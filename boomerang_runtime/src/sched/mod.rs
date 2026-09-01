@@ -8,9 +8,11 @@ mod queue;
 
 // Kept at the scheduler-module boundary so sibling modules retain their narrow
 // `super::` imports while the generic core lives in its own implementation module.
-pub(crate) use compiled::run_owned_scheduler;
 #[cfg(test)]
 pub(crate) use compiled::run_owned_scheduler_with_origin;
+pub(crate) use compiled::{
+    run_owned_scheduler, run_owned_scheduler_with_coordination, OwnedSchedulerCoordination,
+};
 pub(crate) use core::{ExecutionStorage, ModeTransition, Schedule, SchedulerError};
 use core::{ReactionOutcome, SchedulerCore};
 

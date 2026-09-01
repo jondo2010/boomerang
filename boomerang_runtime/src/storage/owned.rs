@@ -740,10 +740,23 @@ impl<'image> OwnedStorage<'image> {
             .for_each(|context| context.start_time = origin);
     }
 
+    /// Applies the optional Federate origin to both the scheduler clock and reaction contexts.
+    pub(crate) fn prepare_scheduler_origin(&mut self, origin: &mut Instant) {
+        if let Some(configured) = self.configured_origin {
+            *origin = configured;
+        }
+        self.initialize_reaction_context_origins(*origin);
+    }
+
     /// Configures the shared Federate origin before the scheduler takes ownership.
     pub(crate) fn configure_scheduler_origin(&mut self, origin: Instant) {
         self.configured_origin = Some(origin);
         self.initialize_reaction_context_origins(origin);
+    }
+
+    /// Returns a thread-safe context for local logical-time coordination with this scheduler.
+    pub(crate) fn scheduler_send_context(&self) -> crate::SendContext {
+        self.contexts[ReactorIndex::new(0)].make_send_context()
     }
 
     owned_scheduler_readers! {
@@ -1948,5 +1961,52 @@ mod tests {
         .unwrap();
 
         assert_eq!(*seen_origin.lock().unwrap(), Some(origin));
+    }
+
+    #[test]
+    fn configured_federate_origin_drives_the_paced_scheduler_clock() {
+        let actions = [ActionImage::new(
+            ScopeIndex::new(0),
+            ActionSlotIndex::new(0),
+            ActionTiming::Timer { period_nanos: None },
+            TableRange::new(0, 1),
+            None,
+        )];
+        let reaction_triggers = [LevelReactionImage::new(0, ReactionIndex::new(0))];
+        let startup_actions = [TimerStartupImage::new(ActionIndex::new(0), 1_000_000_000)];
+        let required_bindings = [
+            REQUIRED_BINDINGS[0],
+            REQUIRED_BINDINGS[1],
+            REQUIRED_BINDINGS[2],
+        ];
+        let image = EnclaveImage {
+            actions: TinyMapView::new(&actions),
+            reaction_triggers: &reaction_triggers,
+            startup_actions: &startup_actions,
+            required_bindings: TinyMapView::new(&required_bindings),
+            ..IMAGE
+        };
+        let image = EnclaveImageView::new(&image).unwrap();
+        let bindings = OwnedBindings::new()
+            .bind_state(BindingSlotIndex::new(0), initialize_state)
+            .bind_reaction(
+                BindingSlotIndex::new(1),
+                |context: &mut Context, _state, _refs, _mode_effect| {
+                    context.schedule_shutdown(Some(Duration::ZERO));
+                    Ok(())
+                },
+            )
+            .bind_port(BindingSlotIndex::new(2), PayloadType::<u32>::new());
+        let mut storage = OwnedStorage::new(image, bindings).unwrap();
+        storage.configure_scheduler_origin(Instant::now() - std::time::Duration::from_millis(800));
+
+        let started = Instant::now();
+        crate::sched::run_owned_scheduler(
+            &mut storage,
+            &Config::default().with_fast_forward(false),
+        )
+        .unwrap();
+
+        assert!(started.elapsed() < std::time::Duration::from_millis(500));
     }
 }

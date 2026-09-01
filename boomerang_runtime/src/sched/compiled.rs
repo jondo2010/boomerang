@@ -1,20 +1,63 @@
 //! Compiled-image scheduler adapters and owned execution composition.
 
-#[cfg(feature = "federated")]
-use super::{barrier::NoFederatedTimeBarrier, FederatedTimeBarrier};
 use super::{
+    barrier::LogicalTimeBarrier,
     core::{ExecutionStorage, ReactionOutcome, Schedule, SchedulerCore, SchedulerError},
     modal::EventManager,
     Config, Stats,
 };
+#[cfg(feature = "federated")]
+use super::{barrier::NoFederatedTimeBarrier, FederatedTimeBarrier};
 use crate::{
     image::{
         ActionIndex, EnclaveImageView, LevelReactionImage, ModeIndex, PortIndex, ReactionIndex,
         ReactorIndex, ScopeIndex,
     },
     ActionKey, Duration, EnclaveKey, Level, OwnedStorage, OwnedStorageError, ReactionSetLimits,
-    ReactorData, Tag,
+    ReactorData, SendContext, Tag,
 };
+
+/// Crate-private local coordination links for one owned compiled scheduler.
+pub(crate) struct OwnedSchedulerCoordination {
+    key: EnclaveKey,
+    upstream: tinymap::TinySecondaryMap<EnclaveKey, (SendContext, Option<Duration>)>,
+    downstream: tinymap::TinySecondaryMap<EnclaveKey, SendContext>,
+}
+
+impl OwnedSchedulerCoordination {
+    /// Creates an unlinked scheduler descriptor for one canonical Enclave.
+    pub(crate) fn new(key: EnclaveKey) -> Self {
+        Self {
+            key,
+            upstream: tinymap::TinySecondaryMap::new(),
+            downstream: tinymap::TinySecondaryMap::new(),
+        }
+    }
+
+    /// Adds one logical upstream, retaining the most restrictive delay for parallel routes.
+    pub(crate) fn add_upstream(
+        &mut self,
+        key: EnclaveKey,
+        context: SendContext,
+        delay: Option<Duration>,
+    ) {
+        if let Some((_, existing_delay)) = self.upstream.get_mut(key) {
+            *existing_delay = match (*existing_delay, delay) {
+                (None, _) | (_, None) => None,
+                (Some(existing), Some(candidate)) => Some(existing.min(candidate)),
+            };
+        } else {
+            self.upstream.insert(key, (context, delay));
+        }
+    }
+
+    /// Adds one logical downstream, coalescing parallel routes to the same Enclave.
+    pub(crate) fn add_downstream(&mut self, key: EnclaveKey, context: SendContext) {
+        if !self.downstream.contains_key(key) {
+            self.downstream.insert(key, context);
+        }
+    }
+}
 
 /// Defines explicit compiled-image schedule methods without repeating adapter boilerplate.
 macro_rules! image_schedule_accessors {
@@ -80,7 +123,9 @@ impl Schedule for EnclaveImageView<'_> {
 impl ExecutionStorage<EnclaveImageView<'_>> for OwnedStorage<'_> {
     type Error = OwnedStorageError;
 
-    fn prepare_startup_origin(&mut self, _start_time: &mut std::time::Instant) {}
+    fn prepare_startup_origin(&mut self, start_time: &mut std::time::Instant) {
+        self.prepare_scheduler_origin(start_time);
+    }
 
     fn action_from_runtime(&self, key: ActionKey) -> ActionIndex {
         self.scheduler_action(key)
@@ -181,7 +226,21 @@ pub(crate) fn run_owned_scheduler_with_origin(
     config: &Config,
     origin: std::time::Instant,
 ) -> Result<Tag, SchedulerError<OwnedStorageError>> {
-    storage.initialize_reaction_context_origins(origin);
+    run_owned_scheduler_with_coordination(
+        storage,
+        config,
+        origin,
+        OwnedSchedulerCoordination::new(EnclaveKey::default()),
+    )
+}
+
+/// Runs validated owned storage with one Federate origin and explicit local route coordination.
+pub(crate) fn run_owned_scheduler_with_coordination(
+    storage: &mut OwnedStorage<'_>,
+    config: &Config,
+    origin: std::time::Instant,
+    coordination: OwnedSchedulerCoordination,
+) -> Result<Tag, SchedulerError<OwnedStorageError>> {
     let schedule = storage.scheduler_image();
     let reaction_limits = schedule.reaction_limits();
     let reaction_capacity = reaction_limits.num_keys;
@@ -192,8 +251,25 @@ pub(crate) fn run_owned_scheduler_with_origin(
     let mut current_tag = Tag::NEVER;
     let mut last_nonterminal_tag = None;
     let mut shutdown_tag = None;
-    let mut upstream_enclaves = tinymap::TinySecondaryMap::new();
-    let downstream_enclaves = tinymap::TinySecondaryMap::new();
+    let OwnedSchedulerCoordination {
+        key,
+        upstream,
+        downstream: downstream_enclaves,
+    } = coordination;
+    let mut upstream_enclaves = upstream
+        .into_iter()
+        .map(|(key, (context, delay))| {
+            (
+                key,
+                LogicalTimeBarrier {
+                    released_tag: Tag::NEVER,
+                    provisional_tag: Tag::NEVER,
+                    upstream_ctx: context,
+                    upstream_delay: delay,
+                },
+            )
+        })
+        .collect();
     #[cfg(feature = "federated")]
     let mut federated_time_barrier: Box<dyn FederatedTimeBarrier> =
         Box::new(NoFederatedTimeBarrier);
@@ -203,7 +279,7 @@ pub(crate) fn run_owned_scheduler_with_origin(
     let mut outcomes = (0..reaction_capacity).map(|_| Default::default()).collect();
 
     SchedulerCore {
-        key: EnclaveKey::default(),
+        key,
         config,
         schedule: &schedule,
         storage,

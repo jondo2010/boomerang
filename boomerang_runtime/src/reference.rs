@@ -11,6 +11,7 @@ use crate::{
         RouteDirection, StateSlotIndex, TimingDomain,
     },
     run_owned_scheduler,
+    sched::{run_owned_scheduler_with_coordination, OwnedSchedulerCoordination},
     storage::owned::StoredState,
     AsyncEvent, Config, OwnedBindings, OwnedStorage, OwnedStorageError, PayloadType, ReactorData,
     RuntimeError, Tag,
@@ -644,6 +645,50 @@ pub fn execute_owned_federate(
     for (_, storage) in &mut storages {
         storage.configure_scheduler_origin(origin);
     }
+    let scheduler_contexts = storages
+        .iter()
+        .map(|(enclave, storage)| (*enclave, storage.scheduler_send_context()))
+        .collect::<Vec<_>>();
+    let mut coordinations = storages
+        .iter()
+        .map(|(enclave, _)| {
+            (
+                *enclave,
+                OwnedSchedulerCoordination::new(crate::EnclaveKey::from(enclave.as_u32() as usize)),
+            )
+        })
+        .collect::<Vec<_>>();
+    for endpoint in endpoints
+        .iter()
+        .filter(|endpoint| endpoint.timing_domain == TimingDomain::Logical)
+    {
+        let source_key = crate::EnclaveKey::from(endpoint.source.as_u32() as usize);
+        let destination_key = crate::EnclaveKey::from(endpoint.destination.as_u32() as usize);
+        let source_context = scheduler_contexts
+            .iter()
+            .find_map(|(enclave, context)| (*enclave == endpoint.source).then(|| context.clone()))
+            .expect("selected route source has a configured scheduler context");
+        let destination_context = scheduler_contexts
+            .iter()
+            .find_map(|(enclave, context)| {
+                (*enclave == endpoint.destination).then(|| context.clone())
+            })
+            .expect("selected route destination has a configured scheduler context");
+        let delay = (endpoint.delay_nanos != 0)
+            .then(|| crate::Duration::nanoseconds(endpoint.delay_nanos as i64));
+        coordinations
+            .iter_mut()
+            .find(|(enclave, _)| *enclave == endpoint.source)
+            .expect("selected route source has scheduler coordination")
+            .1
+            .add_downstream(destination_key, destination_context);
+        coordinations
+            .iter_mut()
+            .find(|(enclave, _)| *enclave == endpoint.destination)
+            .expect("selected route destination has scheduler coordination")
+            .1
+            .add_upstream(source_key, source_context, delay);
+    }
     let inbound_enclaves = endpoints
         .iter()
         .map(|endpoint| endpoint.destination)
@@ -652,7 +697,7 @@ pub fn execute_owned_federate(
     let (results, failure) = std::thread::scope(|scope| {
         let (result_tx, result_rx) = std::sync::mpsc::channel();
         let mut handles = Vec::with_capacity(enclave_count);
-        for (enclave, mut storage) in storages {
+        for ((enclave, mut storage), (_, coordination)) in storages.into_iter().zip(coordinations) {
             let result_tx = result_tx.clone();
             let config = if inbound_enclaves.contains(&enclave) {
                 config.clone().with_keep_alive(true)
@@ -661,7 +706,12 @@ pub fn execute_owned_federate(
             };
             let handle = scope.spawn(move || {
                 let execution = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                    run_owned_scheduler(&mut storage, &config)
+                    run_owned_scheduler_with_coordination(
+                        &mut storage,
+                        &config,
+                        origin,
+                        coordination,
+                    )
                 }));
                 let result = match execution {
                     Ok(Ok(final_tag)) => Ok(OwnedExecutionResult {

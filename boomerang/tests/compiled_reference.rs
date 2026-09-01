@@ -1037,6 +1037,226 @@ static ROUTED_DEPLOYMENT: CompiledDeploymentImage<'static> = CompiledDeploymentI
     coordination: CoordinationProjection::Local,
 };
 
+#[derive(Debug)]
+struct MultiSourceState {
+    value: u32,
+    delay: bool,
+}
+
+fn initialize_fast_source() -> MultiSourceState {
+    MultiSourceState {
+        value: 1,
+        delay: false,
+    }
+}
+
+fn initialize_slow_source() -> MultiSourceState {
+    MultiSourceState {
+        value: 2,
+        delay: true,
+    }
+}
+
+fn emit_multi_source_value(
+    context: &mut Context,
+    state: &mut dyn ReactorData,
+    refs: ReactionRefs<'_>,
+    _mode_effect: Option<CompiledModeEffectRef>,
+) -> Result<(), ReactionBindingError> {
+    let state = state.downcast_mut::<MultiSourceState>().unwrap();
+    if state.delay {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let mut output: OutputRef<u32> = refs.ports_mut.partition_mut()?;
+    *output = Some(state.value);
+    context.schedule_shutdown(Some(Duration::ZERO));
+    Ok(())
+}
+
+#[derive(Debug, Default)]
+struct MultiSinkState(Vec<(u32, u32)>);
+
+fn receive_both_source_values(
+    context: &mut Context,
+    state: &mut dyn ReactorData,
+    refs: ReactionRefs<'_>,
+    _mode_effect: Option<CompiledModeEffectRef>,
+) -> Result<(), ReactionBindingError> {
+    let (left, right): (InputRef<u32>, InputRef<u32>) = refs.ports.partition()?;
+    state.downcast_mut::<MultiSinkState>().unwrap().0.push((
+        *left
+            .as_ref()
+            .expect("left source must be admitted at this tag"),
+        *right
+            .as_ref()
+            .expect("right source must be admitted at this tag"),
+    ));
+    context.schedule_shutdown(Some(Duration::ZERO));
+    Ok(())
+}
+
+fn multi_source_bindings(initializer: fn() -> MultiSourceState) -> OwnedBindings {
+    OwnedBindings::new()
+        .bind_state(BindingSlotIndex::new(0), initializer)
+        .bind_reaction(BindingSlotIndex::new(1), emit_multi_source_value)
+        .bind_port(BindingSlotIndex::new(2), PayloadType::<u32>::new())
+}
+
+fn multi_sink_bindings() -> OwnedBindings {
+    OwnedBindings::new()
+        .bind_state(BindingSlotIndex::new(0), MultiSinkState::default)
+        .bind_reaction(BindingSlotIndex::new(1), receive_both_source_values)
+        .bind_port(BindingSlotIndex::new(2), PayloadType::<u32>::new())
+        .bind_port(BindingSlotIndex::new(3), PayloadType::<u32>::new())
+}
+
+static MULTI_LEFT_ROUTES: [RouteImage; 1] = [RouteImage::new(
+    IdentityRange::new(9, 4),
+    PortIndex::new(0),
+    RouteDirection::Outbound,
+    TimingDomain::Logical,
+    0,
+)];
+static MULTI_RIGHT_ROUTES: [RouteImage; 1] = [RouteImage::new(
+    IdentityRange::new(9, 5),
+    PortIndex::new(0),
+    RouteDirection::Outbound,
+    TimingDomain::Logical,
+    0,
+)];
+
+const fn multi_source_image(
+    identity_data: &'static str,
+    routes: &'static [RouteImage],
+) -> EnclaveImage<'static> {
+    EnclaveImage {
+        identity_data,
+        routes: TinyMapView::new(routes),
+        ..ROUTED_SOURCE_IMAGE
+    }
+}
+
+static MULTI_SINK_PORTS: [PortImage; 2] = [
+    PortImage::new(ScopeIndex::new(0), r!(0, 1), BindingSlotIndex::new(2)),
+    PortImage::new(ScopeIndex::new(0), r!(1, 1), BindingSlotIndex::new(3)),
+];
+static MULTI_SINK_TRIGGERS: [LevelReactionImage; 2] = [
+    LevelReactionImage::new(0, ReactionIndex::new(0)),
+    LevelReactionImage::new(0, ReactionIndex::new(0)),
+];
+static MULTI_SINK_REACTIONS: [ReactionImage; 1] =
+    [fixture_reaction(0, 1, r!(0, 2), r!(0, 0), r!(0, 0))];
+static MULTI_SINK_USE_PORTS: [PortIndex; 2] = [PortIndex::new(0), PortIndex::new(1)];
+static MULTI_SINK_ROUTES: [RouteImage; 2] = [
+    RouteImage::new(
+        IdentityRange::new(8, 4),
+        PortIndex::new(0),
+        RouteDirection::Inbound,
+        TimingDomain::Logical,
+        0,
+    ),
+    RouteImage::new(
+        IdentityRange::new(12, 5),
+        PortIndex::new(1),
+        RouteDirection::Inbound,
+        TimingDomain::Logical,
+        0,
+    ),
+];
+static MULTI_SINK_BINDINGS: [RequiredBindingImage; 4] = [
+    RequiredBindingImage::new(IdentityRange::new(4, 1), BindingKind::StateInitializer),
+    RequiredBindingImage::new(IdentityRange::new(5, 1), BindingKind::Reaction),
+    RequiredBindingImage::new(IdentityRange::new(6, 1), BindingKind::Port),
+    RequiredBindingImage::new(IdentityRange::new(7, 1), BindingKind::Port),
+];
+static MULTI_SINK_IMAGE: EnclaveImage<'static> = EnclaveImage {
+    identity_data: "sinkabcdleftright",
+    enclave_id: IdentityRange::new(0, 4),
+    reactors: TinyMapView::new(&ROUTED_SINK_REACTORS),
+    actions: TinyMapView::new(&[]),
+    ports: TinyMapView::new(&MULTI_SINK_PORTS),
+    reactions: TinyMapView::new(&MULTI_SINK_REACTIONS),
+    modes: TinyMapView::new(&[]),
+    scopes: TinyMapView::new(&ROUTED_SINK_SCOPES),
+    reaction_triggers: &MULTI_SINK_TRIGGERS,
+    reaction_use_ports: &MULTI_SINK_USE_PORTS,
+    reaction_effect_ports: &[],
+    reaction_actions: &[],
+    reaction_modes: &[],
+    scope_descendants: &ROUTED_SINK_DESCENDANTS,
+    scope_logical_actions: &[],
+    scope_timer_startups: &[],
+    scope_reset_reactions: &[],
+    scope_startup_reactions: &[],
+    scope_shutdown_reactions: &[],
+    startup_actions: &[],
+    timer_startup_actions: &[],
+    shutdown_reactions: &[],
+    shutdown_actions: &[],
+    routes: TinyMapView::new(&MULTI_SINK_ROUTES),
+    required_bindings: TinyMapView::new(&MULTI_SINK_BINDINGS),
+    storage_bounds: StorageBounds::new(1, 0, 8, 0, 0, 0),
+};
+
+static MULTI_ENCLAVES: [EnclaveImage<'static>; 3] = [
+    multi_source_image("alphaabcxleft", &MULTI_LEFT_ROUTES),
+    multi_source_image("gammaabcxright", &MULTI_RIGHT_ROUTES),
+    MULTI_SINK_IMAGE,
+];
+static MULTI_FEDERATES: [FederateImage; 1] = [FederateImage::new(
+    IdentityRange::new(0, 4),
+    IdentityRange::new(4, 6),
+    IdentityRange::new(10, 7),
+    r!(0, 3),
+)];
+static MULTI_DEPLOYMENT: CompiledDeploymentImage<'static> = CompiledDeploymentImage {
+    identity_data: "hosttargetruntime",
+    federation: GlobalFederationImage::new(&ROUTED_FEDERATE_MEMBERS, &[]),
+    federates: TinyMapView::new(&MULTI_FEDERATES),
+    enclaves: TinyMapView::new(&MULTI_ENCLAVES),
+    coordination: CoordinationProjection::Local,
+};
+
+#[test]
+fn owned_federate_coordinates_multiple_same_tag_sources_before_destination_execution() {
+    let result = execute_owned_federate(
+        &MULTI_DEPLOYMENT,
+        FederateIndex::new(0),
+        OwnedFederateBindings::new()
+            .bind_enclave(
+                EnclaveIndex::new(0),
+                multi_source_bindings(initialize_fast_source),
+            )
+            .bind_enclave(
+                EnclaveIndex::new(1),
+                multi_source_bindings(initialize_slow_source),
+            )
+            .bind_enclave(EnclaveIndex::new(2), multi_sink_bindings())
+            .bind_route(
+                BoundaryId::new("left"),
+                PayloadType::<u32>::new(),
+                PayloadType::<u32>::new(),
+            )
+            .bind_route(
+                BoundaryId::new("right"),
+                PayloadType::<u32>::new(),
+                PayloadType::<u32>::new(),
+            ),
+        Config::default().with_fast_forward(true),
+    )
+    .unwrap();
+
+    assert_eq!(
+        result
+            .enclave(EnclaveIndex::new(2))
+            .unwrap()
+            .state::<MultiSinkState>(StateSlotIndex::new(0))
+            .unwrap()
+            .0,
+        [(1, 2)]
+    );
+}
+
 #[test]
 fn owned_federate_routes_typed_values_and_shares_one_origin() {
     for fast_forward in [true, false] {

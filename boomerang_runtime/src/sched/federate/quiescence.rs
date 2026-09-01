@@ -1,9 +1,8 @@
 //! Federate-wide quiescence coordination across scheduler-owned Enclaves.
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    sync::mpsc,
-};
+use std::{collections::BTreeMap, sync::mpsc};
+
+use tinymap::TinySecondaryMap;
 
 use crate::{AsyncEvent, EnclaveKey};
 
@@ -104,6 +103,31 @@ enum QuiescencePhase {
     Committed,
 }
 
+/// Coordinator-owned phase flags for one dense Enclave identity.
+#[derive(Clone, Copy, Default)]
+struct CoordinatorEnclaveState {
+    /// Whether the Enclave has not completed or aborted execution.
+    active: bool,
+    /// Whether the Enclave has reported work since its last idle report.
+    busy: bool,
+    /// Whether the Enclave has reported idle in the observing phase.
+    seen_idle: bool,
+    /// Whether the Enclave confirmed the coordinator's current command.
+    confirmed: bool,
+}
+
+impl CoordinatorEnclaveState {
+    /// Creates the initial state for one live scheduler participant.
+    const fn active() -> Self {
+        Self {
+            active: true,
+            busy: false,
+            seen_idle: false,
+            confirmed: false,
+        }
+    }
+}
+
 /// Abort handle for one owned Federate's shared quiescence coordinator.
 pub(crate) struct FederateQuiescenceHandle {
     /// Shared participant-report sender used to request immediate abortion.
@@ -122,9 +146,9 @@ pub(crate) struct FederateQuiescenceCoordinator {
     /// Serialized quiescence reports from every scheduler-owned Enclave.
     report_rx: mpsc::Receiver<QuiescenceReport>,
     /// Per-Enclave command senders keyed by canonical scheduler identity.
-    commands: BTreeMap<EnclaveKey, mpsc::Sender<QuiescenceCommand>>,
-    /// Enclaves that have not completed or aborted execution.
-    active: BTreeSet<EnclaveKey>,
+    commands: TinySecondaryMap<EnclaveKey, mpsc::Sender<QuiescenceCommand>>,
+    /// Per-Enclave active membership and phase flags.
+    active: TinySecondaryMap<EnclaveKey, CoordinatorEnclaveState>,
     #[cfg(test)]
     /// One-shot test hook that admits work immediately before the final parked queue recheck.
     commit_window_hook: Option<Box<dyn FnOnce() + Send>>,
@@ -140,19 +164,28 @@ impl FederateQuiescenceCoordinator {
             #[cfg(test)]
             mut commit_window_hook,
         } = self;
-        let send = |command, active: &BTreeSet<EnclaveKey>| {
-            for (key, tx) in &commands {
-                if active.contains(key) {
+        let send = |command, active: &TinySecondaryMap<EnclaveKey, CoordinatorEnclaveState>| {
+            for (key, tx) in commands.iter() {
+                if active.get(key).is_some_and(|state| state.active) {
                     let _ = tx.send(command);
                 }
             }
         };
-        let mut busy = BTreeSet::new();
-        let mut seen_idle = BTreeSet::new();
-        let mut confirmed = BTreeSet::new();
+        let any_active = |active: &TinySecondaryMap<EnclaveKey, CoordinatorEnclaveState>| {
+            active.values().any(|state| state.active)
+        };
+        let all_confirmed = |active: &TinySecondaryMap<EnclaveKey, CoordinatorEnclaveState>| {
+            active.values().all(|state| state.confirmed == state.active)
+        };
+        let clear_confirmed =
+            |active: &mut TinySecondaryMap<EnclaveKey, CoordinatorEnclaveState>| {
+                active
+                    .iter_mut()
+                    .for_each(|(_, state)| state.confirmed = false);
+            };
         let mut epoch = 0usize;
         let mut phase = QuiescencePhase::Observing;
-        while !active.is_empty() {
+        while any_active(&active) {
             let report = match report_rx.recv() {
                 Ok(report) => report,
                 Err(_) => {
@@ -166,21 +199,24 @@ impl FederateQuiescenceCoordinator {
                     break;
                 }
                 QuiescenceReport::Complete(key) => {
-                    active.remove(&key);
-                    busy.remove(&key);
-                    seen_idle.remove(&key);
-                    confirmed.remove(&key);
+                    if let Some(state) = active.get_mut(key) {
+                        *state = CoordinatorEnclaveState::default();
+                    }
                 }
                 QuiescenceReport::Active(key) => {
-                    busy.insert(key);
-                    seen_idle.remove(&key);
-                    confirmed.clear();
+                    if let Some(state) = active.get_mut(key) {
+                        state.busy = true;
+                        state.seen_idle = false;
+                    }
+                    clear_confirmed(&mut active);
                     if matches!(
                         phase,
                         QuiescencePhase::Parking | QuiescencePhase::Rechecking
                     ) {
                         epoch = epoch.wrapping_add(1);
-                        seen_idle.clear();
+                        active
+                            .iter_mut()
+                            .for_each(|(_, state)| state.seen_idle = false);
                         send(QuiescenceCommand::Resume(epoch), &active);
                         phase = QuiescencePhase::Resuming;
                     } else if phase != QuiescencePhase::Committed {
@@ -191,14 +227,18 @@ impl FederateQuiescenceCoordinator {
                     key,
                     epoch: observed,
                 } => {
-                    busy.remove(&key);
-                    if phase == QuiescencePhase::Observing {
-                        seen_idle.insert(key);
-                    } else if matches!(phase, QuiescencePhase::Probing | QuiescencePhase::Resuming)
-                        && observed == epoch
-                        && active.contains(&key)
-                    {
-                        confirmed.insert(key);
+                    if let Some(state) = active.get_mut(key) {
+                        state.busy = false;
+                        if phase == QuiescencePhase::Observing {
+                            state.seen_idle = true;
+                        } else if matches!(
+                            phase,
+                            QuiescencePhase::Probing | QuiescencePhase::Resuming
+                        ) && observed == epoch
+                            && state.active
+                        {
+                            state.confirmed = true;
+                        }
                     }
                 }
                 QuiescenceReport::Parked {
@@ -206,52 +246,55 @@ impl FederateQuiescenceCoordinator {
                     epoch: observed,
                 } if phase == QuiescencePhase::Parking
                     && observed == epoch
-                    && active.contains(&key) =>
+                    && active.get(key).is_some_and(|state| state.active) =>
                 {
-                    confirmed.insert(key);
+                    active[key].confirmed = true;
                 }
                 QuiescenceReport::Rechecked {
                     key,
                     epoch: observed,
                 } if phase == QuiescencePhase::Rechecking
                     && observed == epoch
-                    && active.contains(&key) =>
+                    && active.get(key).is_some_and(|state| state.active) =>
                 {
-                    confirmed.insert(key);
+                    active[key].confirmed = true;
                 }
                 QuiescenceReport::Parked { .. } | QuiescenceReport::Rechecked { .. } => {}
             }
-            if active.is_empty() {
+            if !any_active(&active) {
                 continue;
             }
             match phase {
-                QuiescencePhase::Observing if busy.is_empty() && seen_idle == active => {
+                QuiescencePhase::Observing
+                    if active.values().all(|state| !state.busy)
+                        && active.values().all(|state| state.seen_idle == state.active) =>
+                {
                     epoch = epoch.wrapping_add(1);
-                    confirmed.clear();
+                    clear_confirmed(&mut active);
                     send(QuiescenceCommand::Probe(epoch), &active);
                     phase = QuiescencePhase::Probing;
                 }
-                QuiescencePhase::Probing if confirmed == active => {
-                    confirmed.clear();
+                QuiescencePhase::Probing if all_confirmed(&active) => {
+                    clear_confirmed(&mut active);
                     send(QuiescenceCommand::Park(epoch), &active);
                     phase = QuiescencePhase::Parking;
                 }
-                QuiescencePhase::Parking if confirmed == active => {
+                QuiescencePhase::Parking if all_confirmed(&active) => {
                     #[cfg(test)]
                     if let Some(hook) = commit_window_hook.take() {
                         hook();
                     }
-                    confirmed.clear();
+                    clear_confirmed(&mut active);
                     send(QuiescenceCommand::Recheck(epoch), &active);
                     phase = QuiescencePhase::Rechecking;
                 }
-                QuiescencePhase::Rechecking if confirmed == active => {
+                QuiescencePhase::Rechecking if all_confirmed(&active) => {
                     send(QuiescenceCommand::Commit(epoch), &active);
-                    confirmed.clear();
+                    clear_confirmed(&mut active);
                     phase = QuiescencePhase::Committed;
                 }
-                QuiescencePhase::Resuming if confirmed == active => {
-                    confirmed.clear();
+                QuiescencePhase::Resuming if all_confirmed(&active) => {
+                    clear_confirmed(&mut active);
                     send(QuiescenceCommand::Park(epoch), &active);
                     phase = QuiescencePhase::Parking;
                 }
@@ -411,11 +454,13 @@ impl FederateQuiescence {
         keys: impl IntoIterator<Item = (EnclaveKey, crate::Receiver<AsyncEvent>)>,
     ) -> Self {
         let (report_tx, report_rx) = mpsc::channel();
-        let mut commands = BTreeMap::new();
+        let mut commands = TinySecondaryMap::new();
+        let mut active = TinySecondaryMap::new();
         let mut participants = BTreeMap::new();
         for (key, event_rx) in keys {
             let (command_tx, command_rx) = mpsc::channel();
             commands.insert(key, command_tx);
+            active.insert(key, CoordinatorEnclaveState::active());
             participants.insert(
                 key,
                 QuiescenceParticipant {
@@ -429,7 +474,6 @@ impl FederateQuiescence {
                 },
             );
         }
-        let active = commands.keys().copied().collect();
         Self {
             abort_handle: FederateQuiescenceHandle {
                 report_tx: report_tx.clone(),

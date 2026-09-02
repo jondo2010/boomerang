@@ -1,6 +1,4 @@
-#[cfg(not(feature = "__boomerang_descriptor"))]
-compile_error!("sensor-mcu-payload-only");
-#[cfg(feature = "__boomerang_payload")]
+#[cfg(not(any(feature = "__boomerang_descriptor", feature = "__boomerang_payload")))]
 compile_error!("sensor-mcu-payload-only");
 
 use boomerang::prelude::*;
@@ -15,11 +13,13 @@ use boomerang::prelude::*;
         scratch_bytes = 128,
     )
 )]
-pub fn Sensor() -> impl Reactor {
+pub fn Sensor(#[input] command: u32) -> impl Reactor {
     reaction! {
-        sample (startup) {
+        sample (command) {
             #[cfg(not(feature = "__boomerang_descriptor"))]
             let _payload_only = "sensor-mcu-payload-only";
+            assert_eq!(*command, Some(42));
+            ctx.schedule_shutdown(None);
         }
     }
 }

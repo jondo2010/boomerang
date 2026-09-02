@@ -4,8 +4,11 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-__boomerang_descriptor = []
-__boomerang_payload = []
+default = ["boomerang/hosted"]
+__boomerang_descriptor = ["boomerang/__boomerang_descriptor"]
+__boomerang_payload = ["boomerang/__boomerang_payload"]
+controller-selected = []
+sensor-selected = []
 
 [dependencies]
-boomerang = { path = "../../../../../boomerang" }
+boomerang = { path = "../../../../../boomerang", default-features = false }

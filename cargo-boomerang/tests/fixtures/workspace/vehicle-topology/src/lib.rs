@@ -19,8 +19,8 @@ const _: () = assert!(
         scratch_bytes = 256,
     )
 )]
-fn ControllerTopology() -> impl Reactor {
-    reaction! { control (startup) {} }
+fn ControllerTopology(#[output] command: u32) -> impl Reactor {
+    reaction! { control (startup) -> command { *command = Some(42); } }
     mode! { initial active {
         reaction! { (shutdown) {} }
     } }
@@ -36,19 +36,25 @@ fn ControllerTopology() -> impl Reactor {
         scratch_bytes = 128,
     )
 )]
-fn SensorTopology() -> impl Reactor {
-    reaction! { sample (startup) {} }
+fn SensorTopology(#[input] command: u32) -> impl Reactor {
+    reaction! { sample (command) { ctx.schedule_shutdown(None); } }
 }
 
 /// Builds the fixture's canonical logical topology without constructing a runtime graph.
 pub fn topology() -> Result<ApplicationTopology, TopologyBuildError> {
     let mut assembly = Assembly::new();
-    ControllerTopology()
+    let controller = ControllerTopology()
         .build("controller", (), None, None, None, true, &mut assembly)
         .expect("fixture controller Assembly is valid");
-    SensorTopology()
+    ControllerTopology()
+        .build("backup", (), None, None, None, true, &mut assembly)
+        .expect("fixture backup controller Assembly is valid");
+    let sensor = SensorTopology()
         .build("sensor", (), None, None, None, true, &mut assembly)
         .expect("fixture sensor Assembly is valid");
+    assembly
+        .add_port_connection::<u32, _, _>(controller.command, sensor.command, None, false)
+        .expect("fixture route is valid");
     Ok(assembly
         .application_topology()
         .expect("fixture topology projection is valid"))

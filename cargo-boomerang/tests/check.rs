@@ -43,3 +43,28 @@ fn check_runs_complete_host_analysis_without_building_payloads() {
         .join("boomerang/production/artifacts")
         .exists());
 }
+
+#[test]
+fn check_accepts_an_explicit_workspace_outside_the_current_directory() {
+    let current = tempfile::tempdir().unwrap();
+    let target = tempfile::tempdir().unwrap();
+    let result = std::process::Command::new(env!("CARGO_BIN_EXE_cargo-boomerang"))
+        .arg("boomerang")
+        .arg("--workspace")
+        .arg(fixture_workspace())
+        .args(["check", "--deployment", "production"])
+        .current_dir(current.path())
+        .env("CARGO_TARGET_DIR", target.path())
+        .output()
+        .unwrap();
+
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(target
+        .path()
+        .join("boomerang/production/check.json")
+        .exists());
+}

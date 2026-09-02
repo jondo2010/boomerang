@@ -7,7 +7,7 @@ use std::{
 use anyhow::{anyhow, bail, Context, Result};
 use cargo_metadata::{Metadata, MetadataCommand, Package, PackageId};
 
-use crate::{load_manifest, Deployment, Federate, Topology};
+use crate::{load_manifest, Binding, Deployment, Federate, Topology};
 
 const DESCRIPTOR_FEATURE: &str = "__boomerang_descriptor";
 const PAYLOAD_FEATURE: &str = "__boomerang_payload";
@@ -72,6 +72,10 @@ pub struct ResolvedWorkspace {
     packages: BTreeMap<String, CargoPackage>,
     /// Exact host compiler package used by the generated descriptor driver.
     host_builder: CargoPackage,
+    /// Exact runtime package used by generated target launchers.
+    runtime: CargoPackage,
+    /// Exact dense-table package used by generated image literals.
+    table_store: CargoPackage,
     /// Exact package identities available in the source application's lock graph.
     locked_package_ids: BTreeSet<String>,
     /// Identity of the lockfile enforced during Cargo resolution.
@@ -107,6 +111,16 @@ impl ResolvedWorkspace {
     /// Returns the exact host compiler package selected by Cargo metadata.
     pub fn host_builder(&self) -> &CargoPackage {
         &self.host_builder
+    }
+
+    /// Returns the exact runtime package selected by locked Cargo metadata.
+    pub fn runtime(&self) -> &CargoPackage {
+        &self.runtime
+    }
+
+    /// Returns the exact dense-table package selected by locked Cargo metadata.
+    pub fn table_store(&self) -> &CargoPackage {
+        &self.table_store
     }
 
     /// Returns all direct packages expected beneath the synthetic driver root.
@@ -158,8 +172,21 @@ pub fn resolve_workspace(
             .with_context(|| format!("deployment '{deployment_name}' binding '{component}'"))?;
         packages.insert(binding.package.clone(), package);
     }
-    let host_builder =
-        resolve_host_builder(&metadata, packages.values().map(|package| &package.id))?;
+    let host_builder = resolve_dependency_package(
+        &metadata,
+        packages.values().map(|package| &package.id),
+        "boomerang_builder",
+    )?;
+    let runtime = resolve_dependency_package(
+        &metadata,
+        selected_package_ids(&packages, &bindings),
+        "boomerang_runtime",
+    )?;
+    let table_store = resolve_dependency_package(
+        &metadata,
+        selected_package_ids(&packages, &bindings),
+        "boomerang_tinymap",
+    )?;
     let locked_package_ids = metadata
         .packages
         .iter()
@@ -184,9 +211,33 @@ pub fn resolve_workspace(
         },
         packages,
         host_builder,
+        runtime,
+        table_store,
         locked_package_ids,
         lockfile,
     })
+}
+
+/// Returns exact Cargo roots for target-side implementation packages only.
+fn selected_package_ids<'a>(
+    packages: &'a BTreeMap<String, CargoPackage>,
+    bindings: &'a BTreeMap<String, Binding>,
+) -> impl Iterator<Item = &'a PackageId> {
+    selected_package_names(bindings).map(|package| {
+        &packages
+            .get(package)
+            .expect("resolved binding package is retained")
+            .id
+    })
+}
+
+/// Returns unique implementation package names selected by component bindings.
+fn selected_package_names(bindings: &BTreeMap<String, Binding>) -> impl Iterator<Item = &str> {
+    bindings
+        .values()
+        .map(|binding| binding.package.as_str())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
 }
 
 /// Resolves the host-compatible topology package without imposing implementation facets.
@@ -195,10 +246,11 @@ fn resolve_topology(metadata: &Metadata, name: &str) -> Result<CargoPackage> {
     Ok(cargo_package(package))
 }
 
-/// Finds the unique host compiler package already selected by locked application metadata.
-fn resolve_host_builder<'a>(
+/// Finds one unique transitive package already selected by locked application metadata.
+fn resolve_dependency_package<'a>(
     metadata: &Metadata,
     roots: impl IntoIterator<Item = &'a PackageId>,
+    package_name: &str,
 ) -> Result<CargoPackage> {
     let resolve = metadata.resolve.as_ref().ok_or_else(|| {
         anyhow!("locked Cargo metadata did not contain a dependency resolve graph")
@@ -215,25 +267,25 @@ fn resolve_host_builder<'a>(
         .collect::<BTreeMap<_, _>>();
     let mut pending = roots.into_iter().cloned().collect::<Vec<_>>();
     let mut visited = BTreeSet::new();
-    let mut builders = BTreeSet::new();
+    let mut matches = BTreeSet::new();
     while let Some(id) = pending.pop() {
         if !visited.insert(id.clone()) {
             continue;
         }
         if packages
             .get(&id)
-            .is_some_and(|package| package.name == "boomerang_builder")
+            .is_some_and(|package| package.name == package_name)
         {
-            builders.insert(id.clone());
+            matches.insert(id.clone());
         }
         if let Some(node) = nodes.get(&id) {
             pending.extend(node.deps.iter().map(|dependency| dependency.pkg.clone()));
         }
     }
-    match builders.into_iter().collect::<Vec<_>>().as_slice() {
+    match matches.into_iter().collect::<Vec<_>>().as_slice() {
         [id] => Ok(cargo_package(packages[id])),
         values => bail!(
-            "expected exactly one boomerang_builder package in locked metadata, found {}",
+            "expected exactly one {package_name} package in locked metadata, found {}",
             values.len()
         ),
     }
@@ -366,4 +418,27 @@ fn lockfile_identity(path: PathBuf) -> Result<LockfileIdentity> {
         path,
         digest: *blake3::hash(&bytes).as_bytes(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::selected_package_names;
+    use crate::Binding;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn target_dependency_roots_exclude_the_host_topology_package() {
+        let bindings = BTreeMap::from([(
+            String::from("component"),
+            Binding {
+                package: String::from("payload"),
+                features: Vec::new(),
+            },
+        )]);
+
+        assert_eq!(
+            selected_package_names(&bindings).collect::<Vec<_>>(),
+            ["payload"]
+        );
+    }
 }

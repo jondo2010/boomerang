@@ -23,6 +23,30 @@ const COMPILER_SCHEMA: u32 = 1;
 
 /// Runs the complete host-side check pipeline and returns the published report path.
 pub fn check(workspace: impl AsRef<Path>, deployment_name: &str) -> Result<PathBuf> {
+    let analyzed = analyze(workspace, deployment_name)?;
+    let report = build_report(
+        deployment_name,
+        analyzed.driver.topology(),
+        &analyzed.compiled,
+    )?;
+    publish_report(&analyzed.resolved, &report)
+}
+
+/// Complete reusable result of host-side deployment analysis.
+pub(crate) struct AnalyzedDeployment {
+    /// Cargo-resolved source workspace and deployment selection.
+    pub(crate) resolved: ResolvedWorkspace,
+    /// Descriptor-driver output retaining selected implementation descriptors.
+    pub(crate) driver: DriverOutput,
+    /// Validated target-neutral deployment image.
+    pub(crate) compiled: OwnedCompiledDeployment,
+}
+
+/// Resolves, describes, lowers, and validates one deployment without publishing a report.
+pub(crate) fn analyze(
+    workspace: impl AsRef<Path>,
+    deployment_name: &str,
+) -> Result<AnalyzedDeployment> {
     let resolved = resolve_workspace(workspace, deployment_name)?;
     let driver = run_resolved_descriptor_driver(&resolved)?;
     let deployment = build_resolved_deployment(&resolved, &driver)?;
@@ -30,8 +54,11 @@ pub fn check(workspace: impl AsRef<Path>, deployment_name: &str) -> Result<PathB
     compiled
         .validate()
         .context("failed to validate compiled deployment")?;
-    let report = build_report(deployment_name, driver.topology(), &compiled)?;
-    publish_report(&resolved, &report)
+    Ok(AnalyzedDeployment {
+        resolved,
+        driver,
+        compiled,
+    })
 }
 
 /// Converts manifest and descriptor-driver selections into the canonical compiler input.

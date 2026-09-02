@@ -1,6 +1,4 @@
-#[cfg(not(feature = "__boomerang_descriptor"))]
-compile_error!("controller-payload-only");
-#[cfg(feature = "__boomerang_payload")]
+#[cfg(not(any(feature = "__boomerang_descriptor", feature = "__boomerang_payload")))]
 compile_error!("controller-payload-only");
 
 use boomerang::prelude::*;
@@ -15,11 +13,12 @@ use boomerang::prelude::*;
         scratch_bytes = 256,
     )
 )]
-pub fn Controller() -> impl Reactor {
+pub fn Controller(#[output] command: u32) -> impl Reactor {
     reaction! {
-        control (startup) {
+        control (startup) -> command {
             #[cfg(not(feature = "__boomerang_descriptor"))]
             let _payload_only = "controller-payload-only";
+            *command = Some(42);
         }
     }
     mode! { initial active {

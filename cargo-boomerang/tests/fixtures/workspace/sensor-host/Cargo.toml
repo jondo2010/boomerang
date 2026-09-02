@@ -4,11 +4,12 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-__boomerang_descriptor = ["dep:boomerang_builder"]
-__boomerang_payload = []
+default = ["boomerang/hosted"]
+__boomerang_descriptor = ["boomerang/__boomerang_descriptor", "dep:boomerang_builder"]
+__boomerang_payload = ["boomerang/__boomerang_payload"]
 simulated = []
 payload-alias = ["__boomerang_payload"]
 
 [dependencies]
-boomerang = { path = "../../../../../boomerang" }
+boomerang = { path = "../../../../../boomerang", default-features = false }
 boomerang_builder = { path = "../../../../../boomerang_builder", optional = true }

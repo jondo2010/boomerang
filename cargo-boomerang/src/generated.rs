@@ -40,17 +40,31 @@ pub(crate) fn render_descriptor_driver(resolved: &ResolvedWorkspace) -> Result<G
         dependency(topology_package, true, Vec::new())?,
     );
 
-    let mut binding_expressions = Vec::new();
-    for (index, (component, binding)) in resolved.deployment().bindings.iter().enumerate() {
+    let mut selected_packages = BTreeMap::<String, Vec<String>>::new();
+    for binding in resolved.deployment().bindings.values() {
+        selected_packages
+            .entry(binding.package.clone())
+            .or_default()
+            .extend(binding.features.iter().cloned());
+    }
+    let mut package_aliases = BTreeMap::new();
+    for (index, (implementation, mut features)) in selected_packages.into_iter().enumerate() {
         let alias = format!("implementation_{index}");
         let package = resolved
-            .package(&binding.package)
+            .package(&implementation)
             .expect("resolved implementation package is retained");
-        let mut features = binding.features.clone();
         features.push(String::from("__boomerang_descriptor"));
         features.sort();
         features.dedup();
         dependencies.insert(alias.clone(), dependency(package, false, features)?);
+        package_aliases.insert(implementation, alias);
+    }
+
+    let mut binding_expressions = Vec::new();
+    for (component, binding) in &resolved.deployment().bindings {
+        let alias = package_aliases
+            .get(&binding.package)
+            .expect("selected implementation package has an alias");
         binding_expressions.push(format!(
             "DescriptorDriverBinding::new({component:?}, {package:?}, {alias}::__boomerang::descriptor())?",
             package = binding.package,
@@ -88,7 +102,7 @@ pub(crate) fn render_descriptor_driver(resolved: &ResolvedWorkspace) -> Result<G
     Ok(GeneratedCrate { manifest, main })
 }
 /// Converts one Cargo package identity into an exact generated dependency.
-fn dependency(
+pub(crate) fn dependency(
     package: &CargoPackage,
     default_features: bool,
     features: Vec<String>,

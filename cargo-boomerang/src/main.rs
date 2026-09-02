@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 
@@ -20,6 +22,9 @@ enum CargoCommand {
 /// Arguments accepted after `cargo boomerang`.
 #[derive(Args)]
 struct BoomerangArgs {
+    /// Application workspace containing `Boomerang.toml` and `Cargo.toml`.
+    #[arg(long, default_value = ".", global = true)]
+    workspace: PathBuf,
     /// Deployment-tool operation.
     #[command(subcommand)]
     command: BoomerangCommand,
@@ -39,9 +44,10 @@ enum BoomerangCommand {
 fn main() -> Result<()> {
     match CargoCli::parse().command {
         CargoCommand::Boomerang(BoomerangArgs {
+            workspace,
             command: BoomerangCommand::Check { deployment },
         }) => {
-            cargo_boomerang::check(".", &deployment)?;
+            cargo_boomerang::check(workspace, &deployment)?;
         }
     }
     Ok(())

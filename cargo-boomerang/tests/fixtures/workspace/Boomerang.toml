@@ -10,9 +10,11 @@ features = ["simulated"]
 
 [deployments.production.bindings.controller]
 package = "vehicle-control"
+[deployments.production.bindings.backup]
+package = "vehicle-control"
 
 [deployments.production.federates.host]
-groups = ["placement/controller", "placement/sensor"]
+groups = ["placement/backup", "placement/controller", "placement/sensor"]
 runtime = "std"
 
 [deployments.resolution.bindings.sensor]
@@ -21,9 +23,11 @@ features = ["simulated"]
 
 [deployments.resolution.bindings.controller]
 package = "vehicle-control"
+[deployments.resolution.bindings.backup]
+package = "vehicle-control"
 
 [deployments.resolution.federates.host]
-groups = ["placement/controller", "placement/sensor"]
+groups = ["placement/backup", "placement/controller", "placement/sensor"]
 target = "x86_64-unknown-linux-gnu"
 runtime = "std"
 target-json = "targets/host.json"
@@ -41,4 +45,17 @@ package = "sensor-host"
 features = ["payload-alias"]
 [deployments.payload-alias.federates.host]
 groups = ["vehicle"]
+runtime = "std"
+
+[deployments.feature-union.bindings.controller]
+package = "vehicle-control"
+features = ["controller-selected"]
+[deployments.feature-union.bindings.backup]
+package = "vehicle-control"
+features = ["sensor-selected"]
+[deployments.feature-union.bindings.sensor]
+package = "sensor-host"
+features = ["simulated"]
+[deployments.feature-union.federates.host]
+groups = ["placement/backup", "placement/controller", "placement/sensor"]
 runtime = "std"

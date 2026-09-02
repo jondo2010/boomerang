@@ -7,8 +7,13 @@ edition = "2021"
 default = ["boomerang/hosted"]
 __boomerang_descriptor = ["boomerang/__boomerang_descriptor"]
 __boomerang_payload = ["boomerang/__boomerang_payload"]
+broken-payload = []
 controller-selected = []
 sensor-selected = []
+profile-config-probe = []
 
 [dependencies]
 boomerang = { path = "../../../../../boomerang", default-features = false }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(boomerang_cargo_config_probe)"] }

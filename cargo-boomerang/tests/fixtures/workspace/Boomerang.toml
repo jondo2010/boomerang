@@ -17,6 +17,37 @@ package = "vehicle-control"
 groups = ["placement/backup", "placement/controller", "placement/sensor"]
 runtime = "std"
 
+[deployments.broken-payload.bindings.sensor]
+package = "sensor-host"
+features = ["simulated"]
+
+[deployments.broken-payload.bindings.controller]
+package = "vehicle-control"
+features = ["broken-payload"]
+[deployments.broken-payload.bindings.backup]
+package = "vehicle-control"
+
+[deployments.broken-payload.federates.host]
+groups = ["placement/backup", "placement/controller", "placement/sensor"]
+runtime = "std"
+
+[deployments.profile-config.bindings.sensor]
+package = "sensor-host"
+features = ["simulated"]
+
+[deployments.profile-config.bindings.controller]
+package = "vehicle-control"
+features = ["profile-config-probe"]
+
+[deployments.profile-config.bindings.backup]
+package = "vehicle-control"
+
+[deployments.profile-config.federates.host]
+groups = ["placement/backup", "placement/controller", "placement/sensor"]
+runtime = "std"
+profile = "release"
+cargo-config = ".cargo/profile-config.toml"
+
 [deployments.resolution.bindings.sensor]
 package = "sensor-host"
 features = ["simulated"]

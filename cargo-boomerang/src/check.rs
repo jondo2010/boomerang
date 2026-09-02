@@ -12,14 +12,14 @@ use boomerang_builder::compiler::{
     ImplementationBinding, OwnedCompiledDeployment, PlacementAssignment, PlacementGroupId,
     ResolvedDeployment, RuntimeBackendId, TargetTriple,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     driver::{run_resolved_descriptor_driver, DriverOutput},
     resolve_workspace, CoordinationBackend, ResolvedWorkspace,
 };
 
-const COMPILER_SCHEMA: u32 = 1;
+pub(crate) const COMPILER_SCHEMA: u32 = 1;
 
 /// Runs the complete host-side check pipeline and returns the published report path.
 pub fn check(workspace: impl AsRef<Path>, deployment_name: &str) -> Result<PathBuf> {
@@ -139,15 +139,17 @@ struct CheckReport<'a> {
 }
 
 /// Canonically ordered resource bounds for the checked deployment.
-#[derive(Serialize)]
-struct ResourceReport {
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ResourceReport {
     /// Federates in compiler identity order.
     federates: Vec<FederateResourceReport>,
 }
 
 /// Resource projection for one compiled Federate.
-#[derive(Serialize)]
-struct FederateResourceReport {
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FederateResourceReport {
     /// Stable Federate identity.
     id: String,
     /// Selected Rust compilation target.
@@ -159,8 +161,9 @@ struct FederateResourceReport {
 }
 
 /// Fixed storage bounds for one compiled Enclave.
-#[derive(Serialize)]
-struct EnclaveResourceReport {
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct EnclaveResourceReport {
     /// Stable Enclave identity.
     id: String,
     /// Maximum number of reactor-state slots.
@@ -194,6 +197,18 @@ fn build_report<'a>(
 ) -> Result<CheckReport<'a>> {
     let topology = serde_json::to_vec(topology).context("failed to serialize topology")?;
     let topology_digest = format!("blake3:{}", blake3::hash(&topology).to_hex());
+    let resources = resource_report(compiled);
+    Ok(CheckReport {
+        compiler_schema: COMPILER_SCHEMA,
+        deployment: deployment_name,
+        topology_digest,
+        resources,
+        diagnostics: Vec::new(),
+    })
+}
+
+/// Projects validated compiler output into canonical Federate and Enclave resources.
+pub(crate) fn resource_report(compiled: &OwnedCompiledDeployment) -> ResourceReport {
     let federates = compiled
         .federates()
         .iter()
@@ -219,13 +234,7 @@ fn build_report<'a>(
                 .collect(),
         })
         .collect();
-    Ok(CheckReport {
-        compiler_schema: COMPILER_SCHEMA,
-        deployment: deployment_name,
-        topology_digest,
-        resources: ResourceReport { federates },
-        diagnostics: Vec::new(),
-    })
+    ResourceReport { federates }
 }
 
 /// Atomically publishes one successful report beside any previous valid report.

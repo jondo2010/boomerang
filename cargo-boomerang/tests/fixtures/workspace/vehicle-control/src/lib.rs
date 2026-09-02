@@ -1,5 +1,19 @@
 #[cfg(not(any(feature = "__boomerang_descriptor", feature = "__boomerang_payload")))]
 compile_error!("controller-payload-only");
+#[cfg(all(feature = "broken-payload", feature = "__boomerang_payload"))]
+compile_error!("intentional target payload build failure");
+#[cfg(all(
+    feature = "profile-config-probe",
+    feature = "__boomerang_payload",
+    debug_assertions
+))]
+compile_error!("profile-config probe requires the release profile");
+#[cfg(all(
+    feature = "profile-config-probe",
+    feature = "__boomerang_payload",
+    not(boomerang_cargo_config_probe)
+))]
+compile_error!("profile-config probe requires Cargo configuration rustflags");
 
 use boomerang::prelude::*;
 

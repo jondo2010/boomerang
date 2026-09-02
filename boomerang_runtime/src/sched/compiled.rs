@@ -1,12 +1,14 @@
 //! Compiled-image scheduler adapters and owned execution composition.
 
-#[cfg(feature = "federated")]
-use super::{barrier::NoFederatedTimeBarrier, FederatedTimeBarrier};
+use super::federate::{EnclaveDependencies, QuiescenceControl, QuiescenceParticipant};
 use super::{
+    barrier::LogicalTimeBarrier,
     core::{ExecutionStorage, ReactionOutcome, Schedule, SchedulerCore, SchedulerError},
     modal::EventManager,
     Config, Stats,
 };
+#[cfg(feature = "federated")]
+use super::{barrier::NoFederatedTimeBarrier, FederatedTimeBarrier};
 use crate::{
     image::{
         ActionIndex, EnclaveImageView, LevelReactionImage, ModeIndex, PortIndex, ReactionIndex,
@@ -80,7 +82,9 @@ impl Schedule for EnclaveImageView<'_> {
 impl ExecutionStorage<EnclaveImageView<'_>> for OwnedStorage<'_> {
     type Error = OwnedStorageError;
 
-    fn prepare_startup_origin(&mut self, _start_time: &mut std::time::Instant) {}
+    fn prepare_startup_origin(&mut self, start_time: &mut std::time::Instant) {
+        self.initialize_reaction_context_origins(*start_time);
+    }
 
     fn action_from_runtime(&self, key: ActionKey) -> ActionIndex {
         self.scheduler_action(key)
@@ -92,11 +96,11 @@ impl ExecutionStorage<EnclaveImageView<'_>> for OwnedStorage<'_> {
 
     fn stage_inbound_boundary_value(
         &mut self,
-        key: crate::PortKey,
+        port: PortIndex,
         tag: Tag,
         value: Box<dyn ReactorData>,
     ) -> Result<PortIndex, Self::Error> {
-        OwnedStorage::stage_inbound_boundary_value(self, key, tag, value)
+        OwnedStorage::stage_inbound_boundary_value(self, port, tag, value)
     }
 
     fn commit_boundary_ports(&mut self, tag: Tag) -> Result<(), Self::Error> {
@@ -181,7 +185,23 @@ pub(crate) fn run_owned_scheduler_with_origin(
     config: &Config,
     origin: std::time::Instant,
 ) -> Result<Tag, SchedulerError<OwnedStorageError>> {
-    storage.initialize_reaction_context_origins(origin);
+    run_owned_scheduler_with_coordination(
+        storage,
+        config,
+        origin,
+        EnclaveDependencies::new(EnclaveKey::default()),
+        None,
+    )
+}
+
+/// Runs validated owned storage with one Federate origin and explicit local route coordination.
+pub(crate) fn run_owned_scheduler_with_coordination(
+    storage: &mut OwnedStorage<'_>,
+    config: &Config,
+    origin: std::time::Instant,
+    dependencies: EnclaveDependencies,
+    participant: Option<&mut QuiescenceParticipant>,
+) -> Result<Tag, SchedulerError<OwnedStorageError>> {
     let schedule = storage.scheduler_image();
     let reaction_limits = schedule.reaction_limits();
     let reaction_capacity = reaction_limits.num_keys;
@@ -192,8 +212,25 @@ pub(crate) fn run_owned_scheduler_with_origin(
     let mut current_tag = Tag::NEVER;
     let mut last_nonterminal_tag = None;
     let mut shutdown_tag = None;
-    let mut upstream_enclaves = tinymap::TinySecondaryMap::new();
-    let downstream_enclaves = tinymap::TinySecondaryMap::new();
+    let EnclaveDependencies {
+        key,
+        upstream,
+        downstream: downstream_enclaves,
+    } = dependencies;
+    let mut upstream_enclaves = upstream
+        .into_iter()
+        .map(|(key, (context, delay))| {
+            (
+                key,
+                LogicalTimeBarrier {
+                    released_tag: Tag::NEVER,
+                    provisional_tag: Tag::NEVER,
+                    upstream_ctx: context,
+                    upstream_delay: delay,
+                },
+            )
+        })
+        .collect();
     #[cfg(feature = "federated")]
     let mut federated_time_barrier: Box<dyn FederatedTimeBarrier> =
         Box::new(NoFederatedTimeBarrier);
@@ -203,11 +240,12 @@ pub(crate) fn run_owned_scheduler_with_origin(
     let mut outcomes = (0..reaction_capacity).map(|_| Default::default()).collect();
 
     SchedulerCore {
-        key: EnclaveKey::default(),
+        key,
         config,
         schedule: &schedule,
         storage,
         event_rx: &event_rx,
+        quiescence: participant.map(|participant| participant as &mut dyn QuiescenceControl),
         events: &mut events,
         start_time: &mut start_time,
         current_tag: &mut current_tag,

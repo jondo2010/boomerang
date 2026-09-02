@@ -1,7 +1,7 @@
 use std::{fs, path::PathBuf, process::Command};
 
 const MACRO_ABI_INPUT: &str = "BOOMERANG_PAYLOAD_INPUT_V1_MACRO_ABI";
-const SENSOR_FINGERPRINT: &str = "36c0238776080385e17fc9e0b7bb8412b6b6b99eae1ee9eff11af812eb4a923c";
+const SENSOR_FINGERPRINT: &str = "adf86bcf69509f81e115866c31e02ab770c32b966644a3bff0328485d53b88f1";
 const EMPTY_FINGERPRINT: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
 fn fixture_path(fixture: &str) -> PathBuf {
@@ -37,7 +37,7 @@ fn command(fixture: &str, subcommand: &str, args: &[&str]) -> Command {
         .args(args)
         .env("CARGO_TARGET_DIR", target_dir)
         .env("RUSTFLAGS", "-D warnings")
-        .env(MACRO_ABI_INPUT, "2");
+        .env(MACRO_ABI_INPUT, "3");
     for (contract, reactor_root, fingerprint) in [
         ("example.sensor", "Match", SENSOR_FINGERPRINT),
         ("example.custom", "Custom", EMPTY_FINGERPRINT),
@@ -164,7 +164,7 @@ fn payload_compile_inputs_report_invalid_values() {
     )
     .contains("exactly 64 lowercase hex digits"));
     assert!(input_failure(MACRO_ABI_INPUT, Some("two")).contains("decimal u32"));
-    assert!(input_failure(MACRO_ABI_INPUT, Some("1")).contains("expected 2, received 1"));
+    assert!(input_failure(MACRO_ABI_INPUT, Some("1")).contains("expected 3, received 1"));
 }
 
 #[test]

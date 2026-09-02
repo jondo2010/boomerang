@@ -56,11 +56,14 @@ pub use reaction::{
     EnclaveSenderReactionFn, FromRefs, Reaction, ReactionFn, ReactionKey,
 };
 pub use reactor::*;
-pub use reference::{execute_owned, ExecuteOwnedError, OwnedExecutionResult, StateAccessError};
+pub use reference::{
+    execute_owned, execute_owned_federate, EnclaveExecution, ExecuteOwnedError,
+    ExecuteOwnedFederateError, FederateBindings, FederateExecution, StateAccessError,
+};
 pub use refs::{Refs, RefsMut};
 pub use refs_extract::{ReactionRefs, ReactionRefsError, ReactionRefsExtract};
 pub use sched::*;
-pub use storage::owned::{OwnedBindings, OwnedStorage, OwnedStorageError, ReactionBindingError};
+pub use storage::owned::{EnclaveBindings, OwnedStorage, OwnedStorageError, ReactionBindingError};
 pub use time::*;
 
 /// Types implementing this trait can be used as data in ports, actions, and reactors.
@@ -88,7 +91,7 @@ pub enum RuntimeError {
 
     /// Live graphs do not admit ordinary synchronous ports through the async channel.
     #[error("async boundary port target is not available in a live graph: {0}")]
-    AsyncBoundaryPortUnsupported(PortKey),
+    AsyncBoundaryPortUnsupported(image::PortIndex),
 
     /// Advancing a logical tag by a positive duration exceeded the tag range.
     #[error("logical tag {tag} cannot advance by {period} without overflowing")]

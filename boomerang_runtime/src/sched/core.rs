@@ -2,7 +2,9 @@
 
 use kanal::ReceiveErrorTimeout;
 
-use super::{barrier::LogicalTimeBarrier, modal::EventManager, Config, Stats};
+use super::{
+    barrier::LogicalTimeBarrier, federate::QuiescenceControl, modal::EventManager, Config, Stats,
+};
 #[cfg(feature = "federated")]
 use super::{FederatedBarrierError, FederatedBarrierOutcome, FederatedTimeBarrier};
 use crate::{
@@ -130,7 +132,7 @@ pub(crate) trait ExecutionStorage<S: Schedule> {
     /// Stages one inbound scheduler-boundary value until its logical tag is processed.
     fn stage_inbound_boundary_value(
         &mut self,
-        key: crate::PortKey,
+        port: crate::image::PortIndex,
         tag: Tag,
         value: Box<dyn ReactorData>,
     ) -> Result<S::Port, Self::Error>;
@@ -172,6 +174,8 @@ where
     pub(super) storage: &'a mut E,
     /// Existing asynchronous wake receiver.
     pub(super) event_rx: &'a crate::Receiver<AsyncEvent>,
+    /// Optional owned-Federate quiescence hook; live schedulers never install one.
+    pub(super) quiescence: Option<&'a mut dyn QuiescenceControl>,
     /// Root and modal event queues typed by the schedule keys.
     pub(super) events: &'a mut EventManager<S>,
     /// Physical origin used to translate logical tags.
@@ -304,6 +308,19 @@ where
             .push_event(tag, self.schedule.shutdown_reactions(), true);
     }
 
+    /// Returns the first representable shutdown tag strictly after the current scheduler tag.
+    fn next_shutdown_tag(&self) -> Tag {
+        if *self.current_tag < Tag::ZERO {
+            Tag::ZERO
+        } else if self.current_tag.microstep() == usize::MAX {
+            self.current_tag
+                .checked_delay(Duration::nanoseconds(1))
+                .unwrap_or(Tag::FOREVER)
+        } else {
+            self.current_tag.delay(Duration::ZERO)
+        }
+    }
+
     /// Execute startup of the Scheduler.
     #[tracing::instrument(target = "boomerang_runtime::sched", skip(self))]
     pub(super) fn startup(&mut self) {
@@ -364,6 +381,8 @@ where
                 tracing::debug!(target: "boomerang_runtime::sched", "Cannot wait, already past programmed shutdown time...");
                 None
             }
+        } else if let Some(quiescence) = self.quiescence.as_deref_mut() {
+            quiescence.wait()
         } else if self.config.keep_alive {
             tracing::debug!(target: "boomerang_runtime::sched", "Waiting indefinitely for async event.");
             self.event_rx.recv().ok()
@@ -402,13 +421,23 @@ where
     /// Process one scheduler step, returning coordination failures to the caller.
     #[tracing::instrument(target = "boomerang_runtime::sched", skip(self), fields(tag = %self.current_tag))]
     pub(super) fn try_next(&mut self) -> Result<bool, SchedulerError<E::Error>> {
+        if self.event_rx.is_closed() {
+            self.schedule_shutdown_at(self.next_shutdown_tag());
+        }
+
         // Pump the event queue
         while let Ok(Some(async_event)) = self.event_rx.try_recv() {
+            if let Some(quiescence) = self.quiescence.as_deref_mut() {
+                quiescence.active();
+            }
             self.handle_async_event(async_event)
                 .map_err(SchedulerError::Execution)?;
         }
 
         if let Some(next_tag) = self.events.peek_tag() {
+            if let Some(quiescence) = self.quiescence.as_deref_mut() {
+                quiescence.active();
+            }
             tracing::trace!(target: "boomerang_runtime::sched", next_tag = %next_tag, "Trying next tag");
 
             // Wait until all upstream barriers are released
@@ -498,7 +527,7 @@ where
         } else {
             tracing::debug!(target: "boomerang_runtime::sched", "No more events in queue, pushing a shutdown event.");
             // Shutdown event will be processed at the next event loop iteration
-            let shutdown = (*self.current_tag).delay(Duration::ZERO);
+            let shutdown = self.next_shutdown_tag();
             *self.shutdown_tag = Some(shutdown);
             self.schedule_shutdown_at(shutdown);
         }

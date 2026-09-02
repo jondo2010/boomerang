@@ -3,14 +3,15 @@ use std::pin::Pin;
 mod barrier;
 mod compiled;
 mod core;
+pub(crate) mod federate;
 mod modal;
 mod queue;
 
 // Kept at the scheduler-module boundary so sibling modules retain their narrow
 // `super::` imports while the generic core lives in its own implementation module.
-pub(crate) use compiled::run_owned_scheduler;
 #[cfg(test)]
 pub(crate) use compiled::run_owned_scheduler_with_origin;
+pub(crate) use compiled::{run_owned_scheduler, run_owned_scheduler_with_coordination};
 pub(crate) use core::{ExecutionStorage, ModeTransition, Schedule, SchedulerError};
 use core::{ReactionOutcome, SchedulerCore};
 
@@ -167,11 +168,11 @@ impl ExecutionStorage<ReactionGraph> for Pin<Box<Store>> {
 
     fn stage_inbound_boundary_value(
         &mut self,
-        key: PortKey,
+        port: crate::image::PortIndex,
         _tag: Tag,
         _value: Box<dyn ReactorData>,
     ) -> Result<PortKey, Self::Error> {
-        Err(RuntimeError::AsyncBoundaryPortUnsupported(key))
+        Err(RuntimeError::AsyncBoundaryPortUnsupported(port))
     }
 
     fn commit_boundary_ports(&mut self, _tag: Tag) -> Result<(), Self::Error> {
@@ -570,6 +571,7 @@ impl Scheduler {
             schedule: reaction_graph,
             storage: store,
             event_rx,
+            quiescence: None,
             events,
             start_time,
             current_tag,
@@ -726,7 +728,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use crate::{reaction_closure, ActionKey, Level, PortKey, Reaction, Reactor};
+    use crate::{image::PortIndex, reaction_closure, ActionKey, Level, PortKey, Reaction, Reactor};
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum HookCall {
@@ -957,7 +959,7 @@ mod tests {
     fn live_scheduler_rejects_async_boundary_ports() {
         let log = Arc::new(Mutex::new(Vec::new()));
         let future_tag = Tag::new(Duration::seconds(1), 0);
-        let boundary = PortKey::new(7);
+        let boundary = PortIndex::new(7);
         let barrier = RecordingBarrier::interrupting(
             Arc::clone(&log),
             AsyncEvent::Logical {

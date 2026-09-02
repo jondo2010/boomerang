@@ -132,7 +132,7 @@ pub(crate) trait ExecutionStorage<S: Schedule> {
     /// Stages one inbound scheduler-boundary value until its logical tag is processed.
     fn stage_inbound_boundary_value(
         &mut self,
-        key: crate::PortKey,
+        port: crate::image::PortIndex,
         tag: Tag,
         value: Box<dyn ReactorData>,
     ) -> Result<S::Port, Self::Error>;

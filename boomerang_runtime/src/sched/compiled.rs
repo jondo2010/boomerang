@@ -96,11 +96,11 @@ impl ExecutionStorage<EnclaveImageView<'_>> for OwnedStorage<'_> {
 
     fn stage_inbound_boundary_value(
         &mut self,
-        key: crate::PortKey,
+        port: PortIndex,
         tag: Tag,
         value: Box<dyn ReactorData>,
     ) -> Result<PortIndex, Self::Error> {
-        OwnedStorage::stage_inbound_boundary_value(self, key, tag, value)
+        OwnedStorage::stage_inbound_boundary_value(self, port, tag, value)
     }
 
     fn commit_boundary_ports(&mut self, tag: Tag) -> Result<(), Self::Error> {

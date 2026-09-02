@@ -99,10 +99,10 @@ impl EnclaveExecution {
     /// Borrows the state stored at `slot` as its original concrete type.
     /// Invalid slots or concrete types return [`StateAccessError`].
     pub fn state<T: ReactorData>(&self, slot: StateSlotIndex) -> Result<&T, StateAccessError> {
-        if slot.as_u32() as usize >= self.states.len() {
-            return Err(StateAccessError::OutOfRange { slot });
-        }
-        let state = &self.states[slot];
+        let state = self
+            .states
+            .get(slot)
+            .ok_or(StateAccessError::OutOfRange { slot })?;
         state
             .value
             .downcast_ref::<T>()
@@ -118,6 +118,15 @@ impl EnclaveExecution {
     pub const fn final_tag(&self) -> Tag {
         self.final_tag
     }
+}
+
+/// Adapts a compiled dense Enclave identity to the legacy runtime scheduler key.
+///
+/// Compiled execution keeps [`EnclaveIndex`] canonical throughout image and
+/// Federate logic; only scheduler APIs that still use [`crate::EnclaveKey`]
+/// cross this representation boundary.
+pub(crate) const fn runtime_enclave_key(enclave: EnclaveIndex) -> crate::EnclaveKey {
+    crate::EnclaveKey::new(enclave.as_u32())
 }
 
 /// Direct owned bindings aggregating every Enclave and typed local route executed under one
@@ -707,7 +716,7 @@ fn execute_owned_federate_with_spawn_guard(
     for (enclave, owned) in enclaves {
         let image = EnclaveImageView::new(&deployment.enclaves[enclave])
             .expect("Federate preflight validated every selected Enclave image");
-        let enclave_key = crate::EnclaveKey::from(enclave.as_u32() as usize);
+        let enclave_key = runtime_enclave_key(enclave);
         let storage =
             OwnedStorage::new_for_enclave(image, owned, enclave_key).map_err(|source| {
                 ExecuteOwnedFederateError::EnclaveInitialization { enclave, source }
@@ -743,7 +752,7 @@ fn execute_owned_federate_with_spawn_guard(
         .map(|(enclave, _)| {
             (
                 *enclave,
-                EnclaveDependencies::new(crate::EnclaveKey::from(enclave.as_u32() as usize)),
+                EnclaveDependencies::new(runtime_enclave_key(*enclave)),
             )
         })
         .collect::<Vec<_>>();
@@ -751,8 +760,8 @@ fn execute_owned_federate_with_spawn_guard(
         .iter()
         .filter(|endpoint| endpoint.timing_domain == TimingDomain::Logical)
     {
-        let source_key = crate::EnclaveKey::from(endpoint.source.as_u32() as usize);
-        let destination_key = crate::EnclaveKey::from(endpoint.destination.as_u32() as usize);
+        let source_key = runtime_enclave_key(endpoint.source);
+        let destination_key = runtime_enclave_key(endpoint.destination);
         let source_context = scheduler_contexts
             .iter()
             .find_map(|(enclave, context)| (*enclave == endpoint.source).then(|| context.clone()))
@@ -781,10 +790,7 @@ fn execute_owned_federate_with_spawn_guard(
     let enclave_count = storages.len();
     let quiescence = (!config.keep_alive).then(|| {
         FederateQuiescence::new(storages.iter().map(|(enclave, storage)| {
-            (
-                crate::EnclaveKey::from(enclave.as_u32() as usize),
-                storage.scheduler_event_rx(),
-            )
+            (runtime_enclave_key(*enclave), storage.scheduler_event_rx())
         }))
     });
     let (quiescence_handle, quiescence_coordinator, mut quiescence_participants): (
@@ -838,7 +844,7 @@ fn execute_owned_federate_with_spawn_guard(
         for ((enclave, mut storage), (_, coordination)) in storages.into_iter().zip(coordinations) {
             let result_tx = result_tx.clone();
             let config = config.clone();
-            let key = crate::EnclaveKey::from(enclave.as_u32() as usize);
+            let key = runtime_enclave_key(enclave);
             let mut participant = quiescence_participants.remove(&key);
             let spawned = if fail_spawn(Some(enclave)) {
                 Err(std::io::Error::other(

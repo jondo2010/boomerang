@@ -286,9 +286,7 @@ impl<T: ReactorData + Clone> OutboundRoute for TypedOutboundRoute<'_, T> {
         let Some(value) = typed.get().as_ref() else {
             return Ok(());
         };
-        let target = crate::event::AsyncEventTarget::BoundaryPort(PortKey::new(
-            self.destination_port.as_u32(),
-        ));
+        let target = crate::event::AsyncEventTarget::BoundaryPort(self.destination_port);
         let event = match self.timing_domain {
             TimingDomain::Logical => {
                 let tag = if self.delay_nanos == 0 {
@@ -533,10 +531,10 @@ pub enum OwnedStorageError {
     #[error(transparent)]
     Reaction(#[from] ReactionBindingError),
     /// An async event named a port outside this compiled Enclave image.
-    #[error("boundary port key {key} is not present in the compiled image")]
+    #[error("boundary port {port} is not present in the compiled image")]
     BoundaryPortNotFound {
-        /// Runtime-facing port key supplied by the boundary event.
-        key: PortKey,
+        /// Dense compiled port supplied by the boundary event.
+        port: PortIndex,
     },
     /// An async event named an ordinary port without an inbound compiled route.
     #[error("compiled port {port} is not authorized by an inbound scheduler route")]
@@ -833,14 +831,13 @@ impl<'image> OwnedStorage<'image> {
     /// Stages one validated inbound-boundary value and returns its dense compiled port.
     pub(crate) fn stage_inbound_boundary_value(
         &mut self,
-        key: PortKey,
+        port: PortIndex,
         tag: Tag,
         value: Box<dyn ReactorData>,
     ) -> Result<PortIndex, OwnedStorageError> {
-        let port = PortIndex::new(key.as_u32());
         self.ports
             .get(port)
-            .ok_or(OwnedStorageError::BoundaryPortNotFound { key })?;
+            .ok_or(OwnedStorageError::BoundaryPortNotFound { port })?;
         if !self.inbound_boundary_ports.contains_key(port) {
             return Err(OwnedStorageError::BoundaryPortNotInbound { port });
         }
@@ -1331,7 +1328,7 @@ mod tests {
         },
         AsyncEvent, CommonContext, CompiledModeEffectRef, Config, Context, Duration,
         EnclaveBindings, ModeTransitionRequest, OwnedStorage, OwnedStorageError, PayloadType,
-        PortKey, ReactionBindingError, ReactionRefs, ReactorData, Tag, TransitionKind,
+        ReactionBindingError, ReactionRefs, ReactorData, Tag, TransitionKind,
     };
     use std::{
         sync::{
@@ -1853,15 +1850,15 @@ mod tests {
     }
 
     #[test]
-    fn boundary_write_rejects_unknown_port_key() {
+    fn boundary_write_rejects_unknown_compiled_port() {
         let mut storage = OwnedStorage::new(image(), complete_bindings()).unwrap();
         let error = storage
-            .stage_inbound_boundary_value(PortKey::new(7), Tag::ZERO, Box::new(42_u32))
+            .stage_inbound_boundary_value(PortIndex::new(7), Tag::ZERO, Box::new(42_u32))
             .unwrap_err();
 
         assert!(matches!(
             error,
-            OwnedStorageError::BoundaryPortNotFound { key } if key == PortKey::new(7)
+            OwnedStorageError::BoundaryPortNotFound { port } if port == PortIndex::new(7)
         ));
     }
 
@@ -1869,7 +1866,7 @@ mod tests {
     fn boundary_write_rejects_port_without_inbound_route() {
         let mut storage = OwnedStorage::new(image(), complete_bindings()).unwrap();
         let error = storage
-            .stage_inbound_boundary_value(PortKey::new(0), Tag::ZERO, Box::new(42_u32))
+            .stage_inbound_boundary_value(PortIndex::new(0), Tag::ZERO, Box::new(42_u32))
             .unwrap_err();
 
         assert!(matches!(
@@ -1883,7 +1880,7 @@ mod tests {
         let mut storage = OwnedStorage::new(routed_image(), complete_bindings()).unwrap();
         let expected_tag = Tag::new(Duration::nanoseconds(2), 0);
         storage
-            .stage_inbound_boundary_value(PortKey::new(0), expected_tag, Box::new(42_u32))
+            .stage_inbound_boundary_value(PortIndex::new(0), expected_tag, Box::new(42_u32))
             .unwrap();
 
         storage.scheduler_commit_boundary_ports(Tag::ZERO).unwrap();
@@ -1904,7 +1901,7 @@ mod tests {
     fn boundary_write_rejects_wrong_payload_type() {
         let mut storage = OwnedStorage::new(routed_image(), complete_bindings()).unwrap();
         storage
-            .stage_inbound_boundary_value(PortKey::new(0), Tag::ZERO, Box::new(42_u64))
+            .stage_inbound_boundary_value(PortIndex::new(0), Tag::ZERO, Box::new(42_u64))
             .unwrap();
         let error = storage
             .scheduler_commit_boundary_ports(Tag::ZERO)
@@ -1939,7 +1936,7 @@ mod tests {
             PortIndex::new(0),
             BoundaryId::new("logical"),
             EnclaveIndex::new(1),
-            PortIndex::new(0),
+            PortIndex::new(4),
             TimingDomain::Logical,
             5,
             logical_tx,
@@ -1948,7 +1945,7 @@ mod tests {
             PortIndex::new(0),
             BoundaryId::new("physical"),
             EnclaveIndex::new(2),
-            PortIndex::new(0),
+            PortIndex::new(5),
             TimingDomain::Physical,
             1_000_000_000,
             physical_tx,
@@ -1986,16 +1983,28 @@ mod tests {
         ));
 
         match logical_rx.try_recv().unwrap().unwrap() {
-            AsyncEvent::Logical { tag, value, .. } => {
+            AsyncEvent::Logical { tag, target, value } => {
                 assert_eq!(tag, Tag::new(Duration::nanoseconds(12), 0));
+                assert_eq!(
+                    target,
+                    crate::AsyncEventTarget::BoundaryPort(PortIndex::new(4))
+                );
                 assert_eq!(*value.downcast::<String>().ok().unwrap(), "cloned value");
             }
             event => panic!("unexpected logical route event: {event:?}"),
         }
         match physical_rx.try_recv().unwrap().unwrap() {
-            AsyncEvent::Physical { time, value, .. } => {
+            AsyncEvent::Physical {
+                time,
+                target,
+                value,
+            } => {
                 assert!(time >= before + std::time::Duration::from_secs(1));
                 assert!(time <= after + std::time::Duration::from_secs(1));
+                assert_eq!(
+                    target,
+                    crate::AsyncEventTarget::BoundaryPort(PortIndex::new(5))
+                );
                 assert_eq!(*value.downcast::<String>().ok().unwrap(), "cloned value");
             }
             event => panic!("unexpected physical route event: {event:?}"),

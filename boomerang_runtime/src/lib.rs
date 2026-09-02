@@ -91,7 +91,7 @@ pub enum RuntimeError {
 
     /// Live graphs do not admit ordinary synchronous ports through the async channel.
     #[error("async boundary port target is not available in a live graph: {0}")]
-    AsyncBoundaryPortUnsupported(PortKey),
+    AsyncBoundaryPortUnsupported(image::PortIndex),
 
     /// Advancing a logical tag by a positive duration exceeded the tag range.
     #[error("logical tag {tag} cannot advance by {period} without overflowing")]

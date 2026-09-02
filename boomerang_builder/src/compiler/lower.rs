@@ -580,34 +580,34 @@ fn lower_enclave(
         })
         .collect::<Result<tinymap::TinyMap<ReactorIndex, _>, CompileError>>()?;
     let mut flattened_triggers = Vec::new();
-    let mut action_triggers = vec![Vec::new(); actions.len()];
+    let mut action_triggers = (0..actions.len())
+        .map(|_| Vec::new())
+        .collect::<tinymap::TinyMap<ActionIndex, Vec<LevelReactionImage>>>();
     for (id, reaction) in &reactions {
         for relation in reaction.relations() {
             if !relation.flags().is_trigger() {
                 continue;
             }
             if let super::ReactionRelationTarget::Action(action) = relation.target() {
-                action_triggers[action_indices[action].as_u32() as usize].push(
-                    LevelReactionImage::new(analysis.reaction_levels[*id], reaction_indices[*id]),
-                );
+                action_triggers[action_indices[action]].push(LevelReactionImage::new(
+                    analysis.reaction_levels[*id],
+                    reaction_indices[*id],
+                ));
             }
         }
     }
-    for triggers in &mut action_triggers {
+    for triggers in action_triggers.values_mut() {
         triggers.sort_unstable();
         triggers.dedup();
     }
     let action_images = actions
         .iter()
+        .zip(action_triggers.values())
         .enumerate()
-        .map(|(index, (id, action))| {
+        .map(|(index, ((id, action), triggers))| {
             let start = checked_u32(flattened_triggers.len(), enclave_id, "reaction-triggers")?;
-            flattened_triggers.extend_from_slice(&action_triggers[index]);
-            let len = checked_u32(
-                action_triggers[index].len(),
-                enclave_id,
-                "reaction-triggers",
-            )?;
+            flattened_triggers.extend_from_slice(triggers);
+            let len = checked_u32(triggers.len(), enclave_id, "reaction-triggers")?;
             let timing = match action.kind() {
                 super::ActionKind::Logical { minimum_delay } => ActionTiming::Standard {
                     domain: TimingDomain::Logical,
@@ -638,33 +638,33 @@ fn lower_enclave(
             ))
         })
         .collect::<Result<tinymap::TinyMap<ActionIndex, _>, CompileError>>()?;
-    let mut port_triggers = vec![Vec::new(); representatives.len()];
+    let mut port_triggers = (0..representatives.len())
+        .map(|_| Vec::new())
+        .collect::<tinymap::TinyMap<PortIndex, Vec<LevelReactionImage>>>();
     for (id, reaction) in &reactions {
         for relation in reaction.relations() {
             if relation.flags().is_trigger() {
                 if let super::ReactionRelationTarget::Port(port) = relation.target() {
-                    port_triggers[port_indices[port].as_u32() as usize].push(
-                        LevelReactionImage::new(
-                            analysis.reaction_levels[*id],
-                            reaction_indices[*id],
-                        ),
-                    );
+                    port_triggers[port_indices[port]].push(LevelReactionImage::new(
+                        analysis.reaction_levels[*id],
+                        reaction_indices[*id],
+                    ));
                 }
             }
         }
     }
-    for triggers in &mut port_triggers {
+    for triggers in port_triggers.values_mut() {
         triggers.sort_unstable();
         triggers.dedup();
     }
     let port_images = representatives
         .iter()
-        .enumerate()
-        .map(|(index, id)| {
+        .zip(port_triggers.values())
+        .map(|(id, triggers)| {
             let port = topology.port(id).expect("port representative exists");
             let start = checked_u32(flattened_triggers.len(), enclave_id, "reaction-triggers")?;
-            flattened_triggers.extend_from_slice(&port_triggers[index]);
-            let len = checked_u32(port_triggers[index].len(), enclave_id, "reaction-triggers")?;
+            flattened_triggers.extend_from_slice(triggers);
+            let len = checked_u32(triggers.len(), enclave_id, "reaction-triggers")?;
             Ok(PortImage::new(
                 scope_for(port.reactor(), port.mode()),
                 TableRange::new(start, len),
@@ -753,16 +753,18 @@ fn lower_enclave(
         .iter()
         .map(|(id, mode)| ModeImage::new(reactor_indices[mode.reactor()], mode_scopes[*id]))
         .collect::<tinymap::TinyMap<ModeIndex, _>>();
-    let mut scope_parents = Vec::with_capacity(reactors.len() + modes.len());
+    let mut scope_parents = tinymap::TinyMap::<ScopeIndex, Option<ScopeIndex>>::with_capacity(
+        reactors.len() + modes.len(),
+    );
     for (_, reactor) in &reactors {
-        scope_parents.push(reactor.parent().and_then(|parent| {
+        scope_parents.insert(reactor.parent().and_then(|parent| {
             root_scopes
                 .get(parent)
                 .map(|root| reactor.scope_mode().map_or(*root, |mode| mode_scopes[mode]))
         }));
     }
     for (_, mode) in &modes {
-        scope_parents.push(Some(
+        scope_parents.insert(Some(
             mode.parent()
                 .map_or(root_scopes[mode.reactor()], |parent| mode_scopes[parent]),
         ));
@@ -770,11 +772,11 @@ fn lower_enclave(
     let action_scopes = actions
         .iter()
         .map(|(_, action)| scope_for(action.reactor(), action.mode()))
-        .collect::<Vec<_>>();
+        .collect::<tinymap::TinyMap<ActionIndex, _>>();
     let reaction_scopes = reactions
         .iter()
         .map(|(_, reaction)| scope_for(reaction.reactor(), reaction.options().mode()))
-        .collect::<Vec<_>>();
+        .collect::<tinymap::TinyMap<ReactionIndex, _>>();
     let level_reaction = |reaction: &super::ReactionId| {
         LevelReactionImage::new(
             analysis.reaction_levels[reaction],
@@ -797,12 +799,18 @@ fn lower_enclave(
             _ => {}
         }
     }
-    let mut reset_by_scope = vec![Vec::new(); scope_parents.len()];
-    let mut startup_by_scope = vec![Vec::new(); scope_parents.len()];
-    let mut shutdown_by_scope = vec![Vec::new(); scope_parents.len()];
-    for ((id, reaction), scope) in reactions.iter().zip(reaction_scopes.iter().copied()) {
+    let mut reset_by_scope = (0..scope_parents.len())
+        .map(|_| Vec::new())
+        .collect::<tinymap::TinyMap<ScopeIndex, Vec<LevelReactionImage>>>();
+    let mut startup_by_scope = (0..scope_parents.len())
+        .map(|_| Vec::new())
+        .collect::<tinymap::TinyMap<ScopeIndex, Vec<LifecycleReactionImage>>>();
+    let mut shutdown_by_scope = (0..scope_parents.len())
+        .map(|_| Vec::new())
+        .collect::<tinymap::TinyMap<ScopeIndex, Vec<LifecycleReactionImage>>>();
+    for ((id, reaction), scope) in reactions.iter().zip(reaction_scopes.values().copied()) {
         for mode in reaction.options().reset_modes() {
-            reset_by_scope[mode_scopes[mode].as_u32() as usize].push(level_reaction(id));
+            reset_by_scope[mode_scopes[mode]].push(level_reaction(id));
         }
         for relation in reaction.relations() {
             if !relation.flags().is_trigger() {
@@ -817,19 +825,20 @@ fn lower_enclave(
                 .expect("reaction action exists")
                 .kind()
             {
-                super::ActionKind::Startup => startup_by_scope[scope.as_u32() as usize].push(entry),
-                super::ActionKind::Shutdown => {
-                    shutdown_by_scope[scope.as_u32() as usize].push(entry)
-                }
+                super::ActionKind::Startup => startup_by_scope[scope].push(entry),
+                super::ActionKind::Shutdown => shutdown_by_scope[scope].push(entry),
                 _ => {}
             }
         }
     }
-    for values in &mut reset_by_scope {
+    for values in reset_by_scope.values_mut() {
         values.sort_unstable();
         values.dedup();
     }
-    for values in startup_by_scope.iter_mut().chain(&mut shutdown_by_scope) {
+    for values in startup_by_scope
+        .values_mut()
+        .chain(shutdown_by_scope.values_mut())
+    {
         values.sort_by_key(|entry| entry.reaction());
         values.dedup_by_key(|entry| entry.reaction());
     }
@@ -837,7 +846,7 @@ fn lower_enclave(
         if candidate == ancestor {
             break true;
         }
-        let Some(parent) = scope_parents[candidate.as_u32() as usize] else {
+        let Some(parent) = scope_parents[candidate] else {
             break false;
         };
         candidate = parent;
@@ -848,14 +857,14 @@ fn lower_enclave(
     let mut scope_reset_reactions = Vec::new();
     let mut scope_startup_reactions = Vec::new();
     let mut scope_shutdown_reactions = Vec::new();
-    let scope_images = (0..scope_parents.len())
-        .map(|position| {
-            let scope = ScopeIndex::new(checked_u32(position, enclave_id, "scopes")?);
+    let scope_images = scope_parents
+        .iter()
+        .enumerate()
+        .map(|(position, (scope, parent))| {
             let descendants = push_range(
                 &mut scope_descendants,
-                (0u32..)
-                    .take(scope_parents.len())
-                    .map(ScopeIndex::new)
+                scope_parents
+                    .keys()
                     .filter(|candidate| is_descendant(*candidate, scope)),
                 enclave_id,
                 "scope-descendants",
@@ -864,7 +873,7 @@ fn lower_enclave(
                 &mut scope_logical_actions,
                 actions
                     .iter()
-                    .zip(action_scopes.iter().copied())
+                    .zip(action_scopes.values().copied())
                     .filter(|((_, action), action_scope)| {
                         !matches!(action.kind(), super::ActionKind::Physical { .. })
                             && is_descendant(*action_scope, scope)
@@ -875,9 +884,10 @@ fn lower_enclave(
             )?;
             let timer_startups = push_range(
                 &mut scope_timer_startups,
-                timer_startup_actions.iter().copied().filter(|entry| {
-                    is_descendant(action_scopes[entry.action().as_u32() as usize], scope)
-                }),
+                timer_startup_actions
+                    .iter()
+                    .copied()
+                    .filter(|entry| is_descendant(action_scopes[entry.action()], scope)),
                 enclave_id,
                 "scope-timer-startups",
             )?;
@@ -886,9 +896,8 @@ fn lower_enclave(
                 {
                     let mut values = reset_by_scope
                         .iter()
-                        .zip(0u32..)
-                        .filter(|(_, index)| is_descendant(ScopeIndex::new(*index), scope))
-                        .flat_map(|(values, _)| values.iter().copied())
+                        .filter(|(candidate, _)| is_descendant(*candidate, scope))
+                        .flat_map(|(_, values)| values.iter().copied())
                         .collect::<Vec<_>>();
                     values.sort_unstable();
                     values.dedup();
@@ -899,13 +908,13 @@ fn lower_enclave(
             )?;
             let startup_reactions = push_range(
                 &mut scope_startup_reactions,
-                startup_by_scope[position].iter().copied(),
+                startup_by_scope[scope].iter().copied(),
                 enclave_id,
                 "scope-startup-reactions",
             )?;
             let shutdown_reactions = push_range(
                 &mut scope_shutdown_reactions,
-                shutdown_by_scope[position].iter().copied(),
+                shutdown_by_scope[scope].iter().copied(),
                 enclave_id,
                 "scope-shutdown-reactions",
             )?;
@@ -916,7 +925,7 @@ fn lower_enclave(
                 (reactor_indices[mode.reactor()], Some(mode_indices[mode_id]))
             };
             Ok(ScopeImage::new(
-                scope_parents[position],
+                *parent,
                 reactor,
                 mode,
                 descendants,
@@ -929,7 +938,7 @@ fn lower_enclave(
         })
         .collect::<Result<tinymap::TinyMap<ScopeIndex, _>, CompileError>>()?;
     let mut shutdown_reactions = shutdown_by_scope
-        .iter()
+        .values()
         .flat_map(|values| values.iter().copied())
         .collect::<Vec<_>>();
     shutdown_reactions.sort_by_key(|entry| entry.reaction());

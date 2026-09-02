@@ -1,6 +1,6 @@
 use std::fmt::{Debug, Display};
 
-use crate::{ActionKey, Duration, EnclaveKey, PortKey, ReactorData, Tag};
+use crate::{image::PortIndex, ActionKey, Duration, EnclaveKey, ReactorData, Tag};
 
 /// Scheduler-owned destination for an asynchronously admitted value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -8,7 +8,7 @@ pub enum AsyncEventTarget {
     /// A normal asynchronous action destination.
     Action(ActionKey),
     /// A validated scheduler boundary port destination.
-    BoundaryPort(PortKey),
+    BoundaryPort(PortIndex),
 }
 
 /// `AsyncEvent` is used to inject events into the scheduler from outside of the normal event loop.

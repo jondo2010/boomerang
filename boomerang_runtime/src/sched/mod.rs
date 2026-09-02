@@ -168,11 +168,11 @@ impl ExecutionStorage<ReactionGraph> for Pin<Box<Store>> {
 
     fn stage_inbound_boundary_value(
         &mut self,
-        key: PortKey,
+        port: crate::image::PortIndex,
         _tag: Tag,
         _value: Box<dyn ReactorData>,
     ) -> Result<PortKey, Self::Error> {
-        Err(RuntimeError::AsyncBoundaryPortUnsupported(key))
+        Err(RuntimeError::AsyncBoundaryPortUnsupported(port))
     }
 
     fn commit_boundary_ports(&mut self, _tag: Tag) -> Result<(), Self::Error> {
@@ -728,7 +728,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use crate::{reaction_closure, ActionKey, Level, PortKey, Reaction, Reactor};
+    use crate::{image::PortIndex, reaction_closure, ActionKey, Level, PortKey, Reaction, Reactor};
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum HookCall {
@@ -959,7 +959,7 @@ mod tests {
     fn live_scheduler_rejects_async_boundary_ports() {
         let log = Arc::new(Mutex::new(Vec::new()));
         let future_tag = Tag::new(Duration::seconds(1), 0);
-        let boundary = PortKey::new(7);
+        let boundary = PortIndex::new(7);
         let barrier = RecordingBarrier::interrupting(
             Arc::clone(&log),
             AsyncEvent::Logical {

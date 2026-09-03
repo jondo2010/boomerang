@@ -303,6 +303,15 @@ impl<S: Schedule> EventManager<S> {
         }
     }
 
+    /// Whether root or modal queues retain work other than terminal shutdown processing.
+    pub(super) fn has_nonterminal_work(&self) -> bool {
+        self.root.has_nonterminal_work()
+            || self
+                .scope_queues
+                .values()
+                .any(EventQueue::has_nonterminal_work)
+    }
+
     pub(super) fn pop_next_event(&mut self) -> Option<ReadyEvent<S::Reaction, S::Action>> {
         let mut action_values = std::mem::take(&mut self.ready_action_values);
         action_values.clear();

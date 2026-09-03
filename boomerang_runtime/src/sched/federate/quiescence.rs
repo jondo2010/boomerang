@@ -15,6 +15,10 @@ pub(crate) trait QuiescenceControl {
     fn active(&mut self);
     /// Waits for queued work or a coordinator termination command.
     fn wait(&mut self) -> Option<AsyncEvent>;
+    /// Returns the shared logical horizon after it wins Federate-wide termination.
+    fn logical_horizon(&self) -> Option<crate::Tag>;
+    /// Reports that this scheduler is processing the configured logical horizon.
+    fn logical_horizon_reached(&mut self, tag: crate::Tag);
 }
 
 /// Scheduler-to-coordinator reports for one owned Federate's quiescence epoch.
@@ -52,6 +56,11 @@ enum QuiescenceReport {
     ),
     /// An execution failure requires immediate Federate-wide abortion.
     Abort,
+    /// One scheduler reached the shared logical horizon before Federate quiescence.
+    LogicalHorizon(
+        /// Shared horizon tag being processed by every scheduler-owned Enclave.
+        crate::Tag,
+    ),
 }
 
 /// Coordinator-to-scheduler commands for a parked quiescence barrier or abortion.
@@ -84,6 +93,11 @@ enum QuiescenceCommand {
     ),
     /// Stops the scheduler immediately after an execution failure.
     Abort,
+    /// Releases parked schedulers to process their already queued shared logical horizon.
+    LogicalHorizon(
+        /// Shared horizon tag already queued by every scheduler-owned Enclave.
+        crate::Tag,
+    ),
 }
 
 /// Current phase of one owned Federate's channel-coordinated quiescence barrier.
@@ -196,6 +210,10 @@ impl FederateQuiescenceCoordinator {
             match report {
                 QuiescenceReport::Abort => {
                     send(QuiescenceCommand::Abort, &active);
+                    break;
+                }
+                QuiescenceReport::LogicalHorizon(tag) => {
+                    send(QuiescenceCommand::LogicalHorizon(tag), &active);
                     break;
                 }
                 QuiescenceReport::Complete(key) => {
@@ -320,6 +338,8 @@ pub(crate) struct QuiescenceParticipant {
     command_rx: mpsc::Receiver<QuiescenceCommand>,
     /// Scheduler event queue inspected before confirming idleness or termination.
     event_rx: crate::Receiver<AsyncEvent>,
+    /// Shared logical horizon committed by the coordinator, if it won termination.
+    logical_horizon: Option<crate::Tag>,
 }
 
 impl QuiescenceParticipant {
@@ -422,6 +442,10 @@ impl QuiescenceControl for QuiescenceParticipant {
                 Ok(QuiescenceCommand::Commit(epoch)) if self.parked_epoch == Some(epoch) => {
                     return None;
                 }
+                Ok(QuiescenceCommand::LogicalHorizon(tag)) => {
+                    self.logical_horizon = Some(tag);
+                    return None;
+                }
                 Ok(QuiescenceCommand::Recheck(_)) | Ok(QuiescenceCommand::Commit(_)) => {}
                 Ok(QuiescenceCommand::Abort) | Err(mpsc::RecvTimeoutError::Disconnected) => {
                     return None;
@@ -429,6 +453,14 @@ impl QuiescenceControl for QuiescenceParticipant {
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
             }
         }
+    }
+
+    fn logical_horizon(&self) -> Option<crate::Tag> {
+        self.logical_horizon
+    }
+
+    fn logical_horizon_reached(&mut self, tag: crate::Tag) {
+        let _ = self.report_tx.send(QuiescenceReport::LogicalHorizon(tag));
     }
 }
 
@@ -471,6 +503,7 @@ impl FederateQuiescence {
                     report_tx: report_tx.clone(),
                     command_rx,
                     event_rx,
+                    logical_horizon: None,
                 },
             );
         }

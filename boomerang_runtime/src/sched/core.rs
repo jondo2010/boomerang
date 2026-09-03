@@ -435,7 +435,19 @@ where
         }
 
         if let Some(next_tag) = self.events.peek_tag() {
+            let logical_horizon = self.config.timeout.map(|timeout| Tag::ZERO.delay(timeout));
             if let Some(quiescence) = self.quiescence.as_deref_mut() {
+                if logical_horizon == Some(next_tag) && !self.events.has_nonterminal_work() {
+                    if let Some(async_event) = quiescence.wait() {
+                        self.handle_async_event(async_event)
+                            .map_err(SchedulerError::Execution)?;
+                        return Ok(true);
+                    }
+                    if quiescence.logical_horizon() != Some(next_tag) {
+                        self.schedule_shutdown_at(self.next_shutdown_tag());
+                        return Ok(true);
+                    }
+                }
                 quiescence.active();
             }
             tracing::trace!(target: "boomerang_runtime::sched", next_tag = %next_tag, "Trying next tag");
@@ -482,6 +494,11 @@ where
             tracing::debug!(target: "boomerang_runtime::sched", event = ?event, "Processing");
 
             if event.terminal {
+                if logical_horizon == Some(event.tag) {
+                    if let Some(quiescence) = self.quiescence.as_deref_mut() {
+                        quiescence.logical_horizon_reached(event.tag);
+                    }
+                }
                 // Signal to any waiting threads that the scheduler is shutting down.
                 self.shutdown_tx.shutdown();
             }

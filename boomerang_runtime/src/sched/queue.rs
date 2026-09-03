@@ -180,6 +180,13 @@ impl<K: tinymap::Key, A: Copy + PartialEq> EventQueue<K, A> {
         self.event_queue.peek().map(|event| event.tag)
     }
 
+    /// Whether any queued event carries work other than terminal shutdown processing.
+    pub(crate) fn has_nonterminal_work(&self) -> bool {
+        self.event_queue
+            .iter()
+            .any(|event| event.has_nonterminal_work)
+    }
+
     /// If the event queue still has events on it, report that.
     pub(crate) fn shutdown(&mut self) {
         if !self.event_queue.is_empty() {

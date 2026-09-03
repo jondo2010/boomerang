@@ -3,7 +3,7 @@
 use std::{
     collections::BTreeSet,
     fs::{self, File},
-    io::{self, BufReader, Read, Seek, SeekFrom, Write},
+    io::{self, BufReader, Read, Write},
     path::{Path, PathBuf},
 };
 
@@ -223,8 +223,10 @@ pub(crate) struct BundleSource<'a> {
 pub(crate) struct PublishedArtifact {
     /// Complete validated deployment document.
     pub(crate) document: DeploymentDocument,
-    /// Open executable whose bytes match the published artifact record.
+    /// Open regular executable selected from the published artifact record.
     pub(crate) executable: File,
+    /// Expected BLAKE3 digest for the selected executable bytes.
+    pub(crate) executable_hash: String,
 }
 
 /// Loads one immutable, semantically validated local deployment artifact.
@@ -263,29 +265,24 @@ pub(crate) fn load_published_artifact(manifest: &Path) -> Result<PublishedArtifa
         );
     }
     let executable = bundle.join(join_normalized(Path::new(""), &artifact.path)?);
-    let executable = open_verified_artifact(&executable, &artifact.blake3)?;
+    let executable_hash = artifact.blake3.clone();
+    let executable = open_published_artifact(&executable)?;
     Ok(PublishedArtifact {
         document,
         executable,
+        executable_hash,
     })
 }
 
-/// Opens one regular artifact and verifies the bytes held by that open handle.
-pub(crate) fn open_verified_artifact(path: &Path, expected_hash: &str) -> Result<File> {
-    let mut file =
-        File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+/// Opens one regular artifact selected from an already validated published bundle.
+pub(crate) fn open_published_artifact(path: &Path) -> Result<File> {
+    let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
     let metadata = file
         .metadata()
         .with_context(|| format!("failed to inspect {}", path.display()))?;
     if !metadata.is_file() {
         bail!("{} is not a regular published executable", path.display());
     }
-    let actual = hash_open_file(&mut file)?;
-    if actual != expected_hash {
-        bail!("bundle hash mismatch for {}", path.display());
-    }
-    file.seek(SeekFrom::Start(0))
-        .with_context(|| format!("failed to rewind {}", path.display()))?;
     Ok(file)
 }
 

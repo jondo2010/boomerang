@@ -141,7 +141,7 @@ pub fn run(workspace: impl AsRef<Path>, deployment_name: &str) -> Result<RunOutc
     let summary_path = directory.path().join("summary.json");
     let launcher = directory.path().join("launcher");
     let mut executable = published.executable;
-    copy_verified_executable(&mut executable, &launcher)?;
+    copy_verified_executable(&mut executable, &launcher, &published.executable_hash)?;
     let status = Command::new(&launcher)
         .env(EXECUTION_SUMMARY_ENV, &summary_path)
         .status()
@@ -159,8 +159,12 @@ pub fn run(workspace: impl AsRef<Path>, deployment_name: &str) -> Result<RunOutc
     }
 }
 
-/// Copies a verified executable handle into the runner's private temporary directory.
-fn copy_verified_executable(source: &mut File, destination: &Path) -> Result<()> {
+/// Copies an executable into private storage and verifies its completed bytes before launch.
+fn copy_verified_executable(
+    source: &mut File,
+    destination: &Path,
+    expected_hash: &str,
+) -> Result<()> {
     let permissions = source
         .metadata()
         .context("failed to inspect verified executable")?
@@ -182,6 +186,15 @@ fn copy_verified_executable(source: &mut File, destination: &Path) -> Result<()>
     copied
         .set_permissions(permissions)
         .with_context(|| format!("failed to set permissions on {}", destination.display()))?;
+    copied
+        .sync_all()
+        .with_context(|| format!("failed to flush {}", destination.display()))?;
+    drop(copied);
+    let bytes = fs::read(destination)
+        .with_context(|| format!("failed to read completed {}", destination.display()))?;
+    if blake3::hash(&bytes).to_hex().as_str() != expected_hash {
+        bail!("private launcher hash mismatch");
+    }
     Ok(())
 }
 
@@ -309,7 +322,7 @@ fn parse_i128(name: &str, value: &str) -> Result<i128> {
 #[cfg(test)]
 mod tests {
     use super::{copy_verified_executable, read_execution_summary};
-    use crate::bundle::open_verified_artifact;
+    use crate::bundle::open_published_artifact;
     use std::{fs, io::Write, path::Path};
     const VALID_SUMMARY: &str = r#"{"schema":1,"stats":{"processed_tags":"1","processed_reactions":"2","processed_events":"3","set_ports":"4","scheduled_actions":"5"},"final_tag":{"offset_nanos":"6","microstep":"7"}}"#;
     fn write_summary(path: &Path, contents: &str) {
@@ -377,20 +390,40 @@ mod tests {
         drop(source);
 
         let expected_hash = blake3::hash(b"validated").to_hex().to_string();
-        let mut verified = open_verified_artifact(&artifact, &expected_hash).unwrap();
+        let mut verified = open_published_artifact(&artifact).unwrap();
 
         let replacement = directory.path().join("replacement");
         fs::write(&replacement, b"replaced").unwrap();
         fs::rename(&replacement, &artifact).unwrap();
 
         let launcher = directory.path().join("launcher");
-        copy_verified_executable(&mut verified, &launcher).unwrap();
+        copy_verified_executable(&mut verified, &launcher, &expected_hash).unwrap();
         assert_eq!(fs::read(&launcher).unwrap(), b"validated");
         assert_eq!(
             launcher.metadata().unwrap().permissions().mode() & 0o777,
             0o755
         );
     }
+
+    #[test]
+    fn copied_executable_rejects_bytes_mutated_after_opening() {
+        let directory = tempfile::tempdir().unwrap();
+        let artifact = directory.path().join("artifact");
+        fs::write(&artifact, b"validated").unwrap();
+        let expected_hash = blake3::hash(b"validated").to_hex().to_string();
+        let mut source = open_published_artifact(&artifact).unwrap();
+
+        fs::write(&artifact, b"replaced!").unwrap();
+
+        let launcher = directory.path().join("launcher");
+        let error = copy_verified_executable(&mut source, &launcher, &expected_hash).unwrap_err();
+        assert!(
+            error.to_string().contains("private launcher hash mismatch"),
+            "{error:#}"
+        );
+        assert_eq!(fs::read(&launcher).unwrap(), b"replaced!");
+    }
+
     #[cfg(unix)]
     #[test]
     fn execution_summary_decoder_rejects_symbolic_links() {

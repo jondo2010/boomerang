@@ -5,7 +5,7 @@ on:
     branches: ["main"]
 
   pull_request:
-    branches: ["main"]
+    branches: ["main", "codex/deployment-phase4-integration"]
 
 permissions:
   contents: read
@@ -70,6 +70,13 @@ jobs:
 
       - name: test
         run: cargo test --all --verbose
+
+      - name: run generated monolithic deployment
+        if: matrix.os == 'ubuntu-latest' && matrix.toolchain == 'stable'
+        run: >-
+          cargo run -p cargo-boomerang -- boomerang
+          --workspace cargo-boomerang/tests/fixtures/workspace
+          run --deployment production
 
   miri:
     runs-on: ubuntu-latest

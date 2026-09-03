@@ -1,8 +1,45 @@
-use std::{fs, path::PathBuf, process::Command};
+use std::{
+    fs,
+    path::PathBuf,
+    process::{Command, Output},
+    sync::{Mutex, MutexGuard},
+};
 
 const MACRO_ABI_INPUT: &str = "BOOMERANG_PAYLOAD_INPUT_V1_MACRO_ABI";
 const SENSOR_FINGERPRINT: &str = "adf86bcf69509f81e115866c31e02ab770c32b966644a3bff0328485d53b88f1";
 const EMPTY_FINGERPRINT: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+
+static FIXTURE_LOCK: Mutex<()> = Mutex::new(());
+
+struct FixtureLock {
+    _guard: MutexGuard<'static, ()>,
+    lockfile: PathBuf,
+}
+
+impl FixtureLock {
+    fn acquire(fixture: &str) -> Self {
+        Self {
+            _guard: FIXTURE_LOCK
+                .lock()
+                .expect("fixture Cargo.lock synchronization must not be poisoned"),
+            lockfile: fixture_path(fixture).join("Cargo.lock"),
+        }
+    }
+
+    fn output(&self, mut command: Command) -> Output {
+        command.output().expect("cargo command should start")
+    }
+
+    fn cleanup(&self) {
+        let _ = fs::remove_file(&self.lockfile);
+    }
+}
+
+impl Drop for FixtureLock {
+    fn drop(&mut self) {
+        self.cleanup();
+    }
+}
 
 fn fixture_path(fixture: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -51,10 +88,8 @@ fn command(fixture: &str, subcommand: &str, args: &[&str]) -> Command {
     command
 }
 
-fn run(mut command: Command, fixture: &str) -> std::process::Output {
-    let output = command.output().expect("cargo command should start");
-    let _ = fs::remove_file(fixture_path(fixture).join("Cargo.lock"));
-    output
+fn run(command: Command, fixture: &str) -> Output {
+    FixtureLock::acquire(fixture).output(command)
 }
 
 fn failure(command: Command, fixture: &str) -> String {
@@ -147,11 +182,11 @@ fn required_bindings_export_typed_payload_symbols() {
 #[test]
 fn required_bindings_compile_in_a_separate_launcher() {
     let fixture = "payload-launcher";
-    let output = command(fixture, "metadata", &["--format-version", "1"])
-        .output()
-        .expect("cargo metadata should start");
+    let fixture_lock = FixtureLock::acquire(fixture);
+    let output = fixture_lock.output(command(fixture, "metadata", &["--format-version", "1"]));
     assert!(output.status.success(), "{output:?}");
-    cargo_check("payload-launcher", &["--locked"]).unwrap();
+    let output = fixture_lock.output(command(fixture, "check", &["--locked"]));
+    assert!(output.status.success(), "{output:?}");
 }
 
 #[test]

@@ -39,7 +39,11 @@ jobs:
           components: clippy
       - uses: swatinem/rust-cache@v2
       - name: Check with Clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: |
+          cargo clippy --workspace --exclude boomerang --all-targets --all-features -- -D warnings
+          cargo clippy -p boomerang --all-targets --features hosted,serde,parallel,replay,federated -- -D warnings
+          cargo clippy -p boomerang --lib --no-default-features --features __boomerang_payload -- -D warnings
+          cargo clippy -p boomerang --lib --no-default-features --features __boomerang_descriptor -- -D warnings
 
   test:
     strategy:

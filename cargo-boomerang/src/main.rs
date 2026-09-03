@@ -33,6 +33,12 @@ struct BoomerangArgs {
 /// Deployment-tool operations.
 #[derive(Subcommand)]
 enum BoomerangCommand {
+    /// Build and publish one immutable fingerprinted deployment bundle.
+    Build {
+        /// Deployment name declared in `Boomerang.toml`.
+        #[arg(long)]
+        deployment: String,
+    },
     /// Validate and lower one named deployment without compiling payload facets.
     Check {
         /// Deployment name declared in `Boomerang.toml`.
@@ -43,6 +49,13 @@ enum BoomerangCommand {
 
 fn main() -> Result<()> {
     match CargoCli::parse().command {
+        CargoCommand::Boomerang(BoomerangArgs {
+            workspace,
+            command: BoomerangCommand::Build { deployment },
+        }) => {
+            let manifest = cargo_boomerang::build(workspace, &deployment)?;
+            println!("{}", manifest.display());
+        }
         CargoCommand::Boomerang(BoomerangArgs {
             workspace,
             command: BoomerangCommand::Check { deployment },

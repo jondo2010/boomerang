@@ -53,7 +53,12 @@ pub(super) fn render_launcher(
         "fn main() -> Result<(), Box<dyn std::error::Error>> {\n\
              let bindings = generated_bindings();\n\
              let _execution = execute_owned_federate(\n\
-                 &DEPLOYMENT, FederateIndex::new(0), bindings, Config::default(),\n\
+                 &DEPLOYMENT, FederateIndex::new(0), bindings, Config {\n\
+                     fast_forward: false,\n\
+                     timeout: None,\n\
+                     keep_alive: false,\n\
+                     physical_event_q_size: 1024,\n\
+                 },\n\
              )?;\n\
              Ok(())\n\
          }\n",

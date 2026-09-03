@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use cargo_boomerang::{load_manifest, parse_manifest, CoordinationBackend};
+use cargo_boomerang::{load_manifest, parse_manifest, CoordinationBackend, ExecutionPolicy};
 
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -83,6 +83,14 @@ fn valid_manifest_preserves_the_complete_schema() {
         CoordinationBackend::PeerToPeer
     );
     assert!(future.rti.is_none());
+}
+
+#[test]
+fn deployment_execution_policy_is_nameable_from_the_public_crate_root() {
+    let policy: ExecutionPolicy = Default::default();
+    assert!(!policy.fast_forward);
+    assert!(!policy.keep_alive);
+    assert_eq!(policy.logical_horizon, None);
 }
 
 #[test]

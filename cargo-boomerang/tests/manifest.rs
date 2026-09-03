@@ -144,7 +144,7 @@ runtime = "std"
     let cases = [
         (
             one_federate_with_coordination().replace("schema = 1", "schema = 3"),
-            "unsupported Boomerang.toml schema 3; expected 1 or 2",
+            "unsupported Boomerang.toml schema 3; expected 1",
         ),
         (
             format!(
@@ -182,29 +182,28 @@ runtime = "std"
 }
 
 #[test]
-fn schema_versions_gate_deployment_execution_policy() {
+fn schema_one_accepts_deployment_execution_policy_and_rejects_schema_two() {
     let schema_one = one_federate_without_coordination().replace(
         "runtime = \"std\"",
         "runtime = \"std\"\n\n[deployments.production.execution]\nfast-forward = true",
     );
-    let error = parse_manifest(&schema_one).unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("deployments.production.execution is available only in schema 2"),
-        "{error}"
-    );
+    parse_manifest(&schema_one).unwrap();
 
     let schema_two_default =
         one_federate_without_coordination().replace("schema = 1", "schema = 2");
-    parse_manifest(&schema_two_default).unwrap();
+    let error = parse_manifest(&schema_two_default).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported Boomerang.toml schema 2; expected 1"),
+        "{error}"
+    );
 }
 
 #[test]
 fn execution_policy_rejects_invalid_logical_horizons_at_the_manifest_boundary() {
     for duration in ["not-a-duration", "-1ns", "0.1ns", "18446744073709551616ns"] {
         let source = one_federate_without_coordination()
-            .replace("schema = 1", "schema = 2")
             .replace(
                 "runtime = \"std\"",
                 &format!("runtime = \"std\"\n\n[deployments.production.execution]\nlogical-horizon = {duration:?}"),
@@ -218,11 +217,9 @@ fn execution_policy_rejects_invalid_logical_horizons_at_the_manifest_boundary() 
         );
     }
 
-    let zero = one_federate_without_coordination()
-        .replace("schema = 1", "schema = 2")
-        .replace(
-            "runtime = \"std\"",
-            "runtime = \"std\"\n\n[deployments.production.execution]\nlogical-horizon = \"0ns\"",
-        );
+    let zero = one_federate_without_coordination().replace(
+        "runtime = \"std\"",
+        "runtime = \"std\"\n\n[deployments.production.execution]\nlogical-horizon = \"0ns\"",
+    );
     parse_manifest(&zero).unwrap();
 }

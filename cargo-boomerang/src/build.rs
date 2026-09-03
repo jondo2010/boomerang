@@ -18,13 +18,13 @@ use crate::{
     codegen::generate_analyzed_launcher,
 };
 
-/// Stable domain separator for schema-v2 deployment fingerprint inputs.
-const DEPLOYMENT_FINGERPRINT_DOMAIN_V2: &str = "boomerang.deployment.v2";
+/// Stable domain separator for schema-v1 deployment fingerprint inputs.
+const DEPLOYMENT_FINGERPRINT_DOMAIN_V1: &str = "boomerang.deployment.v1";
 
-/// Canonical semantic input for schema-v2 deployment fingerprints.
+/// Canonical semantic input for schema-v1 deployment fingerprints.
 #[derive(Serialize)]
-struct FingerprintInputV2 {
-    /// Stable domain separator for schema-v2 deployment fingerprints.
+struct FingerprintInputV1 {
+    /// Stable domain separator for schema-v1 deployment fingerprints.
     domain: &'static str,
     /// Deployment-document schema version.
     schema: u32,
@@ -125,8 +125,8 @@ pub fn build(workspace: impl AsRef<Path>, deployment_name: &str) -> Result<PathB
         backend: String::from("local"),
         protocol: None,
     };
-    let fingerprint_input = FingerprintInputV2 {
-        domain: DEPLOYMENT_FINGERPRINT_DOMAIN_V2,
+    let fingerprint_input = FingerprintInputV1 {
+        domain: DEPLOYMENT_FINGERPRINT_DOMAIN_V1,
         schema: DEPLOYMENT_SCHEMA,
         compiler_schema: COMPILER_SCHEMA,
         topology_hash: topology_hash.clone(),
@@ -285,10 +285,10 @@ mod tests {
     }
 
     #[test]
-    fn fingerprint_input_serializes_the_v2_deployment_domain_first() {
-        let input = FingerprintInputV2 {
-            domain: DEPLOYMENT_FINGERPRINT_DOMAIN_V2,
-            schema: 2,
+    fn fingerprint_input_serializes_the_v1_deployment_domain_first() {
+        let input = FingerprintInputV1 {
+            domain: DEPLOYMENT_FINGERPRINT_DOMAIN_V1,
+            schema: 1,
             compiler_schema: 1,
             topology_hash: String::new(),
             bindings: Vec::new(),
@@ -312,6 +312,6 @@ mod tests {
 
         assert!(serde_json::to_string(&input)
             .unwrap()
-            .starts_with(r#"{"domain":"boomerang.deployment.v2","schema":2"#));
+            .starts_with(r#"{"domain":"boomerang.deployment.v1","schema":1"#));
     }
 }

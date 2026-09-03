@@ -13,9 +13,9 @@ use serde::{Deserialize, Serialize};
 use crate::check::ResourceReport;
 
 /// Current public deployment-document schema.
-pub(crate) const DEPLOYMENT_SCHEMA: u32 = 2;
+pub(crate) const DEPLOYMENT_SCHEMA: u32 = 1;
 
-/// Complete schema-v2 deployment document published with one artifact bundle.
+/// Complete schema-v1 deployment document published with one artifact bundle.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct DeploymentDocument {
@@ -681,7 +681,7 @@ mod tests {
 
     fn sample_document() -> DeploymentDocument {
         serde_json::from_value(serde_json::json!({
-            "schema": 2,
+            "schema": 1,
             "compiler_schema": 1,
             "deployment": "test",
             "fingerprint": "00".repeat(32),

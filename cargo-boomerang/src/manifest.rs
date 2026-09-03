@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, path::PathBuf};
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Deserializer};
 
-const SUPPORTED_SCHEMA: u32 = 2;
+const SUPPORTED_SCHEMA: u32 = 1;
 
 /// A parsed and manifest-locally validated `Boomerang.toml` file.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -28,7 +28,7 @@ impl Manifest {
     fn validate(&self) -> Result<()> {
         if !(1..=SUPPORTED_SCHEMA).contains(&self.schema) {
             bail!(
-                "unsupported Boomerang.toml schema {}; expected 1 or {SUPPORTED_SCHEMA}",
+                "unsupported Boomerang.toml schema {}; expected {SUPPORTED_SCHEMA}",
                 self.schema
             );
         }
@@ -44,7 +44,7 @@ impl Manifest {
                     "deployment names must be non-empty and contain only ASCII letters, digits, '-', '_', or '.'; '.' and '..' are reserved",
                 ));
             }
-            deployment.validate(name, self.schema)?;
+            deployment.validate(name)?;
         }
         Ok(())
     }
@@ -73,18 +73,12 @@ pub struct Deployment<F = Federate> {
     pub coordination: Option<Coordination>,
     /// Coordinator artifact configuration for the `central-rti` backend.
     pub rti: Option<Rti>,
-    /// Deployment-wide execution behavior introduced by schema 2.
+    /// Deployment-wide execution behavior.
     pub execution: Option<ExecutionPolicy>,
 }
 
 impl Deployment<Federate> {
-    fn validate(&self, name: &str, schema: u32) -> Result<()> {
-        if schema == 1 && self.execution.is_some() {
-            return Err(invalid_deployment(
-                name,
-                format!("deployments.{name}.execution is available only in schema 2"),
-            ));
-        }
+    fn validate(&self, name: &str) -> Result<()> {
         match self.federates.len() {
             0 => {
                 return Err(invalid_deployment(

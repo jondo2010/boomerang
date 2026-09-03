@@ -1,4 +1,4 @@
-schema = 2
+schema = 1
 
 [topology]
 package = "vehicle-topology"

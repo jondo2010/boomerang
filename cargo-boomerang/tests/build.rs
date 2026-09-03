@@ -74,7 +74,7 @@ fn build_publishes_a_valid_fingerprinted_bundle() {
     );
 
     let document: Value = serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
-    assert_eq!(document["schema"], 2);
+    assert_eq!(document["schema"], 1);
     assert_eq!(document["deployment"], "production");
     assert_eq!(document["coordination"]["backend"], "local");
     assert!(document["coordination"]["protocol"].is_null());
@@ -171,7 +171,7 @@ fn build_normalizes_deployment_execution_policy_into_every_published_artifact() 
 
     let manifest = PathBuf::from(String::from_utf8(result.stdout).unwrap().trim());
     let document: Value = serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
-    assert_eq!(document["schema"], 2);
+    assert_eq!(document["schema"], 1);
     assert_eq!(
         document["execution"],
         serde_json::json!({

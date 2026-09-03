@@ -202,8 +202,8 @@ impl SnakeGrid {
         let mut rng = StdRng::seed_from_u64(1234);
         for _ in 0..60 {
             // don't loop infinitely
-            let row = rng.gen_range(0..self.grid_side);
-            let col = rng.gen_range(0..self.grid_side);
+            let row = rng.random_range(0..self.grid_side);
+            let col = rng.random_range(0..self.grid_side);
             if self[cell(row, col)] == CellState::Free {
                 return Some(cell(row, col));
             }

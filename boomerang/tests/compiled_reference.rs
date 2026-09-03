@@ -1473,11 +1473,25 @@ fn owned_federate_paced_origin_starts_after_delayed_initializer() {
     assert!(fired_at.duration_since(state.initialized_at) >= timer_delay);
 }
 
+/// Bounds deadlock detection to one second outside Miri and 30 seconds under Miri, whose
+/// interpreter overhead would otherwise cause false watchdog failures.
+fn owned_federate_watchdog_timeout() -> std::time::Duration {
+    #[cfg(miri)]
+    {
+        std::time::Duration::from_secs(30)
+    }
+
+    #[cfg(not(miri))]
+    {
+        std::time::Duration::from_secs(1)
+    }
+}
+
 fn bounded<T: Send + 'static>(run: impl FnOnce() -> T + Send + 'static) -> T {
     let (tx, rx) = std::sync::mpsc::channel();
     let worker = std::thread::spawn(move || tx.send(run()).unwrap());
     let result = rx
-        .recv_timeout(std::time::Duration::from_secs(1))
+        .recv_timeout(owned_federate_watchdog_timeout())
         .expect("owned Federate execution must complete within one second");
     worker.join().unwrap();
     result
@@ -1949,7 +1963,7 @@ fn owned_federate_panic_requests_bounded_shutdown_and_joins() {
         ExecuteOwnedFederateError::ThreadPanicked { enclave, ref message }
             if enclave == EnclaveIndex::new(1) && message == "routed sink panic"
     ));
-    assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    assert!(started.elapsed() < owned_federate_watchdog_timeout());
 }
 
 #[test]
@@ -2109,7 +2123,7 @@ fn owned_federate_retains_route_failure_before_competing_scheduler_panic() {
             source: OwnedStorageError::OutboundRouteChannelFull { destination, .. },
         } if enclave == EnclaveIndex::new(0) && destination == EnclaveIndex::new(1)
     ));
-    assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    assert!(started.elapsed() < owned_federate_watchdog_timeout());
 }
 
 #[test]

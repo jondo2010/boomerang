@@ -299,6 +299,14 @@ fn read_execution_summary(path: &Path) -> Result<ExecutionSummary> {
     let stats = document.stats;
     let final_tag = document.final_tag;
     let offset_nanos = parse_i128("offset_nanos", &final_tag.offset_nanos)?;
+    let duration_nanos = boomerang_runtime::Duration::MIN.whole_nanoseconds()
+        ..=boomerang_runtime::Duration::MAX.whole_nanoseconds();
+    if !duration_nanos.contains(&offset_nanos) {
+        bail!(
+            "failed to decode {}: offset_nanos is outside time::Duration range",
+            path.display()
+        );
+    }
     Ok(ExecutionSummary {
         stats: ExecutionStats {
             processed_tags: parse_usize("processed_tags", &stats.processed_tags)?,
@@ -391,6 +399,16 @@ mod tests {
                 r#"{"schema":1,"stats":{"processed_tags":"1","processed_reactions":"2","processed_events":"3","set_ports":"4","scheduled_actions":"5"},"final_tag":{"offset_nanos":"170141183460469231731687303715884105728","microstep":"7"}}"#,
                 "offset_nanos is outside i128",
             ),
+            (
+                "duration-min-overflow",
+                r#"{"schema":1,"stats":{"processed_tags":"1","processed_reactions":"2","processed_events":"3","set_ports":"4","scheduled_actions":"5"},"final_tag":{"offset_nanos":"-170141183460469231731687303715884105728","microstep":"7"}}"#,
+                "offset_nanos is outside time::Duration range",
+            ),
+            (
+                "duration-max-overflow",
+                r#"{"schema":1,"stats":{"processed_tags":"1","processed_reactions":"2","processed_events":"3","set_ports":"4","scheduled_actions":"5"},"final_tag":{"offset_nanos":"170141183460469231731687303715884105727","microstep":"7"}}"#,
+                "offset_nanos is outside time::Duration range",
+            ),
         ];
         for (name, contents, expected) in cases {
             let path = directory.path().join(format!("{name}.json"));
@@ -405,6 +423,26 @@ mod tests {
             error.to_string().contains("exceeds 16384 bytes"),
             "{error:#}"
         );
+    }
+
+    #[test]
+    fn execution_summary_decoder_accepts_time_duration_boundaries() {
+        let directory = tempfile::tempdir().unwrap();
+        for (name, expected) in [
+            ("duration-min", boomerang_runtime::Duration::MIN),
+            ("duration-max", boomerang_runtime::Duration::MAX),
+        ] {
+            let path = directory.path().join(format!("{name}.json"));
+            let contents = VALID_SUMMARY.replace(
+                r#""offset_nanos":"6""#,
+                &format!(r#""offset_nanos":"{}""#, expected.whole_nanoseconds()),
+            );
+            write_summary(&path, &contents);
+
+            let summary = read_execution_summary(&path).unwrap();
+
+            assert_eq!(summary.final_tag().offset(), expected);
+        }
     }
 
     #[cfg(unix)]

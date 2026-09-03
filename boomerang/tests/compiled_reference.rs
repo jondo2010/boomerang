@@ -1492,7 +1492,7 @@ fn bounded<T: Send + 'static>(run: impl FnOnce() -> T + Send + 'static) -> T {
     let worker = std::thread::spawn(move || tx.send(run()).unwrap());
     let result = rx
         .recv_timeout(owned_federate_watchdog_timeout())
-        .expect("owned Federate execution must complete within one second");
+        .expect("owned Federate execution must complete within the watchdog timeout");
     worker.join().unwrap();
     result
 }

@@ -31,7 +31,14 @@ impl FixtureLock {
     }
 
     fn cleanup(&self) {
-        let _ = fs::remove_file(&self.lockfile);
+        match fs::remove_file(&self.lockfile) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!(
+                "failed to remove fixture lockfile {}: {error}",
+                self.lockfile.display()
+            ),
+        }
     }
 }
 

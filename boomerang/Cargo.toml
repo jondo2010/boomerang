@@ -44,7 +44,7 @@ boomerang_macros = { workspace = true }
 
 [dev-dependencies]
 boomerang_util = { path = "../boomerang_util", features = ["runner", "replay", "test-tracing"] }
-criterion = "0.5"
+criterion = "0.8"
 serde = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing-tracy = { workspace = true }
@@ -52,7 +52,7 @@ tracing-tracy = { workspace = true }
 # Deps for Snake example
 [target.'cfg(not(windows))'.dev-dependencies]
 termcolor = { version = "1.2" }
-rand = { version = "0.9" }
+rand = { version = "0.10" }
 pprof = { version = "0.15", features = ["criterion", "flamegraph"] }
 
 [[bench]]

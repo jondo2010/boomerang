@@ -252,10 +252,16 @@ impl Store {
         self: &mut Pin<Box<Self>>,
         origin: std::time::Instant,
     ) {
-        let contexts = &mut self.as_mut().project().inner.contexts;
-        contexts
-            .iter_mut()
-            .for_each(|(_, context)| context.start_time = origin);
+        let caches = self.as_mut().project().caches;
+        for (_, cache) in caches.get_mut().iter_mut() {
+            // SAFETY: `Store::new` initialized each cache with the unique context pointer for
+            // its reaction after pinning `Store`. The context table is not moved or structurally
+            // modified afterwards, and iterating the distinct cache entries gives this loop the
+            // only mutable access to each context while it initializes its startup origin.
+            unsafe {
+                cache.context.as_mut().start_time = origin;
+            }
+        }
     }
 
     pub fn reschedule_action_value(

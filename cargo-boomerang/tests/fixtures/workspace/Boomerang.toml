@@ -95,6 +95,22 @@ runtime = "std"
 target-json = "targets/host.json"
 cargo-config = ".cargo/host.toml"
 
+[deployments.foreign-x86-linux]
+bindings = { sensor = { package = "sensor-host", features = ["simulated"] }, controller = { package = "vehicle-control" }, backup = { package = "vehicle-control" } }
+
+[deployments.foreign-x86-linux.federates.host]
+groups = ["placement/backup", "placement/controller", "placement/sensor"]
+target = "x86_64-unknown-linux-gnu"
+runtime = "std"
+
+[deployments.foreign-aarch64-macos]
+bindings = { sensor = { package = "sensor-host", features = ["simulated"] }, controller = { package = "vehicle-control" }, backup = { package = "vehicle-control" } }
+
+[deployments.foreign-aarch64-macos.federates.host]
+groups = ["placement/backup", "placement/controller", "placement/sensor"]
+target = "aarch64-apple-darwin"
+runtime = "std"
+
 [deployments.outside-member.bindings."vehicle/sensor"]
 package = "outside-member"
 

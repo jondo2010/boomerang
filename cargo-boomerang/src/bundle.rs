@@ -10,7 +10,7 @@ use std::{
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::check::ResourceReport;
+use crate::check::{ResourceReport, COMPILER_SCHEMA};
 
 /// Current public deployment-document schema.
 pub(crate) const DEPLOYMENT_SCHEMA: u32 = 1;
@@ -573,6 +573,9 @@ fn validate_bundle(bundle: &Path, document: &DeploymentDocument) -> Result<()> {
     if document.schema != DEPLOYMENT_SCHEMA {
         bail!("unsupported deployment schema {}", document.schema);
     }
+    if document.compiler_schema != COMPILER_SCHEMA {
+        bail!("unsupported compiler schema {}", document.compiler_schema);
+    }
     validate_fingerprint(&document.fingerprint)?;
     validate_segment(&document.deployment, "deployment")?;
     let metadata = fs::symlink_metadata(bundle)
@@ -1093,6 +1096,26 @@ mod tests {
 
         assert!(
             error.to_string().contains("fingerprint mismatch"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn published_loader_rejects_an_unsupported_compiler_schema() {
+        let parent = tempfile::tempdir().unwrap();
+        let staging = parent.path().join("staging");
+        fs::create_dir(&staging).unwrap();
+        let mut document = write_sample_bundle(&staging);
+        document.compiler_schema = 2;
+        document.fingerprint = deployment_fingerprint(&document).unwrap();
+        write_document(&staging, &document).unwrap();
+        let bundle = parent.path().join(&document.fingerprint);
+        fs::rename(&staging, &bundle).unwrap();
+
+        let error = load_published_artifact(&bundle.join("deployment.json")).unwrap_err();
+
+        assert!(
+            error.to_string().contains("unsupported compiler schema 2"),
             "{error:#}"
         );
     }

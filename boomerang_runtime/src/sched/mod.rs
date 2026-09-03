@@ -109,40 +109,42 @@ impl Config {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Stats {
-    /// Number of `tag`s processed
+    /// Scheduler tag-processing steps, including terminal tags.
     processed_tags: usize,
-    /// Number of reactions processed
+    /// Enabled reaction callbacks selected for invocation.
     processed_reactions: usize,
-    /// Number of scheduled async events
+    /// Timing-dependent asynchronous scheduler events handled.
     processed_events: usize,
-    /// Number of ports set
+    /// Present-port observations during trigger propagation.
     set_ports: usize,
-    /// Number of scheduled, sync actions
+    /// Actions explicitly requested by reaction outcomes.
     scheduled_actions: usize,
 }
 
 impl Stats {
-    /// Returns the number of logical tags processed by this scheduler.
+    /// Returns scheduler tag-processing steps, including terminal tags.
     pub const fn processed_tags(&self) -> usize {
         self.processed_tags
     }
 
-    /// Returns the number of reactions processed by this scheduler.
+    /// Returns enabled reaction callbacks selected for invocation.
     pub const fn processed_reactions(&self) -> usize {
         self.processed_reactions
     }
 
-    /// Returns the number of scheduled asynchronous events processed by this scheduler.
+    /// Returns timing-dependent asynchronous scheduler events handled.
+    ///
+    /// This is scheduler telemetry, not a count of unique logical events.
     pub const fn processed_events(&self) -> usize {
         self.processed_events
     }
 
-    /// Returns the number of ports set by this scheduler.
+    /// Returns present-port observations during trigger propagation.
     pub const fn set_ports(&self) -> usize {
         self.set_ports
     }
 
-    /// Returns the number of synchronous actions scheduled by this scheduler.
+    /// Returns actions explicitly requested by reaction outcomes.
     pub const fn scheduled_actions(&self) -> usize {
         self.scheduled_actions
     }

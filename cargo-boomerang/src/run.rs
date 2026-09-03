@@ -3,7 +3,7 @@
 use std::{
     fs::{self, File, OpenOptions},
     io::{self, Seek, SeekFrom},
-    path::Path,
+    path::{Path, PathBuf},
     process::{Command, ExitStatus},
 };
 
@@ -21,39 +21,41 @@ const EXECUTION_SUMMARY_ENV: &str = "BOOMERANG_EXECUTION_SUMMARY_V1";
 /// Maximum accepted execution-summary file size in bytes.
 const MAX_EXECUTION_SUMMARY_BYTES: u64 = 16 * 1024;
 
-/// Aggregate work counters reported by one completed generated Federate.
+/// Saturating sums of scheduler-work counters from a completed generated Federate.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecutionStats {
-    /// Number of logical tags processed by the Federate.
+    /// Scheduler tag-processing steps, including terminal tags.
     processed_tags: usize,
-    /// Number of reactions processed by the Federate.
+    /// Enabled reaction callbacks selected for invocation.
     processed_reactions: usize,
-    /// Number of events processed by the Federate.
+    /// Timing-dependent asynchronous scheduler events handled.
     processed_events: usize,
-    /// Number of ports set by the Federate.
+    /// Present-port observations during trigger propagation.
     set_ports: usize,
-    /// Number of actions scheduled by the Federate.
+    /// Actions explicitly requested by reaction outcomes.
     scheduled_actions: usize,
 }
 
 impl ExecutionStats {
-    /// Returns the number of logical tags processed by the Federate.
+    /// Returns the saturating sum of scheduler tag-processing steps, including terminal tags.
     pub const fn processed_tags(&self) -> usize {
         self.processed_tags
     }
-    /// Returns the number of reactions processed by the Federate.
+    /// Returns the saturating sum of enabled reaction callbacks selected for invocation.
     pub const fn processed_reactions(&self) -> usize {
         self.processed_reactions
     }
-    /// Returns the number of events processed by the Federate.
+    /// Returns the saturating sum of timing-dependent asynchronous scheduler events handled.
+    ///
+    /// This is scheduler telemetry, not a count of unique logical events.
     pub const fn processed_events(&self) -> usize {
         self.processed_events
     }
-    /// Returns the number of ports set by the Federate.
+    /// Returns the saturating sum of present-port observations during trigger propagation.
     pub const fn set_ports(&self) -> usize {
         self.set_ports
     }
-    /// Returns the number of actions scheduled by the Federate.
+    /// Returns the saturating sum of actions explicitly requested by reaction outcomes.
     pub const fn scheduled_actions(&self) -> usize {
         self.scheduled_actions
     }
@@ -137,9 +139,7 @@ pub fn run(workspace: impl AsRef<Path>, deployment_name: &str) -> Result<RunOutc
     let manifest = build(workspace, deployment_name)?;
     let published = load_published_artifact(&manifest)?;
     validate_published_host_artifact(&published.document)?;
-    let directory = tempfile::tempdir().context("failed to create execution-summary directory")?;
-    let summary_path = directory.path().join("summary.json");
-    let launcher = directory.path().join("launcher");
+    let (_directory, summary_path, launcher) = prepare_execution_directory()?;
     let mut executable = published.executable;
     copy_verified_executable(&mut executable, &launcher, &published.executable_hash)?;
     let status = Command::new(&launcher)
@@ -157,6 +157,20 @@ pub fn run(workspace: impl AsRef<Path>, deployment_name: &str) -> Result<RunOutc
             summary: None,
         })
     }
+}
+
+/// Creates one private canonical directory for the summary and executable copy.
+fn prepare_execution_directory() -> Result<(tempfile::TempDir, PathBuf, PathBuf)> {
+    let directory = tempfile::tempdir().context("failed to create execution-summary directory")?;
+    let canonical_directory = fs::canonicalize(directory.path()).with_context(|| {
+        format!(
+            "failed to canonicalize execution-summary directory {}",
+            directory.path().display()
+        )
+    })?;
+    let summary_path = canonical_directory.join("summary.json");
+    let launcher = canonical_directory.join(format!("launcher{}", std::env::consts::EXE_SUFFIX));
+    Ok((directory, summary_path, launcher))
 }
 
 /// Copies an executable into private storage and verifies its completed bytes before launch.
@@ -321,12 +335,29 @@ fn parse_i128(name: &str, value: &str) -> Result<i128> {
 
 #[cfg(test)]
 mod tests {
-    use super::{copy_verified_executable, read_execution_summary};
+    use super::{copy_verified_executable, prepare_execution_directory, read_execution_summary};
     use crate::bundle::open_published_artifact;
     use std::{fs, io::Write, path::Path};
     const VALID_SUMMARY: &str = r#"{"schema":1,"stats":{"processed_tags":"1","processed_reactions":"2","processed_events":"3","set_ports":"4","scheduled_actions":"5"},"final_tag":{"offset_nanos":"6","microstep":"7"}}"#;
     fn write_summary(path: &Path, contents: &str) {
         fs::write(path, contents).unwrap();
+    }
+    #[test]
+    fn private_run_paths_are_absolute_and_use_the_host_executable_suffix() {
+        let (_directory, summary_path, launcher) = prepare_execution_directory().unwrap();
+
+        assert!(summary_path.is_absolute(), "{}", summary_path.display());
+        assert_eq!(
+            launcher.file_name().unwrap(),
+            format!("launcher{}", std::env::consts::EXE_SUFFIX).as_str()
+        );
+        assert_eq!(summary_path.parent(), launcher.parent());
+        assert_eq!(
+            summary_path.parent().unwrap(),
+            fs::canonicalize(summary_path.parent().unwrap())
+                .unwrap()
+                .as_path()
+        );
     }
     #[test]
     fn execution_summary_decoder_rejects_invalid_protocol_files() {

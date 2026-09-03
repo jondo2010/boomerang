@@ -150,6 +150,23 @@ fn run_rejects_a_custom_target_before_bundle_generation() {
 }
 
 #[test]
+fn run_rejects_a_foreign_native_target_before_bundle_generation() {
+    let deployment = if target_lexicon::HOST.to_string() == "x86_64-unknown-linux-gnu" {
+        "foreign-aarch64-macos"
+    } else {
+        "foreign-x86-linux"
+    };
+    let target = tempfile::tempdir().unwrap();
+    let result = with_target_directory(target.path(), || {
+        cargo_boomerang::run(fixture_workspace(), deployment)
+    });
+    let error = result.unwrap_err().to_string();
+
+    assert!(error.contains("is not the host target"), "{error}");
+    assert!(!target.path().join("boomerang").join(deployment).exists());
+}
+
+#[test]
 fn run_forwards_application_streams_without_reframing() {
     let output = run_cli("production");
     assert!(

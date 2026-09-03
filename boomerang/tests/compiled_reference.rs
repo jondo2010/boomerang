@@ -753,9 +753,7 @@ fn compiled_reference_executes_startup_to_shutdown() {
     let result = execute_owned(
         &IMAGE,
         reference_bindings(),
-        Config::default()
-            .with_fast_forward(true)
-            .with_timeout(Duration::nanoseconds(6)),
+        Config::default().with_fast_forward(true),
     )
     .unwrap();
 
@@ -778,6 +776,8 @@ fn compiled_reference_executes_startup_to_shutdown() {
                 && found == std::any::type_name::<CounterState>()
     ));
     assert_eq!(result.final_tag(), Tag::new(Duration::nanoseconds(5), 0));
+    assert!(result.stats().processed_tags() > 0);
+    assert!(result.stats().processed_reactions() > 0);
 }
 
 #[test]
@@ -1380,6 +1380,42 @@ fn owned_federate_routes_typed_values_and_shares_one_origin() {
         assert_eq!(sink_state.values, [42]);
         assert_eq!(source.final_tag(), Tag::new(Duration::ZERO, usize::MAX));
         assert_eq!(sink.final_tag(), Tag::new(Duration::milliseconds(1), 0));
+        assert_eq!(result.final_tag(), source.final_tag().max(sink.final_tag()));
+        assert_eq!(
+            result.stats().processed_tags(),
+            source
+                .stats()
+                .processed_tags()
+                .saturating_add(sink.stats().processed_tags())
+        );
+        assert_eq!(
+            result.stats().processed_reactions(),
+            source
+                .stats()
+                .processed_reactions()
+                .saturating_add(sink.stats().processed_reactions())
+        );
+        assert_eq!(
+            result.stats().processed_events(),
+            source
+                .stats()
+                .processed_events()
+                .saturating_add(sink.stats().processed_events())
+        );
+        assert_eq!(
+            result.stats().set_ports(),
+            source
+                .stats()
+                .set_ports()
+                .saturating_add(sink.stats().set_ports())
+        );
+        assert_eq!(
+            result.stats().scheduled_actions(),
+            source
+                .stats()
+                .scheduled_actions()
+                .saturating_add(sink.stats().scheduled_actions())
+        );
         assert_eq!(source_state.origin, Some(result.origin()));
         assert_eq!(sink_state.origin, Some(result.origin()));
     }
@@ -1509,6 +1545,7 @@ fn owned_federate_quiescence_wins_before_logical_horizon() {
         );
         assert_eq!(result.enclave(enclave).unwrap().final_tag(), Tag::NEVER);
     }
+    assert_eq!(result.final_tag(), Tag::NEVER);
 }
 
 #[test]

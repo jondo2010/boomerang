@@ -161,9 +161,10 @@ fn run_forwards_application_streams_without_reframing() {
         String::from_utf8(output.stdout).unwrap(),
         "sensor received command 42\n"
     );
-    assert!(String::from_utf8(output.stderr)
-        .unwrap()
-        .contains("sensor scheduling shutdown\n"));
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "sensor scheduling shutdown\n"
+    );
 }
 
 #[test]

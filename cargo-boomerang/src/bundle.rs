@@ -3,7 +3,7 @@
 use std::{
     collections::BTreeSet,
     fs::{self, File},
-    io::{self, BufReader, Write},
+    io::{self, BufReader, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
 };
 
@@ -223,8 +223,8 @@ pub(crate) struct BundleSource<'a> {
 pub(crate) struct PublishedArtifact {
     /// Complete validated deployment document.
     pub(crate) document: DeploymentDocument,
-    /// Canonical regular-file path of the owned executable.
-    pub(crate) executable: PathBuf,
+    /// Open executable whose bytes match the published artifact record.
+    pub(crate) executable: File,
 }
 
 /// Loads one immutable, semantically validated local deployment artifact.
@@ -263,20 +263,30 @@ pub(crate) fn load_published_artifact(manifest: &Path) -> Result<PublishedArtifa
         );
     }
     let executable = bundle.join(join_normalized(Path::new(""), &artifact.path)?);
-    let metadata = fs::symlink_metadata(&executable)
-        .with_context(|| format!("failed to inspect {}", executable.display()))?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() {
-        bail!(
-            "{} is not a regular published executable",
-            executable.display()
-        );
-    }
-    let executable = fs::canonicalize(&executable)
-        .with_context(|| format!("failed to canonicalize {}", executable.display()))?;
+    let executable = open_verified_artifact(&executable, &artifact.blake3)?;
     Ok(PublishedArtifact {
         document,
         executable,
     })
+}
+
+/// Opens one regular artifact and verifies the bytes held by that open handle.
+pub(crate) fn open_verified_artifact(path: &Path, expected_hash: &str) -> Result<File> {
+    let mut file =
+        File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("failed to inspect {}", path.display()))?;
+    if !metadata.is_file() {
+        bail!("{} is not a regular published executable", path.display());
+    }
+    let actual = hash_open_file(&mut file)?;
+    if actual != expected_hash {
+        bail!("bundle hash mismatch for {}", path.display());
+    }
+    file.seek(SeekFrom::Start(0))
+        .with_context(|| format!("failed to rewind {}", path.display()))?;
+    Ok(file)
 }
 
 /// Stages, verifies, and atomically publishes an immutable deployment bundle.
@@ -785,8 +795,24 @@ fn is_lower_hex(value: &str, width: usize) -> bool {
 
 /// Hashes exact file bytes as lowercase BLAKE3 text.
 fn hash_file(path: &Path) -> Result<String> {
-    let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
-    Ok(blake3::hash(&bytes).to_hex().to_string())
+    let mut file =
+        File::open(path).with_context(|| format!("failed to read {}", path.display()))?;
+    hash_open_file(&mut file)
+}
+
+/// Computes a BLAKE3 digest from the bytes held by an open file handle.
+fn hash_open_file(file: &mut File) -> Result<String> {
+    let mut hasher = blake3::Hasher::new();
+    let mut buffer = [0_u8; 8 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .context("failed to read opened artifact")?;
+        if read == 0 {
+            return Ok(hasher.finalize().to_hex().to_string());
+        }
+        hasher.update(&buffer[..read]);
+    }
 }
 
 #[cfg(test)]

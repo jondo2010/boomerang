@@ -1,7 +1,8 @@
 //! Host-side execution of one verified generated deployment artifact.
 
 use std::{
-    fs,
+    fs::{self, File, OpenOptions},
+    io::{self, Seek, SeekFrom},
     path::Path,
     process::{Command, ExitStatus},
 };
@@ -138,10 +139,13 @@ pub fn run(workspace: impl AsRef<Path>, deployment_name: &str) -> Result<RunOutc
     validate_published_host_artifact(&published.document)?;
     let directory = tempfile::tempdir().context("failed to create execution-summary directory")?;
     let summary_path = directory.path().join("summary.json");
-    let status = Command::new(&published.executable)
+    let launcher = directory.path().join("launcher");
+    let mut executable = published.executable;
+    copy_verified_executable(&mut executable, &launcher)?;
+    let status = Command::new(&launcher)
         .env(EXECUTION_SUMMARY_ENV, &summary_path)
         .status()
-        .with_context(|| format!("failed to launch {}", published.executable.display()))?;
+        .with_context(|| format!("failed to launch {}", launcher.display()))?;
     if status.success() {
         Ok(RunOutcome {
             status,
@@ -153,6 +157,32 @@ pub fn run(workspace: impl AsRef<Path>, deployment_name: &str) -> Result<RunOutc
             summary: None,
         })
     }
+}
+
+/// Copies a verified executable handle into the runner's private temporary directory.
+fn copy_verified_executable(source: &mut File, destination: &Path) -> Result<()> {
+    let permissions = source
+        .metadata()
+        .context("failed to inspect verified executable")?
+        .permissions();
+    source
+        .seek(SeekFrom::Start(0))
+        .context("failed to rewind verified executable")?;
+    let mut copied = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)
+        .with_context(|| format!("failed to create {}", destination.display()))?;
+    io::copy(source, &mut copied).with_context(|| {
+        format!(
+            "failed to copy verified executable to {}",
+            destination.display()
+        )
+    })?;
+    copied
+        .set_permissions(permissions)
+        .with_context(|| format!("failed to set permissions on {}", destination.display()))?;
+    Ok(())
 }
 
 /// Confirms that a validated bundle remains runnable by the local host process.
@@ -278,8 +308,9 @@ fn parse_i128(name: &str, value: &str) -> Result<i128> {
 
 #[cfg(test)]
 mod tests {
-    use super::read_execution_summary;
-    use std::{fs, path::Path};
+    use super::{copy_verified_executable, read_execution_summary};
+    use crate::bundle::open_verified_artifact;
+    use std::{fs, io::Write, path::Path};
     const VALID_SUMMARY: &str = r#"{"schema":1,"stats":{"processed_tags":"1","processed_reactions":"2","processed_events":"3","set_ports":"4","scheduled_actions":"5"},"final_tag":{"offset_nanos":"6","microstep":"7"}}"#;
     fn write_summary(path: &Path, contents: &str) {
         fs::write(path, contents).unwrap();
@@ -329,6 +360,35 @@ mod tests {
         assert!(
             error.to_string().contains("exceeds 16384 bytes"),
             "{error:#}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copied_executable_uses_bytes_from_the_verified_open_handle() {
+        let directory = tempfile::tempdir().unwrap();
+        let artifact = directory.path().join("artifact");
+        let mut source = fs::File::create(&artifact).unwrap();
+        source.write_all(b"validated").unwrap();
+        let mut permissions = source.metadata().unwrap().permissions();
+        use std::os::unix::fs::PermissionsExt;
+        permissions.set_mode(0o755);
+        source.set_permissions(permissions).unwrap();
+        drop(source);
+
+        let expected_hash = blake3::hash(b"validated").to_hex().to_string();
+        let mut verified = open_verified_artifact(&artifact, &expected_hash).unwrap();
+
+        let replacement = directory.path().join("replacement");
+        fs::write(&replacement, b"replaced").unwrap();
+        fs::rename(&replacement, &artifact).unwrap();
+
+        let launcher = directory.path().join("launcher");
+        copy_verified_executable(&mut verified, &launcher).unwrap();
+        assert_eq!(fs::read(&launcher).unwrap(), b"validated");
+        assert_eq!(
+            launcher.metadata().unwrap().permissions().mode() & 0o777,
+            0o755
         );
     }
     #[cfg(unix)]

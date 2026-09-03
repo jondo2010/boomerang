@@ -1,7 +1,7 @@
 use std::{collections::BTreeMap, path::PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 
 const SUPPORTED_SCHEMA: u32 = 1;
 
@@ -26,7 +26,7 @@ impl Manifest {
     }
 
     fn validate(&self) -> Result<()> {
-        if self.schema != SUPPORTED_SCHEMA {
+        if !(1..=SUPPORTED_SCHEMA).contains(&self.schema) {
             bail!(
                 "unsupported Boomerang.toml schema {}; expected {SUPPORTED_SCHEMA}",
                 self.schema
@@ -73,6 +73,8 @@ pub struct Deployment<F = Federate> {
     pub coordination: Option<Coordination>,
     /// Coordinator artifact configuration for the `central-rti` backend.
     pub rti: Option<Rti>,
+    /// Deployment-wide execution behavior.
+    pub execution: Option<ExecutionPolicy>,
 }
 
 impl Deployment<Federate> {
@@ -120,6 +122,36 @@ impl Deployment<Federate> {
             _ => Ok(()),
         }
     }
+}
+
+/// Deployment-wide runtime behavior normalized at the manifest boundary.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct ExecutionPolicy {
+    /// Whether logical execution bypasses wall-clock synchronization.
+    #[serde(default)]
+    pub fast_forward: bool,
+    /// Whether schedulers remain alive without pending events.
+    #[serde(default)]
+    pub keep_alive: bool,
+    /// Optional logical horizon normalized once to nonnegative nanoseconds.
+    #[serde(default, deserialize_with = "deserialize_logical_horizon")]
+    pub logical_horizon: Option<u64>,
+}
+
+/// Deserializes an optional human duration as an exact nonnegative nanosecond count.
+fn deserialize_logical_horizon<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer)?
+        .map(|value| {
+            let duration = humantime::parse_duration(&value)
+                .map_err(|error| serde::de::Error::custom(error.to_string()))?;
+            u64::try_from(duration.as_nanos())
+                .map_err(|_| serde::de::Error::custom("logical horizon exceeds u64 nanoseconds"))
+        })
+        .transpose()
 }
 
 /// Selection of one implementation package for a component instance.

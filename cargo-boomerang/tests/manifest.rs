@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use cargo_boomerang::{load_manifest, parse_manifest, CoordinationBackend};
+use cargo_boomerang::{load_manifest, parse_manifest, CoordinationBackend, ExecutionPolicy};
 
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -23,6 +23,20 @@ runtime = "std"
 
 [deployments.production.coordination]
 backend = "central-rti"
+"#
+}
+
+fn one_federate_without_coordination() -> &'static str {
+    r#"
+schema = 1
+
+[topology]
+package = "vehicle-topology"
+entry = "vehicle::topology"
+
+[deployments.production.federates.host]
+groups = ["vehicle"]
+runtime = "std"
 "#
 }
 
@@ -69,6 +83,14 @@ fn valid_manifest_preserves_the_complete_schema() {
         CoordinationBackend::PeerToPeer
     );
     assert!(future.rti.is_none());
+}
+
+#[test]
+fn deployment_execution_policy_is_nameable_from_the_public_crate_root() {
+    let policy: ExecutionPolicy = Default::default();
+    assert!(!policy.fast_forward);
+    assert!(!policy.keep_alive);
+    assert_eq!(policy.logical_horizon, None);
 }
 
 #[test]
@@ -121,8 +143,8 @@ runtime = "std"
 "#;
     let cases = [
         (
-            one_federate_with_coordination().replace("schema = 1", "schema = 2"),
-            "unsupported Boomerang.toml schema 2; expected 1",
+            one_federate_with_coordination().replace("schema = 1", "schema = 3"),
+            "unsupported Boomerang.toml schema 3; expected 1",
         ),
         (
             format!(
@@ -157,4 +179,47 @@ runtime = "std"
             "expected {expected:?}, got {error}"
         );
     }
+}
+
+#[test]
+fn schema_one_accepts_deployment_execution_policy_and_rejects_schema_two() {
+    let schema_one = one_federate_without_coordination().replace(
+        "runtime = \"std\"",
+        "runtime = \"std\"\n\n[deployments.production.execution]\nfast-forward = true",
+    );
+    parse_manifest(&schema_one).unwrap();
+
+    let schema_two_default =
+        one_federate_without_coordination().replace("schema = 1", "schema = 2");
+    let error = parse_manifest(&schema_two_default).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported Boomerang.toml schema 2; expected 1"),
+        "{error}"
+    );
+}
+
+#[test]
+fn execution_policy_rejects_invalid_logical_horizons_at_the_manifest_boundary() {
+    for duration in ["not-a-duration", "-1ns", "0.1ns", "18446744073709551616ns"] {
+        let source = one_federate_without_coordination()
+            .replace(
+                "runtime = \"std\"",
+                &format!("runtime = \"std\"\n\n[deployments.production.execution]\nlogical-horizon = {duration:?}"),
+            );
+        let error = parse_manifest(&source).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("deployments.production.execution.logical-horizon"),
+            "duration {duration:?} produced {error}"
+        );
+    }
+
+    let zero = one_federate_without_coordination().replace(
+        "runtime = \"std\"",
+        "runtime = \"std\"\n\n[deployments.production.execution]\nlogical-horizon = \"0ns\"",
+    );
+    parse_manifest(&zero).unwrap();
 }

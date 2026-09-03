@@ -46,15 +46,16 @@ fn initialize_counter() -> CounterState {
 
 /// Increments the directly bound reactor state when its startup reaction executes.
 fn increment_counter(
-    _context: &mut Context,
+    context: &mut Context,
     state: &mut dyn ReactorData,
     _refs: ReactionRefs<'_>,
     _mode_effect: Option<CompiledModeEffectRef>,
 ) -> Result<(), ReactionBindingError> {
-    state
+    let state = state
         .downcast_mut::<CounterState>()
-        .expect("the image's state binding initializes CounterState")
-        .count += 1;
+        .expect("the image's state binding initializes CounterState");
+    state.count += 1;
+    state.tags.push(context.get_tag());
     Ok(())
 }
 
@@ -700,6 +701,51 @@ static ROUTED_IMAGE: EnclaveImage<'static> = EnclaveImage {
     routes: TinyMapView::new(&ROUTED_ROUTES),
     required_bindings: TinyMapView::new(&ROUTED_REQUIRED_BINDINGS),
     ..IMAGE
+};
+
+static HORIZON_SHUTDOWN_REACTIONS: [LifecycleReactionImage; 1] = [LifecycleReactionImage::new(
+    LevelReactionImage::new(0, ReactionIndex::new(0)),
+    ActionIndex::new(0),
+)];
+static HORIZON_WORK_IMAGE: EnclaveImage<'static> = EnclaveImage {
+    shutdown_reactions: &HORIZON_SHUTDOWN_REACTIONS,
+    ..IMAGE
+};
+
+static HORIZON_IDLE_IMAGE: EnclaveImage<'static> = EnclaveImage {
+    identity_data: "compiled/referencecounter-stateincrement-counter-idle",
+    enclave_id: IdentityRange::new(49, 4),
+    scope_timer_startups: &[],
+    timer_startup_actions: &[],
+    shutdown_reactions: &HORIZON_SHUTDOWN_REACTIONS,
+    ..IMAGE
+};
+
+static HORIZON_ENCLAVES: [EnclaveImage<'static>; 2] = [HORIZON_WORK_IMAGE, HORIZON_IDLE_IMAGE];
+static QUIESCENT_HORIZON_IMAGE: EnclaveImage<'static> = EnclaveImage {
+    scope_timer_startups: &[],
+    timer_startup_actions: &[],
+    ..HORIZON_WORK_IMAGE
+};
+static QUIESCENT_HORIZON_ENCLAVES: [EnclaveImage<'static>; 2] =
+    [QUIESCENT_HORIZON_IMAGE, HORIZON_IDLE_IMAGE];
+static HORIZON_FEDERATES: [FederateImage; 1] = [FederateImage::new(
+    IdentityRange::new(0, 4),
+    IdentityRange::new(4, 6),
+    IdentityRange::new(10, 7),
+    r!(0, 2),
+)];
+static HORIZON_FEDERATE_MEMBERS: [FederateIndex; 1] = [FederateIndex::new(0)];
+static HORIZON_DEPLOYMENT: CompiledDeploymentImage<'static> = CompiledDeploymentImage {
+    identity_data: "hosttargetruntime",
+    federation: GlobalFederationImage::new(&HORIZON_FEDERATE_MEMBERS, &[]),
+    federates: TinyMapView::new(&HORIZON_FEDERATES),
+    enclaves: TinyMapView::new(&HORIZON_ENCLAVES),
+    coordination: CoordinationProjection::Local,
+};
+static QUIESCENT_HORIZON_DEPLOYMENT: CompiledDeploymentImage<'static> = CompiledDeploymentImage {
+    enclaves: TinyMapView::new(&QUIESCENT_HORIZON_ENCLAVES),
+    ..HORIZON_DEPLOYMENT
 };
 
 #[test]
@@ -1432,6 +1478,66 @@ fn owned_federate_quiesces_when_a_source_emits_no_route_value() {
         .unwrap()
         .values
         .is_empty());
+}
+
+#[test]
+fn owned_federate_quiescence_wins_before_logical_horizon() {
+    let result = bounded(|| {
+        execute_owned_federate(
+            &QUIESCENT_HORIZON_DEPLOYMENT,
+            FederateIndex::new(0),
+            FederateBindings::new()
+                .bind_enclave(EnclaveIndex::new(0), reference_bindings())
+                .bind_enclave(EnclaveIndex::new(1), reference_bindings()),
+            Config::default()
+                .with_fast_forward(true)
+                .with_timeout(Duration::seconds(1)),
+        )
+        .unwrap()
+    });
+
+    for enclave in [EnclaveIndex::new(0), EnclaveIndex::new(1)] {
+        let state = result
+            .enclave(enclave)
+            .unwrap()
+            .state::<CounterState>(StateSlotIndex::new(0))
+            .unwrap();
+        assert_eq!(
+            state.tags,
+            [Tag::ZERO],
+            "quiescence must precede the horizon"
+        );
+        assert_eq!(result.enclave(enclave).unwrap().final_tag(), Tag::NEVER);
+    }
+}
+
+#[test]
+fn owned_federate_logical_horizon_stops_all_enclaves_at_one_tag() {
+    let horizon = Duration::nanoseconds(1);
+    let result = bounded(move || {
+        execute_owned_federate(
+            &HORIZON_DEPLOYMENT,
+            FederateIndex::new(0),
+            FederateBindings::new()
+                .bind_enclave(EnclaveIndex::new(0), reference_bindings())
+                .bind_enclave(EnclaveIndex::new(1), reference_bindings()),
+            Config::default()
+                .with_fast_forward(true)
+                .with_timeout(horizon),
+        )
+        .unwrap()
+    });
+
+    let expected = Tag::new(horizon, 0);
+    for enclave in [EnclaveIndex::new(0), EnclaveIndex::new(1)] {
+        let state = result
+            .enclave(enclave)
+            .unwrap()
+            .state::<CounterState>(StateSlotIndex::new(0))
+            .unwrap();
+        assert_eq!(state.tags, [expected]);
+        assert_eq!(result.enclave(enclave).unwrap().final_tag(), Tag::NEVER);
+    }
 }
 
 #[test]

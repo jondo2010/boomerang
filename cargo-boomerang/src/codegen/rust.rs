@@ -15,7 +15,7 @@ use boomerang_runtime::{
 };
 use tinymap::TableRange;
 
-use crate::DriverOutput;
+use crate::{manifest::ExecutionPolicy, DriverOutput};
 
 /// Renders one complete static launcher source file from validated compiler output.
 pub(super) fn render_launcher(
@@ -23,6 +23,7 @@ pub(super) fn render_launcher(
     compiled: &OwnedCompiledDeployment,
     federate_index: usize,
     aliases: &BTreeMap<String, String>,
+    execution: &ExecutionPolicy,
 ) -> Result<String> {
     let federate = compiled
         .federates()
@@ -49,20 +50,15 @@ pub(super) fn render_launcher(
     }
     render_deployment(&mut source, federate)?;
     render_bindings(&mut source, driver, federate.enclaves(), aliases)?;
-    source.push_str(
-        "fn main() -> Result<(), Box<dyn std::error::Error>> {\n\
-             let bindings = generated_bindings();\n\
-             let _execution = execute_owned_federate(\n\
-                 &DEPLOYMENT, FederateIndex::new(0), bindings, Config {\n\
-                     fast_forward: false,\n\
-                     timeout: None,\n\
-                     keep_alive: false,\n\
-                     physical_event_q_size: 1024,\n\
-                 },\n\
-             )?;\n\
-             Ok(())\n\
-         }\n",
-    );
+    let timeout = execution
+        .logical_horizon
+        .map(|nanos| format!("Some(boomerang_runtime::Duration::nanoseconds_i128({nanos}))"))
+        .unwrap_or_else(|| String::from("None"));
+    writeln!(
+        source,
+        "fn main() -> Result<(), Box<dyn std::error::Error>> {{\n    let bindings = generated_bindings();\n    let _execution = execute_owned_federate(\n        &DEPLOYMENT, FederateIndex::new(0), bindings, Config {{\n            fast_forward: {},\n            timeout: {},\n            keep_alive: {},\n            // Legacy public-API compatibility placeholder.\n            physical_event_q_size: 1024,\n        }},\n    )?;\n    Ok(())\n}}",
+        execution.fast_forward, timeout, execution.keep_alive,
+    )?;
     Ok(source)
 }
 

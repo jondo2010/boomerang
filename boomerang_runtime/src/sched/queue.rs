@@ -30,8 +30,8 @@ pub(super) struct ScheduledEvent<K: tinymap::Key, A: Copy> {
     pub(super) reactions: KeySet<K>,
     /// Whether processing this event terminates the scheduler.
     pub(super) terminal: bool,
-    /// Whether this event includes work other than terminal shutdown processing.
-    pub(super) has_nonterminal_work: bool,
+    /// Number of queued nonterminal contributions merged into this event.
+    pub(super) nonterminal_work_count: usize,
     /// Optional action value metadata needed for modal rebasing.
     pub(super) action_value: Option<ScheduledActionValue<A>>,
 }
@@ -108,7 +108,10 @@ impl<K: tinymap::Key, A: Copy + PartialEq> EventQueue<K, A> {
             let mut event = self.event_queue.peek_mut().unwrap();
             event.reactions.extend_above(reactions);
             event.terminal = event.terminal || terminal;
-            event.has_nonterminal_work |= !terminal;
+            event.nonterminal_work_count = event
+                .nonterminal_work_count
+                .checked_add(usize::from(!terminal))
+                .expect("queued nonterminal-work count overflowed");
             if action_value.is_some() {
                 event.action_value = action_value;
             }
@@ -120,7 +123,7 @@ impl<K: tinymap::Key, A: Copy + PartialEq> EventQueue<K, A> {
                 tag,
                 reactions: reaction_set,
                 terminal,
-                has_nonterminal_work: !terminal,
+                nonterminal_work_count: usize::from(!terminal),
                 action_value,
             };
             self.event_queue.push(event);
@@ -149,7 +152,10 @@ impl<K: tinymap::Key, A: Copy + PartialEq> EventQueue<K, A> {
                     }
                     event.reactions.merge(&next_event.reactions);
                     event.terminal = event.terminal || next_event.terminal;
-                    event.has_nonterminal_work |= next_event.has_nonterminal_work;
+                    event.nonterminal_work_count = event
+                        .nonterminal_work_count
+                        .checked_add(next_event.nonterminal_work_count)
+                        .expect("queued nonterminal-work count overflowed");
 
                     self.recycle_reaction_set(next_event.reactions);
                 } else {
@@ -195,10 +201,16 @@ impl<K: tinymap::Key, A: Copy + PartialEq> EventQueue<K, A> {
         }
     }
 
-    pub(crate) fn clear(&mut self) {
+    /// Clears the queue and returns the number of removed nonterminal contributions.
+    pub(crate) fn clear(&mut self) -> usize {
+        let mut nonterminal_work_count = 0usize;
         while let Some(event) = self.event_queue.pop() {
+            nonterminal_work_count = nonterminal_work_count
+                .checked_add(event.nonterminal_work_count)
+                .expect("queued nonterminal-work count overflowed");
             self.recycle_reaction_set(event.reactions);
         }
+        nonterminal_work_count
     }
 
     pub(crate) fn rebase_action_values(
@@ -252,21 +264,21 @@ mod tests {
             tag: Tag::new(Duration::seconds(1), 0),
             reactions: KeySet::default(),
             terminal: false,
-            has_nonterminal_work: true,
+            nonterminal_work_count: 1,
             action_value: None,
         });
         heap.push(ScheduledEvent {
             tag: Tag::new(Duration::seconds(1), 0),
             reactions: KeySet::default(),
             terminal: true,
-            has_nonterminal_work: false,
+            nonterminal_work_count: 0,
             action_value: None,
         });
         heap.push(ScheduledEvent {
             tag: Tag::new(Duration::seconds(0), 0),
             reactions: KeySet::default(),
             terminal: false,
-            has_nonterminal_work: true,
+            nonterminal_work_count: 1,
             action_value: None,
         });
 
@@ -279,5 +291,24 @@ mod tests {
         let ev2 = heap.pop().unwrap();
         assert!(ev2.terminal);
         assert_eq!(ev2.tag.offset(), Duration::seconds(1));
+    }
+
+    #[test]
+    fn nonterminal_work_count_survives_merging_and_clear() {
+        let mut queue = EventQueue::<DefaultKey, u8>::new(ReactionSetLimits {
+            max_level: Level::default(),
+            num_keys: 0,
+        });
+        let tag = Tag::new(Duration::seconds(1), 0);
+
+        queue.push_event(tag, std::iter::empty(), false);
+        queue.push_event(tag, std::iter::empty(), false);
+        queue.push_event(tag, std::iter::empty(), true);
+
+        let event = queue.pop_next_event(&mut Vec::new()).unwrap();
+        assert_eq!(event.nonterminal_work_count, 2);
+
+        queue.push_event(tag.delay(Duration::seconds(1)), std::iter::empty(), false);
+        assert_eq!(queue.clear(), 1);
     }
 }

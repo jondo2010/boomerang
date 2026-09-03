@@ -17,6 +17,30 @@ package = "vehicle-control"
 groups = ["placement/backup", "placement/controller", "placement/sensor"]
 runtime = "std"
 
+[deployments.execution]
+bindings = { sensor = { package = "sensor-host", features = ["simulated"] }, controller = { package = "vehicle-control" }, backup = { package = "vehicle-control" } }
+
+[deployments.execution.federates.host]
+groups = ["placement/backup", "placement/controller", "placement/sensor"]
+runtime = "std"
+
+[deployments.execution.execution]
+fast-forward = true
+keep-alive = true
+logical-horizon = "1000ms"
+
+[deployments.execution-equivalent]
+bindings = { sensor = { package = "sensor-host", features = ["simulated"] }, controller = { package = "vehicle-control" }, backup = { package = "vehicle-control" } }
+
+[deployments.execution-equivalent.federates.host]
+groups = ["placement/backup", "placement/controller", "placement/sensor"]
+runtime = "std"
+
+[deployments.execution-equivalent.execution]
+fast-forward = true
+keep-alive = true
+logical-horizon = "1s"
+
 [deployments.broken-payload.bindings.sensor]
 package = "sensor-host"
 features = ["simulated"]

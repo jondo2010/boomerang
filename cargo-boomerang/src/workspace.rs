@@ -208,6 +208,7 @@ pub fn resolve_workspace(
             federates,
             coordination: deployment.coordination.clone(),
             rti: deployment.rti.clone(),
+            execution: deployment.execution.clone(),
         },
         packages,
         host_builder,

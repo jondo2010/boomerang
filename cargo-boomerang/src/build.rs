@@ -11,7 +11,7 @@ use serde::Serialize;
 use crate::{
     bundle::{
         publish_bundle, BindingDocument, BundleSource, CoordinationDocument, DeploymentDocument,
-        DescriptorDocument, FederateDocument, PackageDocument, RuntimeConfigurationDocument,
+        DescriptorDocument, ExecutionPolicyDocument, FederateDocument, PackageDocument,
         DEPLOYMENT_SCHEMA,
     },
     check::{analyze, resource_report, ResourceReport, COMPILER_SCHEMA},
@@ -42,8 +42,8 @@ struct FingerprintInputV1 {
     generated_source_hash: String,
     /// Federate target and runtime selections in compiler identity order.
     federates: Vec<FederateDocument>,
-    /// Runtime configuration embedded in generated source.
-    runtime_configuration: RuntimeConfigurationDocument,
+    /// Deployment execution policy embedded in generated source.
+    execution: ExecutionPolicyDocument,
     /// Canonical static resource projection.
     resources: ResourceReport,
     /// Selected coordination backend and protocol identity.
@@ -110,11 +110,16 @@ pub fn build(workspace: impl AsRef<Path>, deployment_name: &str) -> Result<PathB
     let source_lock_hash = lowercase_hex(&analyzed.resolved.lockfile().digest);
     let generated_lock_hash = hash_file(generated.lockfile_path())?;
     let generated_source_hash = hash_file(generated.source_path())?;
-    let runtime_configuration = RuntimeConfigurationDocument {
-        fast_forward: false,
-        keep_alive: false,
-        physical_event_q_size: 1024,
-        timeout_nanos: None,
+    let execution = analyzed
+        .resolved
+        .deployment()
+        .execution
+        .clone()
+        .unwrap_or_default();
+    let execution = ExecutionPolicyDocument {
+        fast_forward: execution.fast_forward,
+        keep_alive: execution.keep_alive,
+        logical_horizon_nanos: execution.logical_horizon,
     };
     let coordination = CoordinationDocument {
         backend: String::from("local"),
@@ -130,7 +135,7 @@ pub fn build(workspace: impl AsRef<Path>, deployment_name: &str) -> Result<PathB
         generated_lock_hash,
         generated_source_hash,
         federates: vec![federate],
-        runtime_configuration,
+        execution,
         resources: resources.clone(),
         coordination,
     };
@@ -149,7 +154,7 @@ pub fn build(workspace: impl AsRef<Path>, deployment_name: &str) -> Result<PathB
         generated_source_hash: fingerprint_input.generated_source_hash,
         bindings: fingerprint_input.bindings,
         federates: fingerprint_input.federates,
-        runtime_configuration: fingerprint_input.runtime_configuration,
+        execution: fingerprint_input.execution,
         resources,
         coordination: fingerprint_input.coordination,
         generated: Vec::new(),
@@ -291,11 +296,10 @@ mod tests {
             generated_lock_hash: String::new(),
             generated_source_hash: String::new(),
             federates: Vec::new(),
-            runtime_configuration: serde_json::from_value(serde_json::json!({
+            execution: serde_json::from_value(serde_json::json!({
                 "fast_forward": false,
                 "keep_alive": false,
-                "physical_event_q_size": 1024,
-                "timeout_nanos": null
+                "logical_horizon_nanos": null
             }))
             .unwrap(),
             resources: serde_json::from_value(serde_json::json!({ "federates": [] })).unwrap(),

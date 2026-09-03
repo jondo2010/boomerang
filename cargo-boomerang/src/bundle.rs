@@ -39,8 +39,8 @@ pub(crate) struct DeploymentDocument {
     pub(crate) bindings: Vec<BindingDocument>,
     /// Built Federates in compiler identity order.
     pub(crate) federates: Vec<FederateDocument>,
-    /// Runtime settings embedded in every generated launcher.
-    pub(crate) runtime_configuration: RuntimeConfigurationDocument,
+    /// Deployment execution policy embedded in every generated launcher.
+    pub(crate) execution: ExecutionPolicyDocument,
     /// Canonical statically computed resource bounds.
     pub(crate) resources: ResourceReport,
     /// Selected coordination backend and protocol identity.
@@ -117,18 +117,16 @@ pub(crate) struct FederateDocument {
     pub(crate) cargo_config_hash: Option<String>,
 }
 
-/// Runtime configuration embedded literally in generated launchers.
+/// Normalized deployment execution policy embedded literally in generated launchers.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RuntimeConfigurationDocument {
+pub(crate) struct ExecutionPolicyDocument {
     /// Whether logical execution bypasses wall-clock synchronization.
     pub(crate) fast_forward: bool,
     /// Whether schedulers remain alive without pending events.
     pub(crate) keep_alive: bool,
-    /// Maximum physical events buffered by each runtime environment.
-    pub(crate) physical_event_q_size: usize,
-    /// Optional runtime timeout in nanoseconds.
-    pub(crate) timeout_nanos: Option<u64>,
+    /// Optional logical horizon in nanoseconds.
+    pub(crate) logical_horizon_nanos: Option<u64>,
 }
 
 /// Coordination selection recorded for external deployment tooling.
@@ -693,11 +691,10 @@ mod tests {
             "generated_source_hash": "44".repeat(32),
             "bindings": [],
             "federates": [],
-            "runtime_configuration": {
+            "execution": {
                 "fast_forward": false,
                 "keep_alive": false,
-                "physical_event_q_size": 1024,
-                "timeout_nanos": null
+                "logical_horizon_nanos": null
             },
             "resources": { "federates": [] },
             "coordination": { "backend": "local", "protocol": null },
@@ -876,7 +873,7 @@ mod tests {
         assert!(serde_json::from_value::<DeploymentDocument>(top_level).is_err());
 
         let mut nested = serde_json::to_value(document).unwrap();
-        nested["runtime_configuration"]["unexpected"] = serde_json::json!(true);
+        nested["execution"]["unexpected"] = serde_json::json!(true);
         assert!(serde_json::from_value::<DeploymentDocument>(nested).is_err());
     }
 

@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use clap::{Args, Parser, Subcommand};
 
 /// Cargo plugin entry point.
@@ -45,6 +45,12 @@ enum BoomerangCommand {
         #[arg(long)]
         deployment: String,
     },
+    /// Build, validate, and run one native generated monolithic deployment.
+    Run {
+        /// Deployment name declared in `Boomerang.toml`.
+        #[arg(long)]
+        deployment: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -61,6 +67,16 @@ fn main() -> Result<()> {
             command: BoomerangCommand::Check { deployment },
         }) => {
             cargo_boomerang::check(workspace, &deployment)?;
+        }
+        CargoCommand::Boomerang(BoomerangArgs {
+            workspace,
+            command: BoomerangCommand::Run { deployment },
+        }) => {
+            let outcome = cargo_boomerang::run(workspace, &deployment)?;
+            match outcome.status().code() {
+                Some(code) => std::process::exit(code),
+                None => bail!("generated application terminated without a numeric exit code"),
+            }
         }
     }
     Ok(())

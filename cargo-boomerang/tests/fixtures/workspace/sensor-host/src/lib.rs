@@ -19,6 +19,10 @@ pub fn Sensor(#[input] command: u32) -> impl Reactor {
             #[cfg(not(feature = "__boomerang_descriptor"))]
             let _payload_only = "sensor-mcu-payload-only";
             assert_eq!(*command, Some(42));
+            #[cfg(feature = "runtime-failure")]
+            std::process::exit(42);
+            println!("sensor received command 42");
+            eprintln!("sensor scheduling shutdown");
             ctx.schedule_shutdown(None);
         }
     }

@@ -17,6 +17,13 @@ package = "vehicle-control"
 groups = ["placement/backup", "placement/controller", "placement/sensor"]
 runtime = "std"
 
+[deployments.runtime-failure]
+bindings = { sensor = { package = "sensor-host", features = ["simulated", "runtime-failure"] }, controller = { package = "vehicle-control" }, backup = { package = "vehicle-control" } }
+
+[deployments.runtime-failure.federates.host]
+groups = ["placement/backup", "placement/controller", "placement/sensor"]
+runtime = "std"
+
 [deployments.execution]
 bindings = { sensor = { package = "sensor-host", features = ["simulated"] }, controller = { package = "vehicle-control" }, backup = { package = "vehicle-control" } }
 

@@ -8,6 +8,7 @@ default = ["boomerang/hosted"]
 __boomerang_descriptor = ["boomerang/__boomerang_descriptor", "dep:boomerang_builder"]
 __boomerang_payload = ["boomerang/__boomerang_payload"]
 simulated = []
+runtime-failure = []
 payload-alias = ["__boomerang_payload"]
 
 [dependencies]

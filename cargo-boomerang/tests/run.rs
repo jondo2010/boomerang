@@ -3,7 +3,7 @@ use std::{
     fs,
     panic::{catch_unwind, resume_unwind, AssertUnwindSafe},
     path::PathBuf,
-    process::Command,
+    process::{Command, Output},
     sync::{Mutex, OnceLock},
 };
 
@@ -11,6 +11,18 @@ use serde_json::{json, Value};
 
 fn fixture_workspace() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/workspace")
+}
+
+/// Runs the installed Cargo plugin for one fixture deployment in an isolated target directory.
+fn run_cli(deployment: &str) -> Output {
+    let target = tempfile::tempdir().unwrap();
+    Command::new(env!("CARGO_BIN_EXE_cargo-boomerang"))
+        .args(["boomerang", "--workspace"])
+        .arg(fixture_workspace())
+        .args(["run", "--deployment", deployment])
+        .env("CARGO_TARGET_DIR", target.path())
+        .output()
+        .unwrap()
 }
 
 fn target_directory_lock() -> &'static Mutex<()> {
@@ -135,4 +147,27 @@ fn run_rejects_a_custom_target_before_bundle_generation() {
     let error = result.unwrap_err().to_string();
     assert!(error.contains("custom target JSON"), "{error}");
     assert!(!target.path().join("boomerang/resolution").exists());
+}
+
+#[test]
+fn run_forwards_application_streams_without_reframing() {
+    let output = run_cli("production");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "sensor received command 42\n"
+    );
+    assert!(String::from_utf8(output.stderr)
+        .unwrap()
+        .contains("sensor scheduling shutdown\n"));
+}
+
+#[test]
+fn run_propagates_the_generated_application_exit_code() {
+    let output = run_cli("runtime-failure");
+    assert_eq!(output.status.code(), Some(42));
 }

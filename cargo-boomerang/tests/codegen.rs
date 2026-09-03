@@ -48,6 +48,20 @@ fn generated_single_federate_launcher_executes_typed_local_route_without_builder
 }
 
 #[test]
+fn generated_launcher_renders_normalized_deployment_execution_policy() {
+    let launcher =
+        cargo_boomerang::generate_launcher(fixture_workspace(), "execution", "host").unwrap();
+    let source = std::fs::read_to_string(launcher.source_path()).unwrap();
+    assert!(source.contains("fast_forward: true"), "{source}");
+    assert!(source.contains("keep_alive: true"), "{source}");
+    assert!(
+        source.contains("timeout: Some(boomerang_runtime::Duration::nanoseconds_i128(1000000000))"),
+        "{source}"
+    );
+    assert!(source.contains("physical_event_q_size: 1024"), "{source}");
+}
+
+#[test]
 fn generated_launcher_build_preserves_json_compiler_diagnostics() {
     let launcher =
         cargo_boomerang::generate_launcher(fixture_workspace(), "broken-payload", "host").unwrap();

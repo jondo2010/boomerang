@@ -352,11 +352,18 @@ pub(crate) fn generate_analyzed_launcher(
 
     let aliases = payload_aliases(&analyzed.resolved, &analyzed.driver, federate)?;
     let manifest = render_manifest(&analyzed.resolved, &aliases)?;
+    let execution = analyzed
+        .resolved
+        .deployment()
+        .execution
+        .clone()
+        .unwrap_or_default();
     let source = rust::render_launcher(
         &analyzed.driver,
         &analyzed.compiled,
         federate_index,
         &aliases,
+        &execution,
     )?;
     let compile_inputs = payload_compile_inputs(&analyzed.resolved, &analyzed.driver)?;
 

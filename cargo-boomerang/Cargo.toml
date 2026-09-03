@@ -13,6 +13,7 @@ blake3.workspace = true
 boomerang_builder = { workspace = true, features = ["descriptor-fingerprint", "host-interchange"] }
 boomerang_runtime.workspace = true
 cargo_metadata.workspace = true
+humantime.workspace = true
 clap = { version = "4.2", features = ["derive"] }
 serde = { workspace = true, features = ["derive"] }
 serde_path_to_error.workspace = true

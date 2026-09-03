@@ -26,6 +26,20 @@ backend = "central-rti"
 "#
 }
 
+fn one_federate_without_coordination() -> &'static str {
+    r#"
+schema = 1
+
+[topology]
+package = "vehicle-topology"
+entry = "vehicle::topology"
+
+[deployments.production.federates.host]
+groups = ["vehicle"]
+runtime = "std"
+"#
+}
+
 #[test]
 fn valid_manifest_preserves_the_complete_schema() {
     let manifest = load_manifest(fixture("valid")).unwrap();
@@ -121,8 +135,8 @@ runtime = "std"
 "#;
     let cases = [
         (
-            one_federate_with_coordination().replace("schema = 1", "schema = 2"),
-            "unsupported Boomerang.toml schema 2; expected 1",
+            one_federate_with_coordination().replace("schema = 1", "schema = 3"),
+            "unsupported Boomerang.toml schema 3; expected 1 or 2",
         ),
         (
             format!(
@@ -157,4 +171,50 @@ runtime = "std"
             "expected {expected:?}, got {error}"
         );
     }
+}
+
+#[test]
+fn schema_versions_gate_deployment_execution_policy() {
+    let schema_one = one_federate_without_coordination().replace(
+        "runtime = \"std\"",
+        "runtime = \"std\"\n\n[deployments.production.execution]\nfast-forward = true",
+    );
+    let error = parse_manifest(&schema_one).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("deployments.production.execution is available only in schema 2"),
+        "{error}"
+    );
+
+    let schema_two_default =
+        one_federate_without_coordination().replace("schema = 1", "schema = 2");
+    parse_manifest(&schema_two_default).unwrap();
+}
+
+#[test]
+fn execution_policy_rejects_invalid_logical_horizons_at_the_manifest_boundary() {
+    for duration in ["not-a-duration", "-1ns", "0.1ns", "18446744073709551616ns"] {
+        let source = one_federate_without_coordination()
+            .replace("schema = 1", "schema = 2")
+            .replace(
+                "runtime = \"std\"",
+                &format!("runtime = \"std\"\n\n[deployments.production.execution]\nlogical-horizon = {duration:?}"),
+            );
+        let error = parse_manifest(&source).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("deployments.production.execution.logical-horizon"),
+            "duration {duration:?} produced {error}"
+        );
+    }
+
+    let zero = one_federate_without_coordination()
+        .replace("schema = 1", "schema = 2")
+        .replace(
+            "runtime = \"std\"",
+            "runtime = \"std\"\n\n[deployments.production.execution]\nlogical-horizon = \"0ns\"",
+        );
+    parse_manifest(&zero).unwrap();
 }

@@ -74,7 +74,7 @@ fn build_publishes_a_valid_fingerprinted_bundle() {
     );
 
     let document: Value = serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
-    assert_eq!(document["schema"], 1);
+    assert_eq!(document["schema"], 2);
     assert_eq!(document["deployment"], "production");
     assert_eq!(document["coordination"]["backend"], "local");
     assert!(document["coordination"]["protocol"].is_null());
@@ -88,11 +88,15 @@ fn build_publishes_a_valid_fingerprinted_bundle() {
         ])
     );
     assert_eq!(document["federates"][0]["runtime"], "std");
-    let runtime_configuration = document["runtime_configuration"].as_object().unwrap();
-    assert_eq!(runtime_configuration["physical_event_q_size"], 1024);
-    assert!(runtime_configuration.contains_key("timeout_nanos"));
-    assert!(runtime_configuration["timeout_nanos"].is_null());
-    assert!(!runtime_configuration.contains_key("timeout_ns"));
+    assert_eq!(
+        document["execution"],
+        serde_json::json!({
+            "fast_forward": false,
+            "keep_alive": false,
+            "logical_horizon_nanos": null,
+        })
+    );
+    assert!(document.get("runtime_configuration").is_none());
 
     let bundle = manifest_path.parent().unwrap();
     let source_lock_hash = blake3::hash(&fs::read(fixture_workspace().join("Cargo.lock")).unwrap())
@@ -143,6 +147,65 @@ fn build_publishes_a_valid_fingerprinted_bundle() {
     assert!(!package_names.contains(&"vehicle-topology"));
     assert!(package_names.contains(&"sensor-host"));
     assert!(package_names.contains(&"vehicle-control"));
+
+    let resources = document["resources"]["federates"][0]["enclaves"]
+        .as_array()
+        .unwrap();
+    assert!(
+        resources
+            .iter()
+            .all(|enclave| enclave.get("event_capacity").is_some()),
+        "each Enclave resource record must retain its authoritative event capacity: {resources:?}"
+    );
+}
+
+#[test]
+fn build_normalizes_deployment_execution_policy_into_every_published_artifact() {
+    let target = tempfile::tempdir().unwrap();
+    let result = build_fixture("execution", target.path());
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+
+    let manifest = PathBuf::from(String::from_utf8(result.stdout).unwrap().trim());
+    let document: Value = serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
+    assert_eq!(document["schema"], 2);
+    assert_eq!(
+        document["execution"],
+        serde_json::json!({
+            "fast_forward": true,
+            "keep_alive": true,
+            "logical_horizon_nanos": 1_000_000_000u64,
+        })
+    );
+    assert!(document.get("runtime_configuration").is_none());
+
+    let equivalent = build_fixture("execution-equivalent", target.path());
+    assert!(
+        equivalent.status.success(),
+        "{}",
+        String::from_utf8_lossy(&equivalent.stderr)
+    );
+    let equivalent_manifest = PathBuf::from(String::from_utf8(equivalent.stdout).unwrap().trim());
+    let equivalent_document: Value =
+        serde_json::from_slice(&fs::read(equivalent_manifest).unwrap()).unwrap();
+    assert_eq!(equivalent_document["execution"], document["execution"]);
+
+    let source = fs::read_to_string(
+        manifest
+            .parent()
+            .unwrap()
+            .join("generated/host/src/main.rs"),
+    )
+    .unwrap();
+    assert!(source.contains("fast_forward: true"), "{source}");
+    assert!(source.contains("keep_alive: true"), "{source}");
+    assert!(
+        source.contains("timeout: Some(boomerang_runtime::Duration::nanoseconds_i128(1000000000))"),
+        "{source}"
+    );
 }
 
 #[test]

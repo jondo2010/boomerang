@@ -41,6 +41,41 @@ pub(super) fn render_launcher(
          ) -> &'a mut T {\n\
              state.downcast_mut::<T>()\n\
                  .expect(\"generated state initializer and reaction must agree\")\n\
+         }\n\n\
+         const EXECUTION_SUMMARY_ENV: &str = \"BOOMERANG_EXECUTION_SUMMARY_V1\";\n\n\
+         /// Writes the optional version-1 execution summary for the supervising host.\n\
+         fn write_execution_summary(\n\
+             execution: &boomerang_runtime::FederateExecution,\n\
+         ) -> std::io::Result<()> {\n\
+             let Some(path) = std::env::var_os(EXECUTION_SUMMARY_ENV) else {\n\
+                 return Ok(());\n\
+             };\n\
+             let mut file = std::fs::OpenOptions::new()\n\
+                 .write(true)\n\
+                 .create_new(true)\n\
+                 .open(path)?;\n\
+             let stats = execution.stats();\n\
+             use std::io::Write as _;\n\
+             writeln!(\n\
+                 file,\n\
+                 concat!(\n\
+                     \"{{\\\"schema\\\":1,\\\"stats\\\":{{\",\n\
+                     \"\\\"processed_tags\\\":\\\"{}\\\",\",\n\
+                     \"\\\"processed_reactions\\\":\\\"{}\\\",\",\n\
+                     \"\\\"processed_events\\\":\\\"{}\\\",\",\n\
+                     \"\\\"set_ports\\\":\\\"{}\\\",\",\n\
+                     \"\\\"scheduled_actions\\\":\\\"{}\\\"}},\",\n\
+                     \"\\\"final_tag\\\":{{\\\"offset_nanos\\\":\\\"{}\\\",\",\n\
+                     \"\\\"microstep\\\":\\\"{}\\\"}}}}\"\n\
+                 ),\n\
+                 stats.processed_tags(),\n\
+                 stats.processed_reactions(),\n\
+                 stats.processed_events(),\n\
+                 stats.set_ports(),\n\
+                 stats.scheduled_actions(),\n\
+                 execution.final_tag().offset().whole_nanoseconds(),\n\
+                 execution.final_tag().microstep(),\n\
+             )\n\
          }\n\n",
     );
 
@@ -56,7 +91,7 @@ pub(super) fn render_launcher(
         .unwrap_or_else(|| String::from("None"));
     writeln!(
         source,
-        "fn main() -> Result<(), Box<dyn std::error::Error>> {{\n    let bindings = generated_bindings();\n    let _execution = execute_owned_federate(\n        &DEPLOYMENT, FederateIndex::new(0), bindings, Config {{\n            fast_forward: {},\n            timeout: {},\n            keep_alive: {},\n            // Legacy public-API compatibility placeholder.\n            physical_event_q_size: 1024,\n        }},\n    )?;\n    Ok(())\n}}",
+        "fn main() -> Result<(), Box<dyn std::error::Error>> {{\n    let bindings = generated_bindings();\n    let execution = execute_owned_federate(\n        &DEPLOYMENT, FederateIndex::new(0), bindings, Config {{\n            fast_forward: {},\n            timeout: {},\n            keep_alive: {},\n            // Legacy public-API compatibility placeholder.\n            physical_event_q_size: 1024,\n        }},\n    )?;\n    write_execution_summary(&execution)?;\n    Ok(())\n}}",
         execution.fast_forward, timeout, execution.keep_alive,
     )?;
     Ok(source)

@@ -15,6 +15,9 @@ use crate::check::ResourceReport;
 /// Current public deployment-document schema.
 pub(crate) const DEPLOYMENT_SCHEMA: u32 = 1;
 
+/// Stable domain separator for schema-v1 deployment fingerprint inputs.
+const DEPLOYMENT_FINGERPRINT_DOMAIN_V1: &str = "boomerang.deployment.v1";
+
 /// Complete schema-v1 deployment document published with one artifact bundle.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -49,6 +52,56 @@ pub(crate) struct DeploymentDocument {
     pub(crate) generated: Vec<FileRecord>,
     /// Executable files ready for deployment.
     pub(crate) artifacts: Vec<FileRecord>,
+}
+
+/// Canonical semantic input for schema-v1 deployment fingerprints.
+#[derive(Serialize)]
+struct FingerprintInputV1<'a> {
+    /// Stable domain separator for schema-v1 deployment fingerprints.
+    domain: &'static str,
+    /// Deployment-document schema version.
+    schema: u32,
+    /// Canonical compiler-image schema version.
+    compiler_schema: u32,
+    /// Lowercase BLAKE3 hash of compact canonical topology JSON.
+    topology_hash: &'a str,
+    /// Selected implementation bindings in canonical driver order.
+    bindings: &'a [BindingDocument],
+    /// Lowercase BLAKE3 hash of the source workspace lockfile.
+    source_lock_hash: &'a str,
+    /// Lowercase BLAKE3 hash of the reconciled generated lockfile.
+    generated_lock_hash: &'a str,
+    /// Lowercase BLAKE3 hash of generated Rust launcher source.
+    generated_source_hash: &'a str,
+    /// Federate target and runtime selections in compiler identity order.
+    federates: &'a [FederateDocument],
+    /// Deployment execution policy embedded in generated source.
+    execution: &'a ExecutionPolicyDocument,
+    /// Canonical static resource projection.
+    resources: &'a ResourceReport,
+    /// Selected coordination backend and protocol identity.
+    coordination: &'a CoordinationDocument,
+}
+
+/// Computes the canonical semantic fingerprint for one deployment document.
+pub(crate) fn deployment_fingerprint(document: &DeploymentDocument) -> Result<String> {
+    let input = FingerprintInputV1 {
+        domain: DEPLOYMENT_FINGERPRINT_DOMAIN_V1,
+        schema: document.schema,
+        compiler_schema: document.compiler_schema,
+        topology_hash: &document.topology_hash,
+        bindings: &document.bindings,
+        source_lock_hash: &document.source_lock_hash,
+        generated_lock_hash: &document.generated_lock_hash,
+        generated_source_hash: &document.generated_source_hash,
+        federates: &document.federates,
+        execution: &document.execution,
+        resources: &document.resources,
+        coordination: &document.coordination,
+    };
+    let bytes = serde_json::to_vec(&input)
+        .context("failed to serialize canonical deployment fingerprint input")?;
+    Ok(blake3::hash(&bytes).to_hex().to_string())
 }
 
 /// One selected component binding recorded in the deployment document.
@@ -163,6 +216,67 @@ pub(crate) struct BundleSource<'a> {
     pub(crate) source: &'a Path,
     /// Canonical executable emitted by Cargo.
     pub(crate) executable: &'a Path,
+}
+
+/// Verified document and executable selected from a published deployment bundle.
+#[derive(Debug)]
+pub(crate) struct PublishedArtifact {
+    /// Complete validated deployment document.
+    pub(crate) document: DeploymentDocument,
+    /// Canonical regular-file path of the owned executable.
+    pub(crate) executable: PathBuf,
+}
+
+/// Loads one immutable, semantically validated local deployment artifact.
+pub(crate) fn load_published_artifact(manifest: &Path) -> Result<PublishedArtifact> {
+    if manifest.file_name().and_then(|name| name.to_str()) != Some("deployment.json") {
+        bail!("published artifact manifest must be named deployment.json");
+    }
+    let bundle = manifest
+        .parent()
+        .ok_or_else(|| anyhow!("published artifact manifest has no parent directory"))?;
+    let document = read_document(bundle)?;
+    validate_bundle(bundle, &document)?;
+    let fingerprint = deployment_fingerprint(&document)?;
+    if fingerprint != document.fingerprint {
+        bail!("deployment semantic fingerprint mismatch");
+    }
+    let directory_name = bundle
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow!("published artifact directory name is not valid UTF-8"))?;
+    if directory_name != document.fingerprint {
+        bail!("published artifact directory name does not match deployment fingerprint");
+    }
+    if document.federates.len() != 1 {
+        bail!("published artifact requires exactly one local Federate");
+    }
+    let federate = &document.federates[0];
+    if document.artifacts.len() != 1 {
+        bail!("published artifact requires exactly one artifact record");
+    }
+    let artifact = &document.artifacts[0];
+    if artifact.federate != federate.id {
+        bail!(
+            "published artifact is not owned by local Federate '{}'",
+            federate.id
+        );
+    }
+    let executable = bundle.join(join_normalized(Path::new(""), &artifact.path)?);
+    let metadata = fs::symlink_metadata(&executable)
+        .with_context(|| format!("failed to inspect {}", executable.display()))?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        bail!(
+            "{} is not a regular published executable",
+            executable.display()
+        );
+    }
+    let executable = fs::canonicalize(&executable)
+        .with_context(|| format!("failed to canonicalize {}", executable.display()))?;
+    Ok(PublishedArtifact {
+        document,
+        executable,
+    })
 }
 
 /// Stages, verifies, and atomically publishes an immutable deployment bundle.
@@ -680,17 +794,26 @@ mod tests {
     use super::*;
 
     fn sample_document() -> DeploymentDocument {
-        serde_json::from_value(serde_json::json!({
+        let mut document: DeploymentDocument = serde_json::from_value(serde_json::json!({
             "schema": 1,
             "compiler_schema": 1,
             "deployment": "test",
-            "fingerprint": "00".repeat(32),
+            "fingerprint": "",
             "topology_hash": "11".repeat(32),
             "source_lock_hash": "22".repeat(32),
             "generated_lock_hash": "33".repeat(32),
             "generated_source_hash": "44".repeat(32),
             "bindings": [],
-            "federates": [],
+            "federates": [{
+                "id": "host",
+                "groups": [],
+                "target": target_lexicon::HOST.to_string(),
+                "toolchain": null,
+                "profile": null,
+                "runtime": "std",
+                "target_json_hash": null,
+                "cargo_config_hash": null
+            }],
             "execution": {
                 "fast_forward": false,
                 "keep_alive": false,
@@ -701,7 +824,9 @@ mod tests {
             "generated": [],
             "artifacts": []
         }))
-        .unwrap()
+        .unwrap();
+        document.fingerprint = deployment_fingerprint(&document).unwrap();
+        document
     }
 
     fn write_sample_bundle(root: &Path) -> DeploymentDocument {
@@ -793,12 +918,16 @@ mod tests {
         let target = tempfile::tempdir().unwrap();
         let inputs = tempfile::tempdir().unwrap();
         let [manifest, lockfile, source, executable] = write_sample_source_files(inputs.path());
-        let destination = target.path().join("boomerang/test").join("00".repeat(32));
+        let document = sample_document();
+        let destination = target
+            .path()
+            .join("boomerang/test")
+            .join(&document.fingerprint);
         fs::create_dir_all(&destination).unwrap();
 
         let error = publish_bundle(
             target.path(),
-            sample_document(),
+            document,
             BundleSource {
                 federate: "host",
                 manifest: &manifest,
@@ -820,6 +949,7 @@ mod tests {
         let inputs = tempfile::tempdir().unwrap();
         let [manifest, lockfile, source, executable] = write_sample_source_files(inputs.path());
         let document = sample_document();
+        let fingerprint = document.fingerprint.clone();
         let first = publish_bundle(
             target.path(),
             document.clone(),
@@ -855,7 +985,7 @@ mod tests {
         assert_eq!(fs::read(&artifact).unwrap(), artifact_before);
         let published = read_document(bundle).unwrap();
         validate_bundle(bundle, &published).unwrap();
-        let staging_prefix = format!(".{}.staging-", "00".repeat(32));
+        let staging_prefix = format!(".{fingerprint}.staging-");
         assert!(fs::read_dir(bundle.parent().unwrap())
             .unwrap()
             .all(|entry| !entry
@@ -875,6 +1005,29 @@ mod tests {
         let mut nested = serde_json::to_value(document).unwrap();
         nested["execution"]["unexpected"] = serde_json::json!(true);
         assert!(serde_json::from_value::<DeploymentDocument>(nested).is_err());
+    }
+
+    #[test]
+    fn fingerprint_input_serializes_the_v1_deployment_domain_first() {
+        let document = sample_document();
+        let input = FingerprintInputV1 {
+            domain: DEPLOYMENT_FINGERPRINT_DOMAIN_V1,
+            schema: document.schema,
+            compiler_schema: document.compiler_schema,
+            topology_hash: &document.topology_hash,
+            bindings: &document.bindings,
+            source_lock_hash: &document.source_lock_hash,
+            generated_lock_hash: &document.generated_lock_hash,
+            generated_source_hash: &document.generated_source_hash,
+            federates: &document.federates,
+            execution: &document.execution,
+            resources: &document.resources,
+            coordination: &document.coordination,
+        };
+
+        assert!(serde_json::to_string(&input)
+            .unwrap()
+            .starts_with(r#"{"domain":"boomerang.deployment.v1","schema":1"#));
     }
 
     #[test]
@@ -901,5 +1054,35 @@ mod tests {
             symlink("deployment.json", &extra_symlink).unwrap();
             assert!(validate_bundle(bundle.path(), &document).is_err());
         }
+    }
+
+    #[test]
+    fn published_loader_rejects_semantic_fingerprint_tampering() {
+        let parent = tempfile::tempdir().unwrap();
+        let document = sample_document();
+        let bundle = parent.path().join(&document.fingerprint);
+        fs::create_dir(&bundle).unwrap();
+        let mut tampered = write_sample_bundle(&bundle);
+        tampered.execution.keep_alive = true;
+        write_document(&bundle, &tampered).unwrap();
+
+        let error = load_published_artifact(&bundle.join("deployment.json")).unwrap_err();
+
+        assert!(
+            error.to_string().contains("fingerprint mismatch"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn published_loader_rejects_a_wrong_fingerprint_directory_name() {
+        let parent = tempfile::tempdir().unwrap();
+        let bundle = parent.path().join("ff".repeat(32));
+        fs::create_dir(&bundle).unwrap();
+        write_sample_bundle(&bundle);
+
+        let error = load_published_artifact(&bundle.join("deployment.json")).unwrap_err();
+
+        assert!(error.to_string().contains("directory name"), "{error:#}");
     }
 }

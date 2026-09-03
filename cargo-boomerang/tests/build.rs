@@ -190,8 +190,18 @@ fn build_normalizes_deployment_execution_policy_into_every_published_artifact() 
     );
     let equivalent_manifest = PathBuf::from(String::from_utf8(equivalent.stdout).unwrap().trim());
     let equivalent_document: Value =
-        serde_json::from_slice(&fs::read(equivalent_manifest).unwrap()).unwrap();
+        serde_json::from_slice(&fs::read(&equivalent_manifest).unwrap()).unwrap();
     assert_eq!(equivalent_document["execution"], document["execution"]);
+    assert_eq!(equivalent_document["fingerprint"], document["fingerprint"]);
+    assert_eq!(
+        equivalent_manifest.parent().unwrap().file_name(),
+        manifest.parent().unwrap().file_name(),
+        "equivalent policies must publish under the same fingerprint"
+    );
+    assert_eq!(
+        equivalent_document["generated_source_hash"],
+        document["generated_source_hash"]
+    );
 
     let source = fs::read_to_string(
         manifest
@@ -206,6 +216,14 @@ fn build_normalizes_deployment_execution_policy_into_every_published_artifact() 
         source.contains("timeout: Some(boomerang_runtime::Duration::nanoseconds_i128(1000000000))"),
         "{source}"
     );
+    let equivalent_source = fs::read_to_string(
+        equivalent_manifest
+            .parent()
+            .unwrap()
+            .join("generated/host/src/main.rs"),
+    )
+    .unwrap();
+    assert_eq!(equivalent_source, source);
 }
 
 #[test]

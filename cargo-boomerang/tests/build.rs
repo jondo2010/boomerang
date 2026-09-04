@@ -206,7 +206,8 @@ fn repeated_build_preserves_the_same_published_bundle() {
     let artifact_after = fs::read(&artifact).unwrap();
     assert_eq!(artifact_after, artifact_before);
     assert_eq!(blake3::hash(&artifact_after), artifact_hash_before);
-    assert_no_staging_residue(&target.path().join("boomerang"));
+    assert_no_staging_residue(&target.path().join("boomerang/generated"));
+    assert_no_staging_residue(first_manifest.parent().unwrap().parent().unwrap());
 }
 
 #[test]

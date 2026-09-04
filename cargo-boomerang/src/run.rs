@@ -11,7 +11,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde::Deserialize;
 
 use crate::{
-    build,
+    build::build_analyzed,
     bundle::{load_published_artifact, DeploymentDocument},
     check::analyze,
 };
@@ -136,7 +136,7 @@ pub fn run(workspace: impl AsRef<Path>, deployment_name: &str) -> Result<RunOutc
         );
     }
 
-    let manifest = build(workspace, deployment_name)?;
+    let manifest = build_analyzed(&analyzed)?;
     let published = load_published_artifact(&manifest)?;
     validate_published_host_artifact(&published.document)?;
     let (_directory, summary_path, launcher) = prepare_execution_directory()?;

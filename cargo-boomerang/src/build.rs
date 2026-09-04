@@ -13,13 +13,19 @@ use crate::{
         CoordinationDocument, DeploymentDocument, DescriptorDocument, ExecutionPolicyDocument,
         FederateDocument, PackageDocument, DEPLOYMENT_SCHEMA,
     },
-    check::{analyze, resource_report, COMPILER_SCHEMA},
+    check::{analyze, resource_report, AnalyzedDeployment, COMPILER_SCHEMA},
     codegen::generate_analyzed_launcher,
 };
 
 /// Builds one deployment and returns its immutable `deployment.json` path.
 pub fn build(workspace: impl AsRef<Path>, deployment_name: &str) -> Result<PathBuf> {
     let analyzed = analyze(workspace, deployment_name)?;
+    build_analyzed(&analyzed)
+}
+
+/// Builds and publishes a deployment from an already validated analysis.
+pub(crate) fn build_analyzed(analyzed: &AnalyzedDeployment) -> Result<PathBuf> {
+    let deployment_name = analyzed.resolved.deployment_name();
     let compiled_federates = analyzed.compiled.federates();
     if compiled_federates.len() != 1 {
         bail!("deployment bundle generation currently supports one local Federate");

@@ -92,38 +92,7 @@ impl GeneratedLauncher {
 
     /// Builds and privately copies the launcher while the request target is locked.
     fn build_locked_offline_in(&self, target_dir: &Path) -> Result<BuiltLauncher> {
-        let mut arguments = Vec::new();
-        if let Some(toolchain) = &self.federate.toolchain {
-            arguments.push(format!("+{toolchain}").into());
-        }
-        arguments.extend([
-            OsString::from("build"),
-            OsString::from("--manifest-path"),
-            self.manifest_path.as_os_str().to_owned(),
-            OsString::from("--locked"),
-            OsString::from("--offline"),
-            OsString::from("--message-format=json-render-diagnostics"),
-            OsString::from("--target-dir"),
-            target_dir.as_os_str().to_owned(),
-        ]);
-        if let Some(target_json) = &self.federate.target_json {
-            arguments.extend([
-                OsString::from("--target"),
-                configured_path_argument(target_json),
-            ]);
-        } else if let Some(target) = &self.federate.target {
-            arguments.extend([OsString::from("--target"), OsString::from(target)]);
-        }
-        if let Some(profile) = &self.federate.profile {
-            arguments.extend([OsString::from("--profile"), OsString::from(profile)]);
-        }
-        if let Some(cargo_config) = &self.federate.cargo_config {
-            arguments.extend([
-                OsString::from("--config"),
-                configured_path_argument(cargo_config),
-            ]);
-        }
-
+        let arguments = self.configured_arguments("build", target_dir, true);
         let output = self.cargo(arguments)?;
         require_success("locked offline launcher build", &output)?;
         let canonical_target_dir = fs::canonicalize(target_dir)
@@ -203,15 +172,8 @@ impl GeneratedLauncher {
     }
 
     fn check_locked_offline_in(&self, target_dir: &Path) -> Result<()> {
-        let output = self.cargo(vec![
-            OsString::from("check"),
-            OsString::from("--manifest-path"),
-            self.manifest_path.as_os_str().to_owned(),
-            OsString::from("--locked"),
-            OsString::from("--offline"),
-            OsString::from("--target-dir"),
-            target_dir.as_os_str().to_owned(),
-        ])?;
+        let arguments = self.configured_arguments("check", target_dir, false);
+        let output = self.cargo(arguments)?;
         require_success("locked offline launcher check", &output)
     }
 
@@ -222,16 +184,54 @@ impl GeneratedLauncher {
     }
 
     fn run_locked_offline_in(&self, target_dir: &Path) -> Result<()> {
-        let output = self.cargo(vec![
-            OsString::from("run"),
+        let arguments = self.configured_arguments("run", target_dir, false);
+        let output = self.cargo(arguments)?;
+        require_success("locked offline launcher execution", &output)
+    }
+
+    /// Builds configured arguments for one locked, offline launcher Cargo operation.
+    fn configured_arguments(
+        &self,
+        operation: &str,
+        target_directory: &Path,
+        json_diagnostics: bool,
+    ) -> Vec<OsString> {
+        let mut arguments = Vec::new();
+        if let Some(toolchain) = &self.federate.toolchain {
+            arguments.push(format!("+{toolchain}").into());
+        }
+        arguments.extend([
+            OsString::from(operation),
             OsString::from("--manifest-path"),
             self.manifest_path.as_os_str().to_owned(),
             OsString::from("--locked"),
             OsString::from("--offline"),
+        ]);
+        if json_diagnostics {
+            arguments.push(OsString::from("--message-format=json-render-diagnostics"));
+        }
+        arguments.extend([
             OsString::from("--target-dir"),
-            target_dir.as_os_str().to_owned(),
-        ])?;
-        require_success("locked offline launcher execution", &output)
+            target_directory.as_os_str().to_owned(),
+        ]);
+        if let Some(target_json) = &self.federate.target_json {
+            arguments.extend([
+                OsString::from("--target"),
+                configured_path_argument(target_json),
+            ]);
+        } else if let Some(target) = &self.federate.target {
+            arguments.extend([OsString::from("--target"), OsString::from(target)]);
+        }
+        if let Some(profile) = &self.federate.profile {
+            arguments.extend([OsString::from("--profile"), OsString::from(profile)]);
+        }
+        if let Some(cargo_config) = &self.federate.cargo_config {
+            arguments.extend([
+                OsString::from("--config"),
+                configured_path_argument(cargo_config),
+            ]);
+        }
+        arguments
     }
 
     /// Runs one Cargo command against this generated manifest with compatibility inputs set.

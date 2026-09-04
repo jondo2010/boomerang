@@ -84,6 +84,21 @@ fn generated_single_federate_launcher_executes_typed_local_route_without_builder
 }
 
 #[test]
+fn generated_launcher_check_and_run_apply_federate_cargo_configuration() {
+    let target = tempfile::tempdir().unwrap();
+    support::with_target_directory(target.path(), || {
+        let launcher =
+            cargo_boomerang::generate_launcher(fixture_workspace(), "profile-config", "host")
+                .unwrap();
+        let check = launcher.check_locked_offline();
+        let run = launcher.run_locked_offline();
+
+        assert!(check.is_ok(), "check failed: {check:#?}");
+        assert!(run.is_ok(), "run failed: {run:#?}");
+    });
+}
+
+#[test]
 fn generated_launcher_renders_normalized_deployment_execution_policy() {
     support::with_target_directory(
         &support::shared_target("launcher"),

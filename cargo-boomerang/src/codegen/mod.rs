@@ -30,6 +30,8 @@ const GENERATED_LAUNCHER_CACHE_VERSION: &str = "1";
 pub struct GeneratedLauncher {
     /// Stable generated-workspace cache directory under the resolved Cargo target tree.
     directory: PathBuf,
+    /// Stable short Cargo build target selected by the full generated-workspace digest.
+    build_target: PathBuf,
     /// Path to the generated Cargo manifest.
     manifest_path: PathBuf,
     /// Path to the generated Rust executable source.
@@ -44,7 +46,7 @@ pub struct GeneratedLauncher {
 
 /// Successful offline build artifact for a generated static Federate launcher.
 ///
-/// The executable path is stored in the persistent generated-workspace cache.
+/// The executable path is stored in the persistent generated-launcher build cache.
 pub struct BuiltLauncher {
     executable_path: PathBuf,
 }
@@ -74,7 +76,7 @@ impl GeneratedLauncher {
 
     /// Builds the generated launcher offline with its locked dependency graph.
     pub fn build_locked_offline(&self) -> Result<BuiltLauncher> {
-        let target_dir = self.directory.join("target");
+        let target_dir = &self.build_target;
         let target_dir_argument = target_dir
             .to_str()
             .ok_or_else(|| anyhow!("generated target path is not valid UTF-8"))?;
@@ -112,7 +114,7 @@ impl GeneratedLauncher {
 
         let output = self.cargo(arguments)?;
         require_success("locked offline launcher build", &output)?;
-        let canonical_target_dir = fs::canonicalize(&target_dir)
+        let canonical_target_dir = fs::canonicalize(target_dir)
             .with_context(|| format!("failed to canonicalize {}", target_dir.display()))?;
         let mut executable_paths = BTreeSet::new();
         for message in Message::parse_stream(output.stdout.as_slice()) {
@@ -175,7 +177,7 @@ impl GeneratedLauncher {
 
     /// Checks the generated launcher offline with its reconciled lockfile locked.
     pub fn check_locked_offline(&self) -> Result<()> {
-        let target_dir = self.directory.join("target");
+        let target_dir = &self.build_target;
         let output = self.cargo(vec![
             OsString::from("check"),
             OsString::from("--manifest-path"),
@@ -193,7 +195,7 @@ impl GeneratedLauncher {
 
     /// Builds and executes the generated launcher offline with its reconciled lockfile locked.
     pub fn run_locked_offline(&self) -> Result<()> {
-        let target_dir = self.directory.join("target");
+        let target_dir = &self.build_target;
         let output = self.cargo(vec![
             OsString::from("run"),
             OsString::from("--manifest-path"),
@@ -220,6 +222,7 @@ impl GeneratedLauncher {
 
     /// Runs one Cargo command against this generated manifest with compatibility inputs set.
     fn cargo(&self, arguments: impl IntoIterator<Item = impl AsRef<OsStr>>) -> Result<Output> {
+        validate_optional_cache_directory(&self.build_target, "generated launcher build target")?;
         let mut command = Command::new(cargo_program(std::env::var_os("CARGO")));
         command
             .current_dir(&self.directory)
@@ -393,6 +396,7 @@ pub(crate) fn generate_analyzed_launcher(
 
     let candidate = GeneratedLauncher {
         directory: staging.path().to_path_buf(),
+        build_target: staging.path().join("target"),
         manifest_path,
         source_path,
         lockfile_path,
@@ -419,6 +423,11 @@ pub(crate) fn generate_analyzed_launcher(
         &compile_inputs,
         &configuration,
     )?;
+    let build_target = analyzed
+        .resolved
+        .target_directory()
+        .join("b")
+        .join(&identity);
     let directory = parent.join(identity);
     match rename_noreplace(staging.path(), &directory) {
         Ok(()) => {}
@@ -451,6 +460,7 @@ pub(crate) fn generate_analyzed_launcher(
 
     Ok(GeneratedLauncher {
         directory,
+        build_target,
         manifest_path,
         source_path,
         lockfile_path,
@@ -569,23 +579,10 @@ fn validate_launcher_cache_entry(
         &directory.join("src"),
         "generated launcher source directory",
     )?;
-    let target = directory.join("target");
-    match fs::symlink_metadata(&target) {
-        Ok(metadata) if metadata.file_type().is_dir() => {}
-        Ok(_) => bail!(
-            "generated launcher target directory {} is not a directory",
-            target.display()
-        ),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(error).with_context(|| {
-                format!(
-                    "failed to inspect generated launcher target directory {}",
-                    target.display()
-                )
-            });
-        }
-    }
+    validate_optional_cache_directory(
+        &directory.join("target"),
+        "generated launcher target directory",
+    )?;
     validate_cache_file(
         &directory.join("Cargo.toml"),
         manifest,
@@ -597,6 +594,17 @@ fn validate_launcher_cache_entry(
         lockfile,
         "reconciled generated lockfile",
     )
+}
+
+/// Requires an optional cache directory to be absent or a real non-symlink directory.
+fn validate_optional_cache_directory(path: &Path, description: &str) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_dir() => Ok(()),
+        Ok(_) => bail!("{description} {} is not a directory", path.display()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error)
+            .with_context(|| format!("failed to inspect {description} {}", path.display())),
+    }
 }
 
 /// Requires a cache path to be a real directory rather than a symlink or other file type.

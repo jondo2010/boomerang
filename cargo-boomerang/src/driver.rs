@@ -22,7 +22,7 @@ use crate::{
     generated::render_descriptor_driver,
     generated_cache::{
         generated_cargo_program, resolve_generated_workspace, GeneratedRole,
-        GeneratedWorkspaceRequest, RequestIdentityBuilder,
+        GeneratedWorkspaceRequest, RequestIdentity, RequestIdentityBuilder,
     },
     resolve_workspace, ResolvedWorkspace,
 };
@@ -78,23 +78,17 @@ pub fn run_descriptor_driver(
 pub(crate) fn run_resolved_descriptor_driver(resolved: &ResolvedWorkspace) -> Result<DriverOutput> {
     let generated = render_descriptor_driver(resolved)?;
     let cargo_program = generated_cargo_program();
-    let mut identity = RequestIdentityBuilder::new(GeneratedRole::Descriptor);
-    identity.field("manifest", Some(generated.manifest.as_bytes()));
-    identity.field("source", Some(generated.main.as_bytes()));
-    identity.field("source-lock-digest", Some(&resolved.lockfile().digest));
-    for package_id in resolved.driver_package_ids() {
-        identity.field("driver-package-id", Some(package_id.as_bytes()));
-    }
-    identity.field(
-        "cargo-program",
-        Some(cargo_program.to_string_lossy().as_bytes()),
+    let driver_package_ids = resolved.driver_package_ids();
+    let identity = descriptor_request_identity(
+        generated.manifest.as_bytes(),
+        generated.main.as_bytes(),
+        &resolved.lockfile().digest,
+        &driver_package_ids,
+        &cargo_program,
     );
-    identity.field("target", Some(b"host"));
-    identity.field("profile", Some(b"default"));
-    identity.field("toolchain", Some(b"default"));
     let request = GeneratedWorkspaceRequest {
         role: GeneratedRole::Descriptor,
-        identity: identity.finish(),
+        identity,
         manifest: generated.manifest.as_bytes(),
         source: generated.main.as_bytes(),
         source_lockfile: &resolved.lockfile().path,
@@ -166,6 +160,32 @@ pub(crate) fn run_resolved_descriptor_driver(resolved: &ResolvedWorkspace) -> Re
         compiled_artifacts,
     })
 }
+
+/// Canonically identifies a descriptor request, preserving every Cargo executable path byte.
+fn descriptor_request_identity(
+    manifest: &[u8],
+    source: &[u8],
+    source_lock_digest: &[u8; 32],
+    driver_package_ids: &BTreeSet<String>,
+    cargo_program: &std::ffi::OsString,
+) -> RequestIdentity {
+    let mut identity = RequestIdentityBuilder::new(GeneratedRole::Descriptor);
+    identity.field("manifest", Some(manifest));
+    identity.field("source", Some(source));
+    identity.field("source-lock-digest", Some(source_lock_digest));
+    for package_id in driver_package_ids {
+        identity.field("driver-package-id", Some(package_id.as_bytes()));
+    }
+    identity.field(
+        "cargo-program",
+        Some(cargo_program.as_os_str().as_encoded_bytes()),
+    );
+    identity.field("target", Some(b"host"));
+    identity.field("profile", Some(b"default"));
+    identity.field("toolchain", Some(b"default"));
+    identity.finish()
+}
+
 /// Invokes the current Cargo executable with deterministic arguments in the generated crate.
 fn cargo<I, S>(program: &OsStr, crate_dir: &Path, arguments: I) -> Result<Output>
 where
@@ -297,4 +317,23 @@ fn validate_generated_graph(
         }
     }
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::{collections::BTreeSet, ffi::OsString, os::unix::ffi::OsStringExt as _};
+
+    use super::descriptor_request_identity;
+
+    #[test]
+    fn descriptor_request_identity_distinguishes_non_unicode_cargo_programs() {
+        let first = OsString::from_vec(b"/tmp/cargo-\x80".to_vec());
+        let second = OsString::from_vec(b"/tmp/cargo-\x81".to_vec());
+        let package_ids = BTreeSet::new();
+
+        assert_ne!(
+            descriptor_request_identity(b"manifest", b"source", &[0; 32], &package_ids, &first),
+            descriptor_request_identity(b"manifest", b"source", &[0; 32], &package_ids, &second),
+        );
+    }
 }

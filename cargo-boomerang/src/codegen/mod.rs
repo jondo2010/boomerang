@@ -579,10 +579,6 @@ fn validate_launcher_cache_entry(
         &directory.join("src"),
         "generated launcher source directory",
     )?;
-    validate_optional_cache_directory(
-        &directory.join("target"),
-        "generated launcher target directory",
-    )?;
     validate_cache_file(
         &directory.join("Cargo.toml"),
         manifest,
@@ -598,6 +594,33 @@ fn validate_launcher_cache_entry(
 
 /// Requires an optional cache directory to be absent or a real non-symlink directory.
 fn validate_optional_cache_directory(path: &Path, description: &str) -> Result<()> {
+    let parent = path
+        .parent()
+        .with_context(|| format!("{description} {} has no parent", path.display()))?;
+    let parent_description = format!("{description} parent");
+    match fs::symlink_metadata(parent) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            match fs::create_dir(parent) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!("failed to create {parent_description} {}", parent.display())
+                    });
+                }
+            }
+        }
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "failed to inspect {parent_description} {}",
+                    parent.display()
+                )
+            });
+        }
+    }
+    validate_cache_directory(parent, &parent_description)?;
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_dir() => Ok(()),
         Ok(_) => bail!("{description} {} is not a directory", path.display()),
@@ -790,31 +813,26 @@ fn require_success(phase: &'static str, output: &Output) -> Result<()> {
 mod tests {
     use super::{
         cargo_program, configured_metadata_arguments, rendered_compiler_diagnostics,
-        same_manifest_identity, validate_launcher_cache_entry,
+        same_manifest_identity, validate_optional_cache_directory,
     };
     use crate::ResolvedFederate;
-    #[cfg(unix)]
-    use std::fs;
     use std::path::Path;
 
     #[cfg(unix)]
     #[test]
-    fn launcher_cache_rejects_symlinked_target_directory() {
-        let cache = tempfile::tempdir().unwrap();
-        fs::create_dir(cache.path().join("src")).unwrap();
-        let manifest = b"manifest";
-        let source = b"source";
-        let lockfile = b"lockfile";
-        fs::write(cache.path().join("Cargo.toml"), manifest).unwrap();
-        fs::write(cache.path().join("src/main.rs"), source).unwrap();
-        fs::write(cache.path().join("Cargo.lock"), lockfile).unwrap();
+    fn launcher_build_target_rejects_symlinked_parent() {
+        let target = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
-        std::os::unix::fs::symlink(outside.path(), cache.path().join("target")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), target.path().join("b")).unwrap();
+        let digest = "0".repeat(64);
+        let build_target = target.path().join("b").join(&digest);
 
-        let error = validate_launcher_cache_entry(cache.path(), manifest, source, lockfile)
-            .expect_err("symlinked cache target must be rejected");
+        let error =
+            validate_optional_cache_directory(&build_target, "generated launcher build target")
+                .expect_err("symlinked build target parent must be rejected");
 
-        assert!(error.to_string().contains("target directory"), "{error:#}");
+        assert!(error.to_string().contains("target parent"), "{error:#}");
+        assert!(!outside.path().join(digest).exists());
     }
 
     #[test]

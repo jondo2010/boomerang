@@ -43,7 +43,7 @@ pub(crate) fn build_analyzed(analyzed: &AnalyzedDeployment) -> Result<PathBuf> {
     let cargo_config_hash = optional_hash(configuration.cargo_config.as_deref())
         .context("failed to hash configured Cargo configuration before launcher generation")?;
 
-    let generated = generate_analyzed_launcher(&analyzed, federate_id).with_context(|| {
+    let generated = generate_analyzed_launcher(analyzed, federate_id).with_context(|| {
         format!(
             "deployment '{deployment_name}' Federate '{federate_id}' launcher generation failed"
         )
@@ -65,7 +65,7 @@ pub(crate) fn build_analyzed(analyzed: &AnalyzedDeployment) -> Result<PathBuf> {
     let topology = serde_json::to_vec(analyzed.driver.topology())
         .context("failed to serialize canonical topology")?;
     let topology_hash = hash_bytes(&topology);
-    let bindings = binding_records(&analyzed)?;
+    let bindings = binding_records(analyzed)?;
     let mut groups = configuration.groups.clone();
     groups.sort();
     groups.dedup();

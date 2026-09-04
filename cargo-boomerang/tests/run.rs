@@ -128,9 +128,12 @@ fn generated_monolith_matches_owned_reference_execution_summary() {
 
 #[test]
 fn generated_launcher_emits_the_versioned_execution_summary_writer() {
-    let launcher =
-        cargo_boomerang::generate_launcher(fixture_workspace(), "execution", "host").unwrap();
-    let source = fs::read_to_string(launcher.source_path()).unwrap();
+    let target = tempfile::tempdir().unwrap();
+    let source = with_target_directory(target.path(), || {
+        let launcher =
+            cargo_boomerang::generate_launcher(fixture_workspace(), "execution", "host").unwrap();
+        fs::read_to_string(launcher.source_path()).unwrap()
+    });
 
     assert!(
         source.contains("BOOMERANG_EXECUTION_SUMMARY_V1"),

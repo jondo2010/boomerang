@@ -569,6 +569,23 @@ fn validate_launcher_cache_entry(
         &directory.join("src"),
         "generated launcher source directory",
     )?;
+    let target = directory.join("target");
+    match fs::symlink_metadata(&target) {
+        Ok(metadata) if metadata.file_type().is_dir() => {}
+        Ok(_) => bail!(
+            "generated launcher target directory {} is not a directory",
+            target.display()
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "failed to inspect generated launcher target directory {}",
+                    target.display()
+                )
+            });
+        }
+    }
     validate_cache_file(
         &directory.join("Cargo.toml"),
         manifest,
@@ -765,10 +782,30 @@ fn require_success(phase: &'static str, output: &Output) -> Result<()> {
 mod tests {
     use super::{
         cargo_program, configured_metadata_arguments, rendered_compiler_diagnostics,
-        same_manifest_identity,
+        same_manifest_identity, validate_launcher_cache_entry,
     };
     use crate::ResolvedFederate;
-    use std::path::Path;
+    use std::{fs, path::Path};
+
+    #[cfg(unix)]
+    #[test]
+    fn launcher_cache_rejects_symlinked_target_directory() {
+        let cache = tempfile::tempdir().unwrap();
+        fs::create_dir(cache.path().join("src")).unwrap();
+        let manifest = b"manifest";
+        let source = b"source";
+        let lockfile = b"lockfile";
+        fs::write(cache.path().join("Cargo.toml"), manifest).unwrap();
+        fs::write(cache.path().join("src/main.rs"), source).unwrap();
+        fs::write(cache.path().join("Cargo.lock"), lockfile).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), cache.path().join("target")).unwrap();
+
+        let error = validate_launcher_cache_entry(cache.path(), manifest, source, lockfile)
+            .expect_err("symlinked cache target must be rejected");
+
+        assert!(error.to_string().contains("target directory"), "{error:#}");
+    }
 
     #[test]
     fn metadata_reconciliation_preserves_federate_toolchain_and_cargo_config() {

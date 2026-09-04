@@ -7,14 +7,14 @@ use serde_json::{json, Value};
 
 mod support;
 
-/// Runs the installed Cargo plugin for one fixture deployment in an isolated target directory.
+/// Runs the installed Cargo plugin for one fixture deployment in the shared run target.
 fn run_cli(deployment: &str) -> Output {
-    let target = tempfile::tempdir().unwrap();
+    let target = support::shared_target("run");
     Command::new(env!("CARGO_BIN_EXE_cargo-boomerang"))
         .args(["boomerang", "--workspace"])
         .arg(support::fixture_workspace())
         .args(["run", "--deployment", deployment])
-        .env("CARGO_TARGET_DIR", target.path())
+        .env("CARGO_TARGET_DIR", target)
         .output()
         .unwrap()
 }
@@ -41,8 +41,8 @@ fn summary_json(summary: &cargo_boomerang::ExecutionSummary) -> Value {
 fn generated_monolith_matches_owned_reference_execution_summary() {
     let expected_directory = tempfile::tempdir().unwrap();
     let expected_path = expected_directory.path().join("summary.json");
-    let expected_target = tempfile::tempdir().unwrap();
-    let built = support::with_target_directory(expected_target.path(), || {
+    let target = support::shared_target("run");
+    let built = support::with_target_directory(&target, || {
         let launcher =
             cargo_boomerang::generate_launcher(support::fixture_workspace(), "production", "host")
                 .unwrap();
@@ -55,8 +55,7 @@ fn generated_monolith_matches_owned_reference_execution_summary() {
     assert!(expected_status.success());
     let expected: Value = serde_json::from_slice(&fs::read(&expected_path).unwrap()).unwrap();
 
-    let target = tempfile::tempdir().unwrap();
-    let observed = support::with_target_directory(target.path(), || {
+    let observed = support::with_target_directory(&target, || {
         cargo_boomerang::run(support::fixture_workspace(), "production")
     })
     .unwrap();
@@ -77,8 +76,8 @@ fn generated_monolith_matches_owned_reference_execution_summary() {
 
 #[test]
 fn generated_launcher_emits_the_versioned_execution_summary_writer() {
-    let target = tempfile::tempdir().unwrap();
-    let source = support::with_target_directory(target.path(), || {
+    let target = support::shared_target("run");
+    let source = support::with_target_directory(&target, || {
         let launcher =
             cargo_boomerang::generate_launcher(support::fixture_workspace(), "execution", "host")
                 .unwrap();

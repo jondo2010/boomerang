@@ -85,8 +85,7 @@ fn generated_single_federate_launcher_executes_typed_local_route_without_builder
 
 #[test]
 fn generated_launcher_check_and_run_apply_federate_cargo_configuration() {
-    let target = tempfile::tempdir().unwrap();
-    support::with_target_directory(target.path(), || {
+    support::with_target_directory(&support::shared_target("launcher"), || {
         let launcher =
             cargo_boomerang::generate_launcher(fixture_workspace(), "profile-config", "host")
                 .unwrap();
@@ -121,8 +120,9 @@ fn generated_launcher_renders_normalized_deployment_execution_policy_inner() {
 
 #[test]
 fn generated_launcher_build_preserves_json_compiler_diagnostics() {
+    let target = tempfile::tempdir().unwrap();
     support::with_target_directory(
-        &support::shared_target("launcher"),
+        target.path(),
         generated_launcher_build_preserves_json_compiler_diagnostics_inner,
     );
 }

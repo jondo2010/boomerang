@@ -22,9 +22,10 @@ fn repeated_descriptor_analysis_uses_cargo_freshness() {
         serde_json::to_vec(second.topology()).unwrap(),
     );
 }
+
 #[test]
 fn driver_selects_only_bound_descriptors_and_emits_topology() {
-    let target = support::shared_target("descriptor-driver");
+    let target = support::shared_target("analysis");
     support::with_target_directory(&target, || {
         let output = run_descriptor_driver(support::fixture_workspace(), "production").unwrap();
 

@@ -6,6 +6,7 @@ mod check;
 mod codegen;
 mod driver;
 mod generated;
+mod generated_cache;
 mod manifest;
 mod run;
 mod workspace;

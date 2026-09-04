@@ -785,7 +785,9 @@ mod tests {
         same_manifest_identity, validate_launcher_cache_entry,
     };
     use crate::ResolvedFederate;
-    use std::{fs, path::Path};
+    #[cfg(unix)]
+    use std::fs;
+    use std::path::Path;
 
     #[cfg(unix)]
     #[test]

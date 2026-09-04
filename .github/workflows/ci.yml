@@ -29,8 +29,6 @@ jobs:
   clippy:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    env:
-      CARGO_TARGET_DIR: ${{ runner.temp }}/t
     timeout-minutes: 20
     name: Clippy
     steps:
@@ -39,6 +37,9 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      - name: Configure Cargo target directory
+        shell: bash
+        run: echo "CARGO_TARGET_DIR=${{ runner.temp }}/t" >> "$GITHUB_ENV"
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: . -> ${{ runner.temp }}/t
@@ -63,12 +64,13 @@ jobs:
             toolchain: nightly
 
     runs-on: ${{ matrix.os }}
-    env:
-      CARGO_TARGET_DIR: ${{ runner.temp }}/t
     timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v7
+      - name: Configure Cargo target directory
+        shell: bash
+        run: echo "CARGO_TARGET_DIR=${{ runner.temp }}/t" >> "$GITHUB_ENV"
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: . -> ${{ runner.temp }}/t
@@ -92,12 +94,13 @@ jobs:
 
   miri:
     runs-on: ubuntu-latest
-    env:
-      CARGO_TARGET_DIR: ${{ runner.temp }}/t
     timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v7
+      - name: Configure Cargo target directory
+        shell: bash
+        run: echo "CARGO_TARGET_DIR=${{ runner.temp }}/t" >> "$GITHUB_ENV"
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: . -> ${{ runner.temp }}/t

@@ -28,7 +28,13 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Configure Cargo target directory
+        shell: bash
+        run: echo "CARGO_TARGET_DIR=${{ runner.temp }}/t" >> "$GITHUB_ENV"
+
       - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: . -> ${{ runner.temp }}/t
 
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov

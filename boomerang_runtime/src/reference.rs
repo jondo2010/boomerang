@@ -26,8 +26,8 @@ use crate::{
         run_owned_scheduler_with_coordination,
     },
     storage::owned::StoredState,
-    AsyncEvent, Config, EnclaveBindings, OwnedStorage, OwnedStorageError, PayloadType, ReactorData,
-    RuntimeError, Tag,
+    AsyncEvent, Config, EnclaveBindings, OwnedSchedulerOutcome, OwnedStorage, OwnedStorageError,
+    PayloadType, ReactorData, RuntimeError, Stats, Tag,
 };
 
 /// Failure while validating, initializing, or synchronously executing a compiled image.
@@ -86,13 +86,15 @@ pub enum StateAccessError {
     },
 }
 
-/// Final owned state retained after synchronously executing one scheduler-owned Enclave.
+/// Final owned state and scheduler outcome retained after synchronously executing one Enclave.
 /// It owns no scheduler machinery or image borrow and may outlive the executed image.
 pub struct EnclaveExecution {
     /// Final owned reactor states keyed by compiled storage slot.
     states: TinyMap<StateSlotIndex, StoredState>,
     /// Last logical tag that processed non-terminal work.
     final_tag: Tag,
+    /// Scheduler-local work counters retained after shutdown.
+    stats: Stats,
 }
 
 impl EnclaveExecution {
@@ -117,6 +119,11 @@ impl EnclaveExecution {
     /// Returns [`Tag::NEVER`] if execution reached only terminal shutdown processing.
     pub const fn final_tag(&self) -> Tag {
         self.final_tag
+    }
+
+    /// Returns scheduler-local work counters for this successful Enclave execution.
+    pub const fn stats(&self) -> &Stats {
+        &self.stats
     }
 }
 
@@ -257,6 +264,10 @@ pub struct FederateExecution {
     enclaves: TinySecondaryMap<EnclaveIndex, EnclaveExecution>,
     /// Single monotonic origin injected into every scheduler and reaction context.
     origin: Instant,
+    /// Scheduler-local work counters summed across successful Enclave executions.
+    stats: Stats,
+    /// Latest nonterminal tag observed across successful Enclave executions.
+    final_tag: Tag,
 }
 
 impl fmt::Debug for FederateExecution {
@@ -278,6 +289,16 @@ impl FederateExecution {
     /// Returns the monotonic origin shared by every Enclave scheduler.
     pub const fn origin(&self) -> Instant {
         self.origin
+    }
+
+    /// Returns scheduler-local work counters summed across this Federate's Enclaves.
+    pub const fn stats(&self) -> &Stats {
+        &self.stats
+    }
+
+    /// Returns the latest nonterminal tag across this Federate's Enclaves.
+    pub const fn final_tag(&self) -> Tag {
+        self.final_tag
     }
 }
 
@@ -865,10 +886,13 @@ fn execute_owned_federate_with_spawn_guard(
                         }));
                         drop(participant);
                         let result = match execution {
-                            Ok(Ok(final_tag)) => Ok(EnclaveExecution {
-                                states: storage.into_states(),
-                                final_tag,
-                            }),
+                            Ok(Ok(OwnedSchedulerOutcome { final_tag, stats })) => {
+                                Ok(EnclaveExecution {
+                                    states: storage.into_states(),
+                                    final_tag,
+                                    stats,
+                                })
+                            }
                             Ok(Err(crate::sched::SchedulerError::Execution(source))) => {
                                 Err(ExecuteOwnedFederateError::EnclaveExecution { enclave, source })
                             }
@@ -940,15 +964,23 @@ fn execute_owned_federate_with_spawn_guard(
     if let Some(error) = failure {
         Err(error)
     } else {
+        let mut stats = Stats::default();
+        let mut final_tag = Tag::NEVER;
+        for execution in results.values() {
+            stats.saturating_add_assign(execution.stats());
+            final_tag = final_tag.max(execution.final_tag());
+        }
         Ok(FederateExecution {
             enclaves: results,
             origin,
+            stats,
+            final_tag,
         })
     }
 }
 
 /// Validates and synchronously executes a borrowed compiled enclave image with direct bindings.
-/// Consumes `bindings`; the result retains only final owned state and the last work tag.
+/// Consumes `bindings`; the result retains final owned state and scheduler work counters.
 ///
 /// # Errors
 ///
@@ -966,10 +998,11 @@ pub fn execute_owned<'image>(
         });
     }
     let mut storage = OwnedStorage::new(image, bindings)?;
-    let final_tag = run_owned_scheduler(&mut storage, &config)?;
+    let OwnedSchedulerOutcome { final_tag, stats } = run_owned_scheduler(&mut storage, &config)?;
     Ok(EnclaveExecution {
         states: storage.into_states(),
         final_tag,
+        stats,
     })
 }
 

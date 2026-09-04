@@ -1049,7 +1049,7 @@ fn payload_compile_inputs(
         ));
     }
     let mut bytes = [0u8; 32];
-    for (index, pair) in fingerprint.as_bytes().chunks_exact(2).enumerate() {
+    for (index, pair) in fingerprint.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         bytes[index] = u8::from_str_radix(
             std::str::from_utf8(pair).expect("fingerprint characters are ASCII"),
             16,

@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use clap::{Args, Parser, Subcommand};
 
 /// Cargo plugin entry point.
@@ -45,6 +45,12 @@ enum BoomerangCommand {
         #[arg(long)]
         deployment: String,
     },
+    /// Build, validate, and run one native generated monolithic deployment.
+    Run {
+        /// Deployment name declared in `Boomerang.toml`.
+        #[arg(long)]
+        deployment: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -62,6 +68,39 @@ fn main() -> Result<()> {
         }) => {
             cargo_boomerang::check(workspace, &deployment)?;
         }
+        CargoCommand::Boomerang(BoomerangArgs {
+            workspace,
+            command: BoomerangCommand::Run { deployment },
+        }) => {
+            let outcome = cargo_boomerang::run(workspace, &deployment)?;
+            std::process::exit(numeric_exit_code(outcome.status())?);
+        }
     }
     Ok(())
+}
+
+fn numeric_exit_code(status: &std::process::ExitStatus) -> Result<i32> {
+    status
+        .code()
+        .ok_or_else(|| anyhow!("generated application terminated without a numeric exit code"))
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::numeric_exit_code;
+    use std::{os::unix::process::ExitStatusExt, process::ExitStatus};
+
+    #[test]
+    fn terminated_process_without_a_numeric_code_is_a_tool_error() {
+        let status = ExitStatus::from_raw(15);
+
+        let error = numeric_exit_code(&status).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("terminated without a numeric exit code"),
+            "{error:#}"
+        );
+    }
 }

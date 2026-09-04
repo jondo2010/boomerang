@@ -174,7 +174,7 @@ fn compiled_reactions(
 pub(crate) fn run_owned_scheduler(
     storage: &mut OwnedStorage<'_>,
     config: &Config,
-) -> Result<Tag, SchedulerError<OwnedStorageError>> {
+) -> Result<OwnedSchedulerOutcome, SchedulerError<OwnedStorageError>> {
     run_owned_scheduler_with_origin(storage, config, std::time::Instant::now())
 }
 
@@ -184,7 +184,7 @@ pub(crate) fn run_owned_scheduler_with_origin(
     storage: &mut OwnedStorage<'_>,
     config: &Config,
     origin: std::time::Instant,
-) -> Result<Tag, SchedulerError<OwnedStorageError>> {
+) -> Result<OwnedSchedulerOutcome, SchedulerError<OwnedStorageError>> {
     run_owned_scheduler_with_coordination(
         storage,
         config,
@@ -201,7 +201,7 @@ pub(crate) fn run_owned_scheduler_with_coordination(
     origin: std::time::Instant,
     dependencies: EnclaveDependencies,
     participant: Option<&mut QuiescenceParticipant>,
-) -> Result<Tag, SchedulerError<OwnedStorageError>> {
+) -> Result<OwnedSchedulerOutcome, SchedulerError<OwnedStorageError>> {
     let schedule = storage.scheduler_image();
     let reaction_limits = schedule.reaction_limits();
     let reaction_capacity = reaction_limits.num_keys;
@@ -263,5 +263,16 @@ pub(crate) fn run_owned_scheduler_with_coordination(
         has_modal_scopes: schedule.has_modal_scopes(),
     }
     .try_event_loop()?;
-    Ok(last_nonterminal_tag.unwrap_or(Tag::NEVER))
+    Ok(OwnedSchedulerOutcome {
+        final_tag: last_nonterminal_tag.unwrap_or(Tag::NEVER),
+        stats,
+    })
+}
+
+/// Successful result of one compiled owned scheduler event loop.
+pub(crate) struct OwnedSchedulerOutcome {
+    /// Last logical tag containing nonterminal work.
+    pub(crate) final_tag: Tag,
+    /// Scheduler-local work counters retained after shutdown.
+    pub(crate) stats: Stats,
 }

@@ -2074,12 +2074,12 @@ mod tests {
         let mut storage = OwnedStorage::new(image(), complete_bindings()).unwrap();
         storage.scheduler_event_tx().close().unwrap();
 
-        let final_tag = crate::sched::run_owned_scheduler(
+        let outcome = crate::sched::run_owned_scheduler(
             &mut storage,
             &Config::default().with_fast_forward(true),
         )
         .unwrap();
 
-        assert_eq!(final_tag, Tag::NEVER);
+        assert_eq!(outcome.final_tag, Tag::NEVER);
     }
 }

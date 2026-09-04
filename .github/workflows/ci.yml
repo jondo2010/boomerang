@@ -5,7 +5,7 @@ on:
     branches: ["main"]
 
   pull_request:
-    branches: ["main"]
+    branches: ["main", "codex/deployment-phase4-integration"]
 
 permissions:
   contents: read
@@ -39,7 +39,11 @@ jobs:
           components: clippy
       - uses: swatinem/rust-cache@v2
       - name: Check with Clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: |
+          cargo clippy --workspace --exclude boomerang --all-targets --all-features -- -D warnings
+          cargo clippy -p boomerang --all-targets --features hosted,serde,parallel,replay,federated -- -D warnings
+          cargo clippy -p boomerang --lib --no-default-features --features __boomerang_payload -- -D warnings
+          cargo clippy -p boomerang --lib --no-default-features --features __boomerang_descriptor -- -D warnings
 
   test:
     strategy:
@@ -70,6 +74,13 @@ jobs:
 
       - name: test
         run: cargo test --all --verbose
+
+      - name: run generated monolithic deployment
+        if: matrix.os == 'ubuntu-latest' && matrix.toolchain == 'stable'
+        run: >-
+          cargo run -p cargo-boomerang -- boomerang
+          --workspace cargo-boomerang/tests/fixtures/workspace
+          run --deployment production
 
   miri:
     runs-on: ubuntu-latest

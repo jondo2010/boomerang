@@ -21,13 +21,23 @@ fn generated_manifest_unions_features_for_one_selected_package() {
 
 #[test]
 fn generated_single_federate_launcher_executes_typed_local_route_without_builder() {
-    let launcher =
-        cargo_boomerang::generate_launcher(fixture_workspace(), "production", "host").unwrap();
+    let workspace = fixture_workspace();
+    let resolved = cargo_boomerang::resolve_workspace(&workspace, "production").unwrap();
+    let launcher = cargo_boomerang::generate_launcher(&workspace, "production", "host").unwrap();
     let built = launcher.build_locked_offline().unwrap();
     assert!(built.executable_path().is_file());
-    let target_dir =
-        std::fs::canonicalize(launcher.manifest_path().parent().unwrap().join("target")).unwrap();
-    assert!(built.executable_path().starts_with(target_dir));
+    let target_dir = std::fs::canonicalize(resolved.target_directory()).unwrap();
+    let mut relative = built
+        .executable_path()
+        .strip_prefix(target_dir)
+        .unwrap()
+        .components();
+    assert_eq!(relative.next().unwrap().as_os_str(), "b");
+    let digest = relative.next().unwrap().as_os_str().to_str().unwrap();
+    assert_eq!(digest.len(), 64);
+    assert!(digest
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
     launcher.run_locked_offline().unwrap();
     launcher.check_locked_offline().unwrap();
 

@@ -128,12 +128,27 @@ pub struct Store {
 
 impl Store {
     /// Create a new `Store` from the given `Env`, `Contexts`, and `ReactionGraph`.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the context or reaction-reference tables do not exactly cover the environment's
+    /// reactions.
     pub fn new(
         env: Env,
         contexts: tinymap::TinySecondaryMap<ReactionKey, Context>,
         reaction_graph: &ReactionGraph,
     ) -> Pin<Box<Self>> {
-        debug_assert!(contexts.len() == env.reactions.len());
+        assert!(
+            itertools::equal(env.reactions.keys(), contexts.keys())
+                && itertools::equal(env.reactions.keys(), reaction_graph.reaction_use_ports.keys())
+                && itertools::equal(
+                    env.reactions.keys(),
+                    reaction_graph.reaction_effect_ports.keys(),
+                )
+                && itertools::equal(env.reactions.keys(), reaction_graph.reaction_actions.keys())
+                && itertools::equal(env.reactions.keys(), reaction_graph.reaction_reactors.keys()),
+            "Store contexts must exactly cover reactions; reaction graph tables must match the same key set",
+        );
 
         // Create a default `ReactionTriggerCtxPtrs` for each reaction
         let ptrs = env
@@ -161,10 +176,11 @@ impl Store {
         let inner = this.inner.get_mut();
         let caches = this.caches.get_mut();
 
-        // SAFETY: We're initializing the caches with self-references. This is safe because:
-        // 1. The data is already pinned and won't move
-        // 2. We're creating pointers to pinned data
-        // 3. The Store will remain pinned for its entire lifetime
+        // SAFETY: We're initializing caches with self-references. This is safe because:
+        // 1. The data is already pinned and will not move for the Store's lifetime.
+        // 2. The release-time validation above proves every zipped table has the complete,
+        //    identically ordered reaction key set, so every cache is initialized exactly once.
+        // 3. Each source iterator provides unique references for those unique reaction keys.
         unsafe {
             let contexts = inner
                 .contexts
@@ -252,10 +268,16 @@ impl Store {
         self: &mut Pin<Box<Self>>,
         origin: std::time::Instant,
     ) {
-        let contexts = &mut self.as_mut().project().inner.contexts;
-        contexts
-            .iter_mut()
-            .for_each(|(_, context)| context.start_time = origin);
+        let caches = self.as_mut().project().caches;
+        for (_, cache) in caches.get_mut().iter_mut() {
+            // SAFETY: `Store::new` initialized each cache with the unique context pointer for
+            // its reaction after pinning `Store`. The context table is not moved or structurally
+            // modified afterwards, and iterating the distinct cache entries gives this loop the
+            // only mutable access to each context while it initializes its startup origin.
+            unsafe {
+                cache.context.as_mut().start_time = origin;
+            }
+        }
     }
 
     pub fn reschedule_action_value(
@@ -421,5 +443,27 @@ pub mod tests {
             let mut ctx_iter = unsafe { store.iter_borrow_storage(reaction_keys.iter().cloned()) };
             let _res = ctx_iter.next().unwrap().trigger(Tag::ZERO);
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "Store contexts must exactly cover reactions")]
+    fn store_new_rejects_a_context_key_set_that_does_not_match_reactions() {
+        let (env, reaction_graph) = crate::env::tests::create_dummy_env();
+        let (event_tx, _) = kanal::bounded(0);
+        let (_, shutdown_rx) = keepalive::channel();
+        let contexts = [(
+            ReactionKey::from(1),
+            Context::new(
+                EnclaveKey::default(),
+                std::time::Instant::now(),
+                None,
+                event_tx,
+                shutdown_rx,
+            ),
+        )]
+        .into_iter()
+        .collect();
+
+        let _store = Store::new(env, contexts, &reaction_graph);
     }
 }

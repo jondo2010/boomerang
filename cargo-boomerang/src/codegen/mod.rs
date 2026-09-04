@@ -5,8 +5,7 @@ mod rust;
 use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::{OsStr, OsString},
-    fs::{self, File},
-    io::Read,
+    fs,
     path::{Path, PathBuf},
     process::{Command, Output},
 };
@@ -107,9 +106,7 @@ impl GeneratedLauncher {
                 }
                 _ => continue,
             };
-            if !artifact.fresh {
-                compiled_artifacts += 1;
-            }
+            compiled_artifacts += usize::from(!artifact.fresh);
             if !same_manifest_identity(&self.manifest_path, artifact.manifest_path.as_std_path())?
                 || !artifact
                     .target
@@ -567,28 +564,14 @@ fn copy_private_launcher(
         .context("failed to prepare private launcher directory")?;
     let filename = source
         .file_name()
-        .ok_or_else(|| anyhow!("launcher executable {} has no file name", source.display()))?;
+        .context("launcher executable has no file name")?;
     let destination = private_directory.path().join(filename);
-    let mut source_file = File::open(source)
-        .with_context(|| format!("failed to open launcher executable {}", source.display()))?;
-    let source_metadata = source_file
-        .metadata()
-        .with_context(|| format!("failed to inspect launcher executable {}", source.display()))?;
-    if !source_metadata.is_file() {
-        bail!(
-            "launcher executable {} is not a regular file",
-            source.display()
-        );
-    }
-    let mut bytes = Vec::new();
-    source_file
-        .read_to_end(&mut bytes)
-        .context("failed to read launcher executable")?;
-    let source_hash = blake3::hash(&bytes);
-    fs::write(&destination, bytes)
+    let source_hash = blake3::hash(
+        &fs::read(source)
+            .with_context(|| format!("failed to read launcher executable {}", source.display()))?,
+    );
+    fs::copy(source, &destination)
         .with_context(|| format!("failed to copy launcher executable {}", source.display()))?;
-    fs::set_permissions(&destination, source_metadata.permissions())
-        .context("failed to preserve private launcher permissions")?;
     if source_hash
         != blake3::hash(
             &fs::read(&destination)
@@ -817,40 +800,24 @@ mod tests {
             cargo_config: Some(cargo_config.path().to_path_buf()),
         };
         let inputs = vec![(String::from("COMPATIBILITY"), String::from("fixed"))];
-        let first = launcher_request_identity(
-            b"manifest",
-            b"source",
-            &[7; 32],
-            &inputs,
-            &federate,
-            OsStr::new("cargo"),
-        )
-        .unwrap();
-
-        std::fs::write(cargo_config.path(), b"[net]\noffline = false\n").unwrap();
-        let second = launcher_request_identity(
-            b"manifest",
-            b"source",
-            &[7; 32],
-            &inputs,
-            &federate,
-            OsStr::new("cargo"),
-        )
-        .unwrap();
-
-        assert_ne!(first, second);
-        assert_ne!(
-            second,
+        let identity = |cargo| {
             launcher_request_identity(
                 b"manifest",
                 b"source",
                 &[7; 32],
                 &inputs,
                 &federate,
-                OsStr::new("custom-cargo"),
+                OsStr::new(cargo),
             )
             .unwrap()
-        );
+        };
+        let first = identity("cargo");
+
+        std::fs::write(cargo_config.path(), b"[net]\noffline = false\n").unwrap();
+        let second = identity("cargo");
+
+        assert_ne!(first, second);
+        assert_ne!(second, identity("custom-cargo"));
     }
 
     #[test]

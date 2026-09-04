@@ -9,15 +9,10 @@ fn fixture_workspace() -> PathBuf {
 
 #[test]
 fn generated_manifest_unions_features_for_one_selected_package() {
-    support::with_target_directory(
-        &support::shared_target("launcher"),
-        generated_manifest_unions_features_for_one_selected_package_inner,
-    );
-}
-
-fn generated_manifest_unions_features_for_one_selected_package_inner() {
-    let launcher =
-        cargo_boomerang::generate_launcher(fixture_workspace(), "feature-union", "host").unwrap();
+    let launcher = support::with_target_directory(&support::shared_target("launcher"), || {
+        cargo_boomerang::generate_launcher(fixture_workspace(), "feature-union", "host")
+    })
+    .unwrap();
     let manifest = std::fs::read_to_string(launcher.manifest_path()).unwrap();
     let manifest = manifest.parse::<toml::Table>().unwrap();
     let features = &manifest["dependencies"]["implementation_0"]["features"];
@@ -31,16 +26,13 @@ fn generated_manifest_unions_features_for_one_selected_package_inner() {
 #[test]
 fn generated_single_federate_launcher_executes_typed_local_route_without_builder() {
     let target = tempfile::tempdir().unwrap();
-    support::with_target_directory(
-        target.path(),
-        generated_single_federate_launcher_executes_typed_local_route_without_builder_inner,
-    );
-}
-
-fn generated_single_federate_launcher_executes_typed_local_route_without_builder_inner() {
     let workspace = fixture_workspace();
-    let resolved = cargo_boomerang::resolve_workspace(&workspace, "production").unwrap();
-    let launcher = cargo_boomerang::generate_launcher(&workspace, "production", "host").unwrap();
+    let (resolved, launcher) = support::with_target_directory(target.path(), || {
+        (
+            cargo_boomerang::resolve_workspace(&workspace, "production").unwrap(),
+            cargo_boomerang::generate_launcher(&workspace, "production", "host").unwrap(),
+        )
+    });
     let first = launcher.build_locked_offline().unwrap();
     assert!(first.compiled_artifacts() > 0);
     let first_executable = std::fs::read(first.executable_path()).unwrap();
@@ -85,29 +77,22 @@ fn generated_single_federate_launcher_executes_typed_local_route_without_builder
 
 #[test]
 fn generated_launcher_check_and_run_apply_federate_cargo_configuration() {
-    support::with_target_directory(&support::shared_target("launcher"), || {
-        let launcher =
-            cargo_boomerang::generate_launcher(fixture_workspace(), "profile-config", "host")
-                .unwrap();
-        let check = launcher.check_locked_offline();
-        let run = launcher.run_locked_offline();
-
-        assert!(check.is_ok(), "check failed: {check:#?}");
-        assert!(run.is_ok(), "run failed: {run:#?}");
-    });
+    let launcher = support::with_target_directory(&support::shared_target("launcher"), || {
+        cargo_boomerang::generate_launcher(fixture_workspace(), "profile-config", "host")
+    })
+    .unwrap();
+    let check = launcher.check_locked_offline();
+    let run = launcher.run_locked_offline();
+    assert!(check.is_ok(), "check failed: {check:#?}");
+    assert!(run.is_ok(), "run failed: {run:#?}");
 }
 
 #[test]
 fn generated_launcher_renders_normalized_deployment_execution_policy() {
-    support::with_target_directory(
-        &support::shared_target("launcher"),
-        generated_launcher_renders_normalized_deployment_execution_policy_inner,
-    );
-}
-
-fn generated_launcher_renders_normalized_deployment_execution_policy_inner() {
-    let launcher =
-        cargo_boomerang::generate_launcher(fixture_workspace(), "execution", "host").unwrap();
+    let launcher = support::with_target_directory(&support::shared_target("launcher"), || {
+        cargo_boomerang::generate_launcher(fixture_workspace(), "execution", "host")
+    })
+    .unwrap();
     let source = std::fs::read_to_string(launcher.source_path()).unwrap();
     assert!(source.contains("fast_forward: true"), "{source}");
     assert!(source.contains("keep_alive: true"), "{source}");
@@ -121,15 +106,10 @@ fn generated_launcher_renders_normalized_deployment_execution_policy_inner() {
 #[test]
 fn generated_launcher_build_preserves_json_compiler_diagnostics() {
     let target = tempfile::tempdir().unwrap();
-    support::with_target_directory(
-        target.path(),
-        generated_launcher_build_preserves_json_compiler_diagnostics_inner,
-    );
-}
-
-fn generated_launcher_build_preserves_json_compiler_diagnostics_inner() {
-    let launcher =
-        cargo_boomerang::generate_launcher(fixture_workspace(), "broken-payload", "host").unwrap();
+    let launcher = support::with_target_directory(target.path(), || {
+        cargo_boomerang::generate_launcher(fixture_workspace(), "broken-payload", "host")
+    })
+    .unwrap();
 
     let error = launcher
         .build_locked_offline()

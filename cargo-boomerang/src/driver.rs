@@ -167,7 +167,7 @@ fn descriptor_request_identity(
     source: &[u8],
     source_lock_digest: &[u8; 32],
     driver_package_ids: &BTreeSet<String>,
-    cargo_program: &std::ffi::OsString,
+    cargo_program: &OsStr,
 ) -> RequestIdentity {
     let mut identity = RequestIdentityBuilder::new(GeneratedRole::Descriptor);
     identity.field("manifest", Some(manifest));
@@ -176,10 +176,7 @@ fn descriptor_request_identity(
     for package_id in driver_package_ids {
         identity.field("driver-package-id", Some(package_id.as_bytes()));
     }
-    identity.field(
-        "cargo-program",
-        Some(cargo_program.as_os_str().as_encoded_bytes()),
-    );
+    identity.field("cargo-program", Some(cargo_program.as_encoded_bytes()));
     identity.field("target", Some(b"host"));
     identity.field("profile", Some(b"default"));
     identity.field("toolchain", Some(b"default"));
@@ -187,11 +184,11 @@ fn descriptor_request_identity(
 }
 
 /// Invokes the current Cargo executable with deterministic arguments in the generated crate.
-fn cargo<I, S>(program: &OsStr, crate_dir: &Path, arguments: I) -> Result<Output>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<OsStr>,
-{
+fn cargo(
+    program: &OsStr,
+    crate_dir: &Path,
+    arguments: impl IntoIterator<Item = impl AsRef<OsStr>>,
+) -> Result<Output> {
     Command::new(program)
         .args(arguments)
         .current_dir(crate_dir)
@@ -207,19 +204,13 @@ fn descriptor_artifact(build: &Output, build_log: &mut String) -> Result<(PathBu
     for message in Message::parse_stream(Cursor::new(build.stdout.as_slice())) {
         match message.context("failed to decode Cargo build message")? {
             Message::CompilerArtifact(artifact) => {
-                if !artifact.fresh {
-                    compiled_artifacts += 1;
-                }
+                compiled_artifacts += usize::from(!artifact.fresh);
                 if artifact.target.name == "boomerang-descriptor-driver"
-                    && artifact
-                        .target
-                        .kind
-                        .iter()
-                        .any(|kind| kind == &TargetKind::Bin)
+                    && artifact.target.kind.contains(&TargetKind::Bin)
                 {
-                    let artifact = artifact.executable.ok_or_else(|| {
-                        anyhow!("descriptor driver Cargo artifact has no executable")
-                    })?;
+                    let artifact = artifact
+                        .executable
+                        .context("descriptor driver Cargo artifact has no executable")?;
                     if executable.replace(artifact.into_std_path_buf()).is_some() {
                         bail!("generated Cargo manifest produced multiple descriptor binaries");
                     }
@@ -244,12 +235,9 @@ fn copy_private_descriptor(source: &Path) -> Result<(tempfile::TempDir, PathBuf)
         .prefix("boomerang-descriptor-")
         .tempdir()
         .context("failed to prepare private descriptor execution directory")?;
-    let filename = source.file_name().ok_or_else(|| {
-        anyhow!(
-            "descriptor executable {} has no file name",
-            source.display()
-        )
-    })?;
+    let filename = source
+        .file_name()
+        .context("descriptor executable has no file name")?;
     let destination = execution.path().join(filename);
     let source_hash = hash_file(source)?;
     fs::copy(source, &destination)
@@ -265,6 +253,7 @@ fn hash_file(path: &Path) -> Result<blake3::Hash> {
     let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
     Ok(blake3::hash(&bytes))
 }
+
 /// Converts a failed phase into a diagnostic preserving accumulated stderr.
 fn require_success(phase: &'static str, output: &Output, build_log: &str) -> Result<()> {
     if output.status.success() {

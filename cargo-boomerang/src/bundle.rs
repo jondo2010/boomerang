@@ -365,7 +365,7 @@ pub(crate) fn publish_bundle(
 }
 
 /// Atomically renames a directory only when the destination does not exist.
-fn rename_noreplace(source: &Path, destination: &Path) -> io::Result<()> {
+pub(crate) fn rename_noreplace(source: &Path, destination: &Path) -> io::Result<()> {
     let result = platform_rename_noreplace(source, destination);
     match result {
         Err(error) if fs::symlink_metadata(destination).is_ok() => Err(io::Error::new(

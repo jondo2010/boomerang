@@ -22,6 +22,20 @@ fn build_fixture(deployment: &str, target: &Path) -> Output {
         .unwrap()
 }
 
+fn assert_no_staging_residue(path: &Path) {
+    for entry in fs::read_dir(path).unwrap() {
+        let entry = entry.unwrap();
+        assert!(
+            !entry.file_name().to_string_lossy().contains(".staging-"),
+            "build left staging residue at {}",
+            entry.path().display()
+        );
+        if entry.file_type().unwrap().is_dir() {
+            assert_no_staging_residue(&entry.path());
+        }
+    }
+}
+
 #[test]
 fn failed_target_build_never_publishes_deployment_json() {
     let target = tempfile::tempdir().unwrap();
@@ -157,6 +171,42 @@ fn build_publishes_a_valid_fingerprinted_bundle() {
             .all(|enclave| enclave.get("event_capacity").is_some()),
         "each Enclave resource record must retain its authoritative event capacity: {resources:?}"
     );
+}
+
+#[test]
+fn repeated_build_preserves_the_same_published_bundle() {
+    let target = tempfile::tempdir().unwrap();
+    let first = build_fixture("production", target.path());
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let first_manifest = PathBuf::from(String::from_utf8(first.stdout).unwrap().trim());
+    let first_document: Value =
+        serde_json::from_slice(&fs::read(&first_manifest).unwrap()).unwrap();
+    let artifact = first_manifest
+        .parent()
+        .unwrap()
+        .join(first_document["artifacts"][0]["path"].as_str().unwrap());
+    let manifest_before = fs::read(&first_manifest).unwrap();
+    let artifact_before = fs::read(&artifact).unwrap();
+    let artifact_hash_before = blake3::hash(&artifact_before);
+
+    let second = build_fixture("production", target.path());
+    assert!(
+        second.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let second_manifest = PathBuf::from(String::from_utf8(second.stdout).unwrap().trim());
+
+    assert_eq!(second_manifest, first_manifest);
+    assert_eq!(fs::read(&first_manifest).unwrap(), manifest_before);
+    let artifact_after = fs::read(&artifact).unwrap();
+    assert_eq!(artifact_after, artifact_before);
+    assert_eq!(blake3::hash(&artifact_after), artifact_hash_before);
+    assert_no_staging_residue(&target.path().join("boomerang"));
 }
 
 #[test]

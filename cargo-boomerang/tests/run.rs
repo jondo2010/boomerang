@@ -93,9 +93,12 @@ fn summary_json(summary: &cargo_boomerang::ExecutionSummary) -> Value {
 fn generated_monolith_matches_owned_reference_execution_summary() {
     let expected_directory = tempfile::tempdir().unwrap();
     let expected_path = expected_directory.path().join("summary.json");
-    let launcher =
-        cargo_boomerang::generate_launcher(fixture_workspace(), "production", "host").unwrap();
-    let built = launcher.build_locked_offline().unwrap();
+    let expected_target = tempfile::tempdir().unwrap();
+    let built = with_target_directory(expected_target.path(), || {
+        let launcher =
+            cargo_boomerang::generate_launcher(fixture_workspace(), "production", "host").unwrap();
+        launcher.build_locked_offline().unwrap()
+    });
     let expected_status = Command::new(built.executable_path())
         .env("BOOMERANG_EXECUTION_SUMMARY_V1", &expected_path)
         .status()

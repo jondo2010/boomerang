@@ -41,22 +41,14 @@ fn summary_json(summary: &cargo_boomerang::ExecutionSummary) -> Value {
 #[test]
 fn generated_monolith_matches_owned_reference_execution_summary() {
     let _guard = support::toolchain_lock();
-    let expected_directory = tempfile::tempdir().unwrap();
-    let expected_path = expected_directory.path().join("summary.json");
     let target = support::toolchain_target();
     support::reset_deployment_output(&target, "production");
-    let built = support::with_target_directory(&target, || {
-        let launcher =
-            cargo_boomerang::generate_launcher(support::fixture_workspace(), "production", "host")
-                .unwrap();
-        launcher.build_locked_offline().unwrap()
-    });
-    let expected_status = Command::new(built.executable_path())
-        .env("BOOMERANG_EXECUTION_SUMMARY_V1", &expected_path)
-        .status()
-        .unwrap();
-    assert!(expected_status.success());
-    let expected: Value = serde_json::from_slice(&fs::read(&expected_path).unwrap()).unwrap();
+    let expected =
+        support::with_target_directory(&target, || support::owned_reference_summary("production"));
+    assert!(
+        !target.join("boomerang/production").exists(),
+        "owned reference execution must not generate a launcher"
+    );
 
     let observed = support::with_target_directory(&target, || {
         cargo_boomerang::run(support::fixture_workspace(), "production")

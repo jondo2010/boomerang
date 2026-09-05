@@ -1,9 +1,10 @@
 use cargo_boomerang::run_descriptor_driver;
 
-mod support;
+use super::support;
 
 #[test]
 fn repeated_descriptor_analysis_uses_workspace_configuration_and_cargo_freshness() {
+    let _guard = support::toolchain_lock();
     let target = tempfile::tempdir().unwrap();
     let (first, second) = support::with_target_directory(target.path(), || {
         let run = || run_descriptor_driver(support::fixture_workspace(), "production").unwrap();
@@ -20,7 +21,10 @@ fn repeated_descriptor_analysis_uses_workspace_configuration_and_cargo_freshness
 
 #[test]
 fn driver_selects_only_bound_descriptors_and_emits_topology() {
-    let target = support::shared_target("analysis");
+    let _guard = support::toolchain_lock();
+    let target = support::toolchain_target();
+    support::reset_deployment_output(&target, "production");
+    support::reset_deployment_output(&target, "payload-alias");
     let (output, result) = support::with_target_directory(&target, || {
         (
             run_descriptor_driver(support::fixture_workspace(), "production").unwrap(),

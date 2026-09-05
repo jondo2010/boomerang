@@ -5,7 +5,7 @@ use std::{
 
 use serde_json::{json, Value};
 
-mod support;
+use super::support;
 
 /// Runs the installed Cargo plugin for one fixture deployment in the shared run target.
 fn run_cli(deployment: &str) -> Output {
@@ -39,9 +39,11 @@ fn summary_json(summary: &cargo_boomerang::ExecutionSummary) -> Value {
 
 #[test]
 fn generated_monolith_matches_owned_reference_execution_summary() {
+    let _guard = support::toolchain_lock();
     let expected_directory = tempfile::tempdir().unwrap();
     let expected_path = expected_directory.path().join("summary.json");
-    let target = support::shared_target("run");
+    let target = support::toolchain_target();
+    support::reset_deployment_output(&target, "production");
     let built = support::with_target_directory(&target, || {
         let launcher =
             cargo_boomerang::generate_launcher(support::fixture_workspace(), "production", "host")
@@ -76,13 +78,14 @@ fn generated_monolith_matches_owned_reference_execution_summary() {
 
 #[test]
 fn generated_launcher_emits_the_versioned_execution_summary_writer() {
-    let target = support::shared_target("run");
-    let source = support::with_target_directory(&target, || {
-        let launcher =
-            cargo_boomerang::generate_launcher(support::fixture_workspace(), "execution", "host")
-                .unwrap();
-        fs::read_to_string(launcher.source_path()).unwrap()
+    let _guard = support::toolchain_lock();
+    let target = support::toolchain_target();
+    let launcher = support::with_target_directory(&target, || {
+        cargo_boomerang::generate_launcher(support::fixture_workspace(), "execution", "host")
+            .unwrap()
     });
+    launcher.build_locked_offline().unwrap();
+    let source = fs::read_to_string(launcher.source_path()).unwrap();
 
     assert!(
         source.contains("BOOMERANG_EXECUTION_SUMMARY_V1"),
@@ -95,34 +98,41 @@ fn generated_launcher_emits_the_versioned_execution_summary_writer() {
 
 #[test]
 fn run_rejects_a_custom_target_before_bundle_generation() {
-    let target = tempfile::tempdir().unwrap();
-    let result = support::with_target_directory(target.path(), || {
+    let _guard = support::toolchain_lock();
+    let target = support::toolchain_target();
+    support::reset_deployment_output(&target, "resolution");
+    let result = support::with_target_directory(&target, || {
         cargo_boomerang::run(support::fixture_workspace(), "resolution")
     });
     let error = result.unwrap_err().to_string();
     assert!(error.contains("custom target JSON"), "{error}");
-    assert!(!target.path().join("boomerang/resolution").exists());
+    assert!(!target.join("boomerang/resolution").exists());
 }
 
 #[test]
 fn run_rejects_a_foreign_native_target_before_bundle_generation() {
+    let _guard = support::toolchain_lock();
     let deployment = if target_lexicon::HOST.to_string() == "x86_64-unknown-linux-gnu" {
         "foreign-aarch64-macos"
     } else {
         "foreign-x86-linux"
     };
-    let target = tempfile::tempdir().unwrap();
-    let result = support::with_target_directory(target.path(), || {
+    let target = support::toolchain_target();
+    support::reset_deployment_output(&target, deployment);
+    let result = support::with_target_directory(&target, || {
         cargo_boomerang::run(support::fixture_workspace(), deployment)
     });
     let error = result.unwrap_err().to_string();
 
     assert!(error.contains("is not the host target"), "{error}");
-    assert!(!target.path().join("boomerang").join(deployment).exists());
+    assert!(!target.join("boomerang").join(deployment).exists());
 }
 
 #[test]
 fn run_forwards_application_streams_without_reframing() {
+    let _guard = support::toolchain_lock();
+    let target = support::toolchain_target();
+    support::reset_deployment_output(&target, "production");
     let output = run_cli("production");
     assert!(
         output.status.success(),
@@ -141,6 +151,9 @@ fn run_forwards_application_streams_without_reframing() {
 
 #[test]
 fn run_propagates_the_generated_application_exit_code() {
+    let _guard = support::toolchain_lock();
+    let target = support::toolchain_target();
+    support::reset_deployment_output(&target, "runtime-failure");
     let output = run_cli("runtime-failure");
     assert_eq!(output.status.code(), Some(42));
 }

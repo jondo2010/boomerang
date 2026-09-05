@@ -7,6 +7,8 @@ use std::{
 use cargo_metadata::MetadataCommand;
 use serde_json::Value;
 
+use super::support;
+
 fn fixture_workspace() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/workspace")
 }
@@ -37,9 +39,11 @@ fn assert_no_staging_residue(path: &Path) {
 }
 
 #[test]
-fn failed_target_build_never_publishes_deployment_json() {
-    let target = tempfile::tempdir().unwrap();
-    let result = build_fixture("broken-payload", target.path());
+fn broken_payload_preserves_diagnostics_without_publishing_a_bundle() {
+    let _guard = support::toolchain_lock();
+    let target = support::toolchain_target();
+    support::reset_deployment_output(&target, "broken-payload");
+    let result = build_fixture("broken-payload", &target);
     let stderr = String::from_utf8_lossy(&result.stderr);
 
     assert!(!result.status.success(), "{stderr}");
@@ -49,7 +53,7 @@ fn failed_target_build_never_publishes_deployment_json() {
     );
     assert!(stderr.contains("deployment 'broken-payload'"), "{stderr}");
     assert!(stderr.contains("Federate 'host'"), "{stderr}");
-    let output_directory = target.path().join("boomerang/broken-payload");
+    let output_directory = target.join("boomerang/broken-payload");
     if output_directory.exists() {
         assert!(!output_directory.join("deployment.json").exists());
         assert!(
@@ -62,15 +66,17 @@ fn failed_target_build_never_publishes_deployment_json() {
 
 #[test]
 fn build_publishes_a_valid_fingerprinted_bundle() {
-    let target = tempfile::tempdir().unwrap();
-    let result = build_fixture("production", target.path());
+    let _guard = support::toolchain_lock();
+    let target = support::toolchain_target();
+    support::reset_deployment_output(&target, "production");
+    let result = build_fixture("production", &target);
     let stderr = String::from_utf8_lossy(&result.stderr);
     assert!(result.status.success(), "{stderr}");
 
     let stdout = String::from_utf8(result.stdout).unwrap();
     let manifest_path = fs::canonicalize(PathBuf::from(stdout.trim())).unwrap();
     assert_eq!(stdout.lines().count(), 1, "unexpected stdout: {stdout:?}");
-    let target_directory = fs::canonicalize(target.path()).unwrap();
+    let target_directory = fs::canonicalize(&target).unwrap();
     let relative = manifest_path.strip_prefix(&target_directory).unwrap();
     let components = relative
         .iter()
@@ -175,8 +181,10 @@ fn build_publishes_a_valid_fingerprinted_bundle() {
 
 #[test]
 fn repeated_build_preserves_the_same_published_bundle() {
-    let target = tempfile::tempdir().unwrap();
-    let first = build_fixture("production", target.path());
+    let _guard = support::toolchain_lock();
+    let target = support::toolchain_target();
+    support::reset_deployment_output(&target, "production");
+    let first = build_fixture("production", &target);
     assert!(
         first.status.success(),
         "{}",
@@ -193,7 +201,7 @@ fn repeated_build_preserves_the_same_published_bundle() {
     let artifact_before = fs::read(&artifact).unwrap();
     let artifact_hash_before = blake3::hash(&artifact_before);
 
-    let second = build_fixture("production", target.path());
+    let second = build_fixture("production", &target);
     assert!(
         second.status.success(),
         "{}",
@@ -206,14 +214,17 @@ fn repeated_build_preserves_the_same_published_bundle() {
     let artifact_after = fs::read(&artifact).unwrap();
     assert_eq!(artifact_after, artifact_before);
     assert_eq!(blake3::hash(&artifact_after), artifact_hash_before);
-    assert_no_staging_residue(&target.path().join("boomerang/generated"));
+    assert_no_staging_residue(&target.join("boomerang/generated"));
     assert_no_staging_residue(first_manifest.parent().unwrap().parent().unwrap());
 }
 
 #[test]
 fn build_normalizes_deployment_execution_policy_into_every_published_artifact() {
-    let target = tempfile::tempdir().unwrap();
-    let result = build_fixture("execution", target.path());
+    let _guard = support::toolchain_lock();
+    let target = support::toolchain_target();
+    support::reset_deployment_output(&target, "execution");
+    support::reset_deployment_output(&target, "execution-equivalent");
+    let result = build_fixture("execution", &target);
     assert!(
         result.status.success(),
         "{}",
@@ -233,7 +244,7 @@ fn build_normalizes_deployment_execution_policy_into_every_published_artifact() 
     );
     assert!(document.get("runtime_configuration").is_none());
 
-    let equivalent = build_fixture("execution-equivalent", target.path());
+    let equivalent = build_fixture("execution-equivalent", &target);
     assert!(
         equivalent.status.success(),
         "{}",
@@ -279,8 +290,10 @@ fn build_normalizes_deployment_execution_policy_into_every_published_artifact() 
 
 #[test]
 fn corrupted_published_artifact_causes_a_conflict_without_overwrite() {
-    let target = tempfile::tempdir().unwrap();
-    let first = build_fixture("production", target.path());
+    let _guard = support::toolchain_lock();
+    let target = support::toolchain_target();
+    support::reset_deployment_output(&target, "production");
+    let first = build_fixture("production", &target);
     assert!(
         first.status.success(),
         "{}",
@@ -297,7 +310,7 @@ fn corrupted_published_artifact_causes_a_conflict_without_overwrite() {
     fs::write(&artifact, &corrupted).unwrap();
     let manifest_before = fs::read(&manifest).unwrap();
 
-    let second = build_fixture("production", target.path());
+    let second = build_fixture("production", &target);
     let stderr = String::from_utf8_lossy(&second.stderr);
     assert!(!second.status.success(), "{stderr}");
     assert!(stderr.contains("conflict"), "{stderr}");
@@ -307,15 +320,17 @@ fn corrupted_published_artifact_causes_a_conflict_without_overwrite() {
 
 #[test]
 fn build_accepts_an_explicit_workspace_outside_the_current_directory() {
+    let _guard = support::toolchain_lock();
     let current = tempfile::tempdir().unwrap();
-    let target = tempfile::tempdir().unwrap();
+    let target = support::toolchain_target();
+    support::reset_deployment_output(&target, "production");
     let result = Command::new(env!("CARGO_BIN_EXE_cargo-boomerang"))
         .arg("boomerang")
         .arg("--workspace")
         .arg(fixture_workspace())
         .args(["build", "--deployment", "production"])
         .current_dir(current.path())
-        .env("CARGO_TARGET_DIR", target.path())
+        .env("CARGO_TARGET_DIR", &target)
         .output()
         .unwrap();
 
@@ -329,13 +344,15 @@ fn build_accepts_an_explicit_workspace_outside_the_current_directory() {
     ))
     .unwrap();
     assert!(manifest.exists(), "missing {}", manifest.display());
-    assert!(manifest.starts_with(fs::canonicalize(target.path()).unwrap()));
+    assert!(manifest.starts_with(fs::canonicalize(target).unwrap()));
 }
 
 #[test]
 fn build_applies_configured_release_profile_and_cargo_configuration() {
-    let target = tempfile::tempdir().unwrap();
-    let result = build_fixture("profile-config", target.path());
+    let _guard = support::toolchain_lock();
+    let target = support::toolchain_target();
+    support::reset_deployment_output(&target, "profile-config");
+    let result = build_fixture("profile-config", &target);
 
     assert!(
         result.status.success(),

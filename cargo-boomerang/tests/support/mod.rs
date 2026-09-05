@@ -3,7 +3,7 @@
 use std::{
     ffi::OsString,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Mutex, MutexGuard},
 };
 
 pub fn fixture_workspace() -> PathBuf {
@@ -37,6 +37,22 @@ pub fn shared_target(lane: &str) -> PathBuf {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("cargo-boomerang-fixtures");
     std::fs::create_dir_all(&root).unwrap();
     root.join(lane)
+}
+
+pub fn toolchain_target() -> PathBuf {
+    shared_target("toolchain")
+}
+
+pub fn reset_deployment_output(target: &Path, deployment: &str) {
+    let output = target.join("boomerang").join(deployment);
+    if output.exists() {
+        std::fs::remove_dir_all(output).unwrap();
+    }
+}
+
+pub fn toolchain_lock() -> MutexGuard<'static, ()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 struct TargetDirectoryGuard(Option<OsString>);

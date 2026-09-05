@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-mod support;
+use super::support;
 
 fn fixture_workspace() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/workspace")
@@ -8,7 +8,9 @@ fn fixture_workspace() -> PathBuf {
 
 #[test]
 fn check_runs_complete_host_analysis_without_building_payloads() {
-    let target = support::shared_target("analysis");
+    let _guard = support::toolchain_lock();
+    let target = support::toolchain_target();
+    support::reset_deployment_output(&target, "production");
     let result = std::process::Command::new(env!("CARGO_BIN_EXE_cargo-boomerang"))
         .args(["boomerang", "check", "--deployment", "production"])
         .current_dir(fixture_workspace())
@@ -48,8 +50,10 @@ fn check_runs_complete_host_analysis_without_building_payloads() {
 
 #[test]
 fn check_accepts_an_explicit_workspace_outside_the_current_directory() {
+    let _guard = support::toolchain_lock();
     let current = tempfile::tempdir().unwrap();
-    let target = support::shared_target("analysis");
+    let target = support::toolchain_target();
+    support::reset_deployment_output(&target, "production");
     let result = std::process::Command::new(env!("CARGO_BIN_EXE_cargo-boomerang"))
         .arg("boomerang")
         .arg("--workspace")

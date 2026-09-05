@@ -1,0 +1,45 @@
+name: Cargo Boomerang Toolchain Tests
+
+on:
+  schedule:
+    - cron: "0 3 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  toolchain:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v7
+      - name: Configure Cargo target directory
+        shell: bash
+        run: echo "CARGO_TARGET_DIR=target" >> "$GITHUB_ENV"
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+
+      - name: toolchain version
+        run: cargo -vV
+
+      - name: test cargo-boomerang toolchain
+        run: >-
+          cargo test -p cargo-boomerang --test toolchain --
+          --test-threads=1

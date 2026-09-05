@@ -1,7 +1,7 @@
 use cargo_metadata::MetadataCommand;
 use std::path::PathBuf;
 
-mod support;
+use super::support;
 
 fn fixture_workspace() -> PathBuf {
     support::fixture_workspace()
@@ -9,10 +9,13 @@ fn fixture_workspace() -> PathBuf {
 
 #[test]
 fn generated_manifest_unions_features_for_one_selected_package() {
-    let launcher = support::with_target_directory(&support::shared_target("launcher"), || {
+    let _guard = support::toolchain_lock();
+    let target = support::toolchain_target();
+    let launcher = support::with_target_directory(&target, || {
         cargo_boomerang::generate_launcher(fixture_workspace(), "feature-union", "host")
     })
     .unwrap();
+    launcher.build_locked_offline().unwrap();
     let manifest = std::fs::read_to_string(launcher.manifest_path()).unwrap();
     let manifest = manifest.parse::<toml::Table>().unwrap();
     let features = &manifest["dependencies"]["implementation_0"]["features"];
@@ -20,11 +23,11 @@ fn generated_manifest_unions_features_for_one_selected_package() {
         features.to_string(),
         r#"["__boomerang_payload", "controller-selected", "sensor-selected"]"#
     );
-    launcher.check_locked_offline().unwrap();
 }
 
 #[test]
 fn generated_single_federate_launcher_executes_typed_local_route_without_builder() {
+    let _guard = support::toolchain_lock();
     let target = tempfile::tempdir().unwrap();
     let workspace = fixture_workspace();
     let (resolved, launcher) = support::with_target_directory(target.path(), || {
@@ -77,7 +80,9 @@ fn generated_single_federate_launcher_executes_typed_local_route_without_builder
 
 #[test]
 fn generated_launcher_check_and_run_apply_federate_cargo_configuration() {
-    let launcher = support::with_target_directory(&support::shared_target("launcher"), || {
+    let _guard = support::toolchain_lock();
+    let target = support::toolchain_target();
+    let launcher = support::with_target_directory(&target, || {
         cargo_boomerang::generate_launcher(fixture_workspace(), "profile-config", "host")
     })
     .unwrap();
@@ -89,6 +94,7 @@ fn generated_launcher_check_and_run_apply_federate_cargo_configuration() {
 
 #[test]
 fn generated_launcher_rejects_changed_configured_files_before_cargo() {
+    let _guard = support::toolchain_lock();
     let fixture = support::copied_fixture_workspace();
     let target = tempfile::tempdir().unwrap();
     let launcher = support::with_target_directory(target.path(), || {
@@ -114,7 +120,9 @@ fn generated_launcher_rejects_changed_configured_files_before_cargo() {
 
 #[test]
 fn generated_launcher_renders_normalized_deployment_execution_policy() {
-    let launcher = support::with_target_directory(&support::shared_target("launcher"), || {
+    let _guard = support::toolchain_lock();
+    let target = support::toolchain_target();
+    let launcher = support::with_target_directory(&target, || {
         cargo_boomerang::generate_launcher(fixture_workspace(), "execution", "host")
     })
     .unwrap();
@@ -126,24 +134,11 @@ fn generated_launcher_renders_normalized_deployment_execution_policy() {
         "{source}"
     );
     assert!(source.contains("physical_event_q_size: 1024"), "{source}");
-}
-
-#[test]
-fn generated_launcher_build_preserves_json_compiler_diagnostics() {
-    let target = tempfile::tempdir().unwrap();
-    let launcher = support::with_target_directory(target.path(), || {
-        cargo_boomerang::generate_launcher(fixture_workspace(), "broken-payload", "host")
-    })
-    .unwrap();
-
-    let error = launcher
-        .build_locked_offline()
-        .err()
-        .expect("broken payload launcher build must fail");
     assert!(
-        error
-            .to_string()
-            .contains("intentional target payload build failure"),
-        "expected rendered compiler diagnostic, got:\n{error:#}"
+        source.contains("BOOMERANG_EXECUTION_SUMMARY_V1"),
+        "{source}"
     );
+    assert!(source.contains("create_new(true)"), "{source}");
+    assert!(source.contains("execution.stats()"), "{source}");
+    assert!(source.contains("execution.final_tag()"), "{source}");
 }

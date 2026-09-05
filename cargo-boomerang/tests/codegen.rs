@@ -88,6 +88,31 @@ fn generated_launcher_check_and_run_apply_federate_cargo_configuration() {
 }
 
 #[test]
+fn generated_launcher_rejects_changed_configured_files_before_cargo() {
+    let fixture = support::copied_fixture_workspace();
+    let target = tempfile::tempdir().unwrap();
+    let launcher = support::with_target_directory(target.path(), || {
+        cargo_boomerang::generate_launcher(fixture.path(), "resolution", "host")
+    })
+    .unwrap();
+
+    let target_json = fixture.path().join("targets/host.json");
+    let original_target_json = std::fs::read(&target_json).unwrap();
+    std::fs::write(&target_json, b"changed target JSON").unwrap();
+    let error = launcher.check_locked_offline().unwrap_err().to_string();
+    assert!(error.contains("configured target JSON changed"), "{error}");
+
+    std::fs::write(&target_json, original_target_json).unwrap();
+    let cargo_config = fixture.path().join(".cargo/host.toml");
+    std::fs::write(&cargo_config, b"changed Cargo configuration").unwrap();
+    let error = launcher.check_locked_offline().unwrap_err().to_string();
+    assert!(
+        error.contains("configured Cargo configuration changed"),
+        "{error}"
+    );
+}
+
+#[test]
 fn generated_launcher_renders_normalized_deployment_execution_policy() {
     let launcher = support::with_target_directory(&support::shared_target("launcher"), || {
         cargo_boomerang::generate_launcher(fixture_workspace(), "execution", "host")

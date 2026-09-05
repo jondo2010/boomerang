@@ -2,8 +2,8 @@
 use std::{
     collections::BTreeSet,
     ffi::OsString,
-    fs::{self, OpenOptions},
-    io,
+    fs::{self, File, OpenOptions},
+    io::{self, Seek, SeekFrom},
     path::{Path, PathBuf},
 };
 
@@ -173,14 +173,14 @@ impl GeneratedWorkspace {
         validate_workspace_contents(&self.directory, &self.expectations)?;
         let target = self.target_directory();
         self.prepare_short_target(&target)?;
-        let lock = OpenOptions::new()
+        let mut lock = OpenOptions::new()
             .read(true)
             .write(true)
             .open(target.join(".boomerang-request"))
             .context("failed to open generated target lock")?;
         lock.lock_exclusive()
             .context("failed to lock generated target")?;
-        self.validate_target_marker(&target)?;
+        self.validate_locked_target_marker(&target, &mut lock)?;
         validate_workspace_contents(&self.directory, &self.expectations)?;
         operation(&target)
     }
@@ -213,12 +213,43 @@ impl GeneratedWorkspace {
         self.validate_target_marker(target)
     }
     fn validate_target_marker(&self, target: &Path) -> Result<()> {
+        let marker_path = self.validate_target_marker_path(target)?;
+        let marker = read_cache_record(&marker_path, "generated target marker")?;
+        self.validate_target_marker_record(marker)
+    }
+    fn validate_locked_target_marker(&self, target: &Path, marker_file: &mut File) -> Result<()> {
+        let marker_path = self.validate_target_marker_path(target)?;
+        let metadata = marker_file
+            .metadata()
+            .context("failed to inspect locked generated target marker")?;
+        ensure!(
+            metadata.file_type().is_file() && !metadata_is_reparse_point(&metadata),
+            "generated target marker is not a real regular file"
+        );
+        marker_file
+            .seek(SeekFrom::Start(0))
+            .context("failed to rewind locked generated target marker")?;
+        let marker = serde_json::from_reader(marker_file)
+            .with_context(|| format!("failed to decode {}", marker_path.display()))?;
+        self.validate_target_marker_record(marker)
+    }
+    fn validate_target_marker_path(&self, target: &Path) -> Result<PathBuf> {
         require_real_directory(target, "generated target directory")?;
         validate_canonical_containment(&self.target_anchor, target, "generated target directory")?;
-        let marker = read_cache_record(
-            &target.join(".boomerang-request"),
-            "generated target marker",
-        )?;
+        let marker_path = target.join(".boomerang-request");
+        let metadata = fs::symlink_metadata(&marker_path).with_context(|| {
+            format!(
+                "failed to inspect generated target marker {}",
+                marker_path.display()
+            )
+        })?;
+        ensure!(
+            metadata.file_type().is_file() && !metadata_is_reparse_point(&metadata),
+            "generated target marker is not a real regular file"
+        );
+        Ok(marker_path)
+    }
+    fn validate_target_marker_record(&self, marker: CacheRecord) -> Result<()> {
         let expected = &self.expectations.record;
         if marker.request != expected.request {
             bail!("target locator collision");

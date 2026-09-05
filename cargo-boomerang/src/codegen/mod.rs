@@ -10,7 +10,7 @@ use std::{
     process::{Command, Output},
 };
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, bail, ensure, Context, Result};
 use boomerang_runtime::binding::{
     payload_fingerprint_compile_input_key, PAYLOAD_MACRO_ABI_COMPILE_INPUT,
 };
@@ -45,8 +45,53 @@ pub struct GeneratedLauncher {
     lockfile_path: PathBuf,
     /// Host-verified payload compatibility inputs passed to Cargo.
     compile_inputs: Vec<(String, String)>,
+    /// Canonical configured files and exact bytes included in the request identity.
+    configured_files: ConfiguredFiles,
     /// Target and Cargo configuration selected for this Federate.
     federate: ResolvedFederate,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+/// Canonical configured-file paths and bytes retained for locked preflight validation.
+struct ConfiguredFiles {
+    /// Optional custom target specification included in launcher identity and Cargo arguments.
+    target_json: Option<(PathBuf, Vec<u8>)>,
+    /// Optional Cargo configuration included in launcher identity and Cargo arguments.
+    cargo_config: Option<(PathBuf, Vec<u8>)>,
+}
+
+impl ConfiguredFiles {
+    fn new(federate: &ResolvedFederate) -> Result<Self> {
+        Ok(Self {
+            target_json: configured_file(
+                federate.target_json.as_deref(),
+                "configured target JSON",
+            )?,
+            cargo_config: configured_file(
+                federate.cargo_config.as_deref(),
+                "configured Cargo configuration",
+            )?,
+        })
+    }
+
+    fn apply_canonical_paths(&self, federate: &mut ResolvedFederate) {
+        federate.target_json = self.target_json.as_ref().map(|(path, _)| path.clone());
+        federate.cargo_config = self.cargo_config.as_ref().map(|(path, _)| path.clone());
+    }
+
+    fn validate(&self) -> Result<()> {
+        for (description, expected) in [
+            ("configured target JSON", &self.target_json),
+            ("configured Cargo configuration", &self.cargo_config),
+        ] {
+            let actual = configured_file(
+                expected.as_ref().map(|(path, _)| path.as_path()),
+                description,
+            )?;
+            ensure!(actual == *expected, "{description} changed");
+        }
+        Ok(())
+    }
 }
 
 /// Successful offline build artifact for a generated static Federate launcher.
@@ -88,8 +133,7 @@ impl GeneratedLauncher {
 
     /// Builds the generated launcher offline with its locked dependency graph.
     pub fn build_locked_offline(&self) -> Result<BuiltLauncher> {
-        self.workspace
-            .with_locked_target(|target_dir| self.build_locked_offline_in(target_dir))
+        self.with_locked_target(|target_dir| self.build_locked_offline_in(target_dir))
     }
 
     /// Builds and privately copies the launcher while the request target is locked.
@@ -146,8 +190,7 @@ impl GeneratedLauncher {
 
     /// Checks the generated launcher offline with its reconciled lockfile locked.
     pub fn check_locked_offline(&self) -> Result<()> {
-        self.workspace
-            .with_locked_target(|target_dir| self.check_locked_offline_in(target_dir))
+        self.with_locked_target(|target_dir| self.check_locked_offline_in(target_dir))
     }
 
     fn check_locked_offline_in(&self, target_dir: &Path) -> Result<()> {
@@ -158,14 +201,20 @@ impl GeneratedLauncher {
 
     /// Builds and executes the generated launcher offline with its reconciled lockfile locked.
     pub fn run_locked_offline(&self) -> Result<()> {
-        self.workspace
-            .with_locked_target(|target_dir| self.run_locked_offline_in(target_dir))
+        self.with_locked_target(|target_dir| self.run_locked_offline_in(target_dir))
     }
 
     fn run_locked_offline_in(&self, target_dir: &Path) -> Result<()> {
         let arguments = self.configured_arguments("run", target_dir, false);
         let output = self.cargo(arguments)?;
         require_success("locked offline launcher execution", &output)
+    }
+
+    fn with_locked_target<T>(&self, operation: impl FnOnce(&Path) -> Result<T>) -> Result<T> {
+        self.workspace.with_locked_target(|target_dir| {
+            self.configured_files.validate()?;
+            operation(target_dir)
+        })
     }
 
     /// Builds configured arguments for one locked, offline launcher Cargo operation.
@@ -326,7 +375,7 @@ pub(crate) fn generate_analyzed_launcher(
             federate.runtime()
         );
     }
-    let configuration = analyzed
+    let mut configuration = analyzed
         .resolved
         .deployment()
         .federates
@@ -335,6 +384,8 @@ pub(crate) fn generate_analyzed_launcher(
         .ok_or_else(|| {
             anyhow!("deployment has no resolved configuration for Federate '{federate_id}'")
         })?;
+    let configured_files = ConfiguredFiles::new(&configuration)?;
+    configured_files.apply_canonical_paths(&mut configuration);
 
     let aliases = payload_aliases(&analyzed.resolved, &analyzed.driver, federate)?;
     let manifest = render_manifest(&analyzed.resolved, &aliases)?;
@@ -366,6 +417,7 @@ pub(crate) fn generate_analyzed_launcher(
         &analyzed.resolved.lockfile().digest,
         &compile_inputs,
         &configuration,
+        &configured_files,
         &cargo_program,
     )?;
     let request = GeneratedWorkspaceRequest {
@@ -412,6 +464,7 @@ pub(crate) fn generate_analyzed_launcher(
         source_path,
         lockfile_path,
         compile_inputs,
+        configured_files,
         federate: configuration,
     })
 }
@@ -423,13 +476,9 @@ fn launcher_request_identity(
     source_lock_digest: &[u8; 32],
     compile_inputs: &[(String, String)],
     federate: &ResolvedFederate,
+    configured_files: &ConfiguredFiles,
     cargo_program: &OsStr,
 ) -> Result<RequestIdentity> {
-    let target_json = configured_file(federate.target_json.as_deref(), "configured target JSON")?;
-    let cargo_config = configured_file(
-        federate.cargo_config.as_deref(),
-        "configured Cargo configuration",
-    )?;
     let mut inputs = compile_inputs.to_vec();
     inputs.sort();
 
@@ -448,8 +497,8 @@ fn launcher_request_identity(
         federate.toolchain.as_deref().map(str::as_bytes),
     );
     for (label, file) in [
-        ("target-json", &target_json),
-        ("cargo-config", &cargo_config),
+        ("target-json", &configured_files.target_json),
+        ("cargo-config", &configured_files.cargo_config),
     ] {
         identity.field(
             &format!("{label}-path"),
@@ -687,7 +736,7 @@ fn require_success(phase: &'static str, output: &Output) -> Result<()> {
 mod tests {
     use super::{
         configured_metadata_arguments, configured_path_argument, launcher_command,
-        launcher_request_identity, rendered_compiler_diagnostics,
+        launcher_request_identity, rendered_compiler_diagnostics, ConfiguredFiles,
     };
     use crate::ResolvedFederate;
     use std::{ffi::OsStr, path::Path};
@@ -747,20 +796,23 @@ mod tests {
         }
         let inputs = vec![(String::from("COMPATIBILITY"), String::from("fixed"))];
         let identity = |target_json: &Path, cargo_config: &Path, cargo| {
+            let federate = ResolvedFederate {
+                groups: Vec::new(),
+                target: None,
+                toolchain: None,
+                profile: None,
+                runtime: String::from("std"),
+                target_json: Some(target_json.to_path_buf()),
+                cargo_config: Some(cargo_config.to_path_buf()),
+            };
+            let configured_files = ConfiguredFiles::new(&federate).unwrap();
             launcher_request_identity(
                 b"manifest",
                 b"source",
                 &[7; 32],
                 &inputs,
-                &ResolvedFederate {
-                    groups: Vec::new(),
-                    target: None,
-                    toolchain: None,
-                    profile: None,
-                    runtime: String::from("std"),
-                    target_json: Some(target_json.to_path_buf()),
-                    cargo_config: Some(cargo_config.to_path_buf()),
-                },
+                &federate,
+                &configured_files,
                 OsStr::new(cargo),
             )
             .unwrap()

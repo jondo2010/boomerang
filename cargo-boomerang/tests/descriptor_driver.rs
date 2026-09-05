@@ -3,7 +3,7 @@ use cargo_boomerang::run_descriptor_driver;
 mod support;
 
 #[test]
-fn repeated_descriptor_analysis_uses_cargo_freshness() {
+fn repeated_descriptor_analysis_uses_workspace_configuration_and_cargo_freshness() {
     let target = tempfile::tempdir().unwrap();
     let (first, second) = support::with_target_directory(target.path(), || {
         let run = || run_descriptor_driver(support::fixture_workspace(), "production").unwrap();

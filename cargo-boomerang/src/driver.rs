@@ -3,7 +3,6 @@
 use std::{
     collections::BTreeSet,
     ffi::OsStr,
-    fs,
     io::Cursor,
     path::{Path, PathBuf},
     process::{Command, Output},
@@ -16,13 +15,14 @@ use boomerang_builder::{
         decode_descriptor_driver_output, DescriptorDriverBinding, DescriptorDriverOutput,
     },
 };
-use cargo_metadata::{Message, Metadata, TargetKind};
+use cargo_metadata::{Message, Metadata, PackageId};
 
 use crate::{
     generated::render_descriptor_driver,
     generated_cache::{
-        generated_cargo_program, resolve_generated_workspace, GeneratedRole,
-        GeneratedWorkspaceRequest, RequestIdentity, RequestIdentityBuilder,
+        artifact_matches, copy_private_artifact, generated_cargo_program,
+        resolve_generated_workspace, GeneratedRole, GeneratedWorkspaceRequest, RequestIdentity,
+        RequestIdentityBuilder,
     },
     resolve_workspace, ResolvedWorkspace,
 };
@@ -78,6 +78,11 @@ pub fn run_descriptor_driver(
 pub(crate) fn run_resolved_descriptor_driver(resolved: &ResolvedWorkspace) -> Result<DriverOutput> {
     let generated = render_descriptor_driver(resolved)?;
     let cargo_program = generated_cargo_program();
+    let application_workspace = resolved
+        .lockfile()
+        .path
+        .parent()
+        .expect("canonical workspace lockfile has a parent");
     let driver_package_ids = resolved.driver_package_ids();
     let identity = descriptor_request_identity(
         generated.manifest.as_bytes(),
@@ -95,25 +100,32 @@ pub(crate) fn run_resolved_descriptor_driver(resolved: &ResolvedWorkspace) -> Re
         source_lock_digest: &resolved.lockfile().digest,
     };
     let build_log = std::cell::RefCell::new(String::new());
-    let generated = resolve_generated_workspace(
+    let metadata = |directory: &Path, locked| {
+        let manifest = directory.join("Cargo.toml");
+        let mut arguments = vec![
+            OsStr::new("metadata"),
+            OsStr::new("--manifest-path"),
+            manifest.as_os_str(),
+            OsStr::new("--format-version"),
+            OsStr::new("1"),
+        ];
+        if locked {
+            arguments.push(OsStr::new("--locked"));
+        }
+        arguments.push(OsStr::new("--offline"));
+        cargo(&cargo_program, application_workspace, arguments)
+    };
+    let (generated, descriptor_package) = resolve_generated_workspace(
         resolved.target_directory(),
         &request,
         |directory| {
-            let reconciliation = cargo(
-                &cargo_program,
-                directory,
-                ["metadata", "--format-version", "1", "--offline"],
-            )?;
+            let reconciliation = metadata(directory, false)?;
             let mut log = build_log.borrow_mut();
             log.push_str(&String::from_utf8_lossy(&reconciliation.stderr));
             require_success("lock reconciliation", &reconciliation, &log)
         },
         |directory| {
-            let metadata = cargo(
-                &cargo_program,
-                directory,
-                ["metadata", "--format-version", "1", "--locked", "--offline"],
-            )?;
+            let metadata = metadata(directory, true)?;
             let mut log = build_log.borrow_mut();
             log.push_str(&String::from_utf8_lossy(&metadata.stderr));
             require_success("locked metadata verification", &metadata, &log)?;
@@ -125,7 +137,7 @@ pub(crate) fn run_resolved_descriptor_driver(resolved: &ResolvedWorkspace) -> Re
     let (execution, executable, compiled_artifacts) = generated.with_locked_target(|target| {
         let build = cargo(
             &cargo_program,
-            generated.directory(),
+            application_workspace,
             [
                 OsStr::new("build"),
                 OsStr::new("--locked"),
@@ -139,10 +151,15 @@ pub(crate) fn run_resolved_descriptor_driver(resolved: &ResolvedWorkspace) -> Re
         )?;
         let mut log = build_log.borrow_mut();
         log.push_str(&String::from_utf8_lossy(&build.stderr));
-        let artifact = descriptor_artifact(&build, &mut log);
+        let artifact = descriptor_artifact(
+            &build,
+            &mut log,
+            &descriptor_package,
+            &generated.manifest_path(),
+        );
         require_success("build", &build, &log)?;
         let (executable, compiled_artifacts) = artifact?;
-        let (execution, executable) = copy_private_descriptor(&executable)?;
+        let (execution, executable) = copy_private_artifact(&executable, target)?;
         Ok((execution, executable, compiled_artifacts))
     })?;
     let descriptor = Command::new(&executable)
@@ -183,31 +200,39 @@ fn descriptor_request_identity(
     identity.finish()
 }
 
-/// Invokes the current Cargo executable with deterministic arguments in the generated crate.
+/// Invokes Cargo from the application workspace with deterministic generated-manifest arguments.
 fn cargo(
     program: &OsStr,
-    crate_dir: &Path,
+    application_workspace: &Path,
     arguments: impl IntoIterator<Item = impl AsRef<OsStr>>,
 ) -> Result<Output> {
     Command::new(program)
         .args(arguments)
-        .current_dir(crate_dir)
+        .current_dir(application_workspace)
         .env("BOOMERANG_DESCRIPTOR_DRIVER", "1")
         .output()
-        .with_context(|| format!("failed to invoke Cargo in {}", crate_dir.display()))
+        .with_context(|| {
+            format!(
+                "failed to invoke Cargo in {}",
+                application_workspace.display()
+            )
+        })
 }
 
 /// Extracts the generated descriptor executable and non-fresh artifact count from Cargo messages.
-fn descriptor_artifact(build: &Output, build_log: &mut String) -> Result<(PathBuf, usize)> {
+fn descriptor_artifact(
+    build: &Output,
+    build_log: &mut String,
+    package: &PackageId,
+    manifest: &Path,
+) -> Result<(PathBuf, usize)> {
     let mut executable = None;
     let mut compiled_artifacts = 0;
     for message in Message::parse_stream(Cursor::new(build.stdout.as_slice())) {
         match message.context("failed to decode Cargo build message")? {
             Message::CompilerArtifact(artifact) => {
                 compiled_artifacts += usize::from(!artifact.fresh);
-                if artifact.target.name == "boomerang-descriptor-driver"
-                    && artifact.target.kind.contains(&TargetKind::Bin)
-                {
+                if artifact_matches(&artifact, package, manifest, "boomerang-descriptor-driver")? {
                     let artifact = artifact
                         .executable
                         .context("descriptor driver Cargo artifact has no executable")?;
@@ -229,31 +254,6 @@ fn descriptor_artifact(build: &Output, build_log: &mut String) -> Result<(PathBu
     Ok((executable, compiled_artifacts))
 }
 
-/// Copies the Cargo-selected descriptor binary into an invocation-private executable path.
-fn copy_private_descriptor(source: &Path) -> Result<(tempfile::TempDir, PathBuf)> {
-    let execution = tempfile::Builder::new()
-        .prefix("boomerang-descriptor-")
-        .tempdir()
-        .context("failed to prepare private descriptor execution directory")?;
-    let filename = source
-        .file_name()
-        .context("descriptor executable has no file name")?;
-    let destination = execution.path().join(filename);
-    let source_hash = hash_file(source)?;
-    fs::copy(source, &destination)
-        .with_context(|| format!("failed to copy descriptor executable {}", source.display()))?;
-    if source_hash != hash_file(&destination)? {
-        bail!("copied descriptor executable differs from Cargo artifact");
-    }
-    Ok((execution, destination))
-}
-
-/// Hashes one executable using the same BLAKE3 identity used for generated source inputs.
-fn hash_file(path: &Path) -> Result<blake3::Hash> {
-    let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
-    Ok(blake3::hash(&bytes))
-}
-
 /// Converts a failed phase into a diagnostic preserving accumulated stderr.
 fn require_success(phase: &'static str, output: &Output, build_log: &str) -> Result<()> {
     if output.status.success() {
@@ -270,7 +270,7 @@ fn require_success(phase: &'static str, output: &Output, build_log: &str) -> Res
 fn validate_generated_graph(
     resolved: &crate::ResolvedWorkspace,
     metadata: &Metadata,
-) -> Result<()> {
+) -> Result<PackageId> {
     let root = metadata
         .root_package()
         .ok_or_else(|| anyhow!("generated metadata has no root package"))?;
@@ -305,7 +305,7 @@ fn validate_generated_graph(
             bail!("package {id} was absent from source metadata");
         }
     }
-    Ok(())
+    Ok(root.id.clone())
 }
 
 #[cfg(all(test, unix))]

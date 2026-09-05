@@ -14,14 +14,15 @@ use anyhow::{anyhow, bail, Context, Result};
 use boomerang_runtime::binding::{
     payload_fingerprint_compile_input_key, PAYLOAD_MACRO_ABI_COMPILE_INPUT,
 };
-use cargo_metadata::{Message, Metadata};
+use cargo_metadata::{Message, Metadata, PackageId};
 
 use crate::{
     check::{analyze, AnalyzedDeployment},
     generated::dependency,
     generated_cache::{
-        generated_cargo_program, resolve_generated_workspace, GeneratedRole, GeneratedWorkspace,
-        GeneratedWorkspaceRequest, RequestIdentity, RequestIdentityBuilder,
+        artifact_matches, copy_private_artifact, generated_cargo_program,
+        resolve_generated_workspace, GeneratedRole, GeneratedWorkspace, GeneratedWorkspaceRequest,
+        RequestIdentity, RequestIdentityBuilder,
     },
     DriverOutput, ResolvedFederate, ResolvedWorkspace,
 };
@@ -34,6 +35,8 @@ pub struct GeneratedLauncher {
     application_workspace: PathBuf,
     /// Cargo executable snapshotted for the complete generated-launcher request.
     cargo_program: OsString,
+    /// Exact generated root package selected by locked Cargo metadata.
+    package_id: PackageId,
     /// Path to the generated Cargo manifest.
     manifest_path: PathBuf,
     /// Path to the generated Rust executable source.
@@ -94,8 +97,6 @@ impl GeneratedLauncher {
         let arguments = self.configured_arguments("build", target_dir, true);
         let output = self.cargo(arguments)?;
         require_success("locked offline launcher build", &output)?;
-        let canonical_target_dir = fs::canonicalize(target_dir)
-            .with_context(|| format!("failed to canonicalize {}", target_dir.display()))?;
         let mut executable_paths = BTreeSet::new();
         let mut compiled_artifacts = 0;
         for message in Message::parse_stream(output.stdout.as_slice()) {
@@ -107,42 +108,23 @@ impl GeneratedLauncher {
                 _ => continue,
             };
             compiled_artifacts += usize::from(!artifact.fresh);
-            if !same_manifest_identity(&self.manifest_path, artifact.manifest_path.as_std_path())?
-                || !artifact
-                    .target
-                    .kind
-                    .contains(&cargo_metadata::TargetKind::Bin)
-            {
+            if !artifact_matches(
+                &artifact,
+                &self.package_id,
+                &self.manifest_path,
+                "boomerang-static-launcher",
+            )? {
                 continue;
             }
             let executable = artifact.executable.ok_or_else(|| {
                 anyhow!("generated launcher build emitted a binary without an executable")
             })?;
-            let executable = fs::canonicalize(executable.as_std_path()).with_context(|| {
-                format!("failed to canonicalize generated executable {executable}")
-            })?;
-            if !fs::metadata(&executable)
-                .with_context(|| {
-                    format!(
-                        "failed to inspect generated executable {}",
-                        executable.display()
-                    )
-                })?
-                .is_file()
+            if executable_paths
+                .replace(executable.into_std_path_buf())
+                .is_some()
             {
-                bail!(
-                    "generated executable {} is not a regular file",
-                    executable.display()
-                );
+                bail!("generated launcher build produced multiple executable artifacts");
             }
-            if !executable.starts_with(&canonical_target_dir) {
-                bail!(
-                    "generated executable {} is outside isolated target directory {}",
-                    executable.display(),
-                    canonical_target_dir.display()
-                );
-            }
-            executable_paths.insert(executable);
         }
         if executable_paths.len() != 1 {
             bail!(
@@ -154,7 +136,7 @@ impl GeneratedLauncher {
             .into_iter()
             .next()
             .expect("exactly one generated executable was required");
-        let (_private_directory, executable_path) = copy_private_launcher(&executable, target_dir)?;
+        let (_private_directory, executable_path) = copy_private_artifact(&executable, target_dir)?;
         Ok(BuiltLauncher {
             _private_directory,
             executable_path,
@@ -290,23 +272,6 @@ fn configured_metadata_arguments(
     arguments
 }
 
-/// Compares manifest paths after resolving native aliases and symlinks.
-fn same_manifest_identity(expected: &Path, reported: &Path) -> Result<bool> {
-    let expected = fs::canonicalize(expected).with_context(|| {
-        format!(
-            "failed to canonicalize generated manifest {}",
-            expected.display()
-        )
-    })?;
-    let reported = fs::canonicalize(reported).with_context(|| {
-        format!(
-            "failed to canonicalize Cargo-reported manifest {}",
-            reported.display()
-        )
-    })?;
-    Ok(expected == reported)
-}
-
 /// Collects Cargo-rendered compiler diagnostics from JSON message output.
 fn rendered_compiler_diagnostics(stdout: &[u8]) -> Result<String> {
     let mut diagnostics = String::new();
@@ -411,7 +376,7 @@ pub(crate) fn generate_analyzed_launcher(
         source_lockfile: &analyzed.resolved.lockfile().path,
         source_lock_digest: &analyzed.resolved.lockfile().digest,
     };
-    let workspace = resolve_generated_workspace(
+    let (workspace, package_id) = resolve_generated_workspace(
         analyzed.resolved.target_directory(),
         &request,
         |directory| {
@@ -442,6 +407,7 @@ pub(crate) fn generate_analyzed_launcher(
         workspace,
         application_workspace,
         cargo_program,
+        package_id,
         manifest_path,
         source_path,
         lockfile_path,
@@ -459,8 +425,8 @@ fn launcher_request_identity(
     federate: &ResolvedFederate,
     cargo_program: &OsStr,
 ) -> Result<RequestIdentity> {
-    let target_json = configured_bytes(federate.target_json.as_deref(), "configured target JSON")?;
-    let cargo_config = configured_bytes(
+    let target_json = configured_file(federate.target_json.as_deref(), "configured target JSON")?;
+    let cargo_config = configured_file(
         federate.cargo_config.as_deref(),
         "configured Cargo configuration",
     )?;
@@ -481,16 +447,29 @@ fn launcher_request_identity(
         "toolchain",
         federate.toolchain.as_deref().map(str::as_bytes),
     );
-    identity.field("target-json", target_json.as_deref());
-    identity.field("cargo-config", cargo_config.as_deref());
+    for (label, file) in [
+        ("target-json", &target_json),
+        ("cargo-config", &cargo_config),
+    ] {
+        identity.field(
+            &format!("{label}-path"),
+            file.as_ref()
+                .map(|(path, _)| path.as_os_str().as_encoded_bytes()),
+        );
+        identity.field(label, file.as_ref().map(|(_, bytes)| bytes.as_slice()));
+    }
     identity.field("cargo-program", Some(cargo_program.as_encoded_bytes()));
     Ok(identity.finish())
 }
 
-/// Reads exact optional configured-file bytes while preserving absence in the request identity.
-fn configured_bytes(path: Option<&Path>, description: &str) -> Result<Option<Vec<u8>>> {
+/// Canonicalizes and reads an optional configured file for lossless request identity encoding.
+fn configured_file(path: Option<&Path>, description: &str) -> Result<Option<(PathBuf, Vec<u8>)>> {
     path.map(|path| {
-        fs::read(path).with_context(|| format!("failed to read {description} {}", path.display()))
+        let path = fs::canonicalize(path)
+            .with_context(|| format!("failed to canonicalize {description} {}", path.display()))?;
+        let bytes = fs::read(&path)
+            .with_context(|| format!("failed to read {description} {}", path.display()))?;
+        Ok((path, bytes))
     })
     .transpose()
 }
@@ -523,7 +502,7 @@ fn validate_launcher_graph(
     resolved: &ResolvedWorkspace,
     application_workspace: &Path,
     cargo_program: &OsStr,
-) -> Result<()> {
+) -> Result<PackageId> {
     let mut arguments = configured_metadata_arguments(federate, &directory.join("Cargo.toml"));
     arguments.push(OsString::from("--locked"));
     let output = launcher_command(
@@ -550,37 +529,7 @@ fn validate_launcher_graph(
             bail!("generated launcher package {id} was absent from source metadata");
         }
     }
-    Ok(())
-}
-
-/// Copies a Cargo-selected launcher into an invocation-private, integrity-checked path.
-fn copy_private_launcher(
-    source: &Path,
-    target_directory: &Path,
-) -> Result<(tempfile::TempDir, PathBuf)> {
-    let private_directory = tempfile::Builder::new()
-        .prefix(".boomerang-launcher-")
-        .tempdir_in(target_directory)
-        .context("failed to prepare private launcher directory")?;
-    let filename = source
-        .file_name()
-        .context("launcher executable has no file name")?;
-    let destination = private_directory.path().join(filename);
-    let source_hash = blake3::hash(
-        &fs::read(source)
-            .with_context(|| format!("failed to read launcher executable {}", source.display()))?,
-    );
-    fs::copy(source, &destination)
-        .with_context(|| format!("failed to copy launcher executable {}", source.display()))?;
-    if source_hash
-        != blake3::hash(
-            &fs::read(&destination)
-                .with_context(|| format!("failed to read {}", destination.display()))?,
-        )
-    {
-        bail!("copied launcher executable differs from Cargo artifact");
-    }
-    Ok((private_directory, destination))
+    Ok(root.id.clone())
 }
 
 /// Maps selected implementation package identities to deterministic generated crate aliases.
@@ -738,7 +687,7 @@ fn require_success(phase: &'static str, output: &Output) -> Result<()> {
 mod tests {
     use super::{
         configured_metadata_arguments, configured_path_argument, launcher_command,
-        launcher_request_identity, rendered_compiler_diagnostics, same_manifest_identity,
+        launcher_request_identity, rendered_compiler_diagnostics,
     };
     use crate::ResolvedFederate;
     use std::{ffi::OsStr, path::Path};
@@ -787,47 +736,46 @@ mod tests {
     }
 
     #[test]
-    fn launcher_request_identity_tracks_cargo_config_bytes() {
-        let cargo_config = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(cargo_config.path(), b"[net]\noffline = true\n").unwrap();
-        let federate = ResolvedFederate {
-            groups: Vec::new(),
-            target: None,
-            toolchain: None,
-            profile: None,
-            runtime: String::from("std"),
-            target_json: None,
-            cargo_config: Some(cargo_config.path().to_path_buf()),
-        };
+    fn launcher_request_identity_tracks_configured_files_and_cargo_program() {
+        let [target_a, target_b, config_a, config_b] =
+            std::array::from_fn(|_| tempfile::NamedTempFile::new().unwrap());
+        for path in [target_a.path(), target_b.path()] {
+            std::fs::write(path, b"{}\n").unwrap();
+        }
+        for path in [config_a.path(), config_b.path()] {
+            std::fs::write(path, b"[net]\noffline = true\n").unwrap();
+        }
         let inputs = vec![(String::from("COMPATIBILITY"), String::from("fixed"))];
-        let identity = |cargo| {
+        let identity = |target_json: &Path, cargo_config: &Path, cargo| {
             launcher_request_identity(
                 b"manifest",
                 b"source",
                 &[7; 32],
                 &inputs,
-                &federate,
+                &ResolvedFederate {
+                    groups: Vec::new(),
+                    target: None,
+                    toolchain: None,
+                    profile: None,
+                    runtime: String::from("std"),
+                    target_json: Some(target_json.to_path_buf()),
+                    cargo_config: Some(cargo_config.to_path_buf()),
+                },
                 OsStr::new(cargo),
             )
             .unwrap()
         };
-        let first = identity("cargo");
+        let first = identity(target_a.path(), config_a.path(), "cargo");
 
-        std::fs::write(cargo_config.path(), b"[net]\noffline = false\n").unwrap();
-        let second = identity("cargo");
-
-        assert_ne!(first, second);
-        assert_ne!(second, identity("custom-cargo"));
-    }
-
-    #[test]
-    fn generated_manifest_identity_accepts_canonical_path() {
-        let directory = tempfile::tempdir().unwrap();
-        let manifest = directory.path().join("Cargo.toml");
-        std::fs::write(&manifest, "[package]\nname = \"test\"\n").unwrap();
-
-        let canonical = std::fs::canonicalize(&manifest).unwrap();
-        assert!(same_manifest_identity(&manifest, &canonical).unwrap());
+        std::fs::write(config_a.path(), b"[net]\noffline = false\n").unwrap();
+        assert_ne!(first, identity(target_a.path(), config_a.path(), "cargo"));
+        std::fs::write(config_a.path(), b"[net]\noffline = true\n").unwrap();
+        assert_ne!(first, identity(target_b.path(), config_a.path(), "cargo"));
+        assert_ne!(first, identity(target_a.path(), config_b.path(), "cargo"));
+        assert_ne!(
+            first,
+            identity(target_a.path(), config_a.path(), "custom-cargo")
+        );
     }
 
     #[test]

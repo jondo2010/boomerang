@@ -9,6 +9,7 @@ use std::{
 
 use crate::bundle::rename_noreplace;
 use anyhow::{bail, ensure, Context, Result};
+use cargo_metadata::{Artifact, PackageId, TargetKind};
 use fs2::FileExt;
 const GENERATED_CACHE_SCHEMA: u32 = 1;
 /// The purpose of a generated Cargo workspace.
@@ -134,17 +135,6 @@ impl WorkspaceExpectations {
         }
     }
 }
-#[derive(Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
-#[serde(deny_unknown_fields)]
-/// Ownership record stored in each short Cargo target.
-struct TargetMarker {
-    /// Cache-format version expected by the target owner.
-    schema: u32,
-    /// Generated-workspace role using this target.
-    role: GeneratedRole,
-    /// Full request digest whose prefix forms the target locator.
-    request: String,
-}
 /// Filesystem locations that form one validated generated Cargo workspace.
 #[derive(Debug)]
 pub(crate) struct GeneratedWorkspace {
@@ -157,7 +147,7 @@ pub(crate) struct GeneratedWorkspace {
 }
 impl GeneratedWorkspace {
     /// Revalidates a published workspace and its locked Cargo graph.
-    fn validate_published(&self, validate_graph: &impl Fn(&Path) -> Result<()>) -> Result<()> {
+    fn validate_published<T>(&self, validate_graph: &impl Fn(&Path) -> Result<T>) -> Result<T> {
         require_real_directory(&self.directory, "generated workspace")?;
         validate_canonical_containment(&self.target_anchor, &self.directory, "workspace")?;
         validate_workspace_contents(&self.directory, &self.expectations)?;
@@ -202,13 +192,8 @@ impl GeneratedWorkspace {
         {
             return self.validate_target_marker(target);
         }
-        let record = &self.expectations.record;
-        let marker = TargetMarker {
-            schema: GENERATED_CACHE_SCHEMA,
-            role: record.role,
-            request: record.request.clone(),
-        };
-        let bytes = serde_json::to_vec(&marker).context("failed to encode target marker")?;
+        let marker = &self.expectations.record;
+        let bytes = serde_json::to_vec(marker).context("failed to encode target marker")?;
         publish_staged(
             &parent,
             target,
@@ -219,7 +204,7 @@ impl GeneratedWorkspace {
             |directory, ()| {
                 let marker_path = directory.join(".boomerang-request");
                 validate_exact_directory(directory, &[".boomerang-request"], "target staging")?;
-                if read_target_marker(&marker_path)? != marker {
+                if read_cache_record(&marker_path, "generated target marker")? != *marker {
                     bail!("invalid target marker");
                 }
                 Ok(())
@@ -230,13 +215,15 @@ impl GeneratedWorkspace {
     fn validate_target_marker(&self, target: &Path) -> Result<()> {
         require_real_directory(target, "generated target directory")?;
         validate_canonical_containment(&self.target_anchor, target, "generated target directory")?;
-        let marker = read_target_marker(&target.join(".boomerang-request"))?;
+        let marker = read_cache_record(
+            &target.join(".boomerang-request"),
+            "generated target marker",
+        )?;
         let expected = &self.expectations.record;
         if marker.request != expected.request {
             bail!("target locator collision");
         }
-        let valid = marker.schema == GENERATED_CACHE_SCHEMA && marker.role == expected.role;
-        ensure!(valid, "generated target marker is invalid");
+        ensure!(marker == *expected, "generated target marker is invalid");
         Ok(())
     }
 }
@@ -258,9 +245,7 @@ fn validate_workspace_contents(
     if hash_file(&lockfile, "generated lockfile")? != expected.generated_lock_hash {
         bail!("generated lockfile changed");
     }
-    let actual: CacheRecord =
-        serde_json::from_slice(&read_regular_file(&record, "generated cache record")?)
-            .with_context(|| format!("failed to decode {}", record.display()))?;
+    let actual = read_cache_record(&record, "generated cache record")?;
     ensure!(actual == *expected, "generated cache record changed");
     Ok(())
 }
@@ -278,19 +263,79 @@ fn read_verified_source_lock(path: &Path, expected_digest: &[u8; 32]) -> Result<
 fn read_regular_file(path: &Path, description: &str) -> Result<Vec<u8>> {
     let metadata = fs::symlink_metadata(path)
         .with_context(|| format!("failed to inspect {description} {}", path.display()))?;
-    let real_file = metadata.file_type().is_file() && !metadata_is_reparse_point(&metadata);
-    ensure!(real_file, "{description} is not a real regular file");
+    ensure!(
+        metadata.file_type().is_file() && !metadata_is_reparse_point(&metadata),
+        "{description} is not a real regular file"
+    );
     fs::read(path).with_context(|| format!("failed to read {description} {}", path.display()))
 }
 fn require_real_directory(path: &Path, description: &str) -> Result<()> {
     let metadata = fs::symlink_metadata(path)
         .with_context(|| format!("failed to inspect {description} {}", path.display()))?;
-    let real_directory = metadata.file_type().is_dir() && !metadata_is_reparse_point(&metadata);
-    ensure!(real_directory, "{description} is not a real directory");
+    ensure!(
+        metadata.file_type().is_dir() && !metadata_is_reparse_point(&metadata),
+        "{description} is not a real directory"
+    );
     Ok(())
 }
-fn read_target_marker(path: &Path) -> Result<TargetMarker> {
-    serde_json::from_slice(&read_regular_file(path, "generated target marker")?)
+
+/// Validates and privately copies a raw Cargo artifact while its target lock is held.
+pub(crate) fn copy_private_artifact(
+    path: &Path,
+    target: &Path,
+) -> Result<(tempfile::TempDir, PathBuf)> {
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("failed to inspect Cargo artifact {}", path.display()))?;
+    ensure!(
+        path.is_absolute() && metadata.is_file() && !metadata_is_reparse_point(&metadata),
+        "Cargo artifact {} is not a raw regular file",
+        path.display()
+    );
+    let target = fs::canonicalize(target).context("failed to canonicalize locked target")?;
+    let artifact = validate_canonical_containment(&target, path, "Cargo artifact")?;
+    let private = tempfile::Builder::new()
+        .prefix(".boomerang-artifact-")
+        .tempdir_in(target)
+        .context("failed to prepare private artifact directory")?;
+    let filename = artifact
+        .file_name()
+        .context("Cargo artifact has no file name")?;
+    let destination = private.path().join(filename);
+    let source_hash = hash_file(&artifact, "Cargo artifact")?;
+    fs::copy(&artifact, &destination)
+        .with_context(|| format!("failed to copy Cargo artifact {}", artifact.display()))?;
+    ensure!(
+        source_hash == hash_file(&destination, "private artifact")?,
+        "private copy differs from Cargo artifact"
+    );
+    Ok((private, destination))
+}
+
+/// Selects only a Cargo artifact with the exact generated package, manifest, and binary identity.
+pub(crate) fn artifact_matches(
+    artifact: &Artifact,
+    package: &PackageId,
+    manifest: &Path,
+    binary: &str,
+) -> Result<bool> {
+    let same_package = artifact.package_id == *package;
+    let same_manifest = fs::canonicalize(artifact.manifest_path.as_std_path())
+        .context("failed to canonicalize Cargo artifact manifest")?
+        == fs::canonicalize(manifest).context("failed to canonicalize generated manifest")?;
+    if !same_package && !same_manifest {
+        return Ok(false);
+    }
+    ensure!(
+        same_package
+            && same_manifest
+            && artifact.target.name == binary
+            && artifact.target.kind == [TargetKind::Bin],
+        "generated Cargo artifact identity mismatch"
+    );
+    Ok(true)
+}
+fn read_cache_record(path: &Path, description: &str) -> Result<CacheRecord> {
+    serde_json::from_slice(&read_regular_file(path, description)?)
         .with_context(|| format!("failed to decode {}", path.display()))
 }
 fn validate_exact_directory(directory: &Path, expected: &[&str], description: &str) -> Result<()> {
@@ -305,9 +350,10 @@ fn validate_exact_directory(directory: &Path, expected: &[&str], description: &s
     Ok(())
 }
 fn validate_canonical_file(path: &Path, expected: &[u8], description: &str) -> Result<()> {
-    if read_regular_file(path, description)? != expected {
-        bail!("{description} differs from its canonical input");
-    }
+    ensure!(
+        read_regular_file(path, description)? == expected,
+        "{description} differs from its canonical input"
+    );
     Ok(())
 }
 const STAGING_OWNER_MARKER: &str = ".boomerang-staging-owner";
@@ -319,9 +365,10 @@ fn validate_staging_ownership(
     marker: &Path,
     owner: &[u8],
 ) -> Result<bool> {
-    if !owner.starts_with(b".staging-") {
-        bail!("invalid staging owner name");
-    }
+    ensure!(
+        owner.starts_with(b".staging-"),
+        "invalid staging owner name"
+    );
     let external = marker.parent() == Some(parent);
     let exists = match fs::symlink_metadata(staging) {
         Ok(_) => true,
@@ -333,8 +380,10 @@ fn validate_staging_ownership(
         let canonical = validate_canonical_containment(parent, staging, "staging")?;
         ensure!(canonical.parent() == Some(parent), "staging escaped parent");
     }
-    let owned = read_regular_file(marker, "staging owner proof")? == owner;
-    ensure!(owned, "staging owner proof changed");
+    ensure!(
+        read_regular_file(marker, "staging owner proof")? == owner,
+        "staging owner proof changed"
+    );
     Ok(exists)
 }
 /// Populates, validates, and atomically publishes one staging directory with safe cleanup.
@@ -343,7 +392,7 @@ fn publish_staged<T>(
     destination: &Path,
     populate: impl FnOnce(&Path) -> Result<T>,
     validate: impl FnOnce(&Path, &T) -> Result<()>,
-) -> Result<(T, bool)> {
+) -> Result<T> {
     let staging = tempfile::Builder::new()
         .prefix(".staging-")
         .tempdir_in(parent)
@@ -363,12 +412,12 @@ fn publish_staged<T>(
             .context("failed to remove staging owner marker before publication")?;
         marker = external_marker;
         validate(&staging, &value)?;
-        let published = match rename_noreplace(&staging, destination) {
-            Ok(()) => true,
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => false,
+        match rename_noreplace(&staging, destination) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(error).context("failed to publish generated cache entry"),
-        };
-        Ok((value, published))
+        }
+        Ok(value)
     })();
     let cleanup: Result<()> = (|| {
         if validate_staging_ownership(&staging, parent, &marker, owner)? {
@@ -397,9 +446,10 @@ fn prepare_managed_directories(anchor: &Path, components: &[&str]) -> Result<Pat
         }
         require_real_directory(&child, "managed path component")?;
         let canonical = validate_canonical_containment(anchor, &child, "managed path component")?;
-        if canonical.parent() != Some(current.as_path()) {
-            bail!("managed path escaped");
-        }
+        ensure!(
+            canonical.parent() == Some(current.as_path()),
+            "managed path escaped"
+        );
         current = canonical;
     }
     Ok(current)
@@ -411,9 +461,10 @@ fn validate_canonical_containment(
     description: &str,
 ) -> Result<PathBuf> {
     let canonical = fs::canonicalize(path).context("failed to canonicalize managed path")?;
-    if !canonical.starts_with(anchor) {
-        bail!("{description} escapes target anchor");
-    }
+    ensure!(
+        canonical.starts_with(anchor),
+        "{description} escapes target anchor"
+    );
     Ok(canonical)
 }
 #[cfg(windows)]
@@ -430,12 +481,12 @@ fn metadata_is_reparse_point(_metadata: &fs::Metadata) -> bool {
     false
 }
 /// Resolves or atomically publishes a generated workspace for one exact request.
-pub(crate) fn resolve_generated_workspace(
+pub(crate) fn resolve_generated_workspace<T>(
     target_directory: &Path,
     request: &GeneratedWorkspaceRequest<'_>,
     reconcile: impl FnOnce(&Path) -> Result<()>,
-    validate_graph: impl Fn(&Path) -> Result<()>,
-) -> Result<GeneratedWorkspace> {
+    validate_graph: impl Fn(&Path) -> Result<T>,
+) -> Result<(GeneratedWorkspace, T)> {
     let source_lock =
         read_verified_source_lock(request.source_lockfile, request.source_lock_digest)?;
     let identity = request.identity.lowercase_hex();
@@ -458,10 +509,10 @@ pub(crate) fn resolve_generated_workspace(
             target_anchor,
             expectations,
         };
-        workspace.validate_published(&validate_graph)?;
-        return Ok(workspace);
+        let graph = workspace.validate_published(&validate_graph)?;
+        return Ok((workspace, graph));
     }
-    let (expectations, published) = publish_staged(
+    let expectations = publish_staged(
         &parent,
         &final_directory,
         |directory| {
@@ -491,10 +542,8 @@ pub(crate) fn resolve_generated_workspace(
         target_anchor,
         expectations,
     };
-    if !published {
-        workspace.validate_published(&validate_graph)?;
-    }
-    Ok(workspace)
+    let graph = workspace.validate_published(&validate_graph)?;
+    Ok((workspace, graph))
 }
 /// Selects the Cargo executable while leaving invocation details to the caller.
 pub(crate) fn generated_cargo_program() -> OsString {
@@ -543,6 +592,7 @@ mod tests {
             reconcile: impl FnOnce(&Path) -> Result<()>,
         ) -> Result<GeneratedWorkspace> {
             resolve_generated_workspace(self.target.path(), &self.request(), reconcile, |_| Ok(()))
+                .map(|(workspace, ())| workspace)
         }
         fn published() -> (Self, GeneratedWorkspace) {
             let fixture = Self::new();
@@ -556,11 +606,17 @@ mod tests {
         error
     }
     #[test]
-    fn changed_cached_source_fails_closed() {
+    fn workspace_validation_rejects_mutated_contents_and_entries() {
         let (fixture, workspace) = CacheFixture::published();
         fs::write(workspace.directory().join("src/main.rs"), b"changed").unwrap();
-        let error = expect_error(fixture.resolve(), "generated source");
-        assert!(error.contains("canonical input"), "{error}");
+        expect_error(
+            fixture.resolve(),
+            "generated source differs from its canonical input",
+        );
+
+        let (fixture, workspace) = CacheFixture::published();
+        fs::write(workspace.directory().join("unexpected"), b"x").unwrap();
+        expect_error(fixture.resolve(), "unexpected generated workspace entry");
     }
     #[test]
     fn locked_target_rejects_coordinated_source_and_record_mutation() {
@@ -572,14 +628,13 @@ mod tests {
         let mut record: CacheRecord = serde_json::from_slice(&fs::read(&marker).unwrap()).unwrap();
         record.source_hash = blake3::hash(changed).to_string();
         fs::write(marker, serde_json::to_vec(&record).unwrap()).unwrap();
-        let error = expect_error(
+        expect_error(
             workspace.with_locked_target(|_| -> Result<()> { panic!("target operation ran") }),
-            "generated source",
+            "generated source differs from its canonical input",
         );
-        assert!(error.contains("canonical input"), "{error}");
     }
     #[test]
-    fn failed_reconciliation_never_publishes_request_directory() {
+    fn staging_failure_is_atomic_and_cleanup_is_ownership_safe() {
         let fixture = CacheFixture::new();
         expect_error(
             fixture.resolve_with(|_| anyhow::bail!("intentional reconciliation failure")),
@@ -591,9 +646,7 @@ mod tests {
             .join("boomerang/generated/v1/descriptor")
             .join(fixture.request().identity.lowercase_hex());
         assert!(!published.exists());
-    }
-    #[test]
-    fn replaced_staging_owner_proof_is_not_recursively_deleted() {
+
         let fixture = CacheFixture::new();
         let mut retained = PathBuf::new();
         expect_error(
@@ -608,21 +661,51 @@ mod tests {
             UNSAFE_CLEANUP,
         );
         assert_eq!(fs::read(retained.join("victim")).unwrap(), b"retain");
+
+        let fixture = CacheFixture::new();
+        fs::create_dir_all(fixture.target.path().join("boomerang/.staging-crash")).unwrap();
+        assert!(fixture.resolve().is_ok());
     }
     #[test]
-    fn unexpected_workspace_entry_fails_closed() {
-        let (fixture, workspace) = CacheFixture::published();
-        fs::write(workspace.directory().join("unexpected"), b"x").unwrap();
-        expect_error(fixture.resolve(), "unexpected generated workspace entry");
-    }
-    #[test]
-    fn request_identity_changes_with_canonical_field_bytes() {
-        let identity = |value: &[u8]| {
-            let mut builder = RequestIdentityBuilder::new(GeneratedRole::Descriptor);
-            builder.field("cargo-config", Some(value));
-            builder.finish()
+    fn cargo_artifact_identity_fails_closed_on_partial_matches() {
+        let manifest = tempfile::NamedTempFile::new().unwrap();
+        let other = tempfile::NamedTempFile::new().unwrap();
+        let expected = "path+file:///expected#generated@0.0.0";
+        let package = PackageId {
+            repr: expected.into(),
         };
-        assert_ne!(identity(b"first"), identity(b"second"));
+        let artifact = |package: &str, manifest: &Path, binary: &str| -> Artifact {
+            serde_json::from_str(&format!(
+                r#"{{"package_id":{package:?},"manifest_path":{manifest:?},"target":{{"name":{binary:?},"kind":["bin"],"src_path":{manifest:?}}},"profile":{{"opt_level":"0","debug_assertions":false,"overflow_checks":false,"test":false}},"features":[],"filenames":[],"executable":null,"fresh":false}}"#,
+                manifest = manifest.to_str().unwrap(),
+            ))
+            .unwrap()
+        };
+        for artifact in [
+            artifact(
+                "path+file:///wrong#wrong@0.0.0",
+                manifest.path(),
+                "generated",
+            ),
+            artifact(expected, other.path(), "generated"),
+            artifact(expected, manifest.path(), "wrong"),
+        ] {
+            assert!(artifact_matches(&artifact, &package, manifest.path(), "generated").is_err());
+        }
+    }
+    #[cfg(unix)]
+    #[test]
+    fn artifact_and_managed_paths_reject_symlinks() {
+        let fixture = CacheFixture::new();
+        let artifact = fixture.target.path().join("artifact");
+        let link = fixture.target.path().join("redirected");
+        fs::write(&artifact, b"binary").unwrap();
+        std::os::unix::fs::symlink(artifact, &link).unwrap();
+        assert!(copy_private_artifact(&link, fixture.target.path()).is_err());
+
+        let link = fixture.target.path().join("boomerang");
+        std::os::unix::fs::symlink(fixture.outside.path(), link).unwrap();
+        expect_error(fixture.resolve(), "is not a real directory");
     }
     #[cfg(unix)]
     #[test]
@@ -633,20 +716,16 @@ mod tests {
         let replacement = tempfile::NamedTempFile::new_in(path.parent().unwrap()).unwrap();
         fs::write(replacement.path(), b"replacement lock").unwrap();
         fs::rename(replacement.path(), path).unwrap();
-        assert_eq!(snapshot, LOCK);
-        assert_eq!(fs::read(path).unwrap(), b"replacement lock");
-    }
-    #[cfg(unix)]
-    #[test]
-    fn symlinked_managed_parent_is_rejected() {
-        let fixture = CacheFixture::new();
-        let link = fixture.target.path().join("boomerang");
-        std::os::unix::fs::symlink(fixture.outside.path(), link).unwrap();
-        expect_error(fixture.resolve(), "is not a real directory");
+        assert_eq!(
+            (snapshot, fs::read(path).unwrap()),
+            (LOCK.to_vec(), b"replacement lock".to_vec())
+        );
     }
     #[cfg(windows)]
     #[test]
-    fn linked_managed_parent_is_rejected() {
+    fn linked_managed_parent_and_reparse_attributes_are_rejected() {
+        assert!(windows_file_attributes_are_reparse(0x400));
+        assert!(!windows_file_attributes_are_reparse(0));
         let fixture = CacheFixture::new();
         let generated = fixture.target.path().join("boomerang");
         match std::os::windows::fs::symlink_dir(fixture.outside.path(), generated) {
@@ -656,24 +735,25 @@ mod tests {
         }
         expect_error(fixture.resolve(), "is not a real directory");
     }
-    #[cfg(windows)]
     #[test]
-    fn windows_reparse_attribute_is_detected() {
-        assert!(windows_file_attributes_are_reparse(0x400));
-        assert!(!windows_file_attributes_are_reparse(0));
-    }
-    #[test]
-    fn short_target_collision_fails_closed() {
+    fn short_target_marker_rejects_collisions_and_recreates_removals() {
         let (_fixture, workspace) = CacheFixture::published();
         workspace.with_locked_target(|_| Ok(())).unwrap();
         let marker_path = workspace.target_directory().join(".boomerang-request");
-        let mut marker = read_target_marker(&marker_path).unwrap();
+        let mut marker = read_cache_record(&marker_path, "target marker").unwrap();
         marker.request = "f".repeat(64);
         fs::write(marker_path, serde_json::to_vec(&marker).unwrap()).unwrap();
         expect_error(
             workspace.with_locked_target(|_| Ok(())),
             "target locator collision",
         );
+
+        let (_fixture, workspace) = CacheFixture::published();
+        let target = workspace.target_directory();
+        workspace.with_locked_target(|_| Ok(())).unwrap();
+        fs::remove_dir_all(&target).unwrap();
+        workspace.with_locked_target(|_| Ok(())).unwrap();
+        assert!(target.join(".boomerang-request").is_file());
     }
     #[test]
     fn concurrent_identical_publishers_reuse_one_workspace() {
@@ -687,20 +767,5 @@ mod tests {
             let [first, second] = [scope.spawn(resolve), scope.spawn(resolve)];
             assert_eq!(first.join().unwrap(), second.join().unwrap());
         });
-    }
-    #[test]
-    fn removed_short_target_is_recreated_with_its_full_marker() {
-        let (_fixture, workspace) = CacheFixture::published();
-        let target = workspace.target_directory();
-        workspace.with_locked_target(|_| Ok(())).unwrap();
-        fs::remove_dir_all(&target).unwrap();
-        workspace.with_locked_target(|_| Ok(())).unwrap();
-        assert!(target.join(".boomerang-request").is_file());
-    }
-    #[test]
-    fn crash_staging_residue_is_ignored() {
-        let fixture = CacheFixture::new();
-        fs::create_dir_all(fixture.target.path().join("boomerang/.staging-crash")).unwrap();
-        assert!(fixture.resolve().is_ok());
     }
 }

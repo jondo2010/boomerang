@@ -1,6 +1,5 @@
 use std::path::PathBuf;
 
-#[allow(dead_code)]
 mod support;
 
 fn fixture_workspace() -> PathBuf {

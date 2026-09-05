@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::{
     ffi::OsString,
     path::{Path, PathBuf},
@@ -8,7 +10,6 @@ pub fn fixture_workspace() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/workspace")
 }
 
-#[allow(dead_code)]
 pub fn shared_target(lane: &str) -> PathBuf {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("cargo-boomerang-fixtures");
     std::fs::create_dir_all(&root).unwrap();

@@ -1,3 +1,6 @@
+#[cfg(not(boomerang_workspace_config_probe))]
+compile_error!("Cargo command ignored workspace configuration");
+
 use boomerang_builder::compiler::{
     ApplicationTopology, TopologyBuildError,
 };

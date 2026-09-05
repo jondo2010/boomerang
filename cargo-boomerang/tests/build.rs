@@ -12,31 +12,14 @@ fn fixture_workspace() -> PathBuf {
 }
 
 fn build_fixture(deployment: &str, target: &Path) -> Output {
-    build_workspace_fixture(&fixture_workspace(), deployment, target)
-}
-
-fn build_workspace_fixture(workspace: &Path, deployment: &str, target: &Path) -> Output {
     Command::new(env!("CARGO_BIN_EXE_cargo-boomerang"))
         .arg("boomerang")
         .arg("--workspace")
-        .arg(workspace)
+        .arg(fixture_workspace())
         .args(["build", "--deployment", deployment])
         .env("CARGO_TARGET_DIR", target)
         .output()
         .unwrap()
-}
-
-fn copy_tree(source: &Path, destination: &Path) {
-    fs::create_dir_all(destination).unwrap();
-    for entry in fs::read_dir(source).unwrap() {
-        let entry = entry.unwrap();
-        let target = destination.join(entry.file_name());
-        if entry.file_type().unwrap().is_dir() {
-            copy_tree(&entry.path(), &target);
-        } else {
-            fs::copy(entry.path(), target).unwrap();
-        }
-    }
 }
 
 fn assert_no_staging_residue(path: &Path) {
@@ -352,20 +335,7 @@ fn build_accepts_an_explicit_workspace_outside_the_current_directory() {
 #[test]
 fn build_applies_configured_release_profile_and_cargo_configuration() {
     let target = tempfile::tempdir().unwrap();
-    let temporary = tempfile::tempdir_in(fixture_workspace().parent().unwrap()).unwrap();
-    let workspace = temporary.path().to_path_buf();
-    copy_tree(&fixture_workspace(), &workspace);
-    let manifest = workspace.join("Boomerang.toml");
-    let contents = fs::read_to_string(&manifest)
-        .unwrap()
-        .replace("cargo-config = \".cargo/profile-config.toml\"\n", "");
-    fs::write(manifest, contents).unwrap();
-    fs::write(
-        workspace.join(".cargo/config.toml"),
-        "[build]\nrustflags = [\"--cfg=boomerang_cargo_config_probe\"]\n",
-    )
-    .unwrap();
-    let result = build_workspace_fixture(&workspace, "profile-config", target.path());
+    let result = build_fixture("profile-config", target.path());
 
     assert!(
         result.status.success(),

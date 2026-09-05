@@ -45,7 +45,7 @@ impl ColorChoice {
     fn stream_choice(self) -> anstream::ColorChoice {
         match self {
             Self::Auto => anstream::ColorChoice::Auto,
-            Self::Always => anstream::ColorChoice::AlwaysAnsi,
+            Self::Always => anstream::ColorChoice::Always,
             Self::Never => anstream::ColorChoice::Never,
         }
     }
@@ -97,9 +97,9 @@ impl CommandOutput {
             return;
         }
         command.env("CARGO_TERM_COLOR", self.color.as_cargo_value());
-        if self.quiet {
+        if self.verbosity == 0 {
             command.arg("--quiet");
-        } else if self.verbosity > 0 {
+        } else {
             command.arg(format!("-{}", "v".repeat(usize::from(self.verbosity))));
         }
     }
@@ -110,9 +110,9 @@ impl CommandOutput {
             return;
         }
         arguments.extend([String::from("--color"), self.color.as_cargo_value().into()]);
-        if self.quiet {
+        if self.verbosity == 0 {
             arguments.push(String::from("--quiet"));
-        } else if self.verbosity > 0 {
+        } else {
             arguments.push(format!("-{}", "v".repeat(usize::from(self.verbosity))));
         }
     }
@@ -122,9 +122,13 @@ impl CommandOutput {
         self.verbosity > 0
     }
 
-    /// Forwards successful nested Cargo stderr when verbose output was requested.
+    /// Forwards successful nested Cargo output after its normal-verbosity noise is suppressed.
     pub(crate) fn forward_cargo_stderr(self, output: &Output) -> Result<()> {
-        if self.verbosity == 0 || !output.status.success() || output.stderr.is_empty() {
+        if self.quiet
+            || !self.configure_cargo
+            || !output.status.success()
+            || output.stderr.is_empty()
+        {
             return Ok(());
         }
         let mut stderr = anstream::AutoStream::new(io::stderr(), self.color.stream_choice());

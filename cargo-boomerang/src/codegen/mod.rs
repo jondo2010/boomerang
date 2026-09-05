@@ -327,7 +327,7 @@ fn configured_metadata_arguments(
 }
 
 /// Collects Cargo-rendered compiler diagnostics from JSON message output.
-fn rendered_compiler_diagnostics(stdout: &[u8]) -> Result<String> {
+pub(crate) fn rendered_compiler_diagnostics(stdout: &[u8]) -> Result<String> {
     let mut diagnostics = String::new();
     for message in Message::parse_stream(stdout) {
         match message.context("failed to parse generated Cargo build message")? {

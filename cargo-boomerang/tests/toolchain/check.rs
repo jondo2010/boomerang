@@ -99,3 +99,29 @@ fn check_accepts_an_explicit_workspace_outside_the_current_directory() {
         .join("boomerang/production/check.json")
         .exists());
 }
+
+#[test]
+fn descriptor_failure_reports_actionable_diagnostic_before_cargo_summary() {
+    let _guard = support::toolchain_lock();
+    let target = support::toolchain_target();
+    support::reset_deployment_output(&target, "broken-descriptor");
+    let result = std::process::Command::new(env!("CARGO_BIN_EXE_cargo-boomerang"))
+        .args(["boomerang", "check", "--deployment", "broken-descriptor"])
+        .current_dir(fixture_workspace())
+        .env("CARGO_TARGET_DIR", target)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(result.stderr).unwrap();
+
+    assert!(!result.status.success(), "{stderr}");
+    let diagnostic = stderr
+        .find("error: intentional descriptor build failure")
+        .expect("missing rendered descriptor diagnostic");
+    let summary = stderr
+        .find("error: could not compile `vehicle-control`")
+        .expect("missing Cargo failure summary");
+    assert!(
+        diagnostic < summary,
+        "descriptor diagnostic was out of order:\n{stderr}"
+    );
+}

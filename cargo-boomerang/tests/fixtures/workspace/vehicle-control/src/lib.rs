@@ -3,6 +3,11 @@ compile_error!("controller-payload-only");
 #[cfg(all(feature = "broken-payload", feature = "__boomerang_payload"))]
 compile_error!("intentional target payload build failure");
 #[cfg(all(
+    feature = "broken-descriptor",
+    feature = "__boomerang_descriptor"
+))]
+compile_error!("intentional descriptor build failure");
+#[cfg(all(
     feature = "profile-config-probe",
     feature = "__boomerang_payload",
     debug_assertions
@@ -16,6 +21,9 @@ compile_error!("profile-config probe requires the release profile");
 compile_error!("profile-config probe requires Cargo configuration rustflags");
 
 use boomerang::prelude::*;
+
+#[cfg(all(feature = "warning-diagnostic", feature = "__boomerang_payload"))]
+const INTENTIONAL_TARGET_PAYLOAD_WARNING: () = ();
 
 #[reactor(
     contract = "vehicle.controller",

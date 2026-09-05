@@ -18,6 +18,7 @@ use boomerang_builder::{
 use cargo_metadata::{Message, Metadata, PackageId};
 
 use crate::{
+    codegen::rendered_compiler_diagnostics,
     generated::render_descriptor_driver,
     generated_cache::{
         artifact_matches, copy_private_artifact, generated_cargo_program,
@@ -155,14 +156,11 @@ pub(crate) fn run_resolved_descriptor_driver(
             ],
             output,
         )?;
+        let diagnostics = rendered_compiler_diagnostics(&build.stdout)?;
+        let artifact = descriptor_artifact(&build, &descriptor_package, &generated.manifest_path());
         let mut log = build_log.borrow_mut();
+        log.push_str(&diagnostics);
         log.push_str(&String::from_utf8_lossy(&build.stderr));
-        let artifact = descriptor_artifact(
-            &build,
-            &mut log,
-            &descriptor_package,
-            &generated.manifest_path(),
-        );
         require_success("build", &build, &log)?;
         let (executable, compiled_artifacts) = artifact?;
         let (execution, executable) = copy_private_artifact(&executable, target)?;
@@ -232,31 +230,24 @@ fn cargo(
 /// Extracts the generated descriptor executable and non-fresh artifact count from Cargo messages.
 fn descriptor_artifact(
     build: &Output,
-    build_log: &mut String,
     package: &PackageId,
     manifest: &Path,
 ) -> Result<(PathBuf, usize)> {
     let mut executable = None;
     let mut compiled_artifacts = 0;
     for message in Message::parse_stream(Cursor::new(build.stdout.as_slice())) {
-        match message.context("failed to decode Cargo build message")? {
-            Message::CompilerArtifact(artifact) => {
-                compiled_artifacts += usize::from(!artifact.fresh);
-                if artifact_matches(&artifact, package, manifest, "boomerang-descriptor-driver")? {
-                    let artifact = artifact
-                        .executable
-                        .context("descriptor driver Cargo artifact has no executable")?;
-                    if executable.replace(artifact.into_std_path_buf()).is_some() {
-                        bail!("generated Cargo manifest produced multiple descriptor binaries");
-                    }
+        if let Message::CompilerArtifact(artifact) =
+            message.context("failed to decode Cargo build message")?
+        {
+            compiled_artifacts += usize::from(!artifact.fresh);
+            if artifact_matches(&artifact, package, manifest, "boomerang-descriptor-driver")? {
+                let artifact = artifact
+                    .executable
+                    .context("descriptor driver Cargo artifact has no executable")?;
+                if executable.replace(artifact.into_std_path_buf()).is_some() {
+                    bail!("generated Cargo manifest produced multiple descriptor binaries");
                 }
             }
-            Message::CompilerMessage(message) => {
-                if let Some(rendered) = message.message.rendered {
-                    build_log.push_str(&rendered);
-                }
-            }
-            _ => {}
         }
     }
     let executable = executable

@@ -144,6 +144,25 @@ fn verbose_build_forwards_nested_cargo_output_between_progress_phases() {
 }
 
 #[test]
+fn successful_build_preserves_compiler_warnings_in_phase_order() {
+    let _guard = support::toolchain_lock();
+    let target = support::toolchain_target();
+    support::reset_deployment_output(&target, "warning-diagnostic");
+    let output = build_fixture("warning-diagnostic", &target);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+
+    assert!(output.status.success(), "{stderr}");
+    assert_eq!(stdout.lines().count(), 1, "unexpected stdout: {stdout:?}");
+    let building = stderr.find("Building launcher").unwrap();
+    let warning = stderr
+        .find("INTENTIONAL_TARGET_PAYLOAD_WARNING")
+        .unwrap_or_else(|| panic!("successful Cargo warning was missing:\n{stderr}"));
+    let bundling = stderr.find("Bundling deployment").unwrap();
+    assert!(building < warning && warning < bundling, "{stderr}");
+}
+
+#[test]
 fn broken_payload_preserves_diagnostics_without_publishing_a_bundle() {
     let _guard = support::toolchain_lock();
     let target = support::toolchain_target();

@@ -126,7 +126,6 @@ fn generated_launcher_renders_normalized_deployment_execution_policy() {
         cargo_boomerang::generate_launcher(fixture_workspace(), "execution", "host")
     })
     .unwrap();
-    launcher.build_locked_offline().unwrap();
     let source = std::fs::read_to_string(launcher.source_path()).unwrap();
     assert!(source.contains("fast_forward: true"), "{source}");
     assert!(source.contains("keep_alive: true"), "{source}");

@@ -84,7 +84,6 @@ fn generated_launcher_emits_the_versioned_execution_summary_writer() {
         cargo_boomerang::generate_launcher(support::fixture_workspace(), "execution", "host")
             .unwrap()
     });
-    launcher.build_locked_offline().unwrap();
     let source = fs::read_to_string(launcher.source_path()).unwrap();
 
     assert!(

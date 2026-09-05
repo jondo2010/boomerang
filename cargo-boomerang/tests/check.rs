@@ -1,16 +1,18 @@
 use std::path::PathBuf;
 
+mod support;
+
 fn fixture_workspace() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/workspace")
 }
 
 #[test]
 fn check_runs_complete_host_analysis_without_building_payloads() {
-    let target = tempfile::tempdir().unwrap();
+    let target = support::shared_target("analysis");
     let result = std::process::Command::new(env!("CARGO_BIN_EXE_cargo-boomerang"))
         .args(["boomerang", "check", "--deployment", "production"])
         .current_dir(fixture_workspace())
-        .env("CARGO_TARGET_DIR", target.path())
+        .env("CARGO_TARGET_DIR", target.as_path())
         .output()
         .unwrap();
 
@@ -19,7 +21,7 @@ fn check_runs_complete_host_analysis_without_building_payloads() {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    let report_path = target.path().join("boomerang/production/check.json");
+    let report_path = target.as_path().join("boomerang/production/check.json");
     assert!(report_path.exists(), "missing {}", report_path.display());
     let report: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&report_path).unwrap()).unwrap();
@@ -39,7 +41,7 @@ fn check_runs_complete_host_analysis_without_building_payloads() {
     );
     assert_eq!(report["diagnostics"], serde_json::json!([]));
     assert!(!target
-        .path()
+        .as_path()
         .join("boomerang/production/artifacts")
         .exists());
 }
@@ -47,14 +49,14 @@ fn check_runs_complete_host_analysis_without_building_payloads() {
 #[test]
 fn check_accepts_an_explicit_workspace_outside_the_current_directory() {
     let current = tempfile::tempdir().unwrap();
-    let target = tempfile::tempdir().unwrap();
+    let target = support::shared_target("analysis");
     let result = std::process::Command::new(env!("CARGO_BIN_EXE_cargo-boomerang"))
         .arg("boomerang")
         .arg("--workspace")
         .arg(fixture_workspace())
         .args(["check", "--deployment", "production"])
         .current_dir(current.path())
-        .env("CARGO_TARGET_DIR", target.path())
+        .env("CARGO_TARGET_DIR", target.as_path())
         .output()
         .unwrap();
 
@@ -64,7 +66,7 @@ fn check_accepts_an_explicit_workspace_outside_the_current_directory() {
         String::from_utf8_lossy(&result.stderr)
     );
     assert!(target
-        .path()
+        .as_path()
         .join("boomerang/production/check.json")
         .exists());
 }

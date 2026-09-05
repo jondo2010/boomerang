@@ -13,13 +13,19 @@ use crate::{
         CoordinationDocument, DeploymentDocument, DescriptorDocument, ExecutionPolicyDocument,
         FederateDocument, PackageDocument, DEPLOYMENT_SCHEMA,
     },
-    check::{analyze, resource_report, COMPILER_SCHEMA},
+    check::{analyze, resource_report, AnalyzedDeployment, COMPILER_SCHEMA},
     codegen::generate_analyzed_launcher,
 };
 
 /// Builds one deployment and returns its immutable `deployment.json` path.
 pub fn build(workspace: impl AsRef<Path>, deployment_name: &str) -> Result<PathBuf> {
     let analyzed = analyze(workspace, deployment_name)?;
+    build_analyzed(&analyzed)
+}
+
+/// Builds and publishes a deployment from an already validated analysis.
+pub(crate) fn build_analyzed(analyzed: &AnalyzedDeployment) -> Result<PathBuf> {
+    let deployment_name = analyzed.resolved.deployment_name();
     let compiled_federates = analyzed.compiled.federates();
     if compiled_federates.len() != 1 {
         bail!("deployment bundle generation currently supports one local Federate");
@@ -37,7 +43,7 @@ pub fn build(workspace: impl AsRef<Path>, deployment_name: &str) -> Result<PathB
     let cargo_config_hash = optional_hash(configuration.cargo_config.as_deref())
         .context("failed to hash configured Cargo configuration before launcher generation")?;
 
-    let generated = generate_analyzed_launcher(&analyzed, federate_id).with_context(|| {
+    let generated = generate_analyzed_launcher(analyzed, federate_id).with_context(|| {
         format!(
             "deployment '{deployment_name}' Federate '{federate_id}' launcher generation failed"
         )
@@ -59,7 +65,7 @@ pub fn build(workspace: impl AsRef<Path>, deployment_name: &str) -> Result<PathB
     let topology = serde_json::to_vec(analyzed.driver.topology())
         .context("failed to serialize canonical topology")?;
     let topology_hash = hash_bytes(&topology);
-    let bindings = binding_records(&analyzed)?;
+    let bindings = binding_records(analyzed)?;
     let mut groups = configuration.groups.clone();
     groups.sort();
     groups.dedup();

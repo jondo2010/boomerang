@@ -37,7 +37,12 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      - name: Configure Cargo target directory
+        shell: bash
+        run: echo "CARGO_TARGET_DIR=${{ runner.temp }}/t" >> "$GITHUB_ENV"
       - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: . -> ${{ runner.temp }}/t
       - name: Check with Clippy
         run: |
           cargo clippy --workspace --exclude boomerang --all-targets --all-features -- -D warnings
@@ -63,11 +68,16 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
-      - uses: swatinem/rust-cache@v2
+      - name: Configure Cargo target directory
+        shell: bash
+        run: echo "CARGO_TARGET_DIR=${{ runner.temp }}/t" >> "$GITHUB_ENV"
       - name: fetch Rust
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.toolchain }}
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: . -> ${{ runner.temp }}/t
 
       - name: toolchain version
         run: cargo -vV
@@ -88,12 +98,17 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
-      - uses: swatinem/rust-cache@v2
+      - name: Configure Cargo target directory
+        shell: bash
+        run: echo "CARGO_TARGET_DIR=${{ runner.temp }}/t" >> "$GITHUB_ENV"
       - name: fetch Rust
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: nightly
           components: miri
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: . -> ${{ runner.temp }}/t
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
       - name: Test with Miri

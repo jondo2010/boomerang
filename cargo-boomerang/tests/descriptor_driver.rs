@@ -1,13 +1,32 @@
-use std::path::PathBuf;
-
 use cargo_boomerang::run_descriptor_driver;
 
-fn fixture_workspace() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/workspace")
+mod support;
+
+#[test]
+fn repeated_descriptor_analysis_uses_workspace_configuration_and_cargo_freshness() {
+    let target = tempfile::tempdir().unwrap();
+    let (first, second) = support::with_target_directory(target.path(), || {
+        let run = || run_descriptor_driver(support::fixture_workspace(), "production").unwrap();
+        (run(), run())
+    });
+
+    assert!(first.compiled_artifacts() > 0);
+    assert_eq!(second.compiled_artifacts(), 0);
+    assert_eq!(
+        serde_json::to_vec(first.topology()).unwrap(),
+        serde_json::to_vec(second.topology()).unwrap(),
+    );
 }
+
 #[test]
 fn driver_selects_only_bound_descriptors_and_emits_topology() {
-    let output = run_descriptor_driver(fixture_workspace(), "production").unwrap();
+    let target = support::shared_target("analysis");
+    let (output, result) = support::with_target_directory(&target, || {
+        (
+            run_descriptor_driver(support::fixture_workspace(), "production").unwrap(),
+            run_descriptor_driver(support::fixture_workspace(), "payload-alias"),
+        )
+    });
 
     assert_eq!(
         output
@@ -35,7 +54,6 @@ fn driver_selects_only_bound_descriptors_and_emits_topology() {
     );
     assert!(!output.build_log().contains("payload-only"));
 
-    let result = run_descriptor_driver(fixture_workspace(), "payload-alias");
     let error = result.err().unwrap();
     assert!(error.to_string().contains("reserved payload facet"));
 }

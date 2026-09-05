@@ -1,74 +1,22 @@
 use std::{
-    ffi::OsString,
     fs,
-    panic::{catch_unwind, resume_unwind, AssertUnwindSafe},
-    path::PathBuf,
     process::{Command, Output},
-    sync::{Mutex, OnceLock},
 };
 
 use serde_json::{json, Value};
 
-fn fixture_workspace() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/workspace")
-}
+mod support;
 
-/// Runs the installed Cargo plugin for one fixture deployment in an isolated target directory.
+/// Runs the installed Cargo plugin for one fixture deployment in the shared run target.
 fn run_cli(deployment: &str) -> Output {
-    let target = tempfile::tempdir().unwrap();
+    let target = support::shared_target("run");
     Command::new(env!("CARGO_BIN_EXE_cargo-boomerang"))
         .args(["boomerang", "--workspace"])
-        .arg(fixture_workspace())
+        .arg(support::fixture_workspace())
         .args(["run", "--deployment", deployment])
-        .env("CARGO_TARGET_DIR", target.path())
+        .env("CARGO_TARGET_DIR", target)
         .output()
         .unwrap()
-}
-
-fn target_directory_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
-
-struct TargetDirectoryGuard {
-    previous: Option<OsString>,
-}
-
-impl TargetDirectoryGuard {
-    fn set(target: &std::path::Path) -> Self {
-        let previous = std::env::var_os("CARGO_TARGET_DIR");
-        // SAFETY: the caller holds the process-global target-directory lock.
-        unsafe { std::env::set_var("CARGO_TARGET_DIR", target) };
-        Self { previous }
-    }
-}
-
-impl Drop for TargetDirectoryGuard {
-    fn drop(&mut self) {
-        match &self.previous {
-            Some(previous) => {
-                // SAFETY: the caller holds the process-global target-directory lock.
-                unsafe { std::env::set_var("CARGO_TARGET_DIR", previous) };
-            }
-            None => {
-                // SAFETY: the caller holds the process-global target-directory lock.
-                unsafe { std::env::remove_var("CARGO_TARGET_DIR") };
-            }
-        }
-    }
-}
-
-fn with_target_directory<T>(target: &std::path::Path, operation: impl FnOnce() -> T) -> T {
-    let _lock = target_directory_lock()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let guard = TargetDirectoryGuard::set(target);
-    let result = catch_unwind(AssertUnwindSafe(operation));
-    drop(guard);
-    match result {
-        Ok(value) => value,
-        Err(payload) => resume_unwind(payload),
-    }
 }
 
 fn summary_json(summary: &cargo_boomerang::ExecutionSummary) -> Value {
@@ -93,10 +41,11 @@ fn summary_json(summary: &cargo_boomerang::ExecutionSummary) -> Value {
 fn generated_monolith_matches_owned_reference_execution_summary() {
     let expected_directory = tempfile::tempdir().unwrap();
     let expected_path = expected_directory.path().join("summary.json");
-    let expected_target = tempfile::tempdir().unwrap();
-    let built = with_target_directory(expected_target.path(), || {
+    let target = support::shared_target("run");
+    let built = support::with_target_directory(&target, || {
         let launcher =
-            cargo_boomerang::generate_launcher(fixture_workspace(), "production", "host").unwrap();
+            cargo_boomerang::generate_launcher(support::fixture_workspace(), "production", "host")
+                .unwrap();
         launcher.build_locked_offline().unwrap()
     });
     let expected_status = Command::new(built.executable_path())
@@ -106,9 +55,8 @@ fn generated_monolith_matches_owned_reference_execution_summary() {
     assert!(expected_status.success());
     let expected: Value = serde_json::from_slice(&fs::read(&expected_path).unwrap()).unwrap();
 
-    let target = tempfile::tempdir().unwrap();
-    let observed = with_target_directory(target.path(), || {
-        cargo_boomerang::run(fixture_workspace(), "production")
+    let observed = support::with_target_directory(&target, || {
+        cargo_boomerang::run(support::fixture_workspace(), "production")
     })
     .unwrap();
     assert!(observed.status().success());
@@ -128,10 +76,11 @@ fn generated_monolith_matches_owned_reference_execution_summary() {
 
 #[test]
 fn generated_launcher_emits_the_versioned_execution_summary_writer() {
-    let target = tempfile::tempdir().unwrap();
-    let source = with_target_directory(target.path(), || {
+    let target = support::shared_target("run");
+    let source = support::with_target_directory(&target, || {
         let launcher =
-            cargo_boomerang::generate_launcher(fixture_workspace(), "execution", "host").unwrap();
+            cargo_boomerang::generate_launcher(support::fixture_workspace(), "execution", "host")
+                .unwrap();
         fs::read_to_string(launcher.source_path()).unwrap()
     });
 
@@ -147,8 +96,8 @@ fn generated_launcher_emits_the_versioned_execution_summary_writer() {
 #[test]
 fn run_rejects_a_custom_target_before_bundle_generation() {
     let target = tempfile::tempdir().unwrap();
-    let result = with_target_directory(target.path(), || {
-        cargo_boomerang::run(fixture_workspace(), "resolution")
+    let result = support::with_target_directory(target.path(), || {
+        cargo_boomerang::run(support::fixture_workspace(), "resolution")
     });
     let error = result.unwrap_err().to_string();
     assert!(error.contains("custom target JSON"), "{error}");
@@ -163,8 +112,8 @@ fn run_rejects_a_foreign_native_target_before_bundle_generation() {
         "foreign-x86-linux"
     };
     let target = tempfile::tempdir().unwrap();
-    let result = with_target_directory(target.path(), || {
-        cargo_boomerang::run(fixture_workspace(), deployment)
+    let result = support::with_target_directory(target.path(), || {
+        cargo_boomerang::run(support::fixture_workspace(), deployment)
     });
     let error = result.unwrap_err().to_string();
 

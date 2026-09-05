@@ -692,7 +692,7 @@ fn render_manifest(
             ("default-features".into(), false.into()),
             (
                 "features".into(),
-                vec!["env-filter", "fmt"]
+                vec!["ansi", "env-filter", "fmt"]
                     .into_iter()
                     .map(toml::Value::from)
                     .collect::<Vec<_>>()

@@ -48,8 +48,11 @@ pub(super) fn render_launcher(
              let filter = tracing_subscriber::EnvFilter::builder()\n\
                  .with_default_directive(tracing_subscriber::filter::LevelFilter::OFF.into())\n\
                  .from_env_lossy();\n\
+             let ansi = std::io::IsTerminal::is_terminal(&std::io::stderr())\n\
+                 && std::env::var_os(\"NO_COLOR\").map_or(true, |value| value.is_empty());\n\
              let _ = tracing_subscriber::fmt()\n\
                  .with_env_filter(filter)\n\
+                 .with_ansi(ansi)\n\
                  .with_writer(std::io::stderr)\n\
                  .try_init();\n\
          }\n\n\

@@ -25,6 +25,7 @@ target-lexicon = "0.13"
 tinymap.workspace = true
 toml.workspace = true
 tracing-subscriber = { version = "=0.3.23", default-features = false, features = [
+    "ansi",
     "env-filter",
     "fmt",
 ] }

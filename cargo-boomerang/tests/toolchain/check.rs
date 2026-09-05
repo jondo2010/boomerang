@@ -112,12 +112,13 @@ fn descriptor_failure_reports_actionable_diagnostic_before_cargo_summary() {
         .output()
         .unwrap();
     let stderr = String::from_utf8(result.stderr).unwrap();
+    let plain_stderr = support::without_ansi(&stderr);
 
     assert!(!result.status.success(), "{stderr}");
-    let diagnostic = stderr
+    let diagnostic = plain_stderr
         .find("error: intentional descriptor build failure")
         .expect("missing rendered descriptor diagnostic");
-    let summary = stderr
+    let summary = plain_stderr
         .find("error: could not compile `vehicle-control`")
         .expect("missing Cargo failure summary");
     assert!(

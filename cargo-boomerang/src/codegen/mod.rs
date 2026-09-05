@@ -557,7 +557,7 @@ fn reconcile_launcher_lock(
     require_success("lock reconciliation", &output)
 }
 
-/// Verifies the locked generated graph is entirely contained in the source workspace graph.
+/// Verifies the locked graph uses only source packages and controlled launcher dependencies.
 fn validate_launcher_graph(
     directory: &Path,
     federate: &ResolvedFederate,
@@ -590,9 +590,41 @@ fn validate_launcher_graph(
         .resolve
         .as_ref()
         .ok_or_else(|| anyhow!("generated launcher metadata has no resolve graph"))?;
+    let root_node = graph
+        .nodes
+        .iter()
+        .find(|node| node.id == root.id)
+        .expect("Cargo resolve graph contains its root");
+    let tracing_package = root_node
+        .deps
+        .iter()
+        .map(|dependency| &dependency.pkg)
+        .find(|package| {
+            metadata.packages.iter().any(|candidate| {
+                candidate.id == **package && candidate.name == "tracing-subscriber"
+            })
+        })
+        .ok_or_else(|| {
+            anyhow!("generated launcher does not depend directly on tracing-subscriber")
+        })?;
+    // The generated manifest owns this one direct dependency and therefore its complete closure.
+    let mut launcher_dependencies = BTreeSet::new();
+    let mut pending = vec![tracing_package.clone()];
+    while let Some(package) = pending.pop() {
+        if !launcher_dependencies.insert(package.clone()) {
+            continue;
+        }
+        let node = graph
+            .nodes
+            .iter()
+            .find(|node| node.id == package)
+            .expect("Cargo resolve graph contains every dependency");
+        pending.extend(node.deps.iter().map(|dependency| dependency.pkg.clone()));
+    }
     for node in graph.nodes.iter().filter(|node| node.id != root.id) {
         let id = node.id.to_string();
-        if !resolved.locked_package_ids().contains(&id) {
+        if !resolved.locked_package_ids().contains(&id) && !launcher_dependencies.contains(&node.id)
+        {
             bail!("generated launcher package {id} was absent from source metadata");
         }
     }
@@ -639,7 +671,7 @@ fn binding_implementation(binding: &boomerang_builder::compiler::RequiredBinding
     }
 }
 
-/// Renders the standalone launcher manifest with only runtime and selected payload packages.
+/// Renders the standalone launcher manifest with runtime, tracing, and selected payload packages.
 fn render_manifest(
     resolved: &ResolvedWorkspace,
     aliases: &BTreeMap<String, String>,
@@ -652,6 +684,22 @@ fn render_manifest(
     dependencies.insert(
         String::from("tinymap"),
         dependency(resolved.table_store(), false, Vec::new())?,
+    );
+    dependencies.insert(
+        String::from("tracing-subscriber"),
+        toml::Table::from_iter([
+            ("version".into(), "=0.3.23".into()),
+            ("default-features".into(), false.into()),
+            (
+                "features".into(),
+                vec!["ansi", "env-filter", "fmt"]
+                    .into_iter()
+                    .map(toml::Value::from)
+                    .collect::<Vec<_>>()
+                    .into(),
+            ),
+        ])
+        .into(),
     );
     for (implementation, alias) in aliases {
         let package = resolved

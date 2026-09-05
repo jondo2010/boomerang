@@ -8,15 +8,16 @@ use serde_json::{json, Value};
 use super::support;
 
 /// Runs the installed Cargo plugin for one fixture deployment in the shared toolchain target.
-fn run_cli(deployment: &str) -> Output {
+fn run_cli(deployment: &str, environment: &[(&str, &str)]) -> Output {
     let target = support::toolchain_target();
-    Command::new(env!("CARGO_BIN_EXE_cargo-boomerang"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_cargo-boomerang"));
+    command
         .args(["boomerang", "--workspace"])
         .arg(support::fixture_workspace())
         .args(["run", "--deployment", deployment])
         .env("CARGO_TARGET_DIR", target)
-        .output()
-        .unwrap()
+        .env_remove("RUST_LOG");
+    command.envs(environment.iter().copied()).output().unwrap()
 }
 
 fn summary_json(summary: &cargo_boomerang::ExecutionSummary) -> Value {
@@ -132,7 +133,7 @@ fn run_forwards_application_streams_without_reframing() {
     let _guard = support::toolchain_lock();
     let target = support::toolchain_target();
     support::reset_deployment_output(&target, "production");
-    let output = run_cli("production");
+    let output = run_cli("production", &[]);
     assert!(
         output.status.success(),
         "{}",
@@ -169,10 +170,31 @@ fn run_forwards_application_streams_without_reframing() {
 }
 
 #[test]
+fn generated_launcher_honors_rust_log_trace() {
+    let _guard = support::toolchain_lock();
+    let target = support::toolchain_target();
+    support::reset_deployment_output(&target, "production");
+    let output = run_cli("production", &[("RUST_LOG", "trace")]);
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "sensor received command 42\n"
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("TRACE"), "{stderr}");
+    assert!(stderr.contains("boomerang_runtime"), "{stderr}");
+}
+
+#[test]
 fn run_propagates_the_generated_application_exit_code() {
     let _guard = support::toolchain_lock();
     let target = support::toolchain_target();
     support::reset_deployment_output(&target, "runtime-failure");
-    let output = run_cli("runtime-failure");
+    let output = run_cli("runtime-failure", &[]);
     assert_eq!(output.status.code(), Some(42));
 }

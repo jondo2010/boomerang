@@ -173,10 +173,11 @@ impl GeneratedWorkspace {
         validate_workspace_contents(&self.directory, &self.expectations)?;
         let target = self.target_directory();
         self.prepare_short_target(&target)?;
+        let marker_path = self.validate_target_marker_path(&target)?;
         let mut lock = OpenOptions::new()
             .read(true)
             .write(true)
-            .open(target.join(".boomerang-request"))
+            .open(marker_path)
             .context("failed to open generated target lock")?;
         lock.lock_exclusive()
             .context("failed to lock generated target")?;
@@ -190,7 +191,7 @@ impl GeneratedWorkspace {
             .try_exists()
             .context("failed to inspect generated target")?
         {
-            return self.validate_target_marker(target);
+            return Ok(());
         }
         let marker = &self.expectations.record;
         let bytes = serde_json::to_vec(marker).context("failed to encode target marker")?;
@@ -210,12 +211,7 @@ impl GeneratedWorkspace {
                 Ok(())
             },
         )?;
-        self.validate_target_marker(target)
-    }
-    fn validate_target_marker(&self, target: &Path) -> Result<()> {
-        let marker_path = self.validate_target_marker_path(target)?;
-        let marker = read_cache_record(&marker_path, "generated target marker")?;
-        self.validate_target_marker_record(marker)
+        Ok(())
     }
     fn validate_locked_target_marker(&self, target: &Path, marker_file: &mut File) -> Result<()> {
         let marker_path = self.validate_target_marker_path(target)?;
@@ -584,7 +580,12 @@ pub(crate) fn generated_cargo_program() -> OsString {
 mod tests {
     use super::*;
     use anyhow::Result;
-    use std::{fs, path::Path, sync::Barrier};
+    use std::{
+        fs,
+        path::Path,
+        sync::{mpsc, Barrier},
+        time::Duration,
+    };
     const LOCK: &[u8] = b"version = 4\n";
     const MANIFEST: &[u8] = b"[package]\nname = \"generated-test\"\nversion = \"0.0.0\"\n";
     const SOURCE: &[u8] = b"fn main() {}\n";
@@ -785,6 +786,45 @@ mod tests {
         fs::remove_dir_all(&target).unwrap();
         workspace.with_locked_target(|_| Ok(())).unwrap();
         assert!(target.join(".boomerang-request").is_file());
+    }
+    #[test]
+    fn concurrent_target_users_wait_for_locked_marker_validation() {
+        let (_fixture, workspace) = CacheFixture::published();
+        workspace.with_locked_target(|_| Ok(())).unwrap();
+        let (locked_tx, locked_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::channel();
+
+        std::thread::scope(|scope| {
+            let first_workspace = &workspace;
+            let first = scope.spawn(move || {
+                first_workspace.with_locked_target(|_| {
+                    locked_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    Ok(())
+                })
+            });
+            locked_rx.recv().unwrap();
+            let second_workspace = &workspace;
+            let second = scope.spawn(move || {
+                result_tx
+                    .send(second_workspace.with_locked_target(|_| Ok(())))
+                    .unwrap();
+            });
+
+            let early_result = result_rx.recv_timeout(Duration::from_secs(1));
+            release_tx.send(()).unwrap();
+            first.join().unwrap().unwrap();
+            second.join().unwrap();
+            match early_result {
+                Ok(result) => {
+                    result.unwrap();
+                    panic!("second target user completed before the first released its lock");
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => result_rx.recv().unwrap().unwrap(),
+                Err(mpsc::RecvTimeoutError::Disconnected) => panic!("target user disconnected"),
+            }
+        });
     }
     #[test]
     fn concurrent_identical_publishers_reuse_one_workspace() {

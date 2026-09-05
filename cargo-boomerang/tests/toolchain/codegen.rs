@@ -135,7 +135,10 @@ fn generated_launcher_renders_normalized_deployment_execution_policy() {
         "{source}"
     );
     assert!(source.contains("physical_event_q_size: 1024"), "{source}");
-    assert!(source.contains("BOOMERANG_EXECUTION_SUMMARY_V1"), "{source}");
+    assert!(
+        source.contains("BOOMERANG_EXECUTION_SUMMARY_V1"),
+        "{source}"
+    );
     assert!(source.contains("create_new(true)"), "{source}");
     assert!(source.contains("execution.stats()"), "{source}");
     assert!(source.contains("execution.final_tag()"), "{source}");

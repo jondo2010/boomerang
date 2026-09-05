@@ -7,7 +7,7 @@ use std::{
 use anyhow::{anyhow, bail, Context, Result};
 use cargo_metadata::{Metadata, MetadataCommand, Package, PackageId};
 
-use crate::{load_manifest, Binding, Deployment, Federate, Topology};
+use crate::{load_manifest, Binding, CommandOutput, Deployment, Federate, Topology};
 
 const DESCRIPTOR_FEATURE: &str = "__boomerang_descriptor";
 const PAYLOAD_FEATURE: &str = "__boomerang_payload";
@@ -148,6 +148,15 @@ pub fn resolve_workspace(
     workspace: impl AsRef<Path>,
     deployment_name: &str,
 ) -> Result<ResolvedWorkspace> {
+    resolve_workspace_with_output(workspace, deployment_name, &CommandOutput::silent())
+}
+
+/// Resolves one deployment while applying CLI output policy to Cargo metadata.
+pub(crate) fn resolve_workspace_with_output(
+    workspace: impl AsRef<Path>,
+    deployment_name: &str,
+    output: &CommandOutput,
+) -> Result<ResolvedWorkspace> {
     let supplied_workspace = workspace.as_ref();
     let workspace = fs::canonicalize(supplied_workspace).with_context(|| {
         format!(
@@ -158,7 +167,7 @@ pub fn resolve_workspace(
     let manifest = load_manifest(workspace.join("Boomerang.toml"))?;
     let deployment = manifest.deployment(deployment_name)?;
     let cargo_manifest = workspace.join("Cargo.toml");
-    let metadata = locked_metadata(&workspace, &cargo_manifest)?;
+    let metadata = locked_metadata(&workspace, &cargo_manifest, output)?;
     let workspace_root = metadata.workspace_root.clone().into_std_path_buf();
     let target_directory = metadata.target_directory.clone().into_std_path_buf();
 
@@ -293,12 +302,15 @@ fn resolve_dependency_package<'a>(
 }
 
 /// Invokes Cargo's metadata command with lockfile updates forbidden.
-fn locked_metadata(workspace: &Path, manifest: &Path) -> Result<Metadata> {
+fn locked_metadata(workspace: &Path, manifest: &Path, output: &CommandOutput) -> Result<Metadata> {
     let mut command = MetadataCommand::new();
+    let mut options = vec![String::from("--locked")];
+    output.extend_cargo_options(&mut options);
     command
         .current_dir(workspace)
         .manifest_path(manifest)
-        .other_options(vec![String::from("--locked")]);
+        .other_options(options)
+        .verbose(output.is_verbose());
     command.exec().with_context(|| {
         format!(
             "failed to resolve locked Cargo metadata for {}",

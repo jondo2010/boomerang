@@ -35,6 +35,7 @@ pub struct GeneratedLauncher {
     application_workspace: PathBuf,
     /// Cargo executable snapshotted for the complete generated-launcher request.
     cargo_program: OsString,
+    output: crate::CommandOutput,
     /// Exact generated root package selected by locked Cargo metadata.
     package_id: PackageId,
     /// Path to the generated Cargo manifest.
@@ -264,14 +265,18 @@ impl GeneratedLauncher {
 
     /// Runs one Cargo command against this generated manifest with compatibility inputs set.
     fn cargo(&self, arguments: impl IntoIterator<Item = impl AsRef<OsStr>>) -> Result<Output> {
-        launcher_command(
+        let mut command = launcher_command(
             &self.cargo_program,
             &self.application_workspace,
             &self.compile_inputs,
             arguments,
-        )
-        .output()
-        .context("failed to start generated Cargo command")
+        );
+        self.output.configure(&mut command);
+        let output = command
+            .output()
+            .context("failed to start generated Cargo command")?;
+        self.output.forward_cargo_stderr(&output)?;
+        Ok(output)
     }
 }
 
@@ -346,14 +351,16 @@ pub fn generate_launcher(
     deployment_name: &str,
     federate_id: &str,
 ) -> Result<GeneratedLauncher> {
-    let analyzed = analyze(workspace, deployment_name)?;
-    generate_analyzed_launcher(&analyzed, federate_id)
+    let output = crate::CommandOutput::silent();
+    let analyzed = analyze(workspace, deployment_name, &output)?;
+    generate_analyzed_launcher(&analyzed, federate_id, &output)
 }
 
 /// Generates an isolated static Rust launcher from already completed deployment analysis.
 pub(crate) fn generate_analyzed_launcher(
     analyzed: &AnalyzedDeployment,
     federate_id: &str,
+    output: &crate::CommandOutput,
 ) -> Result<GeneratedLauncher> {
     let federates = analyzed.compiled.federates();
     let (federate_index, federate) = federates
@@ -438,6 +445,7 @@ pub(crate) fn generate_analyzed_launcher(
                 &compile_inputs,
                 &application_workspace,
                 &cargo_program,
+                output,
             )
         },
         |directory| {
@@ -448,6 +456,7 @@ pub(crate) fn generate_analyzed_launcher(
                 &analyzed.resolved,
                 &application_workspace,
                 &cargo_program,
+                output,
             )
         },
     )?;
@@ -459,6 +468,7 @@ pub(crate) fn generate_analyzed_launcher(
         workspace,
         application_workspace,
         cargo_program,
+        output: *output,
         package_id,
         manifest_path,
         source_path,
@@ -530,16 +540,20 @@ fn reconcile_launcher_lock(
     compile_inputs: &[(String, String)],
     application_workspace: &Path,
     cargo_program: &OsStr,
+    progress: &crate::CommandOutput,
 ) -> Result<()> {
     let arguments = configured_metadata_arguments(federate, &directory.join("Cargo.toml"));
-    let output = launcher_command(
+    let mut command = launcher_command(
         cargo_program,
         application_workspace,
         compile_inputs,
         arguments,
-    )
-    .output()
-    .context("failed to start generated Cargo metadata reconciliation")?;
+    );
+    progress.configure(&mut command);
+    let output = command
+        .output()
+        .context("failed to start generated Cargo metadata reconciliation")?;
+    progress.forward_cargo_stderr(&output)?;
     require_success("lock reconciliation", &output)
 }
 
@@ -551,17 +565,21 @@ fn validate_launcher_graph(
     resolved: &ResolvedWorkspace,
     application_workspace: &Path,
     cargo_program: &OsStr,
+    progress: &crate::CommandOutput,
 ) -> Result<PackageId> {
     let mut arguments = configured_metadata_arguments(federate, &directory.join("Cargo.toml"));
     arguments.push(OsString::from("--locked"));
-    let output = launcher_command(
+    let mut command = launcher_command(
         cargo_program,
         application_workspace,
         compile_inputs,
         arguments,
-    )
-    .output()
-    .context("failed to start locked generated Cargo metadata validation")?;
+    );
+    progress.configure(&mut command);
+    let output = command
+        .output()
+        .context("failed to start locked generated Cargo metadata validation")?;
+    progress.forward_cargo_stderr(&output)?;
     require_success("locked metadata verification", &output)?;
     let metadata: Metadata = serde_json::from_slice(&output.stdout)
         .context("failed to decode generated Cargo metadata")?;

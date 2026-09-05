@@ -1,0 +1,183 @@
+//! Cargo-compatible command progress and nested-process configuration.
+
+use std::{
+    env, fmt,
+    io::{self, Write},
+    process::{Command, Output},
+};
+
+#[cfg(not(windows))]
+use std::io::IsTerminal;
+
+use anyhow::{Context, Result};
+
+/// Color policy shared by cargo-boomerang status lines and nested Cargo commands.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ColorChoice {
+    /// Use color only when stderr is a terminal.
+    #[default]
+    Auto,
+    /// Always emit ANSI color escapes.
+    Always,
+    /// Never emit ANSI color escapes.
+    Never,
+}
+
+impl ColorChoice {
+    /// Reads Cargo's `CARGO_TERM_COLOR` convention, falling back to automatic detection.
+    pub fn from_cargo_env() -> Self {
+        match env::var("CARGO_TERM_COLOR").as_deref() {
+            Ok("always") => Self::Always,
+            Ok("never") => Self::Never,
+            _ => Self::Auto,
+        }
+    }
+
+    fn as_cargo_value(self) -> &'static str {
+        match self {
+            Self::Auto if cargo_auto_color_enabled() => "always",
+            Self::Auto => "never",
+            Self::Always => "always",
+            Self::Never => "never",
+        }
+    }
+
+    fn stream_choice(self) -> anstream::ColorChoice {
+        match self {
+            Self::Auto => anstream::ColorChoice::Auto,
+            Self::Always => anstream::ColorChoice::AlwaysAnsi,
+            Self::Never => anstream::ColorChoice::Never,
+        }
+    }
+}
+
+/// Output policy for one cargo-boomerang command invocation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CommandOutput {
+    quiet: bool,
+    verbosity: u8,
+    color: ColorChoice,
+    configure_cargo: bool,
+}
+
+impl CommandOutput {
+    /// Creates a CLI output policy using Cargo-compatible quiet, verbose, and color choices.
+    pub const fn new(quiet: bool, verbosity: u8, color: ColorChoice) -> Self {
+        Self {
+            quiet,
+            verbosity,
+            color,
+            configure_cargo: true,
+        }
+    }
+
+    /// Creates a silent policy for library entry points without changing nested Cargo behavior.
+    pub(crate) const fn silent() -> Self {
+        Self {
+            quiet: true,
+            verbosity: 0,
+            color: ColorChoice::Auto,
+            configure_cargo: false,
+        }
+    }
+
+    /// Writes and flushes one deterministic Cargo-style status line to stderr.
+    pub(crate) fn status(self, phase: Phase, message: impl fmt::Display) -> Result<()> {
+        if self.quiet {
+            return Ok(());
+        }
+        let mut stderr = anstream::AutoStream::new(io::stderr(), self.color.stream_choice());
+        writeln!(stderr, "\x1b[1;32m{phase:>12}\x1b[0m {message}")?;
+        stderr.flush().context("failed to flush command progress")
+    }
+
+    /// Applies the selected Cargo verbosity and color conventions to a nested command.
+    pub(crate) fn configure(self, command: &mut Command) {
+        if !self.configure_cargo {
+            return;
+        }
+        command.env("CARGO_TERM_COLOR", self.color.as_cargo_value());
+        if self.quiet {
+            command.arg("--quiet");
+        } else if self.verbosity > 0 {
+            command.arg(format!("-{}", "v".repeat(usize::from(self.verbosity))));
+        }
+    }
+
+    /// Adds this policy's common options to a Cargo subcommand argument vector.
+    pub(crate) fn extend_cargo_options(self, arguments: &mut Vec<String>) {
+        if !self.configure_cargo {
+            return;
+        }
+        arguments.extend([String::from("--color"), self.color.as_cargo_value().into()]);
+        if self.quiet {
+            arguments.push(String::from("--quiet"));
+        } else if self.verbosity > 0 {
+            arguments.push(format!("-{}", "v".repeat(usize::from(self.verbosity))));
+        }
+    }
+
+    /// Returns whether successful nested Cargo stderr should be visible.
+    pub(crate) const fn is_verbose(self) -> bool {
+        self.verbosity > 0
+    }
+
+    /// Forwards successful nested Cargo stderr when verbose output was requested.
+    pub(crate) fn forward_cargo_stderr(self, output: &Output) -> Result<()> {
+        if self.verbosity == 0 || !output.status.success() || output.stderr.is_empty() {
+            return Ok(());
+        }
+        let mut stderr = anstream::AutoStream::new(io::stderr(), self.color.stream_choice());
+        stderr
+            .write_all(&output.stderr)
+            .context("failed to forward nested Cargo output")?;
+        stderr
+            .flush()
+            .context("failed to flush nested Cargo output")
+    }
+}
+
+/// Resolves Cargo's automatic child color against cargo-boomerang's final stderr.
+fn cargo_auto_color_enabled() -> bool {
+    #[cfg(windows)]
+    {
+        false
+    }
+    #[cfg(not(windows))]
+    {
+        io::stderr().is_terminal() && env::var_os("NO_COLOR").is_none()
+    }
+}
+
+/// Stable action labels used in human-readable progress output.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Phase {
+    /// Resolve and inspect a deployment.
+    Analyzing,
+    /// Generate a descriptor driver or launcher.
+    Generating,
+    /// Execute a nested Cargo build.
+    Building,
+    /// Validate compiler or published-artifact state.
+    Validating,
+    /// Assemble an immutable deployment bundle.
+    Bundling,
+    /// Atomically publish a report or bundle.
+    Publishing,
+    /// Execute the generated deployment.
+    Running,
+}
+
+impl fmt::Display for Phase {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Analyzing => "Analyzing",
+            Self::Generating => "Generating",
+            Self::Building => "Building",
+            Self::Validating => "Validating",
+            Self::Bundling => "Bundling",
+            Self::Publishing => "Publishing",
+            Self::Running => "Running",
+        })
+    }
+}

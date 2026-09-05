@@ -14,10 +14,15 @@ fn fixture_workspace() -> PathBuf {
 }
 
 fn build_fixture(deployment: &str, target: &Path) -> Output {
+    build_fixture_with_options(deployment, target, &[])
+}
+
+fn build_fixture_with_options(deployment: &str, target: &Path, options: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_cargo-boomerang"))
         .arg("boomerang")
         .arg("--workspace")
         .arg(fixture_workspace())
+        .args(options)
         .args(["build", "--deployment", deployment])
         .env("CARGO_TARGET_DIR", target)
         .output()
@@ -39,6 +44,106 @@ fn assert_no_staging_residue(path: &Path) {
 }
 
 #[test]
+fn build_reports_cargo_style_progress_without_polluting_stdout() {
+    let _guard = support::toolchain_lock();
+    let target = support::toolchain_target();
+    support::reset_deployment_output(&target, "production");
+    let output = build_fixture("production", &target);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+
+    assert!(output.status.success(), "{stderr}");
+    assert_eq!(stdout.lines().count(), 1, "unexpected stdout: {stdout:?}");
+    assert!(stderr.contains("Building"), "{stderr}");
+    assert!(stderr.contains("Bundling"), "{stderr}");
+    support::assert_progress_phases(
+        &stderr,
+        &[
+            "Analyzing",
+            "Generating",
+            "Building",
+            "Validating",
+            "Generating",
+            "Building",
+            "Bundling",
+            "Publishing",
+        ],
+    );
+}
+
+#[test]
+fn quiet_build_keeps_its_machine_readable_result_without_progress() {
+    let _guard = support::toolchain_lock();
+    let target = support::toolchain_target();
+    support::reset_deployment_output(&target, "production");
+    let output =
+        build_fixture_with_options("production", &target, &["--quiet", "--color", "always"]);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+
+    assert!(output.status.success(), "{stderr}");
+    assert_eq!(stdout.lines().count(), 1, "unexpected stdout: {stdout:?}");
+    support::assert_progress_phases(&stderr, &[]);
+    assert!(!stderr.contains('\u{1b}'), "unexpected color: {stderr:?}");
+}
+
+#[test]
+fn color_always_styles_progress_without_styling_stdout() {
+    let _guard = support::toolchain_lock();
+    let target = support::toolchain_target();
+    support::reset_deployment_output(&target, "production");
+    let output = build_fixture_with_options("production", &target, &["--color", "always"]);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+
+    assert!(output.status.success(), "{stderr}");
+    assert_eq!(stdout.lines().count(), 1, "unexpected stdout: {stdout:?}");
+    assert!(!stdout.contains('\u{1b}'), "unexpected color: {stdout:?}");
+    assert!(stderr.contains("\u{1b}[1;32m"), "missing color: {stderr:?}");
+}
+
+#[test]
+fn verbose_build_forwards_nested_cargo_output_between_progress_phases() {
+    let _guard = support::toolchain_lock();
+    let target = support::toolchain_target();
+    support::reset_deployment_output(&target, "production");
+    let output = build_fixture_with_options("production", &target, &["--verbose"]);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+
+    assert!(output.status.success(), "{stderr}");
+    assert_eq!(stdout.lines().count(), 1, "unexpected stdout: {stdout:?}");
+    support::assert_progress_phases(
+        &stderr,
+        &[
+            "Analyzing",
+            "Generating",
+            "Building",
+            "Validating",
+            "Generating",
+            "Building",
+            "Bundling",
+            "Publishing",
+        ],
+    );
+    let nested = stderr
+        .lines()
+        .position(|line| {
+            let line = line.trim_start();
+            line.starts_with("Fresh ") || line.starts_with("Compiling ")
+        })
+        .expect("verbose output should include nested Cargo activity");
+    let building = stderr
+        .lines()
+        .position(|line| line.split_whitespace().next() == Some("Building"))
+        .unwrap();
+    assert!(
+        building < nested,
+        "nested Cargo output was out of order:\n{stderr}"
+    );
+}
+
+#[test]
 fn broken_payload_preserves_diagnostics_without_publishing_a_bundle() {
     let _guard = support::toolchain_lock();
     let target = support::toolchain_target();
@@ -53,6 +158,20 @@ fn broken_payload_preserves_diagnostics_without_publishing_a_bundle() {
     );
     assert!(stderr.contains("deployment 'broken-payload'"), "{stderr}");
     assert!(stderr.contains("Federate 'host'"), "{stderr}");
+    assert_eq!(
+        stderr
+            .matches("error: intentional target payload build failure")
+            .count(),
+        1,
+        "compiler diagnostic was duplicated:\n{stderr}"
+    );
+    assert!(
+        stderr.find("Building").unwrap()
+            < stderr
+                .find("intentional target payload build failure")
+                .unwrap(),
+        "compiler diagnostic preceded its build status:\n{stderr}"
+    );
     let output_directory = target.join("boomerang/broken-payload");
     if output_directory.exists() {
         assert!(!output_directory.join("deployment.json").exists());

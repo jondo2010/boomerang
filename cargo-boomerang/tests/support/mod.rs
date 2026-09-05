@@ -55,6 +55,25 @@ pub fn toolchain_lock() -> MutexGuard<'static, ()> {
     LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// Asserts the complete ordered sequence of cargo-boomerang progress labels.
+pub fn assert_progress_phases(stderr: &str, expected: &[&str]) {
+    const PHASES: [&str; 7] = [
+        "Analyzing",
+        "Generating",
+        "Building",
+        "Validating",
+        "Bundling",
+        "Publishing",
+        "Running",
+    ];
+    let actual = stderr
+        .lines()
+        .filter_map(|line| line.split_whitespace().next())
+        .filter(|word| PHASES.contains(word))
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected, "unexpected progress sequence:\n{stderr}");
+}
+
 struct TargetDirectoryGuard(Option<OsString>);
 
 impl Drop for TargetDirectoryGuard {

@@ -71,11 +71,15 @@ pub fn run_descriptor_driver(
     deployment_name: &str,
 ) -> Result<DriverOutput> {
     let resolved = resolve_workspace(workspace, deployment_name)?;
-    run_resolved_descriptor_driver(&resolved)
+    run_resolved_descriptor_driver(&resolved, &crate::CommandOutput::silent())
 }
 
 /// Runs the generated host descriptor driver for an already resolved workspace.
-pub(crate) fn run_resolved_descriptor_driver(resolved: &ResolvedWorkspace) -> Result<DriverOutput> {
+pub(crate) fn run_resolved_descriptor_driver(
+    resolved: &ResolvedWorkspace,
+    output: &crate::CommandOutput,
+) -> Result<DriverOutput> {
+    output.status(crate::output::Phase::Generating, "descriptor driver")?;
     let generated = render_descriptor_driver(resolved)?;
     let cargo_program = generated_cargo_program();
     let application_workspace = resolved
@@ -113,8 +117,9 @@ pub(crate) fn run_resolved_descriptor_driver(resolved: &ResolvedWorkspace) -> Re
             arguments.push(OsStr::new("--locked"));
         }
         arguments.push(OsStr::new("--offline"));
-        cargo(&cargo_program, application_workspace, arguments)
+        cargo(&cargo_program, application_workspace, arguments, output)
     };
+    output.status(crate::output::Phase::Building, "descriptor driver")?;
     let (generated, descriptor_package) = resolve_generated_workspace(
         resolved.target_directory(),
         &request,
@@ -148,6 +153,7 @@ pub(crate) fn run_resolved_descriptor_driver(resolved: &ResolvedWorkspace) -> Re
                 OsStr::new("--target-dir"),
                 target.as_os_str(),
             ],
+            output,
         )?;
         let mut log = build_log.borrow_mut();
         log.push_str(&String::from_utf8_lossy(&build.stderr));
@@ -205,18 +211,22 @@ fn cargo(
     program: &OsStr,
     application_workspace: &Path,
     arguments: impl IntoIterator<Item = impl AsRef<OsStr>>,
+    output: &crate::CommandOutput,
 ) -> Result<Output> {
-    Command::new(program)
+    let mut command = Command::new(program);
+    command
         .args(arguments)
         .current_dir(application_workspace)
-        .env("BOOMERANG_DESCRIPTOR_DRIVER", "1")
-        .output()
-        .with_context(|| {
-            format!(
-                "failed to invoke Cargo in {}",
-                application_workspace.display()
-            )
-        })
+        .env("BOOMERANG_DESCRIPTOR_DRIVER", "1");
+    output.configure(&mut command);
+    let cargo_output = command.output().with_context(|| {
+        format!(
+            "failed to invoke Cargo in {}",
+            application_workspace.display()
+        )
+    })?;
+    output.forward_cargo_stderr(&cargo_output)?;
+    Ok(cargo_output)
 }
 
 /// Extracts the generated descriptor executable and non-fresh artifact count from Cargo messages.

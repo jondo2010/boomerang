@@ -23,6 +23,31 @@ fn check_runs_complete_host_analysis_without_building_payloads() {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
+    assert!(
+        result.stdout.is_empty(),
+        "unexpected stdout: {:?}",
+        result.stdout
+    );
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    for phase in [
+        "Analyzing",
+        "Generating",
+        "Building",
+        "Validating",
+        "Publishing",
+    ] {
+        assert!(stderr.contains(phase), "missing {phase} status:\n{stderr}");
+    }
+    support::assert_progress_phases(
+        &stderr,
+        &[
+            "Analyzing",
+            "Generating",
+            "Building",
+            "Validating",
+            "Publishing",
+        ],
+    );
     let report_path = target.as_path().join("boomerang/production/check.json");
     assert!(report_path.exists(), "missing {}", report_path.display());
     let report: serde_json::Value =

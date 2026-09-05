@@ -16,18 +16,33 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     driver::{run_resolved_descriptor_driver, DriverOutput},
-    resolve_workspace, CoordinationBackend, ResolvedWorkspace,
+    output::{CommandOutput, Phase},
+    workspace::resolve_workspace_with_output,
+    CoordinationBackend, ResolvedWorkspace,
 };
 
 pub(crate) const COMPILER_SCHEMA: u32 = 1;
 
 /// Runs the complete host-side check pipeline and returns the published report path.
 pub fn check(workspace: impl AsRef<Path>, deployment_name: &str) -> Result<PathBuf> {
-    let analyzed = analyze(workspace, deployment_name)?;
+    check_with_output(workspace, deployment_name, &CommandOutput::silent())
+}
+
+/// Checks one deployment while reporting CLI progress through `output`.
+pub fn check_with_output(
+    workspace: impl AsRef<Path>,
+    deployment_name: &str,
+    output: &CommandOutput,
+) -> Result<PathBuf> {
+    let analyzed = analyze(workspace, deployment_name, output)?;
     let report = build_report(
         deployment_name,
         analyzed.driver.topology(),
         &analyzed.compiled,
+    )?;
+    output.status(
+        Phase::Publishing,
+        format_args!("check report for '{deployment_name}'"),
     )?;
     publish_report(&analyzed.resolved, &report)
 }
@@ -46,10 +61,19 @@ pub(crate) struct AnalyzedDeployment {
 pub(crate) fn analyze(
     workspace: impl AsRef<Path>,
     deployment_name: &str,
+    output: &CommandOutput,
 ) -> Result<AnalyzedDeployment> {
-    let resolved = resolve_workspace(workspace, deployment_name)?;
-    let driver = run_resolved_descriptor_driver(&resolved)?;
+    output.status(
+        Phase::Analyzing,
+        format_args!("deployment '{deployment_name}'"),
+    )?;
+    let resolved = resolve_workspace_with_output(workspace, deployment_name, output)?;
+    let driver = run_resolved_descriptor_driver(&resolved, output)?;
     let deployment = build_resolved_deployment(&resolved, &driver)?;
+    output.status(
+        Phase::Validating,
+        format_args!("deployment '{deployment_name}'"),
+    )?;
     let compiled = lower(&deployment).context("failed to lower resolved deployment")?;
     compiled
         .validate()

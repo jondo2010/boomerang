@@ -7,9 +7,9 @@ use serde_json::{json, Value};
 
 use super::support;
 
-/// Runs the installed Cargo plugin for one fixture deployment in the shared run target.
+/// Runs the installed Cargo plugin for one fixture deployment in the shared toolchain target.
 fn run_cli(deployment: &str) -> Output {
-    let target = support::shared_target("run");
+    let target = support::toolchain_target();
     Command::new(env!("CARGO_BIN_EXE_cargo-boomerang"))
         .args(["boomerang", "--workspace"])
         .arg(support::fixture_workspace())

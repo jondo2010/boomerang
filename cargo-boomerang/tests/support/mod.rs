@@ -3,7 +3,7 @@
 use std::{
     ffi::OsString,
     path::{Path, PathBuf},
-    sync::{Mutex, MutexGuard},
+    sync::{Mutex, MutexGuard, OnceLock},
 };
 
 pub fn fixture_workspace() -> PathBuf {
@@ -34,8 +34,15 @@ pub fn copied_fixture_workspace() -> tempfile::TempDir {
 }
 
 pub fn shared_target(lane: &str) -> PathBuf {
-    let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("cargo-boomerang-fixtures");
-    std::fs::create_dir_all(&root).unwrap();
+    static ROOT: OnceLock<PathBuf> = OnceLock::new();
+    let root = ROOT.get_or_init(|| {
+        let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("cargo-boomerang-fixtures");
+        if root.exists() {
+            std::fs::remove_dir_all(&root).unwrap();
+        }
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    });
     root.join(lane)
 }
 

@@ -127,13 +127,13 @@ pub(crate) fn run_resolved_descriptor_driver(
         |directory| {
             let reconciliation = metadata(directory, false)?;
             let mut log = build_log.borrow_mut();
-            log.push_str(&String::from_utf8_lossy(&reconciliation.stderr));
+            retain_cargo_diagnostics(&mut log, &reconciliation, "", output);
             require_success("lock reconciliation", &reconciliation, &log)
         },
         |directory| {
             let metadata = metadata(directory, true)?;
             let mut log = build_log.borrow_mut();
-            log.push_str(&String::from_utf8_lossy(&metadata.stderr));
+            retain_cargo_diagnostics(&mut log, &metadata, "", output);
             require_success("locked metadata verification", &metadata, &log)?;
             let metadata: Metadata = serde_json::from_slice(&metadata.stdout)
                 .context("failed to decode generated Cargo metadata")?;
@@ -159,8 +159,7 @@ pub(crate) fn run_resolved_descriptor_driver(
         let diagnostics = rendered_compiler_diagnostics(&build.stdout)?;
         let artifact = descriptor_artifact(&build, &descriptor_package, &generated.manifest_path());
         let mut log = build_log.borrow_mut();
-        log.push_str(&diagnostics);
-        log.push_str(&String::from_utf8_lossy(&build.stderr));
+        retain_cargo_diagnostics(&mut log, &build, &diagnostics, output);
         require_success("build", &build, &log)?;
         let (executable, compiled_artifacts) = artifact?;
         let (execution, executable) = copy_private_artifact(&executable, target)?;
@@ -180,6 +179,20 @@ pub(crate) fn run_resolved_descriptor_driver(
         build_log: build_log.into_inner(),
         compiled_artifacts,
     })
+}
+
+/// Retains Cargo diagnostics only when they were not already shown or intentionally suppressed.
+fn retain_cargo_diagnostics(
+    build_log: &mut String,
+    cargo_output: &Output,
+    rendered: &str,
+    output: &crate::CommandOutput,
+) {
+    if cargo_output.status.success() && !output.retains_successful_cargo_stderr() {
+        return;
+    }
+    build_log.push_str(rendered);
+    build_log.push_str(&String::from_utf8_lossy(&cargo_output.stderr));
 }
 
 /// Canonically identifies a descriptor request, preserving every Cargo executable path byte.

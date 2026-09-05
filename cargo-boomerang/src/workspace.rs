@@ -310,7 +310,7 @@ fn locked_metadata(workspace: &Path, manifest: &Path, output: &CommandOutput) ->
         .current_dir(workspace)
         .manifest_path(manifest)
         .other_options(options)
-        .verbose(output.is_verbose());
+        .verbose(output.shows_successful_cargo_stderr());
     command.exec().with_context(|| {
         format!(
             "failed to resolve locked Cargo metadata for {}",

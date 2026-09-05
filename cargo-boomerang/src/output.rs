@@ -117,15 +117,19 @@ impl CommandOutput {
         }
     }
 
-    /// Returns whether successful nested Cargo stderr should be visible.
-    pub(crate) const fn is_verbose(self) -> bool {
-        self.verbosity > 0
+    /// Returns whether successful nested Cargo stderr is shown directly to the CLI user.
+    pub(crate) const fn shows_successful_cargo_stderr(self) -> bool {
+        self.configure_cargo && !self.quiet
+    }
+
+    /// Returns whether successful nested Cargo stderr is retained for a library caller.
+    pub(crate) const fn retains_successful_cargo_stderr(self) -> bool {
+        !self.configure_cargo
     }
 
     /// Forwards successful nested Cargo output after its normal-verbosity noise is suppressed.
     pub(crate) fn forward_cargo_stderr(self, output: &Output) -> Result<()> {
-        if self.quiet
-            || !self.configure_cargo
+        if !self.shows_successful_cargo_stderr()
             || !output.status.success()
             || output.stderr.is_empty()
         {
@@ -183,5 +187,29 @@ impl fmt::Display for Phase {
             Self::Publishing => "Publishing",
             Self::Running => "Running",
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ColorChoice, CommandOutput};
+
+    #[test]
+    fn successful_nested_cargo_stderr_policy_distinguishes_cli_and_library_calls() {
+        let default = CommandOutput::new(false, 0, ColorChoice::Never);
+        assert!(default.shows_successful_cargo_stderr());
+        assert!(!default.retains_successful_cargo_stderr());
+
+        let quiet = CommandOutput::new(true, 0, ColorChoice::Never);
+        assert!(!quiet.shows_successful_cargo_stderr());
+        assert!(!quiet.retains_successful_cargo_stderr());
+
+        let verbose = CommandOutput::new(false, 1, ColorChoice::Never);
+        assert!(verbose.shows_successful_cargo_stderr());
+        assert!(!verbose.retains_successful_cargo_stderr());
+
+        let library = CommandOutput::silent();
+        assert!(!library.shows_successful_cargo_stderr());
+        assert!(library.retains_successful_cargo_stderr());
     }
 }

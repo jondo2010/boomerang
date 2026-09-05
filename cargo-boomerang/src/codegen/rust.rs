@@ -43,6 +43,16 @@ pub(super) fn render_launcher(
                  .expect(\"generated state initializer and reaction must agree\")\n\
          }\n\n\
          const EXECUTION_SUMMARY_ENV: &str = \"BOOMERANG_EXECUTION_SUMMARY_V1\";\n\n\
+         /// Installs launcher tracing unless this process already has a subscriber.\n\
+         fn init_tracing() {\n\
+             let filter = tracing_subscriber::EnvFilter::builder()\n\
+                 .with_default_directive(tracing_subscriber::filter::LevelFilter::OFF.into())\n\
+                 .from_env_lossy();\n\
+             let _ = tracing_subscriber::fmt()\n\
+                 .with_env_filter(filter)\n\
+                 .with_writer(std::io::stderr)\n\
+                 .try_init();\n\
+         }\n\n\
          /// Writes the optional version-1 execution summary for the supervising host.\n\
          fn write_execution_summary(\n\
              execution: &boomerang_runtime::FederateExecution,\n\
@@ -91,7 +101,7 @@ pub(super) fn render_launcher(
         .unwrap_or_else(|| String::from("None"));
     writeln!(
         source,
-        "fn main() -> Result<(), Box<dyn std::error::Error>> {{\n    let bindings = generated_bindings();\n    let execution = execute_owned_federate(\n        &DEPLOYMENT, FederateIndex::new(0), bindings, Config {{\n            fast_forward: {},\n            timeout: {},\n            keep_alive: {},\n            // Legacy public-API compatibility placeholder.\n            physical_event_q_size: 1024,\n        }},\n    )?;\n    write_execution_summary(&execution)?;\n    Ok(())\n}}",
+        "fn main() -> Result<(), Box<dyn std::error::Error>> {{\n    init_tracing();\n    let bindings = generated_bindings();\n    let execution = execute_owned_federate(\n        &DEPLOYMENT, FederateIndex::new(0), bindings, Config {{\n            fast_forward: {},\n            timeout: {},\n            keep_alive: {},\n            // Legacy public-API compatibility placeholder.\n            physical_event_q_size: 1024,\n        }},\n    )?;\n    write_execution_summary(&execution)?;\n    Ok(())\n}}",
         execution.fast_forward, timeout, execution.keep_alive,
     )?;
     Ok(source)

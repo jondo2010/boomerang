@@ -82,13 +82,13 @@ jobs:
       - name: toolchain version
         run: cargo -vV
 
-      - name: test workspace except cargo-boomerang
-        run: cargo test --workspace --exclude cargo-boomerang --verbose
-
       - name: test cargo-boomerang fast targets
         run: >-
           cargo test -p cargo-boomerang --lib --bin cargo-boomerang
           --test manifest --test workspace --verbose
+
+      - name: test workspace except cargo-boomerang
+        run: cargo test --workspace --exclude cargo-boomerang --verbose
 
       - name: smoke test cargo-boomerang toolchain on Windows
         if: matrix.os == 'windows-latest' && matrix.toolchain == 'stable'

@@ -15,16 +15,29 @@ use crate::{
     },
     check::{analyze, resource_report, AnalyzedDeployment, COMPILER_SCHEMA},
     codegen::generate_analyzed_launcher,
+    output::{CommandOutput, Phase},
 };
 
 /// Builds one deployment and returns its immutable `deployment.json` path.
 pub fn build(workspace: impl AsRef<Path>, deployment_name: &str) -> Result<PathBuf> {
-    let analyzed = analyze(workspace, deployment_name)?;
-    build_analyzed(&analyzed)
+    build_with_output(workspace, deployment_name, &CommandOutput::silent())
+}
+
+/// Builds one deployment while reporting CLI progress through `output`.
+pub fn build_with_output(
+    workspace: impl AsRef<Path>,
+    deployment_name: &str,
+    output: &CommandOutput,
+) -> Result<PathBuf> {
+    let analyzed = analyze(workspace, deployment_name, output)?;
+    build_analyzed(&analyzed, output)
 }
 
 /// Builds and publishes a deployment from an already validated analysis.
-pub(crate) fn build_analyzed(analyzed: &AnalyzedDeployment) -> Result<PathBuf> {
+pub(crate) fn build_analyzed(
+    analyzed: &AnalyzedDeployment,
+    output: &CommandOutput,
+) -> Result<PathBuf> {
     let deployment_name = analyzed.resolved.deployment_name();
     let compiled_federates = analyzed.compiled.federates();
     if compiled_federates.len() != 1 {
@@ -43,11 +56,20 @@ pub(crate) fn build_analyzed(analyzed: &AnalyzedDeployment) -> Result<PathBuf> {
     let cargo_config_hash = optional_hash(configuration.cargo_config.as_deref())
         .context("failed to hash configured Cargo configuration before launcher generation")?;
 
-    let generated = generate_analyzed_launcher(analyzed, federate_id).with_context(|| {
-        format!(
+    output.status(
+        Phase::Generating,
+        format_args!("launcher for '{deployment_name}'"),
+    )?;
+    let generated =
+        generate_analyzed_launcher(analyzed, federate_id, output).with_context(|| {
+            format!(
             "deployment '{deployment_name}' Federate '{federate_id}' launcher generation failed"
         )
-    })?;
+        })?;
+    output.status(
+        Phase::Building,
+        format_args!("launcher for '{deployment_name}'"),
+    )?;
     let built = generated.build_locked_offline().with_context(|| {
         format!("deployment '{deployment_name}' Federate '{federate_id}' launcher build failed")
     })?;
@@ -62,6 +84,10 @@ pub(crate) fn build_analyzed(analyzed: &AnalyzedDeployment) -> Result<PathBuf> {
         cargo_config_hash.as_deref(),
     )?;
 
+    output.status(
+        Phase::Bundling,
+        format_args!("deployment '{deployment_name}'"),
+    )?;
     let topology = serde_json::to_vec(analyzed.driver.topology())
         .context("failed to serialize canonical topology")?;
     let topology_hash = hash_bytes(&topology);
@@ -116,6 +142,10 @@ pub(crate) fn build_analyzed(analyzed: &AnalyzedDeployment) -> Result<PathBuf> {
         artifacts: Vec::new(),
     };
     document.fingerprint = deployment_fingerprint(&document)?;
+    output.status(
+        Phase::Publishing,
+        format_args!("deployment '{deployment_name}'"),
+    )?;
     publish_bundle(
         analyzed.resolved.target_directory(),
         document,

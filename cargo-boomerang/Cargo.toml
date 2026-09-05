@@ -8,6 +8,7 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+anstream = "1.0"
 anyhow.workspace = true
 blake3.workspace = true
 boomerang_builder = { workspace = true, features = ["descriptor-fingerprint", "host-interchange"] }

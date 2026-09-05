@@ -55,6 +55,31 @@ pub fn toolchain_lock() -> MutexGuard<'static, ()> {
     LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// Removes terminal styling before making semantic assertions about CLI output.
+pub fn without_ansi(output: &str) -> String {
+    anstream::adapter::strip_str(output).to_string()
+}
+
+/// Asserts the complete ordered sequence of cargo-boomerang progress labels.
+pub fn assert_progress_phases(stderr: &str, expected: &[&str]) {
+    const PHASES: [&str; 7] = [
+        "Analyzing",
+        "Generating",
+        "Building",
+        "Validating",
+        "Bundling",
+        "Publishing",
+        "Running",
+    ];
+    let plain_stderr = without_ansi(stderr);
+    let actual = plain_stderr
+        .lines()
+        .filter_map(|line| line.split_whitespace().next())
+        .filter(|word| PHASES.contains(word))
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected, "unexpected progress sequence:\n{stderr}");
+}
+
 struct TargetDirectoryGuard(Option<OsString>);
 
 impl Drop for TargetDirectoryGuard {

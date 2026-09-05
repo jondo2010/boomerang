@@ -8,9 +8,11 @@ default = ["boomerang/hosted"]
 __boomerang_descriptor = ["boomerang/__boomerang_descriptor"]
 __boomerang_payload = ["boomerang/__boomerang_payload"]
 broken-payload = []
+broken-descriptor = []
 controller-selected = []
 sensor-selected = []
 profile-config-probe = []
+warning-diagnostic = []
 
 [dependencies]
 boomerang = { path = "../../../../../boomerang", default-features = false }

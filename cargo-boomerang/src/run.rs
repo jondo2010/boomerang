@@ -14,6 +14,7 @@ use crate::{
     build::build_analyzed,
     bundle::{load_published_artifact, DeploymentDocument},
     check::analyze,
+    output::{CommandOutput, Phase},
 };
 
 /// Private environment key used by generated launchers for schema-v1 summaries.
@@ -103,7 +104,16 @@ impl RunOutcome {
 
 /// Runs one host-compatible deployment through its verified published artifact.
 pub fn run(workspace: impl AsRef<Path>, deployment_name: &str) -> Result<RunOutcome> {
-    let analyzed = analyze(workspace.as_ref(), deployment_name)?;
+    run_with_output(workspace, deployment_name, &CommandOutput::silent())
+}
+
+/// Builds and runs one deployment while reporting CLI progress through `output`.
+pub fn run_with_output(
+    workspace: impl AsRef<Path>,
+    deployment_name: &str,
+    output: &CommandOutput,
+) -> Result<RunOutcome> {
+    let analyzed = analyze(workspace.as_ref(), deployment_name, output)?;
     let federates = analyzed.compiled.federates();
     if federates.len() != 1 {
         bail!("generated execution currently supports exactly one local Federate");
@@ -136,12 +146,20 @@ pub fn run(workspace: impl AsRef<Path>, deployment_name: &str) -> Result<RunOutc
         );
     }
 
-    let manifest = build_analyzed(&analyzed)?;
+    let manifest = build_analyzed(&analyzed, output)?;
+    output.status(
+        Phase::Validating,
+        format_args!("published deployment '{deployment_name}'"),
+    )?;
     let published = load_published_artifact(&manifest)?;
     validate_published_host_artifact(&published.document)?;
     let (_directory, summary_path, launcher) = prepare_execution_directory()?;
     let mut executable = published.executable;
     copy_verified_executable(&mut executable, &launcher, &published.executable_hash)?;
+    output.status(
+        Phase::Running,
+        format_args!("deployment '{deployment_name}'"),
+    )?;
     let status = Command::new(&launcher)
         .env(EXECUTION_SUMMARY_ENV, &summary_path)
         .status()

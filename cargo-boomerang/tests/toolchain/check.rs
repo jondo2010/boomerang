@@ -23,6 +23,31 @@ fn check_runs_complete_host_analysis_without_building_payloads() {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
+    assert!(
+        result.stdout.is_empty(),
+        "unexpected stdout: {:?}",
+        result.stdout
+    );
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    for phase in [
+        "Analyzing",
+        "Generating",
+        "Building",
+        "Validating",
+        "Publishing",
+    ] {
+        assert!(stderr.contains(phase), "missing {phase} status:\n{stderr}");
+    }
+    support::assert_progress_phases(
+        &stderr,
+        &[
+            "Analyzing",
+            "Generating",
+            "Building",
+            "Validating",
+            "Publishing",
+        ],
+    );
     let report_path = target.as_path().join("boomerang/production/check.json");
     assert!(report_path.exists(), "missing {}", report_path.display());
     let report: serde_json::Value =
@@ -73,4 +98,31 @@ fn check_accepts_an_explicit_workspace_outside_the_current_directory() {
         .as_path()
         .join("boomerang/production/check.json")
         .exists());
+}
+
+#[test]
+fn descriptor_failure_reports_actionable_diagnostic_before_cargo_summary() {
+    let _guard = support::toolchain_lock();
+    let target = support::toolchain_target();
+    support::reset_deployment_output(&target, "broken-descriptor");
+    let result = std::process::Command::new(env!("CARGO_BIN_EXE_cargo-boomerang"))
+        .args(["boomerang", "check", "--deployment", "broken-descriptor"])
+        .current_dir(fixture_workspace())
+        .env("CARGO_TARGET_DIR", target)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(result.stderr).unwrap();
+    let plain_stderr = support::without_ansi(&stderr);
+
+    assert!(!result.status.success(), "{stderr}");
+    let diagnostic = plain_stderr
+        .find("error: intentional descriptor build failure")
+        .expect("missing rendered descriptor diagnostic");
+    let summary = plain_stderr
+        .find("error: could not compile `vehicle-control`")
+        .expect("missing Cargo failure summary");
+    assert!(
+        diagnostic < summary,
+        "descriptor diagnostic was out of order:\n{stderr}"
+    );
 }

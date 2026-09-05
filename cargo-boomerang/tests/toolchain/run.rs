@@ -142,10 +142,30 @@ fn run_forwards_application_streams_without_reframing() {
         String::from_utf8(output.stdout).unwrap(),
         "sensor received command 42\n"
     );
-    assert_eq!(
-        String::from_utf8(output.stderr).unwrap(),
-        "sensor scheduling shutdown\n"
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("Building"), "{stderr}");
+    assert!(stderr.contains("Running"), "{stderr}");
+    support::assert_progress_phases(
+        &stderr,
+        &[
+            "Analyzing",
+            "Generating",
+            "Building",
+            "Validating",
+            "Generating",
+            "Building",
+            "Bundling",
+            "Publishing",
+            "Validating",
+            "Running",
+        ],
     );
+    assert_eq!(
+        stderr.matches("sensor scheduling shutdown\n").count(),
+        1,
+        "{stderr}"
+    );
+    assert!(stderr.ends_with("sensor scheduling shutdown\n"), "{stderr}");
 }
 
 #[test]

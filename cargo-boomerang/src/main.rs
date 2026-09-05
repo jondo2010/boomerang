@@ -1,7 +1,9 @@
 use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
-use clap::{Args, Parser, Subcommand};
+use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
+
+use cargo_boomerang::{ColorChoice, CommandOutput};
 
 /// Cargo plugin entry point.
 #[derive(Parser)]
@@ -25,9 +27,39 @@ struct BoomerangArgs {
     /// Application workspace containing `Boomerang.toml` and `Cargo.toml`.
     #[arg(long, default_value = ".", global = true)]
     workspace: PathBuf,
+    /// Suppress cargo-boomerang progress without suppressing command results.
+    #[arg(short, long, global = true, conflicts_with = "verbose")]
+    quiet: bool,
+    /// Use verbose output for nested Cargo commands.
+    #[arg(short, long, global = true, action = ArgAction::Count)]
+    verbose: u8,
+    /// Control color in progress and nested Cargo diagnostics.
+    #[arg(long, global = true, value_enum)]
+    color: Option<CliColorChoice>,
     /// Deployment-tool operation.
     #[command(subcommand)]
     command: BoomerangCommand,
+}
+
+/// Cargo-compatible color values accepted at the command line.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum CliColorChoice {
+    /// Select color automatically from the output destination.
+    Auto,
+    /// Always emit color.
+    Always,
+    /// Never emit color.
+    Never,
+}
+
+impl From<CliColorChoice> for ColorChoice {
+    fn from(choice: CliColorChoice) -> Self {
+        match choice {
+            CliColorChoice::Auto => Self::Auto,
+            CliColorChoice::Always => Self::Always,
+            CliColorChoice::Never => Self::Never,
+        }
+    }
 }
 
 /// Deployment-tool operations.
@@ -54,25 +86,28 @@ enum BoomerangCommand {
 }
 
 fn main() -> Result<()> {
-    match CargoCli::parse().command {
-        CargoCommand::Boomerang(BoomerangArgs {
-            workspace,
-            command: BoomerangCommand::Build { deployment },
-        }) => {
-            let manifest = cargo_boomerang::build(workspace, &deployment)?;
+    let CargoCommand::Boomerang(BoomerangArgs {
+        workspace,
+        quiet,
+        verbose,
+        color,
+        command,
+    }) = CargoCli::parse().command;
+    let color = color
+        .map(ColorChoice::from)
+        .unwrap_or_else(ColorChoice::from_cargo_env);
+    let output = CommandOutput::new(quiet, verbose, color);
+
+    match command {
+        BoomerangCommand::Build { deployment } => {
+            let manifest = cargo_boomerang::build_with_output(workspace, &deployment, &output)?;
             println!("{}", manifest.display());
         }
-        CargoCommand::Boomerang(BoomerangArgs {
-            workspace,
-            command: BoomerangCommand::Check { deployment },
-        }) => {
-            cargo_boomerang::check(workspace, &deployment)?;
+        BoomerangCommand::Check { deployment } => {
+            cargo_boomerang::check_with_output(workspace, &deployment, &output)?;
         }
-        CargoCommand::Boomerang(BoomerangArgs {
-            workspace,
-            command: BoomerangCommand::Run { deployment },
-        }) => {
-            let outcome = cargo_boomerang::run(workspace, &deployment)?;
+        BoomerangCommand::Run { deployment } => {
+            let outcome = cargo_boomerang::run_with_output(workspace, &deployment, &output)?;
             std::process::exit(numeric_exit_code(outcome.status())?);
         }
     }

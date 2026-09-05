@@ -62,6 +62,34 @@ package = "vehicle-control"
 groups = ["placement/backup", "placement/controller", "placement/sensor"]
 runtime = "std"
 
+[deployments.warning-diagnostic.bindings.sensor]
+package = "sensor-host"
+features = ["simulated"]
+
+[deployments.warning-diagnostic.bindings.controller]
+package = "vehicle-control"
+features = ["warning-diagnostic"]
+[deployments.warning-diagnostic.bindings.backup]
+package = "vehicle-control"
+
+[deployments.warning-diagnostic.federates.host]
+groups = ["placement/backup", "placement/controller", "placement/sensor"]
+runtime = "std"
+
+[deployments.broken-descriptor.bindings.sensor]
+package = "sensor-host"
+features = ["simulated"]
+
+[deployments.broken-descriptor.bindings.controller]
+package = "vehicle-control"
+features = ["broken-descriptor"]
+[deployments.broken-descriptor.bindings.backup]
+package = "vehicle-control"
+
+[deployments.broken-descriptor.federates.host]
+groups = ["placement/backup", "placement/controller", "placement/sensor"]
+runtime = "std"
+
 [deployments.profile-config.bindings.sensor]
 package = "sensor-host"
 features = ["simulated"]

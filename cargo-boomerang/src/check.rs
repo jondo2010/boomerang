@@ -8,12 +8,10 @@ use std::{
 
 use anyhow::{Context, Result};
 use boomerang_builder::compiler::{
-    lower, BoundaryBinding, BoundaryFailurePolicyId, BoundaryId, BoundaryPolicies,
-    CodecCapabilityId, CodecPolicyId, CoordinationBackendId, CoordinationSelection, FederateConfig,
-    FederateId, FlowId, ImplementationBinding, OwnedCompiledDeployment, PhysicalBoundaryId,
-    PhysicalBoundaryMetadata, PlacementAssignment, PlacementGroupId, RecoveryPolicyId,
-    ResolvedDeployment, RuntimeBackendId, SecurityPolicyId, TargetTriple, TimingPolicyId,
-    TransportCapabilityId, TransportPolicyId,
+    lower, BoundaryBinding, BoundaryId, BoundaryPolicies, CodecCapabilityId, CoordinationSelection,
+    FederateConfig, FederateId, FlowId, ImplementationBinding, OwnedCompiledDeployment,
+    PhysicalBoundaryId, PhysicalBoundaryMetadata, PlacementAssignment, PlacementGroupId,
+    ResolvedDeployment, RuntimeBackendId, TargetTriple, TransportCapabilityId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -21,7 +19,7 @@ use crate::{
     driver::{run_resolved_descriptor_driver, DriverOutput},
     output::{CommandOutput, Phase},
     workspace::resolve_workspace_with_output,
-    CoordinationBackend, ResolvedWorkspace,
+    ResolvedWorkspace,
 };
 
 pub(crate) const COMPILER_SCHEMA: u32 = 1;
@@ -126,17 +124,14 @@ fn build_resolved_deployment(
                 FederateId::new(id.as_str())?,
                 TargetTriple::new(target)?,
                 RuntimeBackendId::new(config.runtime.as_str())?,
-                RecoveryPolicyId::new(config.recovery.as_str())?,
+                config.recovery,
             ))
         })
         .collect::<Result<Vec<_>>>()?;
     let coordination = match resolved.deployment().coordination.as_ref() {
         None => CoordinationSelection::Local,
         Some(coordination) => CoordinationSelection::Distributed {
-            backend: CoordinationBackendId::new(match coordination.backend {
-                CoordinationBackend::CentralRti => "central-rti",
-                CoordinationBackend::PeerToPeer => "peer-to-peer",
-            })?,
+            backend: coordination.backend,
         },
     };
     let boundary_bindings = resolved
@@ -162,11 +157,11 @@ fn build_resolved_deployment(
                 CodecCapabilityId::new(boundary.codec.as_str())?,
                 TransportCapabilityId::new(boundary.transport.as_str())?,
                 BoundaryPolicies::new(
-                    BoundaryFailurePolicyId::new(boundary.failure_policy.as_str())?,
-                    TransportPolicyId::new(boundary.transport_policy.as_str())?,
-                    CodecPolicyId::new(boundary.codec_policy.as_str())?,
-                    TimingPolicyId::new(boundary.timing_policy.as_str())?,
-                    SecurityPolicyId::new(boundary.security_policy.as_str())?,
+                    boundary.failure_policy,
+                    boundary.transport_policy,
+                    boundary.codec_policy,
+                    boundary.timing_policy,
+                    boundary.security_policy,
                 ),
             ))
         })

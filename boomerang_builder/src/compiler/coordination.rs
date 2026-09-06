@@ -14,10 +14,9 @@ use super::federation::AnalyzedFederationGraph;
 use super::identity::canonical_identity_text;
 use super::{FederateId, ResolvedDeployment};
 use crate::runtime::image::{
-    BoundaryFailurePolicyIndex, CodecCapabilityIndex, CodecPolicyIndex, CoordinationProjection,
-    FederateIndex, FlowIndex, IdentityRange, PhysicalBoundaryIndex, RecoveryPolicyIndex,
-    RtiDependencyImage, RtiImage, RtiMemberImage, RtiRouteImage, SecurityPolicyIndex,
-    TimingPolicyIndex, TransportCapabilityIndex, TransportPolicyIndex,
+    CodecCapabilityIndex, CoordinationProjection, FederateIndex, FlowIndex, IdentityRange,
+    IdentityTable, PhysicalBoundaryIndex, RtiDependencyImage, RtiImage, RtiMemberImage,
+    RtiRouteImage, TransportCapabilityIndex,
 };
 use tinymap::{TableRange, TinyMapView};
 
@@ -52,18 +51,6 @@ pub struct OwnedRtiImage {
     flows: Box<[IdentityRange]>,
     /// Canonically ordered stable physical input/output identities.
     physical_boundaries: Box<[IdentityRange]>,
-    /// Canonically ordered recovery policy identities.
-    recovery_policies: Box<[IdentityRange]>,
-    /// Canonically ordered boundary-failure policy identities.
-    failure_policies: Box<[IdentityRange]>,
-    /// Canonically ordered transport policy identities.
-    transport_policies: Box<[IdentityRange]>,
-    /// Canonically ordered codec policy identities.
-    codec_policies: Box<[IdentityRange]>,
-    /// Canonically ordered timing policy identities.
-    timing_policies: Box<[IdentityRange]>,
-    /// Canonically ordered security policy identities.
-    security_policies: Box<[IdentityRange]>,
     /// Canonically ordered transport capability identities.
     transport_capabilities: Box<[IdentityRange]>,
     /// Canonically ordered codec capability identities.
@@ -73,16 +60,26 @@ pub struct OwnedRtiImage {
 impl OwnedRtiImage {
     /// Borrows this owner as the target-facing immutable RTI image.
     #[must_use]
-    #[rustfmt::skip]
     pub fn image(&self) -> RtiImage<'_> {
         RtiImage::new(
-            &self.identity_data, TinyMapView::new(&self.members), &self.dependencies,
-            &self.affected_downstream, &self.routes, TinyMapView::new(&self.flows),
-            TinyMapView::new(&self.physical_boundaries), TinyMapView::new(&self.recovery_policies),
-            TinyMapView::new(&self.failure_policies), TinyMapView::new(&self.transport_policies),
-            TinyMapView::new(&self.codec_policies), TinyMapView::new(&self.timing_policies),
-            TinyMapView::new(&self.security_policies), TinyMapView::new(&self.transport_capabilities),
-            TinyMapView::new(&self.codec_capabilities),
+            &self.identity_data,
+            TinyMapView::new(&self.members),
+            &self.dependencies,
+            &self.affected_downstream,
+            &self.routes,
+            IdentityTable::new(&self.identity_data, TinyMapView::new(&self.flows)),
+            IdentityTable::new(
+                &self.identity_data,
+                TinyMapView::new(&self.physical_boundaries),
+            ),
+            IdentityTable::new(
+                &self.identity_data,
+                TinyMapView::new(&self.transport_capabilities),
+            ),
+            IdentityTable::new(
+                &self.identity_data,
+                TinyMapView::new(&self.codec_capabilities),
+            ),
         )
     }
 }
@@ -108,7 +105,6 @@ impl OwnedCoordinationProjection {
 }
 
 /// Mechanically maps analyzed stable identities into central-RTI dense tables.
-#[rustfmt::skip]
 pub(crate) fn project_central_rti(
     analysis: &AnalyzedFederationGraph,
     deployment: &ResolvedDeployment,
@@ -125,9 +121,11 @@ pub(crate) fn project_central_rti(
     let mut dependencies = Vec::new();
     let mut affected_downstream = Vec::new();
     let mut identity_data = String::new();
-    macro_rules! dense { ($key:ty, $values:expr) => {
-        dense_identities::<_, $key>(&mut identity_data, ($values).collect())?
-    }; }
+    macro_rules! dense {
+        ($key:ty, $values:expr) => {
+            dense_identities::<_, $key>(&mut identity_data, ($values).collect())?
+        };
+    }
     let route_bindings = analysis
         .edges()
         .iter()
@@ -138,16 +136,20 @@ pub(crate) fn project_central_rti(
         })
         .collect::<Vec<_>>();
     let (flows, flow_indices) = dense!(FlowIndex, route_bindings.iter().map(|value| value.flow()));
-    let physical = route_bindings.iter().flat_map(|value| [value.physical().input(), value.physical().output()].into_iter().flatten());
+    let physical = route_bindings.iter().flat_map(|value| {
+        [value.physical().input(), value.physical().output()]
+            .into_iter()
+            .flatten()
+    });
     let (physical_boundaries, physical_indices) = dense!(PhysicalBoundaryIndex, physical);
-    let (recovery_policies, recovery_indices) = dense!(RecoveryPolicyIndex, deployment.federates().map(|value| value.recovery()));
-    let (failure_policies, failure_indices) = dense!(BoundaryFailurePolicyIndex, route_bindings.iter().map(|value| value.policies().failure()));
-    let (transport_policies, transport_policy_indices) = dense!(TransportPolicyIndex, route_bindings.iter().map(|value| value.policies().transport()));
-    let (codec_policies, codec_policy_indices) = dense!(CodecPolicyIndex, route_bindings.iter().map(|value| value.policies().codec()));
-    let (timing_policies, timing_policy_indices) = dense!(TimingPolicyIndex, route_bindings.iter().map(|value| value.policies().timing()));
-    let (security_policies, security_policy_indices) = dense!(SecurityPolicyIndex, route_bindings.iter().map(|value| value.policies().security()));
-    let (transport_capabilities, transport_capability_indices) = dense!(TransportCapabilityIndex, route_bindings.iter().map(|value| value.transport()));
-    let (codec_capabilities, codec_capability_indices) = dense!(CodecCapabilityIndex, route_bindings.iter().map(|value| value.codec()));
+    let (transport_capabilities, transport_capability_indices) = dense!(
+        TransportCapabilityIndex,
+        route_bindings.iter().map(|value| value.transport())
+    );
+    let (codec_capabilities, codec_capability_indices) = dense!(
+        CodecCapabilityIndex,
+        route_bindings.iter().map(|value| value.codec())
+    );
     let routes = analysis
         .edges()
         .iter()
@@ -159,11 +161,11 @@ pub(crate) fn project_central_rti(
                 flow_indices[binding.flow()],
                 binding.physical().input().map(|id| physical_indices[id]),
                 binding.physical().output().map(|id| physical_indices[id]),
-                failure_indices[binding.policies().failure()],
-                transport_policy_indices[binding.policies().transport()],
-                codec_policy_indices[binding.policies().codec()],
-                timing_policy_indices[binding.policies().timing()],
-                security_policy_indices[binding.policies().security()],
+                binding.policies().failure(),
+                binding.policies().transport(),
+                binding.policies().codec(),
+                binding.policies().timing(),
+                binding.policies().security(),
                 transport_capability_indices[binding.transport()],
                 codec_capability_indices[binding.codec()],
                 indices[edge.source()],
@@ -196,10 +198,10 @@ pub(crate) fn project_central_rti(
             affected_downstream.len() - downstream_start as usize,
         )?;
         members.push(RtiMemberImage::new(
-            recovery_indices[deployment
+            deployment
                 .federate(member)
                 .expect("analyzed member has a resolved Federate configuration")
-                .recovery()],
+                .recovery(),
             direct,
             transitive,
             TableRange::new(downstream_start, downstream_len),
@@ -214,12 +216,6 @@ pub(crate) fn project_central_rti(
         routes,
         flows,
         physical_boundaries,
-        recovery_policies,
-        failure_policies,
-        transport_policies,
-        codec_policies,
-        timing_policies,
-        security_policies,
         transport_capabilities,
         codec_capabilities,
     })

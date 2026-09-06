@@ -1676,10 +1676,9 @@ fn wrong_sink_bindings() -> EnclaveBindings {
 #[test]
 fn owned_federate_preflight_rejects_before_initializers() {
     use boomerang::runtime::image::{
-        BoundaryFailurePolicyIndex, CodecCapabilityIndex, CodecPolicyIndex, FederationEdgeImage,
-        FlowIndex, PhysicalBoundaryIndex, RecoveryPolicyIndex, RtiImage, RtiMemberImage,
-        RtiRouteImage, SecurityPolicyIndex, TimingPolicyIndex, TransportCapabilityIndex,
-        TransportPolicyIndex,
+        BoundaryFailurePolicy, CodecCapabilityIndex, CodecPolicy, FederationEdgeImage, FlowIndex,
+        IdentityTable, PhysicalBoundaryIndex, RecoveryPolicy, RtiImage, RtiMemberImage,
+        RtiRouteImage, SecurityPolicy, TimingPolicy, TransportCapabilityIndex, TransportPolicy,
     };
     ROUTED_INITIALIZATIONS.store(0, Ordering::SeqCst);
     let error = execute_owned_federate(
@@ -1814,17 +1813,17 @@ fn owned_federate_preflight_rejects_before_initializers() {
         1_000_000,
     )];
     let rti_members =
-        [RtiMemberImage::new(RecoveryPolicyIndex::new(0), r!(0, 0), r!(0, 0), r!(0, 0)); 2];
+        [RtiMemberImage::new(RecoveryPolicy::FailStop, r!(0, 0), r!(0, 0), r!(0, 0)); 2];
     let rti_routes = [RtiRouteImage::new(
         IdentityRange::new(0, 4),
         FlowIndex::new(0),
         None::<PhysicalBoundaryIndex>,
         None,
-        BoundaryFailurePolicyIndex::new(0),
-        TransportPolicyIndex::new(0),
-        CodecPolicyIndex::new(0),
-        TimingPolicyIndex::new(0),
-        SecurityPolicyIndex::new(0),
+        BoundaryFailurePolicy::PropagateStop,
+        TransportPolicy::ReliableOrderedFramed,
+        CodecPolicy::CanonicalBounded,
+        TimingPolicy::BestEffort,
+        SecurityPolicy::None,
         TransportCapabilityIndex::new(0),
         CodecCapabilityIndex::new(0),
         FederateIndex::new(0),
@@ -1838,16 +1837,10 @@ fn owned_federate_preflight_rejects_before_initializers() {
         &[],
         &[],
         &rti_routes,
-        TinyMapView::new(&rti_identities),
-        TinyMapView::new(&[]),
-        TinyMapView::new(&rti_identities),
-        TinyMapView::new(&rti_identities),
-        TinyMapView::new(&rti_identities),
-        TinyMapView::new(&rti_identities),
-        TinyMapView::new(&rti_identities),
-        TinyMapView::new(&rti_identities),
-        TinyMapView::new(&rti_identities),
-        TinyMapView::new(&rti_identities),
+        IdentityTable::new("pipex", TinyMapView::new(&rti_identities)),
+        IdentityTable::new("pipex", TinyMapView::new(&[])),
+        IdentityTable::new("pipex", TinyMapView::new(&rti_identities)),
+        IdentityTable::new("pipex", TinyMapView::new(&rti_identities)),
     );
     let cross = CompiledDeploymentImage {
         identity_data: "atrbtrpipe",

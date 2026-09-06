@@ -1,6 +1,11 @@
 use std::{collections::BTreeMap, path::PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
+pub use boomerang_builder::compiler::CoordinationBackend;
+pub use boomerang_runtime::image::{
+    BoundaryFailurePolicy, CodecPolicy, RecoveryPolicy, SecurityPolicy, TimingPolicy,
+    TransportPolicy,
+};
 use serde::{Deserialize, Deserializer};
 
 const SUPPORTED_SCHEMA: u32 = 1;
@@ -190,37 +195,6 @@ pub struct Federate {
     pub cargo_config: Option<String>,
 }
 
-macro_rules! policy_enum {
-    ($name:ident, $doc:literal, {$($(#[$meta:meta])* $variant:ident => $text:literal),+ $(,)?}) => {
-        #[doc = $doc]
-        #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
-        #[serde(rename_all = "kebab-case")]
-        pub enum $name { $($(#[$meta])* $variant),+ }
-
-        impl $name {
-            /// Returns the canonical stable policy identity.
-            pub const fn as_str(self) -> &'static str {
-                match self { $(Self::$variant => $text),+ }
-            }
-        }
-    };
-}
-
-policy_enum!(RecoveryPolicy, "Closed-world Federate recovery capabilities reserved by the roadmap schema.", {
-    /// Isolate the member and apply downstream failure policies.
-    FailStop => "fail-stop",
-    /// Restart the selected artifact from its compiled initial image.
-    RestartReset => "restart-reset",
-    /// Retain local state across transport loss and rejoin with a new incarnation.
-    TransientRejoin => "transient-rejoin",
-    /// Activate a predefined hot or warm standby.
-    RedundantFailover => "redundant-failover",
-    /// Transfer explicitly declared bounded semantic state.
-    ApplicationStateTransfer => "application-state-transfer",
-    /// Restore an optional hosted process checkpoint.
-    CheckpointRestore => "checkpoint-restore",
-});
-
 /// Explicit manifest selections for one cross-Federate boundary.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
@@ -247,65 +221,12 @@ pub struct Boundary {
     pub security_policy: SecurityPolicy,
 }
 
-policy_enum!(BoundaryFailurePolicy, "Boundary behavior when its source Federate is lost.", {
-    /// Stop affected downstream execution.
-    PropagateStop => "propagate-stop",
-    /// Produce explicit absence.
-    ProduceAbsence => "produce-absence",
-    /// Produce a declared bounded safe value.
-    BoundedSafeValue => "bounded-safe-value",
-    /// Enter a declared degraded mode.
-    EnterDegradedMode => "enter-degraded-mode",
-    /// Switch to a predefined standby.
-    SwitchToStandby => "switch-to-standby",
-});
-
-policy_enum!(TransportPolicy, "Transport contracts reserved by the deployment schema.", {
-    /// Reliable, ordered, framed delivery within one membership epoch.
-    ReliableOrderedFramed => "reliable-ordered-framed",
-});
-
-policy_enum!(CodecPolicy, "Codec contracts reserved by the deployment schema.", {
-    /// Canonical architecture-independent encoding into bounded storage.
-    CanonicalBounded => "canonical-bounded",
-});
-
-policy_enum!(TimingPolicy, "Physical-time contract classes reserved by the deployment schema.", {
-    /// Worst-case contract requiring complete qualification evidence.
-    HardBound => "hard-bound",
-    /// Target-window objective with explicit miss behavior.
-    SoftTarget => "soft-target",
-    /// Bounded resource use without a response-time guarantee.
-    BestEffort => "best-effort",
-});
-
-policy_enum!(SecurityPolicy, "Communication security profiles reserved by the deployment schema.", {
-    /// No channel security, accepted only by the deployment threat model.
-    None => "none",
-    /// Integrity protection on an otherwise protected link.
-    IntegrityOnly => "integrity-only",
-    /// Federate authentication without payload confidentiality.
-    Authenticated => "authenticated",
-    /// Federate authentication, integrity, and encryption.
-    AuthenticatedEncrypted => "authenticated-encrypted",
-});
-
 /// Distributed coordination configuration for a deployment.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Coordination {
     /// Selected coordination backend.
     pub backend: CoordinationBackend,
-}
-
-/// Coordination backends reserved by the deployment manifest schema.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "kebab-case")]
-pub enum CoordinationBackend {
-    /// Federates coordinate through a generated central RTI artifact.
-    CentralRti,
-    /// Reserved RTI-free peer coordination; compilation support is deferred.
-    PeerToPeer,
 }
 
 /// Cargo build configuration for the central RTI artifact.

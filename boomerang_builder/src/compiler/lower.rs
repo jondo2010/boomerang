@@ -11,11 +11,12 @@ use crate::{
     descriptor::{ActionSlotId, DescriptorBound, PortSlotId, ReactionSlotId, ReactorSlotId},
     runtime::image::{
         ActionImage, ActionIndex, ActionSlotIndex, ActionTiming, BindingSlotIndex,
-        CompiledDeploymentImage, CompiledDeploymentView, EnclaveIndex, FederateImage,
-        FederateIndex, IdentityRange, LevelReactionImage, LifecycleReactionImage, ModeImage,
-        ModeIndex, PortImage, PortIndex, ReactionImage, ReactionIndex, ReactorImage, ReactorIndex,
-        RequiredBindingImage, RouteDirection, RouteImage, ScopeImage, ScopeIndex, StateSlotIndex,
-        StorageBounds, TableRange, TimerStartupImage, TimingDomain,
+        BoundaryFailurePolicy, CompiledDeploymentImage, CompiledDeploymentView, EnclaveIndex,
+        FederateImage, FederateIndex, IdentityRange, LevelReactionImage, LifecycleReactionImage,
+        ModeImage, ModeIndex, PortImage, PortIndex, ReactionImage, ReactionIndex, ReactorImage,
+        ReactorIndex, RecoveryPolicy, RequiredBindingImage, RouteDirection, RouteImage, ScopeImage,
+        ScopeIndex, SecurityPolicy, StateSlotIndex, StorageBounds, TableRange, TimerStartupImage,
+        TimingDomain, TimingPolicy,
     },
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -38,21 +39,13 @@ pub enum CompileError {
     /// The analyzed federation cannot be represented by the selected coordination image.
     #[error(transparent)]
     CoordinationProjection(#[from] super::CoordinationProjectionError),
-    /// A policy identity is well formed but absent from the roadmap vocabulary.
-    #[error("unknown {category} policy '{selection}'")]
-    UnknownPolicy {
-        /// Policy category being selected.
-        category: &'static str,
-        /// Unrecognized stable policy identity.
-        selection: String,
-    },
     /// A known roadmap policy is not supported by this compiler slice.
     #[error("unsupported {category} policy '{selection}'")]
     UnsupportedPolicy {
         /// Policy category being selected.
         category: &'static str,
-        /// Known but unavailable stable policy identity.
-        selection: String,
+        /// Canonical spelling of the known but unavailable policy.
+        selection: &'static str,
     },
     /// A reaction requests a mode transition that the compiled image cannot yet represent.
     #[error("reaction {reaction} requests an unsupported compiled mode transition")]
@@ -359,14 +352,12 @@ pub fn lower(deployment: &ResolvedDeployment) -> Result<OwnedCompiledDeployment,
         federates,
         coordination: match deployment.coordination() {
             super::CoordinationSelection::Local => OwnedCoordinationProjection::Local,
-            super::CoordinationSelection::Distributed { backend }
-                if matches!(backend.as_str(), "central-rti" | "rti") =>
-            {
-                OwnedCoordinationProjection::CentralRti(Box::new(project_central_rti(
-                    &analysis.federation,
-                    deployment,
-                )?))
-            }
+            super::CoordinationSelection::Distributed {
+                backend: super::CoordinationBackend::CentralRti,
+            } => OwnedCoordinationProjection::CentralRti(Box::new(project_central_rti(
+                &analysis.federation,
+                deployment,
+            )?)),
             super::CoordinationSelection::Distributed { .. } => {
                 return Err(CompileError::UnsupportedCoordination);
             }
@@ -376,44 +367,31 @@ pub fn lower(deployment: &ResolvedDeployment) -> Result<OwnedCompiledDeployment,
     Ok(compiled)
 }
 
-/// Fails closed on unknown or not-yet-supported roadmap policy selections.
-#[rustfmt::skip]
+/// Fails closed on typed roadmap policies not supported by this compiler slice.
 fn validate_policies(deployment: &ResolvedDeployment) -> Result<(), CompileError> {
-    macro_rules! check { ($category:literal, $selection:expr, $supported:literal, [$($known:literal),+ $(,)?]) => {
-        validate_policy($category, $selection, &[$($known),+], $supported)?
-    }; }
+    macro_rules! require {
+        ($category:literal, $selection:expr, $supported:path) => {{
+            let selection = $selection;
+            if selection != $supported {
+                return Err(CompileError::UnsupportedPolicy {
+                    category: $category,
+                    selection: selection.as_str(),
+                });
+            }
+        }};
+    }
     for federate in deployment.federates() {
-        check!("recovery", federate.recovery().as_str(), "fail-stop", ["fail-stop", "restart-reset", "transient-rejoin", "redundant-failover", "application-state-transfer", "checkpoint-restore"]);
+        require!("recovery", federate.recovery(), RecoveryPolicy::FailStop);
     }
     for boundary in deployment.boundary_bindings() {
         let policies = boundary.policies();
-        check!("boundary-failure", policies.failure().as_str(), "propagate-stop", ["propagate-stop", "produce-absence", "bounded-safe-value", "enter-degraded-mode", "switch-to-standby"]);
-        check!("transport", policies.transport().as_str(), "reliable-ordered-framed", ["reliable-ordered-framed"]);
-        check!("codec", policies.codec().as_str(), "canonical-bounded", ["canonical-bounded"]);
-        check!("timing", policies.timing().as_str(), "best-effort", ["hard-bound", "soft-target", "best-effort"]);
-        check!("security", policies.security().as_str(), "none", ["none", "integrity-only", "authenticated", "authenticated-encrypted"]);
-    }
-    Ok(())
-}
-
-/// Validates one stable selection against known and currently supported vocabularies.
-fn validate_policy(
-    category: &'static str,
-    selection: &str,
-    known: &[&str],
-    supported: &str,
-) -> Result<(), CompileError> {
-    if !known.contains(&selection) {
-        return Err(CompileError::UnknownPolicy {
-            category,
-            selection: selection.to_owned(),
-        });
-    }
-    if selection != supported {
-        return Err(CompileError::UnsupportedPolicy {
-            category,
-            selection: selection.to_owned(),
-        });
+        require!(
+            "boundary-failure",
+            policies.failure(),
+            BoundaryFailurePolicy::PropagateStop
+        );
+        require!("timing", policies.timing(), TimingPolicy::BestEffort);
+        require!("security", policies.security(), SecurityPolicy::None);
     }
     Ok(())
 }
@@ -1630,16 +1608,14 @@ mod tests {
     use crate::{
         compiler::{
             ActionId, ActionKind, ApplicationTopology, ApplicationTopologyBuilder, BankMember,
-            BoundaryBinding, BoundaryFailurePolicyId, BoundaryId, BoundaryPolicies,
-            CodecCapabilityId, CodecPolicyId, ComponentInstance, ComponentInstanceId,
-            ConnectionSemantics, CoordinationBackendId, CoordinationSelection, FederateConfig,
-            FederateId, FlowId, ImplementationBinding, ImplementationId, ModeId, ModeTransition,
-            ModeTransitionKind, OwnedCompiledDeployment, PhysicalBoundaryId,
+            BoundaryBinding, BoundaryId, BoundaryPolicies, CodecCapabilityId, ComponentInstance,
+            ComponentInstanceId, ConnectionSemantics, CoordinationBackend, CoordinationSelection,
+            FederateConfig, FederateId, FlowId, ImplementationBinding, ImplementationId, ModeId,
+            ModeTransition, ModeTransitionKind, OwnedCompiledDeployment, PhysicalBoundaryId,
             PhysicalBoundaryMetadata, PlacementAssignment, PlacementGroupId, PortDirection, PortId,
             ReactionId, ReactionOptions, ReactionRelation, ReactionRelationFlags,
-            ReactionRelationTarget, Reactor, ReactorId, RecoveryPolicyId, RequiredBinding,
-            ResolvedDeployment, RuntimeBackendId, SecurityPolicyId, StableEnclaveId, TargetTriple,
-            TimingPolicyId, TransportCapabilityId, TransportPolicyId,
+            ReactionRelationTarget, Reactor, ReactorId, RequiredBinding, ResolvedDeployment,
+            RuntimeBackendId, StableEnclaveId, TargetTriple, TransportCapabilityId,
         },
         descriptor::{
             ActionSlot, ActionSlotId, ComponentDescriptor, DescriptorBound, DescriptorBounds,
@@ -1647,9 +1623,10 @@ mod tests {
             COMPONENT_DESCRIPTOR_MACRO_ABI,
         },
         runtime::image::{
-            ActionIndex, ActionTiming, BindingKind, CoordinationProjection, FederateIndex,
-            ModeIndex, ReactionIndex, ReactorIndex, RouteDirection, RouteIndex, RtiImage,
-            ScopeIndex, TimingDomain,
+            ActionIndex, ActionTiming, BindingKind, BoundaryFailurePolicy, CodecPolicy,
+            CoordinationProjection, FederateIndex, ModeIndex, ReactionIndex, ReactorIndex,
+            RecoveryPolicy, RouteDirection, RouteIndex, RtiImage, ScopeIndex, SecurityPolicy,
+            TimingDomain, TimingPolicy, TransportPolicy,
         },
     };
     fn descriptor(contract: &str, bounds: DescriptorBounds) -> ComponentDescriptor {
@@ -2096,7 +2073,7 @@ mod tests {
         semantics: ConnectionSemantics,
         bounds: [DescriptorBounds; 2],
         dependency_case: DependencyCase,
-        recovery: &str,
+        recovery: RecoveryPolicy,
         parallel: bool,
     ) -> ResolvedDeployment {
         let mut bindings = vec![
@@ -2125,7 +2102,7 @@ mod tests {
             FederateId::new("host").unwrap(),
             TargetTriple::new("x86_64-unknown-linux-gnu").unwrap(),
             RuntimeBackendId::new("native").unwrap(),
-            RecoveryPolicyId::new(recovery).unwrap(),
+            recovery,
         )];
         let mut boundary_bindings = vec![];
         if distributed {
@@ -2133,7 +2110,7 @@ mod tests {
                 FederateId::new("edge").unwrap(),
                 TargetTriple::new("aarch64-unknown-none").unwrap(),
                 RuntimeBackendId::new("rtic").unwrap(),
-                RecoveryPolicyId::new("fail-stop").unwrap(),
+                RecoveryPolicy::FailStop,
             ));
             let boundary_binding = |boundary| {
                 BoundaryBinding::new(
@@ -2146,11 +2123,11 @@ mod tests {
                     CodecCapabilityId::new("postcard").unwrap(),
                     TransportCapabilityId::new("udp").unwrap(),
                     BoundaryPolicies::new(
-                        BoundaryFailurePolicyId::new("propagate-stop").unwrap(),
-                        TransportPolicyId::new("reliable-ordered-framed").unwrap(),
-                        CodecPolicyId::new("canonical-bounded").unwrap(),
-                        TimingPolicyId::new("best-effort").unwrap(),
-                        SecurityPolicyId::new("none").unwrap(),
+                        BoundaryFailurePolicy::PropagateStop,
+                        TransportPolicy::ReliableOrderedFramed,
+                        CodecPolicy::CanonicalBounded,
+                        TimingPolicy::BestEffort,
+                        SecurityPolicy::None,
                     ),
                 )
             };
@@ -2182,7 +2159,7 @@ mod tests {
             federates,
             if distributed {
                 CoordinationSelection::Distributed {
-                    backend: CoordinationBackendId::new("rti").unwrap(),
+                    backend: CoordinationBackend::CentralRti,
                 }
             } else {
                 CoordinationSelection::Local
@@ -2199,7 +2176,7 @@ mod tests {
             ConnectionSemantics::Logical { after: None },
             [known_bounds(); 2],
             DependencyCase::None,
-            "fail-stop",
+            RecoveryPolicy::FailStop,
             false,
         )
     }
@@ -2215,13 +2192,13 @@ mod tests {
             semantics,
             [known_bounds(); 2],
             dependency_case,
-            "fail-stop",
+            RecoveryPolicy::FailStop,
             false,
         )
     }
     fn distributed_with(
         semantics: ConnectionSemantics,
-        recovery: &str,
+        recovery: RecoveryPolicy,
         parallel: bool,
     ) -> ResolvedDeployment {
         deployment_with_bounds(
@@ -2283,7 +2260,7 @@ mod tests {
                 FederateId::new("host").unwrap(),
                 TargetTriple::new("x86_64-unknown-linux-gnu").unwrap(),
                 RuntimeBackendId::new("native").unwrap(),
-                RecoveryPolicyId::new("fail-stop").unwrap(),
+                RecoveryPolicy::FailStop,
             )],
             CoordinationSelection::Local,
             [],
@@ -2328,7 +2305,7 @@ mod tests {
                 FederateId::new("host").unwrap(),
                 TargetTriple::new("x86_64-unknown-linux-gnu").unwrap(),
                 RuntimeBackendId::new("native").unwrap(),
-                RecoveryPolicyId::new("fail-stop").unwrap(),
+                RecoveryPolicy::FailStop,
             )],
             CoordinationSelection::Local,
             [],
@@ -2526,7 +2503,7 @@ mod tests {
             ConnectionSemantics::Logical {
                 after: Some(crate::runtime::Duration::milliseconds(5)),
             },
-            "fail-stop",
+            RecoveryPolicy::FailStop,
             false,
         ))
         .unwrap();
@@ -2552,7 +2529,7 @@ mod tests {
     fn central_rti_projection_preserves_flow_and_physical_boundary_identities() {
         let compiled = lower(&distributed_with(
             ConnectionSemantics::Logical { after: None },
-            "fail-stop",
+            RecoveryPolicy::FailStop,
             false,
         ))
         .unwrap();
@@ -2563,18 +2540,25 @@ mod tests {
         assert_eq!(rti.route_physical_output(route), Some("plant/#g1"));
     }
 
-    #[rustfmt::skip]
     #[test]
     fn cross_federate_physical_connection_is_reserved_for_later_slices() {
-        let error = lower(&distributed_with(ConnectionSemantics::Physical { after: None }, "fail-stop", false)).unwrap_err();
-        assert_eq!(error.to_string(), "cross-Federate physical connection 'controller-to-sensor' is unsupported");
+        let error = lower(&distributed_with(
+            ConnectionSemantics::Physical { after: None },
+            RecoveryPolicy::FailStop,
+            false,
+        ))
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "cross-Federate physical connection 'controller-to-sensor' is unsupported"
+        );
     }
 
     #[test]
     fn one_flow_identity_may_span_parallel_boundary_identities() {
         let compiled = lower(&distributed_with(
             ConnectionSemantics::Logical { after: None },
-            "fail-stop",
+            RecoveryPolicy::FailStop,
             true,
         ))
         .unwrap();
@@ -2594,43 +2578,34 @@ mod tests {
     }
 
     #[test]
-    fn central_rti_projection_preserves_dense_policy_and_capability_references() {
+    fn central_rti_projection_preserves_typed_policies_and_dense_capability_references() {
         let compiled = lower(&deployment(false, true)).unwrap();
         let rti = central_rti(&compiled);
         let route = rti.routes()[0];
         assert_eq!(
             rti.member_recovery_policy(FederateIndex::new(1)),
-            "fail-stop"
+            RecoveryPolicy::FailStop
         );
-        assert_eq!(rti.route_failure_policy(route), "propagate-stop");
-        assert_eq!(rti.route_transport_policy(route), "reliable-ordered-framed");
-        assert_eq!(rti.route_codec_policy(route), "canonical-bounded");
-        assert_eq!(rti.route_timing_policy(route), "best-effort");
-        assert_eq!(rti.route_security_policy(route), "none");
+        assert_eq!(
+            rti.route_failure_policy(route),
+            BoundaryFailurePolicy::PropagateStop
+        );
+        assert_eq!(
+            rti.route_transport_policy(route),
+            TransportPolicy::ReliableOrderedFramed
+        );
+        assert_eq!(rti.route_codec_policy(route), CodecPolicy::CanonicalBounded);
+        assert_eq!(rti.route_timing_policy(route), TimingPolicy::BestEffort);
+        assert_eq!(rti.route_security_policy(route), SecurityPolicy::None);
         assert_eq!(rti.route_transport_capability(route), "udp");
         assert_eq!(rti.route_codec_capability(route), "postcard");
-    }
-
-    #[test]
-    fn unknown_policy_selection_fails_during_compilation() {
-        let error = lower(&distributed_with(
-            ConnectionSemantics::Logical { after: None },
-            "mystery-recovery",
-            false,
-        ))
-        .unwrap_err();
-        assert!(matches!(
-            error,
-            CompileError::UnknownPolicy { category: "recovery", selection }
-                if selection == "mystery-recovery"
-        ));
     }
 
     #[test]
     fn known_unsupported_policy_selection_fails_closed() {
         let error = lower(&distributed_with(
             ConnectionSemantics::Logical { after: None },
-            "restart-reset",
+            RecoveryPolicy::RestartReset,
             false,
         ))
         .unwrap_err();
@@ -2684,7 +2659,7 @@ mod tests {
                 ConnectionSemantics::Logical { after: None },
                 [bounds; 2],
                 DependencyCase::None,
-                "fail-stop",
+                RecoveryPolicy::FailStop,
                 false,
             ))
             .unwrap_err();
@@ -2726,7 +2701,7 @@ mod tests {
                 ConnectionSemantics::Logical { after: None },
                 bounds,
                 DependencyCase::None,
-                "fail-stop",
+                RecoveryPolicy::FailStop,
                 false,
             ))
             .unwrap_err();
@@ -2787,7 +2762,7 @@ mod tests {
                 FederateId::new("host").unwrap(),
                 TargetTriple::new("x86_64-unknown-linux-gnu").unwrap(),
                 RuntimeBackendId::new("native").unwrap(),
-                RecoveryPolicyId::new("fail-stop").unwrap(),
+                RecoveryPolicy::FailStop,
             )],
             CoordinationSelection::Local,
             [],

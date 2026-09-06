@@ -11,18 +11,145 @@
 //! this image.
 
 use super::{FederateIndex, IdentityRange};
-use tinymap::{TableRange, TinyMapView};
+use tinymap::{Key, TableRange, TinyMapView};
 
 tinymap::key_type!(pub FlowIndex);
 tinymap::key_type!(pub PhysicalBoundaryIndex);
-tinymap::key_type!(pub RecoveryPolicyIndex);
-tinymap::key_type!(pub BoundaryFailurePolicyIndex);
-tinymap::key_type!(pub TransportPolicyIndex);
-tinymap::key_type!(pub CodecPolicyIndex);
-tinymap::key_type!(pub TimingPolicyIndex);
-tinymap::key_type!(pub SecurityPolicyIndex);
 tinymap::key_type!(pub TransportCapabilityIndex);
 tinymap::key_type!(pub CodecCapabilityIndex);
+
+/// A densely keyed table of UTF-8 identities stored as ranges into one backing string.
+///
+/// Unlike `TinyMapView<K, IdentityRange>`, this type makes the range payload and its
+/// backing storage one inseparable abstraction. It is used only for open stable
+/// identities; closed operational vocabularies are represented by enums.
+#[derive(Clone, Copy, Debug)]
+pub struct IdentityTable<'a, K: Key> {
+    pub(super) identity_data: &'a str,
+    ranges: TinyMapView<'a, K, IdentityRange>,
+}
+
+impl<'a, K: Key> IdentityTable<'a, K> {
+    /// Creates an unchecked identity table over `identity_data` and its byte ranges.
+    #[must_use]
+    pub const fn new(identity_data: &'a str, ranges: TinyMapView<'a, K, IdentityRange>) -> Self {
+        Self {
+            identity_data,
+            ranges,
+        }
+    }
+
+    /// Returns the number of densely keyed identities.
+    #[must_use]
+    pub const fn len(self) -> usize {
+        self.ranges.len()
+    }
+
+    /// Returns whether the table contains no identities.
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.ranges.is_empty()
+    }
+
+    /// Resolves one key to its UTF-8 identity, or returns `None` for an invalid key or range.
+    #[must_use]
+    pub fn get(self, key: K) -> Option<&'a str> {
+        self.ranges.get(key)?.get(self.identity_data)
+    }
+
+    pub(super) const fn ranges(self) -> TinyMapView<'a, K, IdentityRange> {
+        self.ranges
+    }
+}
+
+impl<K: Key> PartialEq for IdentityTable<'_, K> {
+    fn eq(&self, other: &Self) -> bool {
+        self.identity_data == other.identity_data && self.ranges.values().eq(other.ranges.values())
+    }
+}
+
+impl<K: Key> Eq for IdentityTable<'_, K> {}
+
+macro_rules! policy_enum {
+    ($name:ident, $doc:literal, {$($(#[$meta:meta])* $variant:ident = $value:literal => $text:literal),+ $(,)?}) => {
+        #[doc = $doc]
+        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+        #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
+        #[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
+        #[repr(u8)]
+        pub enum $name {
+            $($(#[$meta])* $variant = $value),+
+        }
+
+        impl $name {
+            /// Returns the canonical manifest spelling of this policy.
+            #[must_use]
+            pub const fn as_str(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $text),+
+                }
+            }
+        }
+    };
+}
+
+policy_enum!(RecoveryPolicy, "Closed Federate recovery behavior compiled into an RTI image.", {
+    /// Isolate the member and apply downstream failure policies.
+    FailStop = 0 => "fail-stop",
+    /// Restart the selected artifact from its compiled initial image.
+    RestartReset = 1 => "restart-reset",
+    /// Retain local state across transport loss and rejoin with a new incarnation.
+    TransientRejoin = 2 => "transient-rejoin",
+    /// Activate a predefined hot or warm standby.
+    RedundantFailover = 3 => "redundant-failover",
+    /// Transfer explicitly declared bounded semantic state.
+    ApplicationStateTransfer = 4 => "application-state-transfer",
+    /// Restore an optional hosted process checkpoint.
+    CheckpointRestore = 5 => "checkpoint-restore",
+});
+
+policy_enum!(BoundaryFailurePolicy, "Boundary behavior when its source Federate is lost.", {
+    /// Stop affected downstream execution.
+    PropagateStop = 0 => "propagate-stop",
+    /// Produce explicit absence.
+    ProduceAbsence = 1 => "produce-absence",
+    /// Produce a declared bounded safe value.
+    BoundedSafeValue = 2 => "bounded-safe-value",
+    /// Enter a declared degraded mode.
+    EnterDegradedMode = 3 => "enter-degraded-mode",
+    /// Switch to a predefined standby.
+    SwitchToStandby = 4 => "switch-to-standby",
+});
+
+policy_enum!(TransportPolicy, "Closed transport contract compiled into an RTI route.", {
+    /// Reliable, ordered, framed delivery within one membership epoch.
+    ReliableOrderedFramed = 0 => "reliable-ordered-framed",
+});
+
+policy_enum!(CodecPolicy, "Closed codec contract compiled into an RTI route.", {
+    /// Canonical architecture-independent encoding into bounded storage.
+    CanonicalBounded = 0 => "canonical-bounded",
+});
+
+policy_enum!(TimingPolicy, "Closed physical-time contract compiled into an RTI route.", {
+    /// Worst-case contract requiring complete qualification evidence.
+    HardBound = 0 => "hard-bound",
+    /// Target-window objective with explicit miss behavior.
+    SoftTarget = 1 => "soft-target",
+    /// Bounded resource use without a response-time guarantee.
+    BestEffort = 2 => "best-effort",
+});
+
+policy_enum!(SecurityPolicy, "Closed communication security profile compiled into an RTI route.", {
+    /// No channel security, accepted only by the deployment threat model.
+    None = 0 => "none",
+    /// Integrity protection on an otherwise protected link.
+    IntegrityOnly = 1 => "integrity-only",
+    /// Federate authentication without payload confidentiality.
+    Authenticated = 2 => "authenticated",
+    /// Federate authentication, integrity, and encryption.
+    AuthenticatedEncrypted = 3 => "authenticated-encrypted",
+});
 
 /// One precomputed incoming dependency in dense Federate coordinates.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -60,7 +187,7 @@ impl RtiDependencyImage {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RtiMemberImage {
     /// Explicit recovery policy selected for this Federate.
-    pub(super) recovery: RecoveryPolicyIndex,
+    pub(super) recovery: RecoveryPolicy,
     /// Direct incoming dependencies grouped by this target Federate.
     pub(super) direct_incoming: TableRange<RtiDependencyImage>,
     /// Transitive incoming dependencies grouped by this target Federate.
@@ -80,16 +207,16 @@ pub struct RtiRouteImage {
     pub(super) physical_input: Option<PhysicalBoundaryIndex>,
     /// Optional dense physical output identity.
     pub(super) physical_output: Option<PhysicalBoundaryIndex>,
-    /// Dense boundary-failure policy reference.
-    pub(super) failure_policy: BoundaryFailurePolicyIndex,
-    /// Dense transport contract policy reference.
-    pub(super) transport_policy: TransportPolicyIndex,
-    /// Dense codec contract policy reference.
-    pub(super) codec_policy: CodecPolicyIndex,
-    /// Dense timing policy reference.
-    pub(super) timing_policy: TimingPolicyIndex,
-    /// Dense security policy reference.
-    pub(super) security_policy: SecurityPolicyIndex,
+    /// Boundary-failure behavior selected for this route.
+    pub(super) failure_policy: BoundaryFailurePolicy,
+    /// Transport contract selected for this route.
+    pub(super) transport_policy: TransportPolicy,
+    /// Codec contract selected for this route.
+    pub(super) codec_policy: CodecPolicy,
+    /// Physical-time contract selected for this route.
+    pub(super) timing_policy: TimingPolicy,
+    /// Communication security profile selected for this route.
+    pub(super) security_policy: SecurityPolicy,
     /// Dense selected transport implementation capability.
     pub(super) transport_capability: TransportCapabilityIndex,
     /// Dense selected codec implementation capability.
@@ -106,20 +233,37 @@ impl RtiRouteImage {
     /// Creates one unchecked route record.
     #[must_use]
     #[allow(clippy::too_many_arguments, reason = "flat immutable image record")]
-    #[rustfmt::skip]
     pub const fn new(
-        boundary: IdentityRange, flow: FlowIndex,
-        physical_input: Option<PhysicalBoundaryIndex>, physical_output: Option<PhysicalBoundaryIndex>,
-        failure_policy: BoundaryFailurePolicyIndex, transport_policy: TransportPolicyIndex,
-        codec_policy: CodecPolicyIndex, timing_policy: TimingPolicyIndex,
-        security_policy: SecurityPolicyIndex, transport_capability: TransportCapabilityIndex,
-        codec_capability: CodecCapabilityIndex, source: FederateIndex, target: FederateIndex,
+        boundary: IdentityRange,
+        flow: FlowIndex,
+        physical_input: Option<PhysicalBoundaryIndex>,
+        physical_output: Option<PhysicalBoundaryIndex>,
+        failure_policy: BoundaryFailurePolicy,
+        transport_policy: TransportPolicy,
+        codec_policy: CodecPolicy,
+        timing_policy: TimingPolicy,
+        security_policy: SecurityPolicy,
+        transport_capability: TransportCapabilityIndex,
+        codec_capability: CodecCapabilityIndex,
+        source: FederateIndex,
+        target: FederateIndex,
         delay_nanos: u64,
     ) -> Self {
         Self {
-            boundary, flow, physical_input, physical_output, failure_policy, transport_policy,
-            codec_policy, timing_policy, security_policy, transport_capability, codec_capability,
-            source, target, delay_nanos,
+            boundary,
+            flow,
+            physical_input,
+            physical_output,
+            failure_policy,
+            transport_policy,
+            codec_policy,
+            timing_policy,
+            security_policy,
+            transport_capability,
+            codec_capability,
+            source,
+            target,
+            delay_nanos,
         }
     }
 
@@ -146,7 +290,7 @@ impl RtiMemberImage {
     /// Creates one unchecked member record from flattened table ranges.
     #[must_use]
     pub const fn new(
-        recovery: RecoveryPolicyIndex,
+        recovery: RecoveryPolicy,
         direct_incoming: TableRange<RtiDependencyImage>,
         transitive_incoming: TableRange<RtiDependencyImage>,
         affected_downstream: TableRange<FederateIndex>,
@@ -179,25 +323,13 @@ pub struct RtiImage<'a> {
     /// Canonically ordered cross-Federate routes, including parallel routes.
     pub(super) routes: &'a [RtiRouteImage],
     /// Canonically ordered stable flow identities.
-    pub(super) flows: TinyMapView<'a, FlowIndex, IdentityRange>,
+    pub(super) flows: IdentityTable<'a, FlowIndex>,
     /// Canonically ordered stable physical input/output identities.
-    pub(super) physical_boundaries: TinyMapView<'a, PhysicalBoundaryIndex, IdentityRange>,
-    /// Canonically ordered recovery policy identities.
-    pub(super) recovery_policies: TinyMapView<'a, RecoveryPolicyIndex, IdentityRange>,
-    /// Canonically ordered boundary-failure policy identities.
-    pub(super) failure_policies: TinyMapView<'a, BoundaryFailurePolicyIndex, IdentityRange>,
-    /// Canonically ordered transport policy identities.
-    pub(super) transport_policies: TinyMapView<'a, TransportPolicyIndex, IdentityRange>,
-    /// Canonically ordered codec policy identities.
-    pub(super) codec_policies: TinyMapView<'a, CodecPolicyIndex, IdentityRange>,
-    /// Canonically ordered timing policy identities.
-    pub(super) timing_policies: TinyMapView<'a, TimingPolicyIndex, IdentityRange>,
-    /// Canonically ordered security policy identities.
-    pub(super) security_policies: TinyMapView<'a, SecurityPolicyIndex, IdentityRange>,
+    pub(super) physical_boundaries: IdentityTable<'a, PhysicalBoundaryIndex>,
     /// Canonically ordered transport implementation identities.
-    pub(super) transport_capabilities: TinyMapView<'a, TransportCapabilityIndex, IdentityRange>,
+    pub(super) transport_capabilities: IdentityTable<'a, TransportCapabilityIndex>,
     /// Canonically ordered codec implementation identities.
-    pub(super) codec_capabilities: TinyMapView<'a, CodecCapabilityIndex, IdentityRange>,
+    pub(super) codec_capabilities: IdentityTable<'a, CodecCapabilityIndex>,
 }
 
 impl PartialEq for RtiImage<'_> {
@@ -211,19 +343,11 @@ impl PartialEq for RtiImage<'_> {
             && self.dependencies == other.dependencies
             && self.affected_downstream == other.affected_downstream
             && self.routes == other.routes
-            && views_equal!(
-                members,
-                flows,
-                physical_boundaries,
-                recovery_policies,
-                failure_policies,
-                transport_policies,
-                codec_policies,
-                timing_policies,
-                security_policies,
-                transport_capabilities,
-                codec_capabilities,
-            )
+            && views_equal!(members)
+            && self.flows == other.flows
+            && self.physical_boundaries == other.physical_boundaries
+            && self.transport_capabilities == other.transport_capabilities
+            && self.codec_capabilities == other.codec_capabilities
     }
 }
 
@@ -234,7 +358,9 @@ macro_rules! route_identity_accessor {
         #[doc = $doc]
         #[must_use]
         pub fn $name(self, route: RtiRouteImage) -> &'a str {
-            self.resolve(self.$table[route.$field])
+            self.$table
+                .get(route.$field)
+                .expect("validated RTI identity reference")
         }
     };
 }
@@ -252,30 +378,30 @@ macro_rules! member_slice_accessor {
     };
 }
 
-#[rustfmt::skip]
 impl<'a> RtiImage<'a> {
     /// Creates an unchecked central RTI image over immutable tables.
     #[must_use]
     #[allow(clippy::too_many_arguments, reason = "flat immutable image schema")]
-    #[rustfmt::skip]
     pub const fn new(
-        identity_data: &'a str, members: TinyMapView<'a, FederateIndex, RtiMemberImage>,
-        dependencies: &'a [RtiDependencyImage], affected_downstream: &'a [FederateIndex],
-        routes: &'a [RtiRouteImage], flows: TinyMapView<'a, FlowIndex, IdentityRange>,
-        physical_boundaries: TinyMapView<'a, PhysicalBoundaryIndex, IdentityRange>,
-        recovery_policies: TinyMapView<'a, RecoveryPolicyIndex, IdentityRange>,
-        failure_policies: TinyMapView<'a, BoundaryFailurePolicyIndex, IdentityRange>,
-        transport_policies: TinyMapView<'a, TransportPolicyIndex, IdentityRange>,
-        codec_policies: TinyMapView<'a, CodecPolicyIndex, IdentityRange>,
-        timing_policies: TinyMapView<'a, TimingPolicyIndex, IdentityRange>,
-        security_policies: TinyMapView<'a, SecurityPolicyIndex, IdentityRange>,
-        transport_capabilities: TinyMapView<'a, TransportCapabilityIndex, IdentityRange>,
-        codec_capabilities: TinyMapView<'a, CodecCapabilityIndex, IdentityRange>,
+        identity_data: &'a str,
+        members: TinyMapView<'a, FederateIndex, RtiMemberImage>,
+        dependencies: &'a [RtiDependencyImage],
+        affected_downstream: &'a [FederateIndex],
+        routes: &'a [RtiRouteImage],
+        flows: IdentityTable<'a, FlowIndex>,
+        physical_boundaries: IdentityTable<'a, PhysicalBoundaryIndex>,
+        transport_capabilities: IdentityTable<'a, TransportCapabilityIndex>,
+        codec_capabilities: IdentityTable<'a, CodecCapabilityIndex>,
     ) -> Self {
         Self {
-            identity_data, members, dependencies, affected_downstream, routes, flows,
-            physical_boundaries, recovery_policies, failure_policies, transport_policies,
-            codec_policies, timing_policies, security_policies, transport_capabilities,
+            identity_data,
+            members,
+            dependencies,
+            affected_downstream,
+            routes,
+            flows,
+            physical_boundaries,
+            transport_capabilities,
             codec_capabilities,
         }
     }
@@ -304,8 +430,8 @@ impl<'a> RtiImage<'a> {
     /// Resolves the stable end-to-end flow identity carried by one route.
     #[must_use]
     pub fn route_flow(self, route: RtiRouteImage) -> &'a str {
-        self.flows[route.flow]
-            .get(self.identity_data)
+        self.flows
+            .get(route.flow)
             .expect("validated RTI flow identity range")
     }
 
@@ -313,8 +439,8 @@ impl<'a> RtiImage<'a> {
     #[must_use]
     pub fn route_physical_input(self, route: RtiRouteImage) -> Option<&'a str> {
         route.physical_input.map(|index| {
-            self.physical_boundaries[index]
-                .get(self.identity_data)
+            self.physical_boundaries
+                .get(index)
                 .expect("validated RTI physical-input identity range")
         })
     }
@@ -323,34 +449,79 @@ impl<'a> RtiImage<'a> {
     #[must_use]
     pub fn route_physical_output(self, route: RtiRouteImage) -> Option<&'a str> {
         route.physical_output.map(|index| {
-            self.physical_boundaries[index]
-                .get(self.identity_data)
+            self.physical_boundaries
+                .get(index)
                 .expect("validated RTI physical-output identity range")
         })
     }
 
-    /// Resolves one Federate's explicit recovery policy identity.
+    /// Returns one Federate's explicit recovery behavior.
     #[must_use]
-    pub fn member_recovery_policy(self, member: FederateIndex) -> &'a str {
-        self.resolve(self.recovery_policies[self.members[member].recovery])
+    pub fn member_recovery_policy(self, member: FederateIndex) -> RecoveryPolicy {
+        self.members[member].recovery
     }
 
-    route_identity_accessor!(route_failure_policy, "Resolves one route's boundary-failure policy identity.", failure_policies, failure_policy);
-    route_identity_accessor!(route_transport_policy, "Resolves one route's transport policy identity.", transport_policies, transport_policy);
-    route_identity_accessor!(route_codec_policy, "Resolves one route's codec policy identity.", codec_policies, codec_policy);
-    route_identity_accessor!(route_timing_policy, "Resolves one route's timing policy identity.", timing_policies, timing_policy);
-    route_identity_accessor!(route_security_policy, "Resolves one route's security policy identity.", security_policies, security_policy);
-    route_identity_accessor!(route_transport_capability, "Resolves one route's selected transport implementation capability.", transport_capabilities, transport_capability);
-    route_identity_accessor!(route_codec_capability, "Resolves one route's selected codec implementation capability.", codec_capabilities, codec_capability);
-
-    /// Resolves one checked RTI identity range.
-    fn resolve(self, range: IdentityRange) -> &'a str {
-        range
-            .get(self.identity_data)
-            .expect("validated RTI identity range")
+    /// Returns one route's boundary-failure behavior.
+    #[must_use]
+    pub const fn route_failure_policy(self, route: RtiRouteImage) -> BoundaryFailurePolicy {
+        route.failure_policy
     }
 
-    member_slice_accessor!(direct_incoming, "Returns direct incoming dependencies for one target Federate.", direct_incoming, dependencies, RtiDependencyImage);
-    member_slice_accessor!(transitive_incoming, "Returns transitive incoming dependencies for one target Federate.", transitive_incoming, dependencies, RtiDependencyImage);
-    member_slice_accessor!(affected_downstream, "Returns Federates affected by loss or progress of one source Federate.", affected_downstream, affected_downstream, FederateIndex);
+    /// Returns one route's transport contract.
+    #[must_use]
+    pub const fn route_transport_policy(self, route: RtiRouteImage) -> TransportPolicy {
+        route.transport_policy
+    }
+
+    /// Returns one route's codec contract.
+    #[must_use]
+    pub const fn route_codec_policy(self, route: RtiRouteImage) -> CodecPolicy {
+        route.codec_policy
+    }
+
+    /// Returns one route's physical-time contract.
+    #[must_use]
+    pub const fn route_timing_policy(self, route: RtiRouteImage) -> TimingPolicy {
+        route.timing_policy
+    }
+
+    /// Returns one route's communication security profile.
+    #[must_use]
+    pub const fn route_security_policy(self, route: RtiRouteImage) -> SecurityPolicy {
+        route.security_policy
+    }
+    route_identity_accessor!(
+        route_transport_capability,
+        "Resolves one route's selected transport implementation capability.",
+        transport_capabilities,
+        transport_capability
+    );
+    route_identity_accessor!(
+        route_codec_capability,
+        "Resolves one route's selected codec implementation capability.",
+        codec_capabilities,
+        codec_capability
+    );
+
+    member_slice_accessor!(
+        direct_incoming,
+        "Returns direct incoming dependencies for one target Federate.",
+        direct_incoming,
+        dependencies,
+        RtiDependencyImage
+    );
+    member_slice_accessor!(
+        transitive_incoming,
+        "Returns transitive incoming dependencies for one target Federate.",
+        transitive_incoming,
+        dependencies,
+        RtiDependencyImage
+    );
+    member_slice_accessor!(
+        affected_downstream,
+        "Returns Federates affected by loss or progress of one source Federate.",
+        affected_downstream,
+        affected_downstream,
+        FederateIndex
+    );
 }

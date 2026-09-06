@@ -574,15 +574,14 @@ fn validate_id<'a>(
 }
 
 fn validate_rti_identity_table<'a, K: Key>(
-    rti: RtiImage<'a>,
     table: &'static str,
     kind: &'static str,
-    values: TinyMapView<'a, K, IdentityRange>,
+    values: IdentityTable<'a, K>,
 ) -> Result<(), ImageValidationError<'a>> {
     check_len::<K>(table, values.len())?;
     let mut previous = None;
-    for (index, range) in values.values().copied().enumerate() {
-        let id = identity_slice(rti.identity_data, table, index as u32, "identity", range)?;
+    for (index, range) in values.ranges().values().copied().enumerate() {
+        let id = identity_slice(values.identity_data, table, index as u32, "identity", range)?;
         validate_id(kind, index as u32, id, &mut previous)?;
     }
     Ok(())
@@ -637,83 +636,187 @@ fn validate_rti_federate_refs<'a>(
     Ok(())
 }
 
-#[rustfmt::skip]
-fn validate_rti<'a>(image: &CompiledDeploymentImage<'a>, rti: RtiImage<'a>) -> Result<(), ImageValidationError<'a>> {
+fn validate_rti<'a>(
+    image: &CompiledDeploymentImage<'a>,
+    rti: RtiImage<'a>,
+) -> Result<(), ImageValidationError<'a>> {
     if rti.members.len() != image.federates.len() {
-        return Err(ImageValidationError::OwnershipMismatch { table: "coordination.rti", index: 0, field: "members" });
+        return Err(ImageValidationError::OwnershipMismatch {
+            table: "coordination.rti",
+            index: 0,
+            field: "members",
+        });
     }
     check_len::<FederateIndex>("coordination.rti.dependencies", rti.dependencies.len())?;
-    check_len::<FederateIndex>("coordination.rti.affected_downstream", rti.affected_downstream.len())?;
+    check_len::<FederateIndex>(
+        "coordination.rti.affected_downstream",
+        rti.affected_downstream.len(),
+    )?;
     macro_rules! identities { ($($table:literal, $kind:literal, $values:expr);+ $(;)?) => {
-        $(validate_rti_identity_table(rti, $table, $kind, $values)?;)+
+        $(validate_rti_identity_table($table, $kind, $values)?;)+
     }; }
     identities! {
         "coordination.rti.flows", "flow", rti.flows; "coordination.rti.physical_boundaries", "physical boundary", rti.physical_boundaries;
-        "coordination.rti.recovery_policies", "recovery policy", rti.recovery_policies; "coordination.rti.failure_policies", "failure policy", rti.failure_policies;
-        "coordination.rti.transport_policies", "transport policy", rti.transport_policies; "coordination.rti.codec_policies", "codec policy", rti.codec_policies;
-        "coordination.rti.timing_policies", "timing policy", rti.timing_policies; "coordination.rti.security_policies", "security policy", rti.security_policies;
         "coordination.rti.transport_capabilities", "transport capability", rti.transport_capabilities; "coordination.rti.codec_capabilities", "codec capability", rti.codec_capabilities;
     }
     let mut dependency_end = 0;
     let mut downstream_end = 0;
     for (position, member) in rti.members.values().copied().enumerate() {
         let index = position as u32;
-        check_ref("coordination.rti.members", index, "recovery", "coordination.rti.recovery_policies", member.recovery, rti.recovery_policies)?;
         for (field, range) in [
             ("direct_incoming", member.direct_incoming),
             ("transitive_incoming", member.transitive_incoming),
         ] {
-            check_rti_range(index, field, "coordination.rti.dependencies", range, rti.dependencies.len(), &mut dependency_end)?;
-            let dependencies = range.get(rti.dependencies).expect("checked RTI dependency range");
-            validate_rti_federate_refs("coordination.rti.dependencies", range.start(), dependencies.iter().map(|value| value.source()), image.federates)?;
+            check_rti_range(
+                index,
+                field,
+                "coordination.rti.dependencies",
+                range,
+                rti.dependencies.len(),
+                &mut dependency_end,
+            )?;
+            let dependencies = range
+                .get(rti.dependencies)
+                .expect("checked RTI dependency range");
+            validate_rti_federate_refs(
+                "coordination.rti.dependencies",
+                range.start(),
+                dependencies.iter().map(|value| value.source()),
+                image.federates,
+            )?;
         }
-        check_rti_range(index, "affected_downstream", "coordination.rti.affected_downstream", member.affected_downstream, rti.affected_downstream.len(), &mut downstream_end)?;
-        let downstream = member.affected_downstream.get(rti.affected_downstream).expect("checked RTI downstream range");
-        validate_rti_federate_refs("coordination.rti.affected_downstream", member.affected_downstream.start(), downstream.iter().copied(), image.federates)?;
+        check_rti_range(
+            index,
+            "affected_downstream",
+            "coordination.rti.affected_downstream",
+            member.affected_downstream,
+            rti.affected_downstream.len(),
+            &mut downstream_end,
+        )?;
+        let downstream = member
+            .affected_downstream
+            .get(rti.affected_downstream)
+            .expect("checked RTI downstream range");
+        validate_rti_federate_refs(
+            "coordination.rti.affected_downstream",
+            member.affected_downstream.start(),
+            downstream.iter().copied(),
+            image.federates,
+        )?;
     }
-    for (field, end, len) in [("dependencies", dependency_end, rti.dependencies.len()), ("affected_downstream", downstream_end, rti.affected_downstream.len())] {
+    for (field, end, len) in [
+        ("dependencies", dependency_end, rti.dependencies.len()),
+        (
+            "affected_downstream",
+            downstream_end,
+            rti.affected_downstream.len(),
+        ),
+    ] {
         if end != len {
-            return Err(ImageValidationError::OwnershipMismatch { table: "coordination.rti", index: 0, field });
+            return Err(ImageValidationError::OwnershipMismatch {
+                table: "coordination.rti",
+                index: 0,
+                field,
+            });
         }
     }
-    macro_rules! route_refs { ($index:expr, $route:expr, $($field:ident => $target:ident),+ $(,)?) => {
-        $(check_ref("coordination.rti.routes", $index, stringify!($field), concat!("coordination.rti.", stringify!($target)), $route.$field, rti.$target)?;)+
-    }; }
     let mut previous_boundary = None;
     for (position, route) in rti.routes.iter().copied().enumerate() {
         let index = position as u32;
-        let boundary = identity_slice(rti.identity_data, "coordination.rti.routes", index, "boundary", route.boundary)?;
+        let boundary = identity_slice(
+            rti.identity_data,
+            "coordination.rti.routes",
+            index,
+            "boundary",
+            route.boundary,
+        )?;
         validate_id("RTI boundary", index, boundary, &mut previous_boundary)?;
-        route_refs!(index, route,
-            flow => flows, failure_policy => failure_policies, transport_policy => transport_policies,
-            codec_policy => codec_policies, timing_policy => timing_policies, security_policy => security_policies,
-            transport_capability => transport_capabilities, codec_capability => codec_capabilities,
-        );
-        check_ref("coordination.rti.routes", index, "source", "federates", route.source, image.federates)?;
-        check_ref("coordination.rti.routes", index, "target", "federates", route.target, image.federates)?;
+        check_ref(
+            "coordination.rti.routes",
+            index,
+            "flow",
+            "coordination.rti.flows",
+            route.flow,
+            rti.flows.ranges(),
+        )?;
+        check_ref(
+            "coordination.rti.routes",
+            index,
+            "transport_capability",
+            "coordination.rti.transport_capabilities",
+            route.transport_capability,
+            rti.transport_capabilities.ranges(),
+        )?;
+        check_ref(
+            "coordination.rti.routes",
+            index,
+            "codec_capability",
+            "coordination.rti.codec_capabilities",
+            route.codec_capability,
+            rti.codec_capabilities.ranges(),
+        )?;
+        check_ref(
+            "coordination.rti.routes",
+            index,
+            "source",
+            "federates",
+            route.source,
+            image.federates,
+        )?;
+        check_ref(
+            "coordination.rti.routes",
+            index,
+            "target",
+            "federates",
+            route.target,
+            image.federates,
+        )?;
         if let Some(value) = route.physical_input {
-            check_ref("coordination.rti.routes", index, "physical_input", "coordination.rti.physical_boundaries", value, rti.physical_boundaries)?;
+            check_ref(
+                "coordination.rti.routes",
+                index,
+                "physical_input",
+                "coordination.rti.physical_boundaries",
+                value,
+                rti.physical_boundaries.ranges(),
+            )?;
         }
         if let Some(value) = route.physical_output {
-            check_ref("coordination.rti.routes", index, "physical_output", "coordination.rti.physical_boundaries", value, rti.physical_boundaries)?;
+            check_ref(
+                "coordination.rti.routes",
+                index,
+                "physical_output",
+                "coordination.rti.physical_boundaries",
+                value,
+                rti.physical_boundaries.ranges(),
+            )?;
         }
     }
     if rti.routes.len() != image.federation.edges.len() {
-        return Err(ImageValidationError::OwnershipMismatch { table: "coordination.rti", index: 0, field: "routes" });
+        return Err(ImageValidationError::OwnershipMismatch {
+            table: "coordination.rti",
+            index: 0,
+            field: "routes",
+        });
     }
     for (position, (route, edge)) in rti.routes.iter().zip(image.federation.edges).enumerate() {
         let boundary = identity_slice_unchecked(rti.identity_data, route.boundary);
         if boundary != identity_slice_unchecked(image.identity_data, edge.boundary())
-            || route.source != edge.source() || route.target != edge.target() || route.delay_nanos() != edge.delay_nanos()
+            || route.source != edge.source()
+            || route.target != edge.target()
+            || route.delay_nanos() != edge.delay_nanos()
         {
-            return Err(ImageValidationError::OwnershipMismatch { table: "coordination.rti.routes", index: position as u32, field: "federation" });
+            return Err(ImageValidationError::OwnershipMismatch {
+                table: "coordination.rti.routes",
+                index: position as u32,
+                field: "federation",
+            });
         }
     }
     Ok(())
 }
 
 /// Validates deployment ownership, identities, federation edges, and nested images.
-#[rustfmt::skip]
 fn validate_compiled_deployment<'a>(
     image: &CompiledDeploymentImage<'a>,
 ) -> Result<(), ImageValidationError<'a>> {
@@ -828,10 +931,20 @@ fn validate_compiled_deployment<'a>(
         CoordinationProjection::CentralRti(rti) => {
             validate_rti(image, rti)?;
             if image.federates.len() <= 1 {
-                return Err(ImageValidationError::OwnershipMismatch { table: "coordination", index: 0, field: "kind" });
+                return Err(ImageValidationError::OwnershipMismatch {
+                    table: "coordination",
+                    index: 0,
+                    field: "kind",
+                });
             }
         }
-        _ => return Err(ImageValidationError::OwnershipMismatch { table: "coordination", index: 0, field: "kind" }),
+        _ => {
+            return Err(ImageValidationError::OwnershipMismatch {
+                table: "coordination",
+                index: 0,
+                field: "kind",
+            })
+        }
     }
 
     for federate in image.federates.values().copied() {
@@ -1959,16 +2072,10 @@ mod tests {
             dependencies,
             &[],
             routes,
-            TinyMapView::new(flows),
-            TinyMapView::new(&[]),
-            TinyMapView::new(&RTI_IDENTITIES),
-            TinyMapView::new(&RTI_IDENTITIES),
-            TinyMapView::new(&RTI_IDENTITIES),
-            TinyMapView::new(&RTI_IDENTITIES),
-            TinyMapView::new(&RTI_IDENTITIES),
-            TinyMapView::new(&RTI_IDENTITIES),
-            TinyMapView::new(&RTI_IDENTITIES),
-            TinyMapView::new(&RTI_IDENTITIES),
+            IdentityTable::new(identity_data, TinyMapView::new(flows)),
+            IdentityTable::new(identity_data, TinyMapView::new(&[])),
+            IdentityTable::new(identity_data, TinyMapView::new(&RTI_IDENTITIES)),
+            IdentityTable::new(identity_data, TinyMapView::new(&RTI_IDENTITIES)),
         )
     }
 
@@ -2062,52 +2169,201 @@ mod tests {
         assert_eq!(federate.enclave_views().count(), 2);
     }
 
-    #[rustfmt::skip]
     #[test]
     fn compiled_view_enforces_coordination_cardinality() {
-        let member = RtiMemberImage::new(RecoveryPolicyIndex::new(0), TableRange::new(0, 0), TableRange::new(0, 0), TableRange::new(0, 0));
+        let member = RtiMemberImage::new(
+            RecoveryPolicy::FailStop,
+            TableRange::new(0, 0),
+            TableRange::new(0, 0),
+            TableRange::new(0, 0),
+        );
         let one = [member];
-        let image = CompiledDeploymentImage { coordination: CoordinationProjection::CentralRti(rti_fixture("x", &one, &[], &[], &[])), ..COMPILED };
-        assert!(matches!(CompiledDeploymentView::new(&image), Err(ImageValidationError::OwnershipMismatch { table: "coordination", index: 0, field: "kind" })));
+        let image = CompiledDeploymentImage {
+            coordination: CoordinationProjection::CentralRti(rti_fixture("x", &one, &[], &[], &[])),
+            ..COMPILED
+        };
+        assert!(matches!(
+            CompiledDeploymentView::new(&image),
+            Err(ImageValidationError::OwnershipMismatch {
+                table: "coordination",
+                index: 0,
+                field: "kind"
+            })
+        ));
 
         let identity_data = format!("{DEPLOYMENT_IDENTITIES}z");
-        let federates = [FEDERATES[0], FederateImage::new(IdentityRange::new(DEPLOYMENT_IDENTITIES.len() as u32, 1), FEDERATES[0].target(), FEDERATES[0].runtime(), TableRange::new(2, 0))];
+        let federates = [
+            FEDERATES[0],
+            FederateImage::new(
+                IdentityRange::new(DEPLOYMENT_IDENTITIES.len() as u32, 1),
+                FEDERATES[0].target(),
+                FEDERATES[0].runtime(),
+                TableRange::new(2, 0),
+            ),
+        ];
         let federation_members = [FederateIndex::new(0), FederateIndex::new(1)];
-        let image = CompiledDeploymentImage { identity_data: &identity_data, federation: GlobalFederationImage::new(&federation_members, &[]), federates: TinyMapView::new(&federates), coordination: CoordinationProjection::Local, ..COMPILED };
-        assert!(matches!(CompiledDeploymentView::new(&image), Err(ImageValidationError::OwnershipMismatch { table: "coordination", index: 0, field: "kind" })));
+        let image = CompiledDeploymentImage {
+            identity_data: &identity_data,
+            federation: GlobalFederationImage::new(&federation_members, &[]),
+            federates: TinyMapView::new(&federates),
+            coordination: CoordinationProjection::Local,
+            ..COMPILED
+        };
+        assert!(matches!(
+            CompiledDeploymentView::new(&image),
+            Err(ImageValidationError::OwnershipMismatch {
+                table: "coordination",
+                index: 0,
+                field: "kind"
+            })
+        ));
     }
 
-    #[rustfmt::skip]
     #[test]
     fn compiled_view_requires_rti_routes_to_match_the_authoritative_federation() {
-        let members = [RtiMemberImage::new(RecoveryPolicyIndex::new(0), TableRange::new(0, 0), TableRange::new(0, 0), TableRange::new(0, 0))];
-        let edges = [FederationEdgeImage::new(IdentityRange::new(0, 4), FederateIndex::new(0), FederateIndex::new(0), 0)];
-        let routes = [RtiRouteImage::new(IdentityRange::new(0, 1), FlowIndex::new(0), None, None,
-            BoundaryFailurePolicyIndex::new(0), TransportPolicyIndex::new(0), CodecPolicyIndex::new(0), TimingPolicyIndex::new(0), SecurityPolicyIndex::new(0),
-            TransportCapabilityIndex::new(0), CodecCapabilityIndex::new(0), FederateIndex::new(0), FederateIndex::new(0), 0)];
-        let image = CompiledDeploymentImage { federation: GlobalFederationImage::new(&FEDERATION_MEMBERS, &edges), coordination: CoordinationProjection::CentralRti(rti_fixture("x", &members, &[], &routes, &RTI_IDENTITIES)), ..COMPILED };
-        assert!(matches!(CompiledDeploymentView::new(&image), Err(ImageValidationError::OwnershipMismatch { table: "coordination.rti.routes", index: 0, field: "federation" })));
+        let members = [RtiMemberImage::new(
+            RecoveryPolicy::FailStop,
+            TableRange::new(0, 0),
+            TableRange::new(0, 0),
+            TableRange::new(0, 0),
+        )];
+        let edges = [FederationEdgeImage::new(
+            IdentityRange::new(0, 4),
+            FederateIndex::new(0),
+            FederateIndex::new(0),
+            0,
+        )];
+        let routes = [RtiRouteImage::new(
+            IdentityRange::new(0, 1),
+            FlowIndex::new(0),
+            None,
+            None,
+            BoundaryFailurePolicy::PropagateStop,
+            TransportPolicy::ReliableOrderedFramed,
+            CodecPolicy::CanonicalBounded,
+            TimingPolicy::BestEffort,
+            SecurityPolicy::None,
+            TransportCapabilityIndex::new(0),
+            CodecCapabilityIndex::new(0),
+            FederateIndex::new(0),
+            FederateIndex::new(0),
+            0,
+        )];
+        let image = CompiledDeploymentImage {
+            federation: GlobalFederationImage::new(&FEDERATION_MEMBERS, &edges),
+            coordination: CoordinationProjection::CentralRti(rti_fixture(
+                "x",
+                &members,
+                &[],
+                &routes,
+                &RTI_IDENTITIES,
+            )),
+            ..COMPILED
+        };
+        assert!(matches!(
+            CompiledDeploymentView::new(&image),
+            Err(ImageValidationError::OwnershipMismatch {
+                table: "coordination.rti.routes",
+                index: 0,
+                field: "federation"
+            })
+        ));
     }
 
-    #[rustfmt::skip]
     #[test]
     fn compiled_view_rejects_invalid_central_rti_dense_references() {
         let flows = [];
-        let member = RtiMemberImage::new(RecoveryPolicyIndex::new(0), TableRange::new(0, 0), TableRange::new(0, 0), TableRange::new(0, 0));
+        let member = RtiMemberImage::new(
+            RecoveryPolicy::FailStop,
+            TableRange::new(0, 0),
+            TableRange::new(0, 0),
+            TableRange::new(0, 0),
+        );
         let members = [member];
-        let routes = [RtiRouteImage::new(IdentityRange::new(1, 16), FlowIndex::new(0), None, None,
-            BoundaryFailurePolicyIndex::new(0), TransportPolicyIndex::new(0), CodecPolicyIndex::new(0), TimingPolicyIndex::new(0), SecurityPolicyIndex::new(0),
-            TransportCapabilityIndex::new(0), CodecCapabilityIndex::new(0), FederateIndex::new(0), FederateIndex::new(0), 0)];
-        let image = CompiledDeploymentImage { coordination: CoordinationProjection::CentralRti(rti_fixture("xfederation-route", &members, &[], &routes, &flows)), ..COMPILED };
-        assert!(matches!(CompiledDeploymentView::new(&image), Err(ImageValidationError::ReferenceOutOfBounds { table: "coordination.rti.routes", index: 0, field: "flow", target: "coordination.rti.flows", referenced: 0 })));
+        let routes = [RtiRouteImage::new(
+            IdentityRange::new(1, 16),
+            FlowIndex::new(0),
+            None,
+            None,
+            BoundaryFailurePolicy::PropagateStop,
+            TransportPolicy::ReliableOrderedFramed,
+            CodecPolicy::CanonicalBounded,
+            TimingPolicy::BestEffort,
+            SecurityPolicy::None,
+            TransportCapabilityIndex::new(0),
+            CodecCapabilityIndex::new(0),
+            FederateIndex::new(0),
+            FederateIndex::new(0),
+            0,
+        )];
+        let image = CompiledDeploymentImage {
+            coordination: CoordinationProjection::CentralRti(rti_fixture(
+                "xfederation-route",
+                &members,
+                &[],
+                &routes,
+                &flows,
+            )),
+            ..COMPILED
+        };
+        assert!(matches!(
+            CompiledDeploymentView::new(&image),
+            Err(ImageValidationError::ReferenceOutOfBounds {
+                table: "coordination.rti.routes",
+                index: 0,
+                field: "flow",
+                target: "coordination.rti.flows",
+                referenced: 0
+            })
+        ));
 
-        let ranged_members = [RtiMemberImage::new(RecoveryPolicyIndex::new(0), TableRange::new(0, 1), TableRange::new(0, 0), TableRange::new(0, 0))];
-        let image = CompiledDeploymentImage { coordination: CoordinationProjection::CentralRti(rti_fixture("x", &ranged_members, &[], &[], &flows)), ..COMPILED };
-        assert!(matches!(CompiledDeploymentView::new(&image), Err(ImageValidationError::RangeOutOfBounds { table: "coordination.rti.members", index: 0, field: "direct_incoming", target: "coordination.rti.dependencies", start: 0, len: 1 })));
+        let ranged_members = [RtiMemberImage::new(
+            RecoveryPolicy::FailStop,
+            TableRange::new(0, 1),
+            TableRange::new(0, 0),
+            TableRange::new(0, 0),
+        )];
+        let image = CompiledDeploymentImage {
+            coordination: CoordinationProjection::CentralRti(rti_fixture(
+                "x",
+                &ranged_members,
+                &[],
+                &[],
+                &flows,
+            )),
+            ..COMPILED
+        };
+        assert!(matches!(
+            CompiledDeploymentView::new(&image),
+            Err(ImageValidationError::RangeOutOfBounds {
+                table: "coordination.rti.members",
+                index: 0,
+                field: "direct_incoming",
+                target: "coordination.rti.dependencies",
+                start: 0,
+                len: 1
+            })
+        ));
 
         let dependencies = [RtiDependencyImage::new(FederateIndex::new(0), 0)];
-        let image = CompiledDeploymentImage { coordination: CoordinationProjection::CentralRti(rti_fixture("x", &members, &dependencies, &[], &flows)), ..COMPILED };
-        assert!(matches!(CompiledDeploymentView::new(&image), Err(ImageValidationError::OwnershipMismatch { table: "coordination.rti", index: 0, field: "dependencies" })));
+        let image = CompiledDeploymentImage {
+            coordination: CoordinationProjection::CentralRti(rti_fixture(
+                "x",
+                &members,
+                &dependencies,
+                &[],
+                &flows,
+            )),
+            ..COMPILED
+        };
+        assert!(matches!(
+            CompiledDeploymentView::new(&image),
+            Err(ImageValidationError::OwnershipMismatch {
+                table: "coordination.rti",
+                index: 0,
+                field: "dependencies"
+            })
+        ));
     }
 
     #[test]
@@ -2212,7 +2468,6 @@ mod tests {
         ));
     }
 
-    #[rustfmt::skip]
     #[test]
     fn compiled_view_orders_enclaves_within_each_federate() {
         let federates = [
@@ -2256,13 +2511,24 @@ mod tests {
             },
         ];
         let members = [FederateIndex::new(0), FederateIndex::new(1)];
-        let rti_members = [RtiMemberImage::new(RecoveryPolicyIndex::new(0), TableRange::new(0, 0), TableRange::new(0, 0), TableRange::new(0, 0)); 2];
+        let rti_members = [RtiMemberImage::new(
+            RecoveryPolicy::FailStop,
+            TableRange::new(0, 0),
+            TableRange::new(0, 0),
+            TableRange::new(0, 0),
+        ); 2];
         let image = CompiledDeploymentImage {
             identity_data: "alphatargetruntimebetatargetruntime",
             federation: GlobalFederationImage::new(&members, &[]),
             federates: TinyMapView::new(&federates),
             enclaves: TinyMapView::new(&enclaves),
-            coordination: CoordinationProjection::CentralRti(rti_fixture("x", &rti_members, &[], &[], &[])),
+            coordination: CoordinationProjection::CentralRti(rti_fixture(
+                "x",
+                &rti_members,
+                &[],
+                &[],
+                &[],
+            )),
         };
 
         let view = CompiledDeploymentView::new(&image).unwrap();

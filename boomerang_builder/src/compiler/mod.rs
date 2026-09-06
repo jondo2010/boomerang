@@ -22,16 +22,14 @@ pub use compiled::{
 };
 pub use coordination::{CoordinationProjectionError, OwnedCoordinationProjection, OwnedRtiImage};
 pub use deployment::{
-    BoundaryBinding, BoundaryPolicies, CoordinationSelection, FederateConfig,
+    BoundaryBinding, BoundaryPolicies, CoordinationBackend, CoordinationSelection, FederateConfig,
     ImplementationBinding, PhysicalBoundaryMetadata, PlacementAssignment,
 };
 pub use identity::{
-    ActionId, ApplicationId, BindingSlotId, BoundaryFailurePolicyId, BoundaryId, CodecCapabilityId,
-    CodecPolicyId, ComponentInstanceId, ContractId, CoordinationBackendId, FederateId, FlowId,
-    ImplementationId, InvalidStableId, ModeId, PhysicalBoundaryId, PlacementGroupId, PortId,
-    ReactionId, ReactorId, RecoveryPolicyId, RuntimeBackendId, SecurityPolicyId, StableEnclaveId,
-    StablePath, StablePathSegment, StableText, TargetTriple, TimingPolicyId, TransportCapabilityId,
-    TransportPolicyId,
+    ActionId, ApplicationId, BindingSlotId, BoundaryId, CodecCapabilityId, ComponentInstanceId,
+    ContractId, FederateId, FlowId, ImplementationId, InvalidStableId, ModeId, PhysicalBoundaryId,
+    PlacementGroupId, PortId, ReactionId, ReactorId, RuntimeBackendId, StableEnclaveId, StablePath,
+    StablePathSegment, StableText, TargetTriple, TransportCapabilityId,
 };
 pub use lower::{lower, CompileError};
 pub use model::{

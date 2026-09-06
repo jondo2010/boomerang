@@ -3,15 +3,19 @@
 //! A [`FederateConfig`] supplies build/runtime capabilities plus an explicit recovery policy.
 //! Each [`BoundaryBinding`] attaches one topology boundary to a stable end-to-end flow, optional
 //! physical input/output endpoints, concrete codec and transport implementations, and five
-//! safety-relevant policy identities. A single flow may span multiple boundary identities. No
-//! policy default is invented here: manifest parsing preserves the full roadmap vocabulary and
-//! compilation rejects unknown or known-but-unsupported selections before target images escape.
+//! safety-relevant typed policies. A single flow may span multiple boundary identities. No policy
+//! default is invented here: manifest parsing rejects unknown values, while compilation rejects
+//! known-but-unsupported selections before target images escape.
 
 use crate::descriptor::ComponentDescriptor;
 
 use super::{
     BoundaryId, CodecCapabilityId, ComponentInstanceId, FederateId, ImplementationId,
     PlacementGroupId, RuntimeBackendId, TargetTriple, TransportCapabilityId,
+};
+use crate::runtime::image::{
+    BoundaryFailurePolicy, CodecPolicy, RecoveryPolicy, SecurityPolicy, TimingPolicy,
+    TransportPolicy,
 };
 
 /// One selected implementation for a logical component instance.
@@ -94,7 +98,7 @@ pub struct FederateConfig {
     /// Runtime backend capability selected for the Federate.
     runtime: RuntimeBackendId,
     /// Explicit recovery behavior selected for this closed-world member.
-    recovery: super::RecoveryPolicyId,
+    recovery: RecoveryPolicy,
 }
 
 impl FederateConfig {
@@ -103,7 +107,7 @@ impl FederateConfig {
         id: FederateId,
         target: TargetTriple,
         runtime: RuntimeBackendId,
-        recovery: super::RecoveryPolicyId,
+        recovery: RecoveryPolicy,
     ) -> Self {
         Self {
             id,
@@ -128,10 +132,24 @@ impl FederateConfig {
         &self.runtime
     }
 
-    /// Returns the selected recovery policy identity.
-    pub fn recovery(&self) -> &super::RecoveryPolicyId {
-        &self.recovery
+    /// Returns the selected recovery policy.
+    pub fn recovery(&self) -> RecoveryPolicy {
+        self.recovery
     }
+}
+
+/// Closed distributed coordination backend vocabulary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(
+    feature = "host-interchange",
+    derive(serde::Deserialize, serde::Serialize)
+)]
+#[cfg_attr(feature = "host-interchange", serde(rename_all = "kebab-case"))]
+pub enum CoordinationBackend {
+    /// Federates coordinate through a generated central RTI artifact.
+    CentralRti,
+    /// Reserved RTI-free peer coordination; compilation support is deferred.
+    PeerToPeer,
 }
 
 /// Coordination backend selected for the deployment.
@@ -141,8 +159,8 @@ pub enum CoordinationSelection {
     Local,
     /// Federates coordinate through the selected distributed backend.
     Distributed {
-        /// Stable identity of the coordination backend capability.
-        backend: super::CoordinationBackendId,
+        /// Selected coordination backend.
+        backend: CoordinationBackend,
     },
 }
 
@@ -175,24 +193,24 @@ impl PhysicalBoundaryMetadata {
     }
 }
 
-/// Explicit policy identities selected for one cross-Federate boundary.
+/// Explicit policies selected for one cross-Federate boundary.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BoundaryPolicies {
-    failure: super::BoundaryFailurePolicyId,
-    transport: super::TransportPolicyId,
-    codec: super::CodecPolicyId,
-    timing: super::TimingPolicyId,
-    security: super::SecurityPolicyId,
+    failure: BoundaryFailurePolicy,
+    transport: TransportPolicy,
+    codec: CodecPolicy,
+    timing: TimingPolicy,
+    security: SecurityPolicy,
 }
 
 impl BoundaryPolicies {
     /// Creates one complete boundary policy selection without implicit defaults.
     pub fn new(
-        failure: super::BoundaryFailurePolicyId,
-        transport: super::TransportPolicyId,
-        codec: super::CodecPolicyId,
-        timing: super::TimingPolicyId,
-        security: super::SecurityPolicyId,
+        failure: BoundaryFailurePolicy,
+        transport: TransportPolicy,
+        codec: CodecPolicy,
+        timing: TimingPolicy,
+        security: SecurityPolicy,
     ) -> Self {
         Self {
             failure,
@@ -204,24 +222,24 @@ impl BoundaryPolicies {
     }
 
     /// Returns the selected source-loss behavior.
-    pub fn failure(&self) -> &super::BoundaryFailurePolicyId {
-        &self.failure
+    pub fn failure(&self) -> BoundaryFailurePolicy {
+        self.failure
     }
     /// Returns the selected transport contract.
-    pub fn transport(&self) -> &super::TransportPolicyId {
-        &self.transport
+    pub fn transport(&self) -> TransportPolicy {
+        self.transport
     }
     /// Returns the selected codec contract.
-    pub fn codec(&self) -> &super::CodecPolicyId {
-        &self.codec
+    pub fn codec(&self) -> CodecPolicy {
+        self.codec
     }
     /// Returns the selected timing class.
-    pub fn timing(&self) -> &super::TimingPolicyId {
-        &self.timing
+    pub fn timing(&self) -> TimingPolicy {
+        self.timing
     }
     /// Returns the selected security profile.
-    pub fn security(&self) -> &super::SecurityPolicyId {
-        &self.security
+    pub fn security(&self) -> SecurityPolicy {
+        self.security
     }
 }
 

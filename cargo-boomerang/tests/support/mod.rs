@@ -7,9 +7,8 @@ use std::{
 };
 
 use boomerang_builder::compiler::{
-    lower, CoordinationBackendId, CoordinationSelection, FederateConfig, FederateId,
-    ImplementationBinding, PlacementAssignment, PlacementGroupId, RecoveryPolicyId,
-    ResolvedDeployment, RuntimeBackendId, TargetTriple,
+    lower, CoordinationSelection, FederateConfig, FederateId, ImplementationBinding,
+    PlacementAssignment, PlacementGroupId, ResolvedDeployment, RuntimeBackendId, TargetTriple,
 };
 use boomerang_runtime::{
     execute_owned_federate,
@@ -134,7 +133,7 @@ pub fn owned_reference_summary(deployment_name: &str) -> Value {
                 FederateId::new(id.as_str())?,
                 TargetTriple::new(target)?,
                 RuntimeBackendId::new(config.runtime.as_str())?,
-                RecoveryPolicyId::new(config.recovery.as_str())?,
+                config.recovery,
             ))
         })
         .collect::<anyhow::Result<Vec<_>>>()
@@ -142,11 +141,7 @@ pub fn owned_reference_summary(deployment_name: &str) -> Value {
     let coordination = match resolved.deployment().coordination.as_ref() {
         None => CoordinationSelection::Local,
         Some(coordination) => CoordinationSelection::Distributed {
-            backend: CoordinationBackendId::new(match coordination.backend {
-                cargo_boomerang::CoordinationBackend::CentralRti => "central-rti",
-                cargo_boomerang::CoordinationBackend::PeerToPeer => "peer-to-peer",
-            })
-            .unwrap(),
+            backend: coordination.backend,
         },
     };
     let compiled = lower(

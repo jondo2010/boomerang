@@ -12,7 +12,7 @@ anstream = "1.0"
 anyhow.workspace = true
 blake3.workspace = true
 boomerang_builder = { workspace = true, features = ["descriptor-fingerprint", "host-interchange"] }
-boomerang_runtime.workspace = true
+boomerang_runtime = { workspace = true, features = ["serde"] }
 cargo_metadata.workspace = true
 fs2.workspace = true
 humantime.workspace = true

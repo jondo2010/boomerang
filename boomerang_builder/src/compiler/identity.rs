@@ -414,10 +414,6 @@ text_id!(
     RuntimeBackendId
 );
 text_id!(
-    /// Stable identity of a distributed coordination backend.
-    CoordinationBackendId
-);
-text_id!(
     /// Stable identity of a payload codec capability.
     CodecCapabilityId
 );
@@ -428,30 +424,6 @@ text_id!(
 text_id!(
     /// Stable identity of an end-to-end application flow.
     FlowId
-);
-text_id!(
-    /// Stable identity of a Federate recovery policy.
-    RecoveryPolicyId
-);
-text_id!(
-    /// Stable identity of a cross-Federate boundary-failure policy.
-    BoundaryFailurePolicyId
-);
-text_id!(
-    /// Stable identity of a transport contract policy.
-    TransportPolicyId
-);
-text_id!(
-    /// Stable identity of a payload codec contract policy.
-    CodecPolicyId
-);
-text_id!(
-    /// Stable identity of an end-to-end timing policy.
-    TimingPolicyId
-);
-text_id!(
-    /// Stable identity of a communication security policy.
-    SecurityPolicyId
 );
 path_id!(
     /// Stable identity of a logical component instance.

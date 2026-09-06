@@ -49,6 +49,9 @@ set are active; they never introduce an unknown participant or mutate the applic
 This is a defining distinction from ROS-style runtime discovery. Unknown binaries, undeclared
 connections, and arbitrary topology changes require a newly compiled deployment.
 
+Closed-world structure does not freeze exact binary contents. A compatible implementation may be
+rebuilt and installed offline without rebuilding unrelated Federate artifacts.
+
 ### Backend-neutral coordination semantics
 
 Logical-time, membership, recovery, and failure semantics are independent of the coordination
@@ -79,7 +82,7 @@ effects.
 Each Federate selects one of these compiled capabilities:
 
 - `fail-stop`: isolate the Federate and execute the declared downstream failure behavior;
-- `restart-reset`: restart from the compiled initial image;
+- `restart-reset`: restart the already selected artifact from its compiled initial image;
 - `transient-rejoin`: retain local state across a transport interruption and rejoin with a new
   incarnation;
 - `redundant-failover`: activate a predefined hot or warm standby;
@@ -106,7 +109,7 @@ superdense tag. A transition occurs only at a quiescent boundary:
 - no participant changes membership midway through a tag or constructive fixed point;
 - no message from the prior epoch may be admitted after the transition;
 - zero-delay strongly connected components change membership atomically as coordination domains;
-- old participants are fenced by deployment fingerprint, membership epoch, and Federate
+- old participants are fenced by coordination fingerprint, membership epoch, and Federate
   incarnation; and
 - an unexpected failure closes the current epoch according to compiled failure policy before
   unaffected domains resume.
@@ -114,6 +117,9 @@ superdense tag. A transition occurs only at a quiescent boundary:
 Transport acknowledgement, retry, drain, and failure bounds must be sufficient to establish the
 transition boundary conservatively. A joining transient Federate receives an effective start tag;
 its timers are relative to that start tag.
+
+Lifecycle recovery never changes the selected implementation or artifact version. Membership
+epochs coordinate failure recovery, not software deployment.
 
 ## Strong logical-time coordination
 
@@ -174,16 +180,40 @@ logical-time semantics.
 Stable textual identities remain authoritative in source models, manifests, durable configuration,
 and diagnostics. Compilation assigns dense deployment-local indices used by steady-state frames.
 
-Before accepting those indices, peers verify the exact deployment fingerprint, protocol version,
-codec set, membership epoch, and authenticated Federate identity when the selected security profile
-requires authentication. A mismatch fails closed. There is no runtime schema negotiation.
+Compatibility and artifact identity are layered:
+
+- the **coordination fingerprint** covers the topology, boundary contracts, protocol and codec
+  versions, dense wire mappings, coordination projection, and policies that participants must share;
+- each **Federate-image fingerprint** covers that Federate's compiled scheduler image, local
+  bindings, and bounded storage; and
+- each **artifact digest** covers the exact produced binary bytes.
+
+Before accepting dense indices, peers verify the coordination fingerprint, membership epoch, and
+authenticated Federate identity when the selected security profile requires authentication. A
+mismatch fails closed. Participants do not require identical Federate-image fingerprints or
+artifact digests because those values describe different deployment slices.
 
 Every boundary selects a codec and maximum encoded size. Generated codecs use a canonical,
 architecture-independent representation with specified endianness and field widths; native struct
 layout is never transferred. Encoding and decoding use bounded caller-provided storage.
 
-Rolling mixed-version interoperability is not implicit. It requires an explicitly compiled
-compatibility profile with its own fingerprint and tests.
+### Offline artifact replacement
+
+A payload implementation may be rebuilt independently when its declared contract remains
+compatible. The build reruns descriptor and deployment validation, rebuilds only affected Federate
+artifacts, and atomically publishes a new bundle-manifest revision containing their new artifact
+digests. Unchanged artifacts are reused.
+
+If only reaction bodies or other implementation internals change, the coordination and
+Federate-image fingerprints may remain unchanged. A local structural change may change only the
+affected Federate-image fingerprint when it preserves every global boundary and policy. A change to
+topology, wire mapping, boundary schema or semantics, protocol, codec, timing or recovery contract,
+or another shared policy changes the coordination fingerprint and requires all participants to be
+regenerated for the new deployment.
+
+Artifact replacement is initially an offline operation: stop the federation, install the new
+bundle revision, and start a new coordinated session. Live code replacement, rolling update,
+runtime implementation selection, and mixed-version session negotiation are outside this roadmap.
 
 ## Security profiles
 
@@ -194,8 +224,8 @@ Security is explicit per boundary or transport domain:
 - `authenticated`; or
 - `authenticated-encrypted`.
 
-A deployment fingerprint proves compatibility, not identity. Authentication binds Federate
-identity, deployment fingerprint, membership epoch, and incarnation to the session. Secret key
+A coordination fingerprint proves compatibility, not identity. Authentication binds Federate
+identity, coordination fingerprint, membership epoch, and incarnation to the session. Secret key
 material is provisioned by the platform and referenced through generated binding slots; it is not
 embedded in deployment images. Authentication and integrity failures are link failures.
 
@@ -293,8 +323,8 @@ phase 5 while leaving ordinary live `Assembly` migration for phase 8.
 
 ### Phase 6 - Bounded wire protocol and transport foundation
 
-- Define the canonical compact wire protocol, dense index handshake, codecs, and exact fingerprint
-  compatibility.
+- Define the canonical compact wire protocol, dense index handshake, codecs, layered coordination
+  and Federate-image fingerprints, and per-artifact digests.
 - Define the reliable ordered channel contract and implement the TCP reference projection.
 - Add bounded protocol state, queues, serialization storage, priority handling, and failure
   conversion.
@@ -346,7 +376,8 @@ This revises issues #138-#139 after the phase-5 federated cut.
 - Implement `restart-reset`, bounded application-state transfer, and predefined redundant failover.
 - Exercise lifecycle and recovery under deterministic fault injection and on the Pi-Pico deployment.
 
-General checkpoint/replay is not a phase-10 requirement.
+General checkpoint/replay and deployment of a new artifact into a running federation are not
+phase-10 requirements.
 
 ### Phase 11 - Physical time, mixed criticality, and security
 
@@ -371,7 +402,6 @@ transitional paths. Passing earlier milestones does not imply passing this gate.
 - Add peer-to-peer or hierarchical coordination projections against the shared conformance model.
 - Measure and implement control-message compression, batching, reduced `PTAG`/`ABS` traffic, and
   other protocol optimizations without changing semantics.
-- Add explicitly compiled rolling-compatibility profiles if a concrete use case requires them.
 
 Phase 12 capabilities are independently selectable extensions and are not silently included in the
 baseline release profile.

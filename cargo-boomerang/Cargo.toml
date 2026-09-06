@@ -30,6 +30,9 @@ tracing-subscriber = { version = "=0.3.23", default-features = false, features =
     "fmt",
 ] }
 
+[dev-dependencies]
+owned-reference-payloads = { path = "tests/fixtures/owned-reference-payloads" }
+
 [[bin]]
 name = "cargo-boomerang"
 path = "src/main.rs"

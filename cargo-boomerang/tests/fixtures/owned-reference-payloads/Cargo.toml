@@ -1,0 +1,17 @@
+[package]
+name = "owned-reference-payloads"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[features]
+default = ["__boomerang_payload", "simulated"]
+__boomerang_payload = []
+simulated = []
+
+[dependencies]
+boomerang_macros = { path = "../../../../boomerang_macros" }
+boomerang_runtime = { path = "../../../../boomerang_runtime", default-features = false }
+
+[build-dependencies]
+boomerang_runtime = { path = "../../../../boomerang_runtime", default-features = false }

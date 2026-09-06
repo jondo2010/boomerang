@@ -5,12 +5,13 @@ edition = "2021"
 publish = false
 
 [features]
+default = ["__boomerang_payload"]
+__boomerang_payload = ["boomerang/__boomerang_payload", "descriptor-pass/__boomerang_payload"]
 binding-fingerprint-mismatch = ["descriptor-pass/binding-fingerprint-mismatch"]
 binding-macro-abi-mismatch = ["descriptor-pass/binding-macro-abi-mismatch"]
 
 [dependencies]
-boomerang = { path = "../../../../boomerang" }
-boomerang_builder = { path = "../../../../boomerang_builder" }
-descriptor-pass = { path = "../descriptor-pass", features = ["__boomerang_payload"] }
+boomerang = { path = "../../../../boomerang", default-features = false }
+descriptor-pass = { path = "../descriptor-pass", default-features = false }
 
 [workspace]

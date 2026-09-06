@@ -10,10 +10,102 @@ features = ["simulated"]
 
 [deployments.production.bindings.controller]
 package = "vehicle-control"
+[deployments.production.bindings.backup]
+package = "vehicle-control"
 
 [deployments.production.federates.host]
-groups = ["placement/controller", "placement/sensor"]
+groups = ["placement/backup", "placement/controller", "placement/sensor"]
 runtime = "std"
+
+[deployments.runtime-failure]
+bindings = { sensor = { package = "sensor-host", features = ["simulated", "runtime-failure"] }, controller = { package = "vehicle-control" }, backup = { package = "vehicle-control" } }
+
+[deployments.runtime-failure.federates.host]
+groups = ["placement/backup", "placement/controller", "placement/sensor"]
+runtime = "std"
+
+[deployments.execution]
+bindings = { sensor = { package = "sensor-host", features = ["simulated"] }, controller = { package = "vehicle-control" }, backup = { package = "vehicle-control" } }
+
+[deployments.execution.federates.host]
+groups = ["placement/backup", "placement/controller", "placement/sensor"]
+runtime = "std"
+
+[deployments.execution.execution]
+fast-forward = true
+keep-alive = true
+logical-horizon = "1000ms"
+
+[deployments.execution-equivalent]
+bindings = { sensor = { package = "sensor-host", features = ["simulated"] }, controller = { package = "vehicle-control" }, backup = { package = "vehicle-control" } }
+
+[deployments.execution-equivalent.federates.host]
+groups = ["placement/backup", "placement/controller", "placement/sensor"]
+runtime = "std"
+
+[deployments.execution-equivalent.execution]
+fast-forward = true
+keep-alive = true
+logical-horizon = "1s"
+
+[deployments.broken-payload.bindings.sensor]
+package = "sensor-host"
+features = ["simulated"]
+
+[deployments.broken-payload.bindings.controller]
+package = "vehicle-control"
+features = ["broken-payload"]
+[deployments.broken-payload.bindings.backup]
+package = "vehicle-control"
+
+[deployments.broken-payload.federates.host]
+groups = ["placement/backup", "placement/controller", "placement/sensor"]
+runtime = "std"
+
+[deployments.warning-diagnostic.bindings.sensor]
+package = "sensor-host"
+features = ["simulated"]
+
+[deployments.warning-diagnostic.bindings.controller]
+package = "vehicle-control"
+features = ["warning-diagnostic"]
+[deployments.warning-diagnostic.bindings.backup]
+package = "vehicle-control"
+
+[deployments.warning-diagnostic.federates.host]
+groups = ["placement/backup", "placement/controller", "placement/sensor"]
+runtime = "std"
+
+[deployments.broken-descriptor.bindings.sensor]
+package = "sensor-host"
+features = ["simulated"]
+
+[deployments.broken-descriptor.bindings.controller]
+package = "vehicle-control"
+features = ["broken-descriptor"]
+[deployments.broken-descriptor.bindings.backup]
+package = "vehicle-control"
+
+[deployments.broken-descriptor.federates.host]
+groups = ["placement/backup", "placement/controller", "placement/sensor"]
+runtime = "std"
+
+[deployments.profile-config.bindings.sensor]
+package = "sensor-host"
+features = ["simulated"]
+
+[deployments.profile-config.bindings.controller]
+package = "vehicle-control"
+features = ["profile-config-probe"]
+
+[deployments.profile-config.bindings.backup]
+package = "vehicle-control"
+
+[deployments.profile-config.federates.host]
+groups = ["placement/backup", "placement/controller", "placement/sensor"]
+runtime = "std"
+profile = "release"
+cargo-config = ".cargo/profile-config.toml"
 
 [deployments.resolution.bindings.sensor]
 package = "sensor-host"
@@ -21,13 +113,31 @@ features = ["simulated"]
 
 [deployments.resolution.bindings.controller]
 package = "vehicle-control"
+[deployments.resolution.bindings.backup]
+package = "vehicle-control"
 
 [deployments.resolution.federates.host]
-groups = ["placement/controller", "placement/sensor"]
+groups = ["placement/backup", "placement/controller", "placement/sensor"]
 target = "x86_64-unknown-linux-gnu"
 runtime = "std"
 target-json = "targets/host.json"
 cargo-config = ".cargo/host.toml"
+
+[deployments.foreign-x86-linux]
+bindings = { sensor = { package = "sensor-host", features = ["simulated"] }, controller = { package = "vehicle-control" }, backup = { package = "vehicle-control" } }
+
+[deployments.foreign-x86-linux.federates.host]
+groups = ["placement/backup", "placement/controller", "placement/sensor"]
+target = "x86_64-unknown-linux-gnu"
+runtime = "std"
+
+[deployments.foreign-aarch64-macos]
+bindings = { sensor = { package = "sensor-host", features = ["simulated"] }, controller = { package = "vehicle-control" }, backup = { package = "vehicle-control" } }
+
+[deployments.foreign-aarch64-macos.federates.host]
+groups = ["placement/backup", "placement/controller", "placement/sensor"]
+target = "aarch64-apple-darwin"
+runtime = "std"
 
 [deployments.outside-member.bindings."vehicle/sensor"]
 package = "outside-member"
@@ -41,4 +151,17 @@ package = "sensor-host"
 features = ["payload-alias"]
 [deployments.payload-alias.federates.host]
 groups = ["vehicle"]
+runtime = "std"
+
+[deployments.feature-union.bindings.controller]
+package = "vehicle-control"
+features = ["controller-selected"]
+[deployments.feature-union.bindings.backup]
+package = "vehicle-control"
+features = ["sensor-selected"]
+[deployments.feature-union.bindings.sensor]
+package = "sensor-host"
+features = ["simulated"]
+[deployments.feature-union.federates.host]
+groups = ["placement/backup", "placement/controller", "placement/sensor"]
 runtime = "std"

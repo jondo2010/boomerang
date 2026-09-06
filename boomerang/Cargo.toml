@@ -11,7 +11,14 @@ repository.workspace = true
 categories.workspace = true
 
 [features]
-default = []
+default = ["hosted"]
+
+## Hosted reactor construction and dynamic assembly support
+hosted = ["dep:boomerang_builder"]
+
+# Reserved deployment facets selected by generated Cargo invocations.
+__boomerang_descriptor = ["hosted"]
+__boomerang_payload = []
 
 # Support for serialization
 serde = ["boomerang_runtime/serde"]
@@ -21,10 +28,11 @@ parallel = ["boomerang_runtime/parallel"]
 
 
 ## Support for recording and replaying
-replay = ["boomerang_runtime/replay", "boomerang_builder/replay"]
+replay = ["hosted", "boomerang_runtime/replay", "boomerang_builder/replay"]
 
 ## Assembly metadata and protocol primitives for static federated enclave topologies
 federated = [
+    "hosted",
     "boomerang_runtime/federated",
     "boomerang_builder/federated",
     "boomerang_federated/runtime",
@@ -36,7 +44,7 @@ document-features = { workspace = true }
 thiserror.workspace = true
 
 # repo dependencies
-boomerang_builder = { workspace = true }
+boomerang_builder = { workspace = true, optional = true }
 boomerang_federated = { workspace = true, optional = true }
 boomerang_runtime = { workspace = true }
 boomerang_macros = { workspace = true }

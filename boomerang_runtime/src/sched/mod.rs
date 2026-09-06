@@ -1,14 +1,19 @@
-use std::{convert::Infallible, pin::Pin};
+use std::pin::Pin;
 
 mod barrier;
 mod compiled;
 mod core;
+pub(crate) mod federate;
 mod modal;
 mod queue;
 
 // Kept at the scheduler-module boundary so sibling modules retain their narrow
 // `super::` imports while the generic core lives in its own implementation module.
-pub(crate) use compiled::run_owned_scheduler;
+#[cfg(test)]
+pub(crate) use compiled::run_owned_scheduler_with_origin;
+pub(crate) use compiled::{
+    run_owned_scheduler, run_owned_scheduler_with_coordination, OwnedSchedulerOutcome,
+};
 pub(crate) use core::{ExecutionStorage, ModeTransition, Schedule, SchedulerError};
 use core::{ReactionOutcome, SchedulerCore};
 
@@ -102,21 +107,61 @@ impl Config {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Stats {
-    /// Number of `tag`s processed
+    /// Scheduler tag-processing steps, including terminal tags.
     processed_tags: usize,
-    /// Number of reactions processed
+    /// Enabled reaction callbacks selected for invocation.
     processed_reactions: usize,
-    /// Number of scheduled async events
+    /// Timing-dependent asynchronous scheduler events handled.
     processed_events: usize,
-    /// Number of ports set
+    /// Present-port observations during trigger propagation.
     set_ports: usize,
-    /// Number of scheduled, sync actions
+    /// Actions explicitly requested by reaction outcomes.
     scheduled_actions: usize,
 }
 
 impl Stats {
+    /// Returns scheduler tag-processing steps, including terminal tags.
+    pub const fn processed_tags(&self) -> usize {
+        self.processed_tags
+    }
+
+    /// Returns enabled reaction callbacks selected for invocation.
+    pub const fn processed_reactions(&self) -> usize {
+        self.processed_reactions
+    }
+
+    /// Returns timing-dependent asynchronous scheduler events handled.
+    ///
+    /// This is scheduler telemetry, not a count of unique logical events.
+    pub const fn processed_events(&self) -> usize {
+        self.processed_events
+    }
+
+    /// Returns present-port observations during trigger propagation.
+    pub const fn set_ports(&self) -> usize {
+        self.set_ports
+    }
+
+    /// Returns actions explicitly requested by reaction outcomes.
+    pub const fn scheduled_actions(&self) -> usize {
+        self.scheduled_actions
+    }
+
+    /// Adds every scheduler counter from `other`, saturating at [`usize::MAX`].
+    pub(crate) fn saturating_add_assign(&mut self, other: &Self) {
+        self.processed_tags = self.processed_tags.saturating_add(other.processed_tags);
+        self.processed_reactions = self
+            .processed_reactions
+            .saturating_add(other.processed_reactions);
+        self.processed_events = self.processed_events.saturating_add(other.processed_events);
+        self.set_ports = self.set_ports.saturating_add(other.set_ports);
+        self.scheduled_actions = self
+            .scheduled_actions
+            .saturating_add(other.scheduled_actions);
+    }
+
     pub fn increment_processed_tags(&mut self) {
         self.processed_tags += 1;
     }
@@ -147,7 +192,13 @@ impl std::fmt::Display for Stats {
 }
 
 impl ExecutionStorage<ReactionGraph> for Pin<Box<Store>> {
-    type Error = Infallible;
+    type Error = RuntimeError;
+
+    fn prepare_startup_origin(&mut self, start_time: &mut std::time::Instant) {
+        let origin = std::time::Instant::now();
+        *start_time = origin;
+        Store::initialize_reaction_context_origins(self, origin);
+    }
 
     fn action_from_runtime(&self, key: ActionKey) -> ActionKey {
         key
@@ -155,6 +206,19 @@ impl ExecutionStorage<ReactionGraph> for Pin<Box<Store>> {
 
     fn push_action_value(&mut self, action: ActionKey, tag: Tag, value: Box<dyn ReactorData>) {
         Store::push_action_value(self, action, tag, value);
+    }
+
+    fn stage_inbound_boundary_value(
+        &mut self,
+        port: crate::image::PortIndex,
+        _tag: Tag,
+        _value: Box<dyn ReactorData>,
+    ) -> Result<PortKey, Self::Error> {
+        Err(RuntimeError::AsyncBoundaryPortUnsupported(port))
+    }
+
+    fn commit_boundary_ports(&mut self, _tag: Tag) -> Result<(), Self::Error> {
+        Ok(())
     }
 
     fn clear_action_values(&mut self, action: ActionKey) {
@@ -227,6 +291,10 @@ impl Schedule for ReactionGraph {
     type Reactor = ReactorKey;
     type Mode = ModeKey;
     type Scope = ScopeKey;
+
+    fn action_capacity(&self) -> usize {
+        self.action_scopes.len()
+    }
 
     fn reaction_limits(&self) -> ReactionSetLimits {
         let max_level = self
@@ -545,6 +613,7 @@ impl Scheduler {
             schedule: reaction_graph,
             storage: store,
             event_rx,
+            quiescence: None,
             events,
             start_time,
             current_tag,
@@ -587,10 +656,9 @@ impl Scheduler {
         reaction_view: KeySetView<ReactionKey>,
         terminal: bool,
     ) {
-        match self.core().process_tag(tag, reaction_view, terminal) {
-            Ok(()) => {}
-            Err(error) => match error {},
-        }
+        self.core()
+            .process_tag(tag, reaction_view, terminal, &[])
+            .expect("live reaction invocation is infallible");
     }
 
     /// Consume the scheduler and return the `Env` instance.
@@ -602,14 +670,14 @@ impl Scheduler {
     }
 }
 
-/// Removes the impossible live-storage error while preserving coordination failures.
+/// Flattens coordination and live-storage failures into the public runtime error type.
 fn live_scheduler_result<T>(
-    result: Result<T, SchedulerError<Infallible>>,
+    result: Result<T, SchedulerError<RuntimeError>>,
 ) -> Result<T, RuntimeError> {
     match result {
         Ok(value) => Ok(value),
         Err(SchedulerError::Coordination(error)) => Err(error),
-        Err(SchedulerError::Execution(error)) => match error {},
+        Err(SchedulerError::Execution(error)) => Err(error),
     }
 }
 
@@ -702,7 +770,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use crate::{reaction_closure, ActionKey, Level, PortKey, Reaction, Reactor};
+    use crate::{image::PortIndex, reaction_closure, ActionKey, Level, PortKey, Reaction, Reactor};
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum HookCall {
@@ -817,6 +885,56 @@ mod tests {
         (scheduler, reaction)
     }
 
+    fn scheduler_recording_start_origin(
+        seen_origin: Arc<Mutex<Option<std::time::Instant>>>,
+    ) -> (Scheduler, ReactionKey) {
+        let mut enclave = Enclave::default();
+        let reactor = enclave.insert_reactor(Reactor::new("root", ()).boxed(), None);
+        let scope = enclave.root_scope(reactor);
+        let reaction = enclave.insert_reaction(
+            Reaction::new(
+                "record-origin",
+                reaction_closure!(ctx, _reactor, _refs => {
+                    *seen_origin.lock().unwrap() = Some(ctx.get_start_time());
+                }),
+                None,
+            ),
+            reactor,
+            std::iter::empty::<PortKey>(),
+            std::iter::empty::<PortKey>(),
+            std::iter::empty::<ActionKey>(),
+            scope,
+            None,
+        );
+        (
+            Scheduler::new(
+                EnclaveKey::from(0),
+                enclave,
+                Config::default().with_fast_forward(true),
+            ),
+            reaction,
+        )
+    }
+
+    #[test]
+    fn live_scheduler_origin_is_captured_at_startup_and_shared_with_contexts() {
+        let seen_origin = Arc::new(Mutex::new(None));
+        let (mut scheduler, reaction) = scheduler_recording_start_origin(Arc::clone(&seen_origin));
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let startup_floor = std::time::Instant::now();
+
+        scheduler.startup();
+        scheduler.events.push_event(
+            Tag::ZERO,
+            std::iter::once((Level::from(0), reaction)),
+            false,
+        );
+        assert!(scheduler.try_next().unwrap());
+
+        assert!(scheduler.start_time >= startup_floor);
+        assert_eq!(*seen_origin.lock().unwrap(), Some(scheduler.start_time));
+    }
+
     #[test]
     fn federated_time_barrier_wraps_processed_logical_tag() {
         let log = Arc::new(Mutex::new(Vec::new()));
@@ -880,6 +998,40 @@ mod tests {
     }
 
     #[test]
+    fn live_scheduler_rejects_async_boundary_ports() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let future_tag = Tag::new(Duration::seconds(1), 0);
+        let boundary = PortIndex::new(7);
+        let barrier = RecordingBarrier::interrupting(
+            Arc::clone(&log),
+            AsyncEvent::Logical {
+                tag: Tag::ZERO,
+                target: crate::AsyncEventTarget::BoundaryPort(boundary),
+                value: Box::new(42_u32),
+            },
+        );
+        let mut scheduler = Scheduler::new_with_federated_time_barrier(
+            EnclaveKey::from(0),
+            Enclave::default(),
+            Config::default().with_fast_forward(true),
+            barrier,
+        );
+
+        scheduler.startup();
+        scheduler.events.push_event(
+            future_tag,
+            std::iter::empty::<(Level, ReactionKey)>(),
+            false,
+        );
+
+        assert!(matches!(
+            scheduler.try_next(),
+            Err(RuntimeError::AsyncBoundaryPortUnsupported(key)) if key == boundary
+        ));
+        assert_eq!(*log.lock().unwrap(), vec![HookCall::Acquire(future_tag)]);
+    }
+
+    #[test]
     fn federated_barrier_error_prevents_reaction_execution() {
         let log = Arc::new(Mutex::new(Vec::new()));
         let barrier = RecordingBarrier::failing_acquire(Arc::clone(&log), "denied");
@@ -929,5 +1081,33 @@ mod tests {
             .unwrap()
             .iter()
             .any(|call| matches!(call, HookCall::Reaction(reaction_tag) if *reaction_tag == tag)));
+    }
+}
+
+#[cfg(test)]
+mod stats_tests {
+    use super::*;
+
+    #[test]
+    fn stats_aggregation_saturates_every_counter() {
+        let mut aggregate = Stats {
+            processed_tags: usize::MAX,
+            processed_reactions: usize::MAX,
+            processed_events: usize::MAX,
+            set_ports: usize::MAX,
+            scheduled_actions: usize::MAX,
+        };
+        aggregate.saturating_add_assign(&Stats {
+            processed_tags: 1,
+            processed_reactions: 1,
+            processed_events: 1,
+            set_ports: 1,
+            scheduled_actions: 1,
+        });
+        assert_eq!(aggregate.processed_tags(), usize::MAX);
+        assert_eq!(aggregate.processed_reactions(), usize::MAX);
+        assert_eq!(aggregate.processed_events(), usize::MAX);
+        assert_eq!(aggregate.set_ports(), usize::MAX);
+        assert_eq!(aggregate.scheduled_actions(), usize::MAX);
     }
 }

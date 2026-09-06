@@ -1,17 +1,18 @@
 //! Owned payload bindings and mutable storage for compiled scheduler images.
 
-use std::{fmt, marker::PhantomData, ptr::NonNull, time::Instant};
+use std::{any::TypeId, fmt, marker::PhantomData, ptr::NonNull, time::Instant};
 
 use tinymap::{TinyMap, TinySecondaryMap};
 
 use crate::{
     action::{Action, ActionKey, BaseAction},
     image::{
-        ActionSlotIndex, ActionTiming, BindingKind, BindingSlotIndex, EnclaveImageView, PortIndex,
-        ReactionIndex, ReactorIndex, StateSlotIndex, TimingDomain,
+        ActionSlotIndex, ActionTiming, BindingKind, BindingSlotIndex, BoundaryId, EnclaveImageView,
+        EnclaveIndex, PortIndex, ReactionIndex, ReactorIndex, StateSlotIndex, TimingDomain,
     },
     port::{BasePort, Port, PortKey},
-    Context, Duration, EnclaveKey, ReactionRefs, ReactorData, Refs, RefsMut, Tag, TriggerRes,
+    CompiledModeEffectRef, Context, Duration, EnclaveKey, PayloadType, ReactionRefs, ReactorData,
+    Refs, RefsMut, Tag, TriggerRes,
 };
 
 /// Errors returned by direct reaction implementations.
@@ -25,21 +26,20 @@ type StorageLayout = (
 /// Initialized reactor contexts and their paired event and shutdown channels.
 type InitializedContexts = (
     TinyMap<ReactorIndex, Context>,
+    crate::Sender<crate::event::AsyncEvent>,
     crate::Receiver<crate::event::AsyncEvent>,
     crate::keepalive::Sender,
 );
-/// Heap-backed factories and invokers bound directly to compiled-image slots.
+/// Heap-backed factories and invokers for one scheduler-owned compiled Enclave.
 #[derive(Default)]
-pub struct OwnedBindings {
-    /// Factories and invokers for the image's typed required binding slots.
+pub struct EnclaveBindings {
+    /// Typed state initializers, reaction invokers, and port/action factories by required slot.
     bindings: TinySecondaryMap<BindingSlotIndex, Binding>,
-    /// Payload action factories keyed by compiled action storage slot.
-    actions: TinySecondaryMap<ActionSlotIndex, Box<dyn ActionFactory>>,
-    /// Payload port factories keyed by compiled port slot.
-    ports: TinySecondaryMap<PortIndex, Box<dyn PortFactory>>,
+    /// Repeated caller-supplied slots retained for pre-initialization duplicate validation.
+    duplicate_slots: TinySecondaryMap<BindingSlotIndex, ()>,
 }
 
-impl OwnedBindings {
+impl EnclaveBindings {
     /// Creates an empty set of direct bindings.
     pub fn new() -> Self {
         Self::default()
@@ -47,7 +47,7 @@ impl OwnedBindings {
 
     /// Binds a state initializer to its compiled required binding slot.
     pub fn bind_state<T: ReactorData>(mut self, slot: BindingSlotIndex, init: fn() -> T) -> Self {
-        self.bindings.insert(
+        self.insert_binding(
             slot,
             Binding::State(Box::new(TypedStateInitializer::<T> {
                 init,
@@ -56,50 +56,85 @@ impl OwnedBindings {
         );
         self
     }
-    /// Binds a payload action type to its compiled storage slot.
-    pub fn bind_action<T: ReactorData>(mut self, slot: ActionSlotIndex) -> Self {
-        self.actions.insert(
+    /// Binds a payload action type to its stable required binding slot.
+    pub fn bind_action<T: ReactorData>(
+        mut self,
+        slot: BindingSlotIndex,
+        payload: PayloadType<T>,
+    ) -> Self {
+        let _ = payload;
+        self.insert_binding(
             slot,
-            Box::new(TypedActionFactory::<T> {
+            Binding::Action(Box::new(TypedActionFactory::<T> {
                 marker: PhantomData,
-            }),
+            })),
         );
         self
     }
-    /// Binds a payload port type to its compiled storage slot.
-    pub fn bind_port<T: ReactorData>(mut self, slot: PortIndex) -> Self {
-        self.ports.insert(
+    /// Binds a payload port type to its stable required binding slot.
+    pub fn bind_port<T: ReactorData>(
+        mut self,
+        slot: BindingSlotIndex,
+        payload: PayloadType<T>,
+    ) -> Self {
+        let _ = payload;
+        self.insert_binding(
             slot,
-            Box::new(TypedPortFactory::<T> {
+            Binding::Port(Box::new(TypedPortFactory::<T> {
                 marker: PhantomData,
-            }),
+            })),
         );
         self
     }
-    /// Binds a directly generated reaction implementation to its required binding slot.
+    /// Binds a generated reaction and its optional image-owned mode effect to a required slot.
     pub fn bind_reaction<F>(mut self, slot: BindingSlotIndex, function: F) -> Self
     where
         F: for<'store> FnMut(
                 &mut Context,
                 &mut dyn ReactorData,
                 ReactionRefs<'store>,
+                Option<CompiledModeEffectRef>,
             ) -> Result<(), ReactionBindingError>
             + Send
             + Sync
             + 'static,
     {
-        self.bindings
-            .insert(slot, Binding::Reaction(Box::new(function)));
+        self.insert_binding(
+            slot,
+            Binding::Reaction(Box::new(ErasedReactionInvoker(function))),
+        );
         self
+    }
+
+    /// Records one typed binding while retaining duplicate-slot evidence for validation.
+    fn insert_binding(&mut self, slot: BindingSlotIndex, binding: Binding) {
+        if self.bindings.insert(slot, binding).is_some() {
+            self.duplicate_slots.insert(slot, ());
+        }
+    }
+
+    /// Returns the concrete payload type bound to one compiled port slot.
+    pub(crate) fn port_payload_type(
+        &self,
+        slot: BindingSlotIndex,
+    ) -> Option<(TypeId, &'static str)> {
+        match self.bindings.get(slot) {
+            Some(Binding::Port(factory)) => Some(factory.payload_type()),
+            _ => None,
+        }
     }
 }
 
-/// The two heterogeneous values that may occupy a required image binding slot.
+/// A heterogeneous implementation value occupying a required image binding slot.
 enum Binding {
     /// A factory for one reactor's concrete state value.
     State(Box<dyn StateInitializer>),
     /// An invoker for one generated reaction implementation.
     Reaction(Box<dyn ReactionInvoker>),
+    /// A factory for one concrete port payload type.
+    Port(Box<dyn PortFactory>),
+    /// A factory for one concrete action payload type.
+    Action(Box<dyn ActionFactory>),
 }
 
 impl Binding {
@@ -108,6 +143,8 @@ impl Binding {
         match self {
             Self::State(_) => BindingKind::StateInitializer,
             Self::Reaction(_) => BindingKind::Reaction,
+            Self::Port(_) => BindingKind::Port,
+            Self::Action(_) => BindingKind::Action,
         }
     }
 }
@@ -187,6 +224,8 @@ impl<T: ReactorData> ActionFactory for TypedActionFactory<T> {
 trait PortFactory: Send + Sync {
     /// Builds a port for the supplied compiled slot.
     fn create(&self, slot: PortIndex) -> Box<dyn BasePort>;
+    /// Returns the concrete payload type produced by this factory.
+    fn payload_type(&self) -> (TypeId, &'static str);
 }
 
 /// A concrete payload port factory.
@@ -204,6 +243,94 @@ impl<T: ReactorData> PortFactory for TypedPortFactory<T> {
         )
         .boxed()
     }
+
+    fn payload_type(&self) -> (TypeId, &'static str) {
+        (TypeId::of::<T>(), std::any::type_name::<T>())
+    }
+}
+
+/// Type-erased outbound route installed only after both typed endpoints pass preflight.
+trait OutboundRoute: Send {
+    /// Clones and admits one present source value at its destination timing boundary.
+    fn emit(&mut self, source: &dyn BasePort, tag: Tag) -> Result<(), OwnedStorageError>;
+}
+
+/// Direct typed outbound route whose generic parameter is unified by `bind_route`.
+struct TypedOutboundRoute<'image, T: ReactorData + Clone> {
+    /// Stable boundary identity used in route diagnostics.
+    boundary: BoundaryId<'image>,
+    /// Canonical destination Enclave identity.
+    destination: EnclaveIndex,
+    /// Dense destination port admitted by the paired inbound route.
+    destination_port: PortIndex,
+    /// Compiled logical or physical timing interpretation.
+    timing_domain: TimingDomain,
+    /// Compiled non-negative delay applied exactly once during emission.
+    delay_nanos: u64,
+    /// Destination scheduler event channel.
+    destination_tx: crate::Sender<crate::event::AsyncEvent>,
+    /// Retains the statically unified endpoint payload type.
+    marker: PhantomData<fn() -> T>,
+}
+
+impl<T: ReactorData + Clone> OutboundRoute for TypedOutboundRoute<'_, T> {
+    fn emit(&mut self, source: &dyn BasePort, tag: Tag) -> Result<(), OwnedStorageError> {
+        let typed = source.downcast_ref::<Port<T>>().ok_or_else(|| {
+            OwnedStorageError::OutboundRoutePayloadTypeMismatch {
+                boundary: self.boundary.as_str().to_owned(),
+                port: source.get_key(),
+                expected: std::any::type_name::<T>(),
+                found: source.type_name(),
+            }
+        })?;
+        let Some(value) = typed.get().as_ref() else {
+            return Ok(());
+        };
+        let target = crate::event::AsyncEventTarget::BoundaryPort(self.destination_port);
+        let event = match self.timing_domain {
+            TimingDomain::Logical => {
+                let tag = if self.delay_nanos == 0 {
+                    tag
+                } else {
+                    tag.checked_delay(Duration::nanoseconds(self.delay_nanos as i64))
+                        .ok_or_else(|| OwnedStorageError::OutboundRouteTagOverflow {
+                            boundary: self.boundary.as_str().to_owned(),
+                            tag,
+                            delay_nanos: self.delay_nanos,
+                        })?
+                };
+                crate::event::AsyncEvent::Logical {
+                    tag,
+                    target,
+                    value: Box::new(value.clone()),
+                }
+            }
+            TimingDomain::Physical => {
+                let time = Instant::now()
+                    .checked_add(std::time::Duration::from_nanos(self.delay_nanos))
+                    .ok_or_else(|| OwnedStorageError::OutboundRouteTimeOverflow {
+                        boundary: self.boundary.as_str().to_owned(),
+                        delay_nanos: self.delay_nanos,
+                    })?;
+                crate::event::AsyncEvent::Physical {
+                    time,
+                    target,
+                    value: Box::new(value.clone()),
+                }
+            }
+        };
+        match self.destination_tx.try_send(event) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(OwnedStorageError::OutboundRouteChannelFull {
+                boundary: self.boundary.as_str().to_owned(),
+                destination: self.destination,
+            }),
+            Err(_) => Err(OwnedStorageError::OutboundRouteChannelClosed {
+                boundary: self.boundary.as_str().to_owned(),
+                destination: self.destination,
+            }),
+        }
+    }
 }
 
 /// Object-safe direct invocation of a generated reaction implementation.
@@ -214,15 +341,20 @@ trait ReactionInvoker: Send + Sync {
         context: &mut Context,
         state: &mut dyn ReactorData,
         refs: ReactionRefs<'_>,
+        mode_effect: Option<CompiledModeEffectRef>,
     ) -> Result<(), ReactionBindingError>;
 }
 
-impl<F> ReactionInvoker for F
+/// Type-erasing adapter for the single owned-reaction callback shape.
+struct ErasedReactionInvoker<F>(F);
+
+impl<F> ReactionInvoker for ErasedReactionInvoker<F>
 where
     F: for<'store> FnMut(
             &mut Context,
             &mut dyn ReactorData,
             ReactionRefs<'store>,
+            Option<CompiledModeEffectRef>,
         ) -> Result<(), ReactionBindingError>
         + Send
         + Sync
@@ -234,8 +366,9 @@ where
         context: &mut Context,
         state: &mut dyn ReactorData,
         refs: ReactionRefs<'_>,
+        mode_effect: Option<CompiledModeEffectRef>,
     ) -> Result<(), ReactionBindingError> {
-        self(context, state, refs)
+        (self.0)(context, state, refs, mode_effect)
     }
 }
 
@@ -259,6 +392,12 @@ pub enum OwnedStorageError {
         expected: BindingKind,
         /// The caller-supplied binding kind.
         found: BindingKind,
+    },
+    /// A stable binding slot was supplied more than once.
+    #[error("duplicate binding at {slot}")]
+    DuplicateBinding {
+        /// The duplicated stable binding slot.
+        slot: BindingSlotIndex,
     },
     /// The set of required bindings does not have exact one-to-one coverage.
     #[error("required binding coverage mismatch: expected {expected}, found {found}")]
@@ -324,12 +463,28 @@ pub enum OwnedStorageError {
         /// The compiled minimum delay in nanoseconds.
         min_delay_nanos: u64,
     },
-    /// A periodic timer requires recurring scheduling support outside this executor slice.
-    #[error("periodic timer at action slot {slot} with period {period_nanos}ns is unsupported")]
-    PeriodicTimerUnsupported {
-        /// The compiled timer action storage slot.
+    /// A periodic timer cannot make logical progress with a zero period.
+    #[error("periodic timer at action slot {slot} has a zero period")]
+    ZeroPeriodTimer {
+        /// Compiled timer action storage slot.
         slot: ActionSlotIndex,
-        /// The requested recurring period in nanoseconds.
+    },
+    /// A periodic timer period exceeds the runtime duration representation.
+    #[error("periodic timer at action slot {slot} has unrepresentable period {period_nanos}ns")]
+    TimerPeriodOutOfRange {
+        /// Compiled timer action storage slot.
+        slot: ActionSlotIndex,
+        /// Unrepresentable period in nanoseconds.
+        period_nanos: u64,
+    },
+    /// A periodic timer's first successor exceeds the runtime logical tag range.
+    #[error("periodic timer at action slot {slot} overflows after startup {startup_nanos}ns plus period {period_nanos}ns")]
+    PeriodicTimerTagOverflow {
+        /// Compiled timer action storage slot.
+        slot: ActionSlotIndex,
+        /// Initial logical timer tag in nanoseconds.
+        startup_nanos: u64,
+        /// Positive recurrence period in nanoseconds.
         period_nanos: u64,
     },
     /// A reaction enables modes other than its statically owning scope's mode.
@@ -346,9 +501,19 @@ pub enum OwnedStorageError {
     },
     /// A direct reaction requested a dynamic mode transition without a stable compiled mode identity.
     #[error("reaction {reaction} requested an unsupported dynamic mode transition")]
-    DynamicModeTransitionUnsupported {
+    LegacyModeTransition {
         /// The reaction awaiting generated compiled-mode identities.
         reaction: ReactionIndex,
+    },
+    /// A reaction requested a canonical mode transition other than its image-declared effect.
+    #[error("reaction {reaction} requested a compiled mode transition that does not match its declared effect")]
+    CompiledModeTransitionMismatch {
+        /// The reaction that attempted to forge or substitute a transition capability.
+        reaction: ReactionIndex,
+        /// Canonical effect declared by the validated image, if any.
+        declared: Option<CompiledModeEffectRef>,
+        /// Canonical effect requested by the bound reaction implementation.
+        requested: CompiledModeEffectRef,
     },
     /// A reaction's port or action references alias mutably within one invocation.
     #[error("reaction {reaction} has aliased mutable references")]
@@ -365,6 +530,72 @@ pub enum OwnedStorageError {
     /// A directly bound reaction returned a reference-extraction error.
     #[error(transparent)]
     Reaction(#[from] ReactionBindingError),
+    /// An async event named a port outside this compiled Enclave image.
+    #[error("boundary port {port} is not present in the compiled image")]
+    BoundaryPortNotFound {
+        /// Dense compiled port supplied by the boundary event.
+        port: PortIndex,
+    },
+    /// An async event named an ordinary port without an inbound compiled route.
+    #[error("compiled port {port} is not authorized by an inbound scheduler route")]
+    BoundaryPortNotInbound {
+        /// Dense compiled port lacking inbound route provenance.
+        port: PortIndex,
+    },
+    /// An async boundary payload did not match the compiled port binding type.
+    #[error("boundary port {port} requires payload type {expected}")]
+    BoundaryPortPayloadTypeMismatch {
+        /// Dense compiled boundary port target.
+        port: PortIndex,
+        /// Concrete payload type required by its direct binding.
+        expected: &'static str,
+    },
+    /// A typed outbound adapter did not match its compiled source port factory.
+    #[error("route '{boundary}' source port {port} requires {expected}, found {found}")]
+    OutboundRoutePayloadTypeMismatch {
+        /// Stable boundary identity.
+        boundary: String,
+        /// Runtime source port identity.
+        port: PortKey,
+        /// Payload type selected by the typed route binding.
+        expected: &'static str,
+        /// Payload type produced by the source port binding.
+        found: &'static str,
+    },
+    /// Applying a logical route delay exceeded the runtime tag range.
+    #[error("route '{boundary}' overflows logical tag {tag} with delay {delay_nanos}ns")]
+    OutboundRouteTagOverflow {
+        /// Stable boundary identity.
+        boundary: String,
+        /// Source logical tag.
+        tag: Tag,
+        /// Compiled route delay.
+        delay_nanos: u64,
+    },
+    /// Applying a physical route delay exceeded the platform instant range.
+    #[error("route '{boundary}' overflows physical time with delay {delay_nanos}ns")]
+    OutboundRouteTimeOverflow {
+        /// Stable boundary identity.
+        boundary: String,
+        /// Compiled route delay.
+        delay_nanos: u64,
+    },
+    /// The destination scheduler closed before it admitted an outbound value.
+    #[error("route '{boundary}' destination Enclave {destination} is closed")]
+    OutboundRouteChannelClosed {
+        /// Stable boundary identity.
+        boundary: String,
+        /// Canonical destination Enclave index.
+        destination: EnclaveIndex,
+    },
+    /// The bounded destination scheduler mailbox could not immediately admit a routed value.
+    #[error("route '{boundary}' destination Enclave {destination} mailbox is full")]
+    OutboundRouteChannelFull {
+        /// Stable boundary identity.
+        boundary: String,
+        /// Canonical destination Enclave index.
+        destination: EnclaveIndex,
+    },
 }
 
 /// Mutable, heap-backed storage for one validated compiled enclave image.
@@ -383,6 +614,16 @@ pub struct OwnedStorage<'image> {
     reactions: TinySecondaryMap<BindingSlotIndex, Box<dyn ReactionInvoker>>,
     /// Alias-checked references to stable boxed targets.
     reaction_refs: TinyMap<ReactionIndex, ReactionReferenceLayout>,
+    /// Boundary payloads retained until their declared logical tag is processed.
+    pending_boundary_values: Vec<(Tag, PortIndex, Box<dyn ReactorData>)>,
+    /// Dense ports admitted by one or more inbound image routes.
+    inbound_boundary_ports: TinySecondaryMap<PortIndex, ()>,
+    /// Typed outbound route adapters grouped by source port.
+    outbound_routes: TinySecondaryMap<PortIndex, Vec<Box<dyn OutboundRoute + 'image>>>,
+    /// Ports already emitted during the current processing tag.
+    emitted_outbound_ports: TinySecondaryMap<PortIndex, ()>,
+    /// Keeps a sender for executor-owned route and shutdown admission.
+    event_tx: crate::Sender<crate::event::AsyncEvent>,
     /// Keeps the per-enclave event channel open for stored reaction contexts.
     event_rx: crate::Receiver<crate::event::AsyncEvent>,
     /// Holds the keepalive sender until a compiled scheduler takes responsibility for shutdown.
@@ -433,28 +674,58 @@ macro_rules! owned_scheduler_writers {
 }
 
 impl<'image> OwnedStorage<'image> {
+    /// Validates one image and its direct bindings without invoking any initializer.
+    pub(crate) fn validate_image_bindings(
+        image: &EnclaveImageView<'_>,
+        bindings: &EnclaveBindings,
+    ) -> Result<(), OwnedStorageError> {
+        let (_, action_images) = validate_storage_layout(image)?;
+        validate_action_timing(&action_images)?;
+        validate_bindings(image, bindings)?;
+        validate_startup_delays(image)?;
+        validate_periodic_timer_startups(image)?;
+        validate_reaction_mode_filters(image)?;
+        validate_reaction_references(image)?;
+        Ok(())
+    }
+
     /// Validates direct bindings and constructs every owned storage collection for `image`.
     pub fn new(
         image: EnclaveImageView<'image>,
-        bindings: OwnedBindings,
+        bindings: EnclaveBindings,
     ) -> Result<Self, OwnedStorageError> {
+        Self::new_for_enclave(image, bindings, EnclaveKey::default())
+    }
+
+    /// Constructs owned storage whose reaction and send contexts use `enclave_key`.
+    /// Scheduler startup replaces the provisional context origin before any reaction executes.
+    pub(crate) fn new_for_enclave(
+        image: EnclaveImageView<'image>,
+        bindings: EnclaveBindings,
+        enclave_key: EnclaveKey,
+    ) -> Result<Self, OwnedStorageError> {
+        Self::validate_image_bindings(&image, &bindings)?;
         let (state_bindings, action_images) = validate_storage_layout(&image)?;
-        validate_action_timing(&action_images)?;
-        validate_bindings(&image, &bindings)?;
-        let OwnedBindings {
+        let EnclaveBindings {
             bindings,
-            actions: action_factories,
-            ports: port_factories,
+            duplicate_slots: _,
         } = bindings;
 
-        validate_startup_delays(&image)?;
-        validate_reaction_mode_filters(&image)?;
-        let mut actions = initialize_actions(&action_images, &action_factories)?;
-        let mut ports = initialize_ports(&image, &port_factories)?;
+        let mut actions = initialize_actions(&action_images, &bindings)?;
+        let mut ports = initialize_ports(&image, &bindings)?;
         let reaction_refs = initialize_reaction_refs(&image, &mut ports, &mut actions)?;
         let states = initialize_states(&state_bindings, &bindings)?;
         let reactions = initialize_reactions(bindings);
-        let (contexts, event_rx, shutdown_tx) = initialize_contexts(&image)?;
+        let provisional_origin = Instant::now();
+        let (contexts, event_tx, event_rx, shutdown_tx) =
+            initialize_contexts(&image, enclave_key, provisional_origin)?;
+        let event_capacity = image.storage_bounds().event_capacity() as usize;
+        let inbound_boundary_ports = image
+            .routes()
+            .values()
+            .filter(|route| route.direction() == crate::image::RouteDirection::Inbound)
+            .map(|route| (route.local_port(), ()))
+            .collect();
         Ok(Self {
             image,
             states,
@@ -463,6 +734,11 @@ impl<'image> OwnedStorage<'image> {
             contexts,
             reactions,
             reaction_refs,
+            pending_boundary_values: Vec::with_capacity(event_capacity),
+            inbound_boundary_ports,
+            outbound_routes: TinySecondaryMap::new(),
+            emitted_outbound_ports: TinySecondaryMap::new(),
+            event_tx,
             event_rx,
             shutdown_tx: Some(shutdown_tx),
         })
@@ -476,12 +752,73 @@ impl<'image> OwnedStorage<'image> {
     /// Clears every compiled port after its reactions have completed for an execution tag.
     pub(crate) fn reset_ports(&mut self) {
         self.ports.values_mut().for_each(|port| port.cleanup());
+        self.emitted_outbound_ports = TinySecondaryMap::new();
+    }
+
+    /// Initializes every owned reaction context with the scheduler's startup-time origin.
+    pub(crate) fn initialize_reaction_context_origins(&mut self, origin: Instant) {
+        self.contexts
+            .values_mut()
+            .for_each(|context| context.start_time = origin);
+    }
+
+    /// Returns a thread-safe context for local logical-time coordination with this scheduler.
+    pub(crate) fn scheduler_send_context(&self) -> crate::SendContext {
+        self.contexts[ReactorIndex::new(0)].make_send_context()
     }
 
     owned_scheduler_readers! {
         fn scheduler_action(action: ActionKey) -> crate::image::ActionIndex |storage| storage.image.actions().iter().find_map(|(index, image)| (storage.actions[image.storage_slot()].key() == action).then_some(index)).expect("owned action key must belong to the validated compiled image");
         fn scheduler_event_rx() -> crate::Receiver<crate::event::AsyncEvent> |storage| storage.event_rx.clone();
         fn scheduler_set_ports() -> impl Iterator<Item = PortIndex> + '_ |storage| storage.ports.iter().filter_map(|(port, value)| value.is_set().then_some(port));
+        fn scheduler_event_tx() -> crate::Sender<crate::event::AsyncEvent> |storage| storage.event_tx.clone();
+    }
+
+    /// Installs one outbound route after the Federate executor validates its paired endpoints.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn bind_outbound_route<T: ReactorData + Clone>(
+        &mut self,
+        source_port: PortIndex,
+        boundary: BoundaryId<'image>,
+        destination: EnclaveIndex,
+        destination_port: PortIndex,
+        timing_domain: TimingDomain,
+        delay_nanos: u64,
+        destination_tx: crate::Sender<crate::event::AsyncEvent>,
+    ) {
+        let route = Box::new(TypedOutboundRoute::<T> {
+            boundary,
+            destination,
+            destination_port,
+            timing_domain,
+            delay_nanos,
+            destination_tx,
+            marker: PhantomData,
+        });
+        if let Some(routes) = self.outbound_routes.get_mut(source_port) {
+            routes.push(route);
+        } else {
+            self.outbound_routes.insert(source_port, vec![route]);
+        }
+    }
+
+    /// Emits each present routed port once before its source reaction completes.
+    fn emit_outbound_routes(&mut self, tag: Tag) -> Result<(), OwnedStorageError> {
+        let ready = self
+            .outbound_routes
+            .keys()
+            .filter(|&port| {
+                self.ports[port].is_set() && !self.emitted_outbound_ports.contains_key(port)
+            })
+            .collect::<Vec<_>>();
+        for port in ready {
+            let source = self.ports[port].as_ref();
+            for route in &mut self.outbound_routes[port] {
+                route.emit(source, tag)?;
+            }
+            self.emitted_outbound_ports.insert(port, ());
+        }
+        Ok(())
     }
 
     owned_scheduler_writers! {
@@ -489,6 +826,44 @@ impl<'image> OwnedStorage<'image> {
         fn scheduler_clear_action(action: crate::image::ActionIndex) |storage| { let slot = storage.image.actions()[action].storage_slot(); storage.actions[slot].clear_values(); };
         fn scheduler_reschedule_action(action: crate::image::ActionIndex, from: Tag, to: Tag) |storage| if from != to { let slot = storage.image.actions()[action].storage_slot(); storage.actions[slot].reschedule_value(from, to); };
         fn take_scheduler_shutdown_tx() -> crate::keepalive::Sender |storage| storage.shutdown_tx.take().expect("owned storage can be attached to only one scheduler");
+    }
+
+    /// Stages one validated inbound-boundary value and returns its dense compiled port.
+    pub(crate) fn stage_inbound_boundary_value(
+        &mut self,
+        port: PortIndex,
+        tag: Tag,
+        value: Box<dyn ReactorData>,
+    ) -> Result<PortIndex, OwnedStorageError> {
+        self.ports
+            .get(port)
+            .ok_or(OwnedStorageError::BoundaryPortNotFound { port })?;
+        if !self.inbound_boundary_ports.contains_key(port) {
+            return Err(OwnedStorageError::BoundaryPortNotInbound { port });
+        }
+        self.pending_boundary_values.push((tag, port, value));
+        Ok(port)
+    }
+
+    /// Writes all retained boundary values for `tag` immediately before its reactions execute.
+    pub(crate) fn scheduler_commit_boundary_ports(
+        &mut self,
+        tag: Tag,
+    ) -> Result<(), OwnedStorageError> {
+        let mut index = 0;
+        while index < self.pending_boundary_values.len() {
+            if self.pending_boundary_values[index].0 != tag {
+                index += 1;
+                continue;
+            }
+            let (_, port, value) = self.pending_boundary_values.remove(index);
+            let storage = &mut self.ports[port];
+            let expected = storage.type_name();
+            storage.set_erased(value).map_err(|_| {
+                OwnedStorageError::BoundaryPortPayloadTypeMismatch { port, expected }
+            })?;
+        }
+        Ok(())
     }
 
     /// Invokes a directly bound reaction using the image's ordered port and action references.
@@ -515,10 +890,26 @@ impl<'image> OwnedStorage<'image> {
             ports_mut: RefsMut::new(&mut references.effect_ports),
             actions: RefsMut::new(&mut references.actions),
         };
-        invoker.invoke(context, state.value.as_mut(), refs)?;
-        if context.trigger_res.scheduled_mode.is_some() {
-            return Err(OwnedStorageError::DynamicModeTransitionUnsupported { reaction });
+        invoker.invoke(
+            context,
+            state.value.as_mut(),
+            refs,
+            reaction_image.mode_effect(),
+        )?;
+        if let Some(requested) = context.trigger_res.scheduled_compiled_mode {
+            let declared = reaction_image.mode_effect();
+            if declared != Some(requested) {
+                return Err(OwnedStorageError::CompiledModeTransitionMismatch {
+                    reaction,
+                    declared,
+                    requested,
+                });
+            }
         }
+        if context.trigger_res.scheduled_mode.is_some() {
+            return Err(OwnedStorageError::LegacyModeTransition { reaction });
+        }
+        self.emit_outbound_routes(tag)?;
         Ok(())
     }
 
@@ -543,8 +934,11 @@ fn copy_borrowed_image_view<'image>(image: &EnclaveImageView<'image>) -> Enclave
 /// Validates every required binding before any state initializer can run.
 fn validate_bindings(
     image: &EnclaveImageView<'_>,
-    bindings: &OwnedBindings,
+    bindings: &EnclaveBindings,
 ) -> Result<(), OwnedStorageError> {
+    if let Some(slot) = bindings.duplicate_slots.keys().next() {
+        return Err(OwnedStorageError::DuplicateBinding { slot });
+    }
     for (slot, required) in image.required_bindings().iter() {
         let binding = bindings
             .bindings
@@ -569,33 +963,22 @@ fn validate_bindings(
         });
     }
 
-    for slot in bindings.actions.keys() {
-        let is_standard = image.actions().values().any(|action| {
-            action.storage_slot() == slot
-                && matches!(action.timing(), ActionTiming::Standard { .. })
-        });
-        if !is_standard {
+    let referenced_action_bindings = image
+        .actions()
+        .values()
+        .filter_map(|action| action.binding())
+        .collect::<Vec<_>>();
+    let has_unreferenced_action_binding = bindings.bindings.iter().any(|(slot, binding)| {
+        matches!(binding, Binding::Action(_)) && !referenced_action_bindings.contains(&slot)
+    });
+    if has_unreferenced_action_binding {
+        if let Some(slot) = image
+            .actions()
+            .values()
+            .find_map(|action| action.binding().is_none().then_some(action.storage_slot()))
+        {
             return Err(OwnedStorageError::UnexpectedActionFactory { slot });
         }
-    }
-    for (_, action) in image.actions().iter() {
-        let slot = action.storage_slot();
-        if matches!(action.timing(), ActionTiming::Standard { .. })
-            && !bindings.actions.contains_key(slot)
-        {
-            return Err(OwnedStorageError::MissingActionFactory { slot });
-        }
-    }
-    for slot in image.ports().keys() {
-        if !bindings.ports.contains_key(slot) {
-            return Err(OwnedStorageError::MissingPortFactory { slot });
-        }
-    }
-    if bindings.ports.len() != image.ports().len() {
-        return Err(OwnedStorageError::PortFactoryCoverageMismatch {
-            expected: image.ports().len(),
-            found: bindings.ports.len(),
-        });
     }
     Ok(())
 }
@@ -655,6 +1038,23 @@ fn validate_reaction_mode_filters(
         })
 }
 
+/// Rejects aliasing reference layouts without constructing actions, ports, or user state.
+fn validate_reaction_references(image: &EnclaveImageView<'_>) -> Result<(), OwnedStorageError> {
+    for (reaction, _) in image.reactions().iter() {
+        let action_slots = image
+            .reaction_actions(reaction)
+            .iter()
+            .map(|action| image.actions()[*action].storage_slot());
+        ensure_unaliased_references(
+            reaction,
+            image.reaction_use_ports(reaction),
+            image.reaction_effect_ports(reaction),
+            action_slots,
+        )?;
+    }
+    Ok(())
+}
+
 /// Rejects global and modal startup delays that cannot fit the runtime duration type.
 fn validate_startup_delays(image: &EnclaveImageView<'_>) -> Result<(), OwnedStorageError> {
     image
@@ -709,18 +1109,56 @@ fn validate_action_timing(
                 .map(|_| ())
                 .map_err(|_| OwnedStorageError::DelayOutOfRange { min_delay_nanos })?,
             ActionTiming::Timer {
+                period_nanos: Some(0),
+            } => return Err(OwnedStorageError::ZeroPeriodTimer { slot }),
+            ActionTiming::Timer {
                 period_nanos: Some(period_nanos),
-            } => return Err(OwnedStorageError::PeriodicTimerUnsupported { slot, period_nanos }),
+            } => {
+                i64::try_from(period_nanos)
+                    .map_err(|_| OwnedStorageError::TimerPeriodOutOfRange { slot, period_nanos })?;
+            }
             ActionTiming::Timer { .. } | ActionTiming::Shutdown => {}
         }
     }
     Ok(())
 }
 
+/// Validates each periodic timer's first recurrence before any user state is initialized.
+fn validate_periodic_timer_startups(image: &EnclaveImageView<'_>) -> Result<(), OwnedStorageError> {
+    image
+        .timer_startup_actions()
+        .iter()
+        .chain(
+            image
+                .scopes()
+                .keys()
+                .flat_map(|scope| image.scope_timer_startups(scope)),
+        )
+        .try_for_each(|startup| {
+            let action = image.actions()[startup.action()];
+            let ActionTiming::Timer {
+                period_nanos: Some(period_nanos),
+            } = action.timing()
+            else {
+                return Ok(());
+            };
+            let startup_nanos = startup.logical_delay_nanos();
+            startup_nanos
+                .checked_add(period_nanos)
+                .filter(|&successor| successor <= i64::MAX as u64)
+                .map(|_| ())
+                .ok_or(OwnedStorageError::PeriodicTimerTagOverflow {
+                    slot: action.storage_slot(),
+                    startup_nanos,
+                    period_nanos,
+                })
+        })
+}
+
 /// Initializes standard payload actions and executor-owned timer or shutdown unit actions.
 fn initialize_actions(
     action_images: &TinySecondaryMap<ActionSlotIndex, crate::image::ActionImage>,
-    factories: &TinySecondaryMap<ActionSlotIndex, Box<dyn ActionFactory>>,
+    bindings: &TinySecondaryMap<BindingSlotIndex, Binding>,
 ) -> Result<TinyMap<ActionSlotIndex, Box<dyn BaseAction>>, OwnedStorageError> {
     let mut actions = TinyMap::with_capacity(action_images.len());
     for (slot, action) in action_images.iter() {
@@ -731,10 +1169,15 @@ fn initialize_actions(
             ActionTiming::Standard {
                 domain,
                 min_delay_nanos,
-            } => factories
-                .get(slot)
-                .ok_or(OwnedStorageError::MissingActionFactory { slot })?
-                .create(slot, domain, min_delay_nanos)?,
+            } => {
+                let binding_slot = action
+                    .binding()
+                    .expect("validated standard action has a payload binding");
+                let Binding::Action(factory) = &bindings[binding_slot] else {
+                    unreachable!("validated action binding has the required kind")
+                };
+                factory.create(slot, domain, min_delay_nanos)?
+            }
         };
         let inserted = actions.insert(value);
         debug_assert_eq!(inserted, slot);
@@ -745,14 +1188,14 @@ fn initialize_actions(
 /// Initializes the dense port map from exact image port slots.
 fn initialize_ports(
     image: &EnclaveImageView<'_>,
-    factories: &TinySecondaryMap<PortIndex, Box<dyn PortFactory>>,
+    bindings: &TinySecondaryMap<BindingSlotIndex, Binding>,
 ) -> Result<TinyMap<PortIndex, Box<dyn BasePort>>, OwnedStorageError> {
     let mut ports = TinyMap::with_capacity(image.ports().len());
-    for slot in image.ports().keys() {
-        let value = factories
-            .get(slot)
-            .ok_or(OwnedStorageError::MissingPortFactory { slot })?
-            .create(slot);
+    for (slot, port) in image.ports().iter() {
+        let Binding::Port(factory) = &bindings[port.binding()] else {
+            unreachable!("validated port binding has the required kind")
+        };
+        let value = factory.create(slot);
         let inserted = ports.insert(value);
         debug_assert_eq!(inserted, slot);
     }
@@ -800,10 +1243,11 @@ fn initialize_reaction_refs(
 /// Initializes one context per reactor plus the channels that keep it schedulable.
 fn initialize_contexts(
     image: &EnclaveImageView<'_>,
+    enclave_key: EnclaveKey,
+    start_time: Instant,
 ) -> Result<InitializedContexts, OwnedStorageError> {
     let (event_tx, event_rx) = kanal::bounded(image.storage_bounds().event_capacity() as usize);
     let (shutdown_tx, shutdown_rx) = crate::keepalive::channel();
-    let start_time = Instant::now();
     let mut contexts = TinyMap::with_capacity(image.reactors().len());
     for (reactor, reactor_image) in image.reactors().iter() {
         let bank_info = reactor_image.bank().map(|bank| crate::BankInfo {
@@ -811,7 +1255,7 @@ fn initialize_contexts(
             total: bank.total() as usize,
         });
         let inserted = contexts.insert(Context::new(
-            EnclaveKey::default(),
+            enclave_key,
             start_time,
             bank_info,
             event_tx.clone(),
@@ -819,7 +1263,7 @@ fn initialize_contexts(
         ));
         debug_assert_eq!(inserted, reactor);
     }
-    Ok((contexts, event_rx, shutdown_tx))
+    Ok((contexts, event_tx, event_rx, shutdown_tx))
 }
 
 /// Rejects repeated mutable references and immutable/mutable port overlap before pointer creation.
@@ -876,15 +1320,23 @@ mod tests {
     use crate::{
         image::{
             ActionImage, ActionIndex, ActionSlotIndex, ActionTiming, BindingKind, BindingSlotIndex,
-            EnclaveImage, EnclaveImageView, IdentityRange, ModeImage, PortImage, PortIndex,
-            ReactionImage, ReactionIndex, ReactorImage, ReactorIndex, RequiredBindingImage,
+            BoundaryId, EnclaveImage, EnclaveImageView, EnclaveIndex, IdentityRange,
+            LevelReactionImage, ModeImage, PortImage, PortIndex, ReactionImage, ReactionIndex,
+            ReactorImage, ReactorIndex, RequiredBindingImage, RouteDirection, RouteImage,
             ScopeImage, ScopeIndex, StateSlotIndex, StorageBounds, TableRange, TimerStartupImage,
             TimingDomain, TinyMapView,
         },
-        CommonContext, Context, Duration, ModeTransitionRequest, OwnedBindings, OwnedStorage,
-        OwnedStorageError, ReactionBindingError, ReactionRefs, ReactorData, Tag, TransitionKind,
+        AsyncEvent, CommonContext, CompiledModeEffectRef, Config, Context, Duration,
+        EnclaveBindings, ModeTransitionRequest, OwnedStorage, OwnedStorageError, PayloadType,
+        ReactionBindingError, ReactionRefs, ReactorData, Tag, TransitionKind,
     };
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::{
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc, Mutex,
+        },
+        time::Instant,
+    };
 
     /// State used to prove the checked state accessor rejects a wrong concrete type.
     struct TestState;
@@ -899,6 +1351,7 @@ mod tests {
         _context: &mut Context,
         _state: &mut dyn ReactorData,
         _refs: ReactionRefs<'_>,
+        _mode_effect: Option<CompiledModeEffectRef>,
     ) -> Result<(), ReactionBindingError> {
         Ok(())
     }
@@ -920,6 +1373,7 @@ mod tests {
         context: &mut Context,
         _state: &mut dyn ReactorData,
         refs: ReactionRefs<'_>,
+        _mode_effect: Option<CompiledModeEffectRef>,
     ) -> Result<(), ReactionBindingError> {
         let call = REACTION_CALLS.fetch_add(1, Ordering::SeqCst);
         let mut port: crate::OutputRef<u32> = refs.ports_mut.partition_mut()?;
@@ -937,6 +1391,7 @@ mod tests {
         context: &mut Context,
         _state: &mut dyn ReactorData,
         _refs: ReactionRefs<'_>,
+        _mode_effect: Option<CompiledModeEffectRef>,
     ) -> Result<(), ReactionBindingError> {
         context.set_mode_transition(ModeTransitionRequest {
             target: crate::ModeKey::new(0),
@@ -955,11 +1410,16 @@ mod tests {
     )];
     /// Creates the test action shared by timing-validation fixtures.
     const fn action(timing: ActionTiming) -> ActionImage {
+        let binding = match timing {
+            ActionTiming::Standard { .. } => Some(BindingSlotIndex::new(3)),
+            ActionTiming::Timer { .. } | ActionTiming::Shutdown => None,
+        };
         ActionImage::new(
             ScopeIndex::new(0),
             ActionSlotIndex::new(0),
             timing,
             TableRange::new(0, 0),
+            binding,
         )
     }
     static ACTIONS: [ActionImage; 1] = [action(ActionTiming::Standard {
@@ -970,7 +1430,11 @@ mod tests {
         domain: TimingDomain::Logical,
         min_delay_nanos: u64::MAX,
     })];
-    static PORTS: [PortImage; 1] = [PortImage::new(ScopeIndex::new(0), TableRange::new(0, 0))];
+    static PORTS: [PortImage; 1] = [PortImage::new(
+        ScopeIndex::new(0),
+        TableRange::new(0, 0),
+        BindingSlotIndex::new(2),
+    )];
     static REACTIONS: [ReactionImage; 1] = [ReactionImage::new(
         ReactorIndex::new(0),
         ScopeIndex::new(0),
@@ -1021,12 +1485,14 @@ mod tests {
     static FILTERED_REACTION_MODES: [crate::image::ModeIndex; 1] =
         [crate::image::ModeIndex::new(0)];
     static SCOPE_LOGICAL_ACTIONS: [ActionIndex; 1] = [ActionIndex::new(0)];
-    static REQUIRED_BINDINGS: [RequiredBindingImage; 2] = [
+    static REQUIRED_BINDINGS: [RequiredBindingImage; 4] = [
         RequiredBindingImage::new(IdentityRange::new(7, 7), BindingKind::StateInitializer),
         RequiredBindingImage::new(IdentityRange::new(14, 10), BindingKind::Reaction),
+        RequiredBindingImage::new(IdentityRange::new(24, 6), BindingKind::Port),
+        RequiredBindingImage::new(IdentityRange::new(30, 8), BindingKind::Action),
     ];
     static IMAGE: EnclaveImage<'static> = EnclaveImage {
-        identity_data: "enclavea-stateb-reaction",
+        identity_data: "enclavea-stateb-reactionc-portd-action",
         enclave_id: IdentityRange::new(0, 7),
         reactors: TinyMapView::new(&REACTORS),
         actions: TinyMapView::new(&ACTIONS),
@@ -1066,6 +1532,26 @@ mod tests {
         reaction_modes: &FILTERED_REACTION_MODES,
         ..IMAGE
     };
+    static INBOUND_ROUTES: [RouteImage; 2] = [
+        RouteImage::new(
+            IdentityRange::new(7, 7),
+            PortIndex::new(0),
+            RouteDirection::Inbound,
+            TimingDomain::Logical,
+            0,
+        ),
+        RouteImage::new(
+            IdentityRange::new(14, 10),
+            PortIndex::new(0),
+            RouteDirection::Inbound,
+            TimingDomain::Logical,
+            0,
+        ),
+    ];
+    static ROUTED_IMAGE: EnclaveImage<'static> = EnclaveImage {
+        routes: TinyMapView::new(&INBOUND_ROUTES),
+        ..IMAGE
+    };
 
     /// Returns a fresh validated view of the immutable test image.
     fn image() -> EnclaveImageView<'static> {
@@ -1087,27 +1573,31 @@ mod tests {
         EnclaveImageView::new(&FILTERED_MODE_IMAGE).expect("test image is valid")
     }
 
+    fn routed_image() -> EnclaveImageView<'static> {
+        EnclaveImageView::new(&ROUTED_IMAGE).expect("test image is valid")
+    }
+
     /// Returns bindings for every non-lifecycle storage slot in [`IMAGE`].
-    fn complete_bindings() -> OwnedBindings {
-        OwnedBindings::new()
+    fn complete_bindings() -> EnclaveBindings {
+        EnclaveBindings::new()
             .bind_state(BindingSlotIndex::new(0), initialize_state)
-            .bind_action::<u32>(ActionSlotIndex::new(0))
-            .bind_port::<u32>(PortIndex::new(0))
             .bind_reaction(BindingSlotIndex::new(1), reaction)
+            .bind_port(BindingSlotIndex::new(2), PayloadType::<u32>::new())
+            .bind_action(BindingSlotIndex::new(3), PayloadType::<u32>::new())
     }
 
     /// Returns bindings whose initializer records that construction reached it.
-    fn counted_bindings() -> OwnedBindings {
-        OwnedBindings::new()
+    fn counted_bindings() -> EnclaveBindings {
+        EnclaveBindings::new()
             .bind_state(BindingSlotIndex::new(0), counted_initializer)
-            .bind_action::<u32>(ActionSlotIndex::new(0))
-            .bind_port::<u32>(PortIndex::new(0))
             .bind_reaction(BindingSlotIndex::new(1), reaction)
+            .bind_port(BindingSlotIndex::new(2), PayloadType::<u32>::new())
+            .bind_action(BindingSlotIndex::new(3), PayloadType::<u32>::new())
     }
 
     #[test]
     fn missing_required_binding_slot_is_rejected() {
-        let error = OwnedStorage::new(image(), OwnedBindings::new()).unwrap_err();
+        let error = OwnedStorage::new(image(), EnclaveBindings::new()).unwrap_err();
 
         assert!(matches!(
             error,
@@ -1120,7 +1610,7 @@ mod tests {
 
     #[test]
     fn wrong_required_binding_kind_is_rejected() {
-        let bindings = OwnedBindings::new().bind_reaction(BindingSlotIndex::new(0), reaction);
+        let bindings = EnclaveBindings::new().bind_reaction(BindingSlotIndex::new(0), reaction);
 
         let error = OwnedStorage::new(image(), bindings).unwrap_err();
 
@@ -1135,36 +1625,53 @@ mod tests {
     }
 
     #[test]
-    fn missing_action_factory_is_rejected() {
-        let bindings = OwnedBindings::new()
-            .bind_state(BindingSlotIndex::new(0), initialize_state)
-            .bind_port::<u32>(PortIndex::new(0))
-            .bind_reaction(BindingSlotIndex::new(1), reaction);
+    fn duplicate_required_binding_is_rejected_before_initializing_state() {
+        INITIALIZER_CALLS.store(0, Ordering::SeqCst);
+        let bindings = counted_bindings().bind_state(BindingSlotIndex::new(0), counted_initializer);
 
         let error = OwnedStorage::new(image(), bindings).unwrap_err();
 
         assert!(matches!(
             error,
-            OwnedStorageError::MissingActionFactory {
+            OwnedStorageError::DuplicateBinding { slot }
+                if slot == BindingSlotIndex::new(0)
+        ));
+        assert_eq!(INITIALIZER_CALLS.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn missing_action_factory_is_rejected() {
+        let bindings = EnclaveBindings::new()
+            .bind_state(BindingSlotIndex::new(0), initialize_state)
+            .bind_reaction(BindingSlotIndex::new(1), reaction)
+            .bind_port(BindingSlotIndex::new(2), PayloadType::<u32>::new());
+
+        let error = OwnedStorage::new(image(), bindings).unwrap_err();
+
+        assert!(matches!(
+            error,
+            OwnedStorageError::MissingBinding {
                 slot,
-            } if slot == ActionSlotIndex::new(0)
+                kind: BindingKind::Action,
+            } if slot == BindingSlotIndex::new(3)
         ));
     }
 
     #[test]
     fn missing_port_factory_is_rejected() {
-        let bindings = OwnedBindings::new()
+        let bindings = EnclaveBindings::new()
             .bind_state(BindingSlotIndex::new(0), initialize_state)
-            .bind_action::<u32>(ActionSlotIndex::new(0))
-            .bind_reaction(BindingSlotIndex::new(1), reaction);
+            .bind_reaction(BindingSlotIndex::new(1), reaction)
+            .bind_action(BindingSlotIndex::new(3), PayloadType::<u32>::new());
 
         let error = OwnedStorage::new(image(), bindings).unwrap_err();
 
         assert!(matches!(
             error,
-            OwnedStorageError::MissingPortFactory {
+            OwnedStorageError::MissingBinding {
                 slot,
-            } if slot == PortIndex::new(0)
+                kind: BindingKind::Port,
+            } if slot == BindingSlotIndex::new(2)
         ));
     }
 
@@ -1179,9 +1686,9 @@ mod tests {
     }
 
     #[test]
-    fn rejects_periodic_timer_before_initializing_state() {
+    fn rejects_zero_period_timer_before_initializing_state() {
         let actions = [action(ActionTiming::Timer {
-            period_nanos: Some(7),
+            period_nanos: Some(0),
         })];
         let periodic_image = EnclaveImage {
             actions: TinyMapView::new(&actions),
@@ -1194,10 +1701,31 @@ mod tests {
 
         assert!(matches!(
             error,
-            OwnedStorageError::PeriodicTimerUnsupported {
-                slot,
-                period_nanos: 7
-            } if slot == ActionSlotIndex::new(0)
+            OwnedStorageError::ZeroPeriodTimer { slot }
+                if slot == ActionSlotIndex::new(0)
+        ));
+        assert_eq!(INITIALIZER_CALLS.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn rejects_unrepresentable_timer_period_before_initializing_state() {
+        let period_nanos = i64::MAX as u64 + 1;
+        let actions = [action(ActionTiming::Timer {
+            period_nanos: Some(period_nanos),
+        })];
+        let periodic_image = EnclaveImage {
+            actions: TinyMapView::new(&actions),
+            ..IMAGE
+        };
+        let image = EnclaveImageView::new(&periodic_image).expect("periodic image is structural");
+        INITIALIZER_CALLS.store(0, Ordering::SeqCst);
+
+        let error = OwnedStorage::new(image, counted_bindings()).unwrap_err();
+
+        assert!(matches!(
+            error,
+            OwnedStorageError::TimerPeriodOutOfRange { slot, period_nanos: found }
+                if slot == ActionSlotIndex::new(0) && found == period_nanos
         ));
         assert_eq!(INITIALIZER_CALLS.load(Ordering::SeqCst), 0);
     }
@@ -1281,8 +1809,11 @@ mod tests {
     #[test]
     fn cached_references_survive_storage_moves_and_reborrows() {
         REACTION_CALLS.store(0, Ordering::SeqCst);
-        let bindings =
-            complete_bindings().bind_reaction(BindingSlotIndex::new(1), schedule_shutdown_once);
+        let bindings = EnclaveBindings::new()
+            .bind_state(BindingSlotIndex::new(0), initialize_state)
+            .bind_reaction(BindingSlotIndex::new(1), schedule_shutdown_once)
+            .bind_port(BindingSlotIndex::new(2), PayloadType::<u32>::new())
+            .bind_action(BindingSlotIndex::new(3), PayloadType::<u32>::new());
         let mut storage = Box::new(OwnedStorage::new(image(), bindings).unwrap());
         let tag = Tag::new(Duration::nanoseconds(7), 2);
 
@@ -1300,8 +1831,11 @@ mod tests {
 
     #[test]
     fn rejects_dynamic_mode_transitions_without_compiled_identity() {
-        let bindings =
-            complete_bindings().bind_reaction(BindingSlotIndex::new(1), request_dynamic_mode);
+        let bindings = EnclaveBindings::new()
+            .bind_state(BindingSlotIndex::new(0), initialize_state)
+            .bind_reaction(BindingSlotIndex::new(1), request_dynamic_mode)
+            .bind_port(BindingSlotIndex::new(2), PayloadType::<u32>::new())
+            .bind_action(BindingSlotIndex::new(3), PayloadType::<u32>::new());
         let mut storage = OwnedStorage::new(image(), bindings).unwrap();
 
         let error = storage
@@ -1310,9 +1844,171 @@ mod tests {
 
         assert!(matches!(
             error,
-            OwnedStorageError::DynamicModeTransitionUnsupported { reaction }
+            OwnedStorageError::LegacyModeTransition { reaction }
                 if reaction == ReactionIndex::new(0)
         ));
+    }
+
+    #[test]
+    fn boundary_write_rejects_unknown_compiled_port() {
+        let mut storage = OwnedStorage::new(image(), complete_bindings()).unwrap();
+        let error = storage
+            .stage_inbound_boundary_value(PortIndex::new(7), Tag::ZERO, Box::new(42_u32))
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            OwnedStorageError::BoundaryPortNotFound { port } if port == PortIndex::new(7)
+        ));
+    }
+
+    #[test]
+    fn boundary_write_rejects_port_without_inbound_route() {
+        let mut storage = OwnedStorage::new(image(), complete_bindings()).unwrap();
+        let error = storage
+            .stage_inbound_boundary_value(PortIndex::new(0), Tag::ZERO, Box::new(42_u32))
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            OwnedStorageError::BoundaryPortNotInbound { port } if port == PortIndex::new(0)
+        ));
+    }
+
+    #[test]
+    fn boundary_write_commits_only_at_declared_tag() {
+        let mut storage = OwnedStorage::new(routed_image(), complete_bindings()).unwrap();
+        let expected_tag = Tag::new(Duration::nanoseconds(2), 0);
+        storage
+            .stage_inbound_boundary_value(PortIndex::new(0), expected_tag, Box::new(42_u32))
+            .unwrap();
+
+        storage.scheduler_commit_boundary_ports(Tag::ZERO).unwrap();
+        assert!(!storage.ports[PortIndex::new(0)].is_set());
+        storage
+            .scheduler_commit_boundary_ports(expected_tag)
+            .unwrap();
+        assert_eq!(
+            storage.ports[PortIndex::new(0)]
+                .downcast_ref::<crate::Port<u32>>()
+                .unwrap()
+                .get(),
+            &Some(42)
+        );
+    }
+
+    #[test]
+    fn boundary_write_rejects_wrong_payload_type() {
+        let mut storage = OwnedStorage::new(routed_image(), complete_bindings()).unwrap();
+        storage
+            .stage_inbound_boundary_value(PortIndex::new(0), Tag::ZERO, Box::new(42_u64))
+            .unwrap();
+        let error = storage
+            .scheduler_commit_boundary_ports(Tag::ZERO)
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            OwnedStorageError::BoundaryPortPayloadTypeMismatch { port, expected }
+                if port == PortIndex::new(0) && expected == std::any::type_name::<u32>()
+        ));
+    }
+
+    #[test]
+    fn outbound_routes_clone_fanout_apply_delays_once_and_do_not_block() {
+        let bindings = EnclaveBindings::new()
+            .bind_state(BindingSlotIndex::new(0), initialize_state)
+            .bind_reaction(
+                BindingSlotIndex::new(1),
+                |_context, _state, refs: ReactionRefs<'_>, _mode_effect| {
+                    let mut output: crate::OutputRef<String> = refs.ports_mut.partition_mut()?;
+                    *output = Some("cloned value".to_owned());
+                    Ok(())
+                },
+            )
+            .bind_port(BindingSlotIndex::new(2), PayloadType::<String>::new())
+            .bind_action(BindingSlotIndex::new(3), PayloadType::<u32>::new());
+        let mut storage = OwnedStorage::new(image(), bindings).unwrap();
+        let source_tag = Tag::new(Duration::nanoseconds(7), 3);
+        let (logical_tx, logical_rx) = kanal::bounded(1);
+        let (physical_tx, physical_rx) = kanal::bounded(1);
+        storage.bind_outbound_route::<String>(
+            PortIndex::new(0),
+            BoundaryId::new("logical"),
+            EnclaveIndex::new(1),
+            PortIndex::new(4),
+            TimingDomain::Logical,
+            5,
+            logical_tx,
+        );
+        storage.bind_outbound_route::<String>(
+            PortIndex::new(0),
+            BoundaryId::new("physical"),
+            EnclaveIndex::new(2),
+            PortIndex::new(5),
+            TimingDomain::Physical,
+            1_000_000_000,
+            physical_tx,
+        );
+        let (full_tx, full_rx) = kanal::bounded(1);
+        full_tx
+            .send(AsyncEvent::Shutdown {
+                delay: Duration::ZERO,
+            })
+            .unwrap();
+        storage.bind_outbound_route::<String>(
+            PortIndex::new(0),
+            BoundaryId::new("full"),
+            EnclaveIndex::new(3),
+            PortIndex::new(0),
+            TimingDomain::Logical,
+            0,
+            full_tx,
+        );
+        let before = Instant::now();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            done_tx
+                .send(storage.invoke_reaction(ReactionIndex::new(0), source_tag))
+                .unwrap();
+        });
+        let result = done_rx.recv_timeout(std::time::Duration::from_secs(1));
+        let after = Instant::now();
+        drop(full_rx);
+        worker.join().unwrap();
+        assert!(matches!(
+            result,
+            Ok(Err(OwnedStorageError::OutboundRouteChannelFull { destination, .. }))
+                if destination == EnclaveIndex::new(3)
+        ));
+
+        match logical_rx.try_recv().unwrap().unwrap() {
+            AsyncEvent::Logical { tag, target, value } => {
+                assert_eq!(tag, Tag::new(Duration::nanoseconds(12), 0));
+                assert_eq!(
+                    target,
+                    crate::AsyncEventTarget::BoundaryPort(PortIndex::new(4))
+                );
+                assert_eq!(*value.downcast::<String>().ok().unwrap(), "cloned value");
+            }
+            event => panic!("unexpected logical route event: {event:?}"),
+        }
+        match physical_rx.try_recv().unwrap().unwrap() {
+            AsyncEvent::Physical {
+                time,
+                target,
+                value,
+            } => {
+                assert!(time >= before + std::time::Duration::from_secs(1));
+                assert!(time <= after + std::time::Duration::from_secs(1));
+                assert_eq!(
+                    target,
+                    crate::AsyncEventTarget::BoundaryPort(PortIndex::new(5))
+                );
+                assert_eq!(*value.downcast::<String>().ok().unwrap(), "cloned value");
+            }
+            event => panic!("unexpected physical route event: {event:?}"),
+        }
     }
 
     #[test]
@@ -1320,5 +2016,70 @@ mod tests {
         fn assert_send<T: Send>() {}
 
         assert_send::<OwnedStorage<'static>>();
+    }
+
+    #[test]
+    fn supplied_federate_origin_drives_the_paced_scheduler_clock() {
+        let actions = [ActionImage::new(
+            ScopeIndex::new(0),
+            ActionSlotIndex::new(0),
+            ActionTiming::Timer { period_nanos: None },
+            TableRange::new(0, 1),
+            None,
+        )];
+        let reaction_triggers = [LevelReactionImage::new(0, ReactionIndex::new(0))];
+        let startup_actions = [TimerStartupImage::new(ActionIndex::new(0), 1_000_000_000)];
+        let required_bindings = [
+            REQUIRED_BINDINGS[0],
+            REQUIRED_BINDINGS[1],
+            REQUIRED_BINDINGS[2],
+        ];
+        let image = EnclaveImage {
+            actions: TinyMapView::new(&actions),
+            reaction_triggers: &reaction_triggers,
+            startup_actions: &startup_actions,
+            required_bindings: TinyMapView::new(&required_bindings),
+            ..IMAGE
+        };
+        let image = EnclaveImageView::new(&image).unwrap();
+        let seen_origin = Arc::new(Mutex::new(None));
+        let reaction_origin = Arc::clone(&seen_origin);
+        let bindings = EnclaveBindings::new()
+            .bind_state(BindingSlotIndex::new(0), initialize_state)
+            .bind_reaction(
+                BindingSlotIndex::new(1),
+                move |context: &mut Context, _state, _refs, _mode_effect| {
+                    *reaction_origin.lock().unwrap() = Some(context.get_start_time());
+                    context.schedule_shutdown(Some(Duration::ZERO));
+                    Ok(())
+                },
+            )
+            .bind_port(BindingSlotIndex::new(2), PayloadType::<u32>::new());
+        let mut storage = OwnedStorage::new(image, bindings).unwrap();
+        let origin = Instant::now() - std::time::Duration::from_millis(800);
+        let started = Instant::now();
+        crate::sched::run_owned_scheduler_with_origin(
+            &mut storage,
+            &Config::default().with_fast_forward(false),
+            origin,
+        )
+        .unwrap();
+
+        assert!(started.elapsed() < std::time::Duration::from_millis(500));
+        assert_eq!(*seen_origin.lock().unwrap(), Some(origin));
+    }
+
+    #[test]
+    fn scheduler_closed_before_first_iteration_shuts_down_without_tag_overflow() {
+        let mut storage = OwnedStorage::new(image(), complete_bindings()).unwrap();
+        storage.scheduler_event_tx().close().unwrap();
+
+        let outcome = crate::sched::run_owned_scheduler(
+            &mut storage,
+            &Config::default().with_fast_forward(true),
+        )
+        .unwrap();
+
+        assert_eq!(outcome.final_tag, Tag::NEVER);
     }
 }

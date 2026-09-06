@@ -1,12 +1,14 @@
 //! Compiled-image scheduler adapters and owned execution composition.
 
-#[cfg(feature = "federated")]
-use super::{barrier::NoFederatedTimeBarrier, FederatedTimeBarrier};
+use super::federate::{EnclaveDependencies, QuiescenceControl, QuiescenceParticipant};
 use super::{
+    barrier::LogicalTimeBarrier,
     core::{ExecutionStorage, ReactionOutcome, Schedule, SchedulerCore, SchedulerError},
     modal::EventManager,
     Config, Stats,
 };
+#[cfg(feature = "federated")]
+use super::{barrier::NoFederatedTimeBarrier, FederatedTimeBarrier};
 use crate::{
     image::{
         ActionIndex, EnclaveImageView, LevelReactionImage, ModeIndex, PortIndex, ReactionIndex,
@@ -31,6 +33,10 @@ impl Schedule for EnclaveImageView<'_> {
     type Reactor = ReactorIndex;
     type Mode = ModeIndex;
     type Scope = ScopeIndex;
+
+    fn action_capacity(&self) -> usize {
+        self.actions().len()
+    }
 
     fn reaction_limits(&self) -> ReactionSetLimits {
         let max_level = self
@@ -64,6 +70,7 @@ impl Schedule for EnclaveImageView<'_> {
         fn port_triggers(port: Self::Port) -> impl Iterator<Item = (Level, Self::Reaction)> + '_ |image| compiled_reactions(image.port_triggers(port).iter().copied());
         fn reaction_filter_matches_scope(reaction: Self::Reaction) -> bool |image| { let modes = image.reaction_modes(reaction); modes.is_empty() || (modes.len() == 1 && image.scopes()[image.reactions()[reaction].scope()].mode() == Some(modes[0])) };
         fn action_is_logical(action: Self::Action) -> bool |image| !matches!(image.actions()[action].timing(), crate::image::ActionTiming::Standard { domain: crate::image::TimingDomain::Physical, .. });
+        fn action_period(action: Self::Action) -> Option<Duration> |image| match image.actions()[action].timing() { crate::image::ActionTiming::Timer { period_nanos: Some(period) } => Some(Duration::nanoseconds(i64::try_from(period).expect("validated compiled timer period"))), _ => None };
         fn descendant_scopes(scope: Self::Scope) -> impl Iterator<Item = Self::Scope> + '_ |image| image.scope_descendants(scope).iter().copied();
         fn reset_reactions_in_scope(scope: Self::Scope) -> impl Iterator<Item = (Level, Self::Reaction)> + '_ |image| compiled_reactions(image.scope_reset_reactions(scope).iter().copied());
         fn startups_in_scope(scope: Self::Scope) -> impl Iterator<Item = (Self::Action, (Level, Self::Reaction))> + '_ |image| image.scope_startup_reactions(scope).iter().map(|startup| { let reaction = startup.reaction(); (startup.action(), (Level::from(reaction.level() as usize), reaction.reaction())) });
@@ -75,12 +82,29 @@ impl Schedule for EnclaveImageView<'_> {
 impl ExecutionStorage<EnclaveImageView<'_>> for OwnedStorage<'_> {
     type Error = OwnedStorageError;
 
+    fn prepare_startup_origin(&mut self, start_time: &mut std::time::Instant) {
+        self.initialize_reaction_context_origins(*start_time);
+    }
+
     fn action_from_runtime(&self, key: ActionKey) -> ActionIndex {
         self.scheduler_action(key)
     }
 
     fn push_action_value(&mut self, action: ActionIndex, tag: Tag, value: Box<dyn ReactorData>) {
         self.scheduler_push_action(action, tag, value);
+    }
+
+    fn stage_inbound_boundary_value(
+        &mut self,
+        port: PortIndex,
+        tag: Tag,
+        value: Box<dyn ReactorData>,
+    ) -> Result<PortIndex, Self::Error> {
+        OwnedStorage::stage_inbound_boundary_value(self, port, tag, value)
+    }
+
+    fn commit_boundary_ports(&mut self, tag: Tag) -> Result<(), Self::Error> {
+        self.scheduler_commit_boundary_ports(tag)
     }
 
     fn clear_action_values(&mut self, action: ActionIndex) {
@@ -108,7 +132,13 @@ impl ExecutionStorage<EnclaveImageView<'_>> for OwnedStorage<'_> {
                     .map(|&(action, tag)| (self.scheduler_action(action), tag)),
             );
             outcome.scheduled_shutdown = result.scheduled_shutdown;
-            outcome.scheduled_mode = None;
+            outcome.scheduled_mode =
+                result
+                    .scheduled_compiled_mode
+                    .map(|request| super::core::ModeTransition {
+                        target: request.target,
+                        transition: request.transition,
+                    });
         }
         Ok(())
     }
@@ -144,19 +174,63 @@ fn compiled_reactions(
 pub(crate) fn run_owned_scheduler(
     storage: &mut OwnedStorage<'_>,
     config: &Config,
-) -> Result<Tag, SchedulerError<OwnedStorageError>> {
+) -> Result<OwnedSchedulerOutcome, SchedulerError<OwnedStorageError>> {
+    run_owned_scheduler_with_origin(storage, config, std::time::Instant::now())
+}
+
+/// Runs validated owned storage with a caller-supplied monotonic origin shared by the scheduler
+/// clock and every compiled reaction context.
+pub(crate) fn run_owned_scheduler_with_origin(
+    storage: &mut OwnedStorage<'_>,
+    config: &Config,
+    origin: std::time::Instant,
+) -> Result<OwnedSchedulerOutcome, SchedulerError<OwnedStorageError>> {
+    run_owned_scheduler_with_coordination(
+        storage,
+        config,
+        origin,
+        EnclaveDependencies::new(EnclaveKey::default()),
+        None,
+    )
+}
+
+/// Runs validated owned storage with one Federate origin and explicit local route coordination.
+pub(crate) fn run_owned_scheduler_with_coordination(
+    storage: &mut OwnedStorage<'_>,
+    config: &Config,
+    origin: std::time::Instant,
+    dependencies: EnclaveDependencies,
+    participant: Option<&mut QuiescenceParticipant>,
+) -> Result<OwnedSchedulerOutcome, SchedulerError<OwnedStorageError>> {
     let schedule = storage.scheduler_image();
     let reaction_limits = schedule.reaction_limits();
     let reaction_capacity = reaction_limits.num_keys;
     let mut events = EventManager::new(reaction_limits, &schedule);
     let event_rx = storage.scheduler_event_rx();
     let shutdown_tx = storage.take_scheduler_shutdown_tx();
-    let mut start_time = std::time::Instant::now();
+    let mut start_time = origin;
     let mut current_tag = Tag::NEVER;
     let mut last_nonterminal_tag = None;
     let mut shutdown_tag = None;
-    let mut upstream_enclaves = tinymap::TinySecondaryMap::new();
-    let downstream_enclaves = tinymap::TinySecondaryMap::new();
+    let EnclaveDependencies {
+        key,
+        upstream,
+        downstream: downstream_enclaves,
+    } = dependencies;
+    let mut upstream_enclaves = upstream
+        .into_iter()
+        .map(|(key, (context, delay))| {
+            (
+                key,
+                LogicalTimeBarrier {
+                    released_tag: Tag::NEVER,
+                    provisional_tag: Tag::NEVER,
+                    upstream_ctx: context,
+                    upstream_delay: delay,
+                },
+            )
+        })
+        .collect();
     #[cfg(feature = "federated")]
     let mut federated_time_barrier: Box<dyn FederatedTimeBarrier> =
         Box::new(NoFederatedTimeBarrier);
@@ -166,11 +240,12 @@ pub(crate) fn run_owned_scheduler(
     let mut outcomes = (0..reaction_capacity).map(|_| Default::default()).collect();
 
     SchedulerCore {
-        key: EnclaveKey::default(),
+        key,
         config,
         schedule: &schedule,
         storage,
         event_rx: &event_rx,
+        quiescence: participant.map(|participant| participant as &mut dyn QuiescenceControl),
         events: &mut events,
         start_time: &mut start_time,
         current_tag: &mut current_tag,
@@ -188,5 +263,16 @@ pub(crate) fn run_owned_scheduler(
         has_modal_scopes: schedule.has_modal_scopes(),
     }
     .try_event_loop()?;
-    Ok(last_nonterminal_tag.unwrap_or(Tag::NEVER))
+    Ok(OwnedSchedulerOutcome {
+        final_tag: last_nonterminal_tag.unwrap_or(Tag::NEVER),
+        stats,
+    })
+}
+
+/// Successful result of one compiled owned scheduler event loop.
+pub(crate) struct OwnedSchedulerOutcome {
+    /// Last logical tag containing nonterminal work.
+    pub(crate) final_tag: Tag,
+    /// Scheduler-local work counters retained after shutdown.
+    pub(crate) stats: Stats,
 }

@@ -324,6 +324,8 @@ pub enum ActionTiming {
 /// An immutable action scheduler record.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ActionImage {
+    /// Stable payload binding for a standard action, or `None` for executor-owned actions.
+    binding: Option<BindingSlotIndex>,
     scope: ScopeIndex,
     storage_slot: ActionSlotIndex,
     timing: ActionTiming,
@@ -337,13 +339,20 @@ impl ActionImage {
         storage_slot: ActionSlotIndex,
         timing: ActionTiming,
         triggers: TableRange<LevelReactionImage>,
+        binding: Option<BindingSlotIndex>,
     ) -> Self {
         Self {
+            binding,
             scope,
             storage_slot,
             timing,
             triggers,
         }
+    }
+
+    /// Returns the standard action's stable payload binding.
+    pub const fn binding(self) -> Option<BindingSlotIndex> {
+        self.binding
     }
 
     /// Returns the action's static scope.
@@ -370,14 +379,29 @@ impl ActionImage {
 /// An immutable port scheduler record.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PortImage {
+    /// Stable payload binding used to construct this port.
+    binding: BindingSlotIndex,
     scope: ScopeIndex,
     triggers: TableRange<LevelReactionImage>,
 }
 
 impl PortImage {
     /// Creates an unchecked port record.
-    pub const fn new(scope: ScopeIndex, triggers: TableRange<LevelReactionImage>) -> Self {
-        Self { scope, triggers }
+    pub const fn new(
+        scope: ScopeIndex,
+        triggers: TableRange<LevelReactionImage>,
+        binding: BindingSlotIndex,
+    ) -> Self {
+        Self {
+            binding,
+            scope,
+            triggers,
+        }
+    }
+
+    /// Returns the port's stable payload binding.
+    pub const fn binding(self) -> BindingSlotIndex {
+        self.binding
     }
 
     /// Returns the port's static scope.
@@ -402,6 +426,8 @@ pub struct ReactionImage {
     effect_ports: TableRange<PortIndex>,
     actions: TableRange<ActionIndex>,
     enabled_modes: TableRange<ModeIndex>,
+    /// Canonical transition effect supplied to the owned compiled reaction adapter.
+    mode_effect: Option<crate::CompiledModeEffectRef>,
 }
 
 impl ReactionImage {
@@ -426,7 +452,14 @@ impl ReactionImage {
             effect_ports,
             actions,
             enabled_modes,
+            mode_effect: None,
         }
+    }
+
+    /// Attaches the reaction's canonical compiled mode transition effect.
+    pub const fn with_mode_effect(mut self, mode_effect: crate::CompiledModeEffectRef) -> Self {
+        self.mode_effect = Some(mode_effect);
+        self
     }
 
     /// Returns the owning reactor.
@@ -467,6 +500,11 @@ impl ReactionImage {
     /// Returns the enabled-mode range.
     pub const fn enabled_modes(self) -> TableRange<ModeIndex> {
         self.enabled_modes
+    }
+
+    /// Returns the canonical compiled mode transition effect, if declared.
+    pub const fn mode_effect(self) -> Option<crate::CompiledModeEffectRef> {
+        self.mode_effect
     }
 }
 
@@ -726,6 +764,10 @@ pub enum BindingKind {
     StateInitializer,
     /// A reaction implementation is required.
     Reaction,
+    /// A port payload type is required.
+    Port,
+    /// An action payload type is required.
+    Action,
 }
 
 /// A required stable implementation-binding slot.

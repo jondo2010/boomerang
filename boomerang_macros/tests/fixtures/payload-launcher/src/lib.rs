@@ -3,8 +3,8 @@
 /// Descriptor fingerprint generated independently by the host-side fixture.
 const EXPECTED_FINGERPRINT: boomerang::runtime::binding::DescriptorFingerprint =
     boomerang::runtime::binding::DescriptorFingerprint::new([
-        78, 205, 113, 160, 6, 66, 61, 63, 151, 182, 205, 5, 96, 240, 159, 169, 26, 94, 253, 73,
-        137, 141, 160, 191, 41, 214, 250, 79, 91, 69, 161, 174,
+        173, 248, 107, 207, 105, 80, 159, 129, 225, 21, 134, 108, 49, 224, 42, 183, 112, 195,
+        43, 150, 102, 68, 163, 191, 240, 50, 132, 133, 213, 59, 136, 241,
     ]);
 const _: () = boomerang::runtime::binding::assert_descriptor_fingerprint(
     EXPECTED_FINGERPRINT,
@@ -13,10 +13,10 @@ const _: () = boomerang::runtime::binding::assert_descriptor_fingerprint(
 
 #[cfg(not(feature = "binding-macro-abi-mismatch"))]
 /// Macro ABI generated independently by the host-side fixture.
-const EXPECTED_MACRO_ABI: u32 = boomerang_builder::COMPONENT_DESCRIPTOR_MACRO_ABI;
+const EXPECTED_MACRO_ABI: u32 = boomerang::runtime::binding::COMPONENT_DESCRIPTOR_MACRO_ABI;
 #[cfg(feature = "binding-macro-abi-mismatch")]
 /// Deliberately incompatible launcher macro ABI.
-const EXPECTED_MACRO_ABI: u32 = boomerang_builder::COMPONENT_DESCRIPTOR_MACRO_ABI + 1;
+const EXPECTED_MACRO_ABI: u32 = boomerang::runtime::binding::COMPONENT_DESCRIPTOR_MACRO_ABI + 1;
 const _: () = assert!(
     EXPECTED_MACRO_ABI == descriptor_pass::__boomerang::BINDING_MANIFEST.macro_abi(),
     "macro ABI mismatch",
@@ -32,7 +32,7 @@ const _: () = boomerang::runtime::binding::assert_descriptor_fingerprint(
 type MoveRefs<'store> = (
     boomerang::runtime::InputRef<'store, u32>,
     boomerang::runtime::ActionRef<'store>,
-    boomerang::runtime::ModeEffectRef,
+    boomerang::runtime::CompiledModeEffectRef,
     boomerang::runtime::OutputRef<'store, u32>,
 );
 
@@ -44,11 +44,28 @@ type ShapedRefs<'store> = (
     boomerang::runtime::OutputBankRef<'store, u8>,
 );
 
-/// Directly constructs root state and invokes its typed reaction symbol.
+/// Adapts owned-storage references and invokes the root typed reaction symbol.
 #[allow(dead_code)]
-fn bind_match<'store>(ctx: &mut boomerang::runtime::Context, refs: MoveRefs<'store>) {
-    let mut state = descriptor_pass::__boomerang::state_Match();
-    descriptor_pass::__boomerang::reaction_Match_2fmove(ctx, &mut state, refs);
+fn bind_match(
+    ctx: &mut boomerang::runtime::Context,
+    state: &mut dyn boomerang::runtime::ReactorData,
+    refs: boomerang::runtime::ReactionRefs<'_>,
+    mode_effect: Option<boomerang::runtime::CompiledModeEffectRef>,
+) -> Result<(), boomerang::runtime::ReactionBindingError> {
+    let state = state
+        .downcast_mut::<descriptor_pass::MatchState>()
+        .expect("the generated state initializer supplies MatchState");
+    let input = refs.ports.partition()?;
+    let startup = refs.actions.partition_mut()?;
+    let output = refs.ports_mut.partition_mut()?;
+    let refs: MoveRefs<'_> = (
+        input,
+        startup,
+        mode_effect.expect("the compiled reaction declares its canonical mode effect"),
+        output,
+    );
+    descriptor_pass::__boomerang::reaction_Match_2fmove(ctx, state, refs);
+    Ok(())
 }
 
 /// Directly constructs shaped state and invokes its typed reaction symbol.
@@ -78,6 +95,45 @@ fn bind_lifetime<'store>(
     descriptor_pass::lifetime_collision::__boomerang::reaction_Lifetime_2ftick(
         ctx, &mut state, refs,
     );
+}
+
+/// Typed references for the standard-action fixture reaction.
+type ActionRefs<'store> = (
+    boomerang::runtime::ActionRef<'store, u32>,
+    boomerang::runtime::ActionRef<'store, u16>,
+    boomerang::runtime::ActionRef<'store, u32>,
+    boomerang::runtime::ActionRef<'store, u16>,
+);
+
+/// Invokes a reaction whose references include logical and physical actions.
+#[allow(dead_code)]
+fn bind_actions<'store>(ctx: &mut boomerang::runtime::Context, refs: ActionRefs<'store>) {
+    let mut state = descriptor_pass::actions::__boomerang::state_Actions();
+    descriptor_pass::actions::__boomerang::reaction_Actions_2fact(ctx, &mut state, refs);
+}
+
+const _: boomerang::runtime::PayloadType<u32> =
+    descriptor_pass::__boomerang::port_Match_2fasync;
+const _: boomerang::runtime::PayloadType<u32> =
+    descriptor_pass::actions::__boomerang::action_Actions_2flogical_5fnow;
+const _: boomerang::runtime::PayloadType<u16> =
+    descriptor_pass::actions::__boomerang::action_Actions_2fphysical_5flater;
+
+#[allow(dead_code)]
+fn direct_payload_bindings() -> boomerang::runtime::EnclaveBindings {
+    use boomerang::runtime::image::BindingSlotIndex;
+
+    boomerang::runtime::EnclaveBindings::new()
+        .bind_state(BindingSlotIndex::new(0), descriptor_pass::__boomerang::state_Match)
+        .bind_reaction(BindingSlotIndex::new(3), bind_match)
+        .bind_port(
+            BindingSlotIndex::new(1),
+            descriptor_pass::__boomerang::port_Match_2fasync,
+        )
+        .bind_action(
+            BindingSlotIndex::new(2),
+            descriptor_pass::actions::__boomerang::action_Actions_2flogical_5fnow,
+        )
 }
 
 /// Keeps a private reactor's generated state type nameable by the launcher.

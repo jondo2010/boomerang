@@ -129,7 +129,7 @@ impl<K: tinymap::Key> PartialOrd for ScopeFrontierEntry<K> {
 
 /// Event returned to the scheduler after root and scope-local queues are merged at one tag.
 #[derive(Debug)]
-pub(super) struct ReadyEvent<K: tinymap::Key> {
+pub(super) struct ReadyEvent<K: tinymap::Key, A: Copy> {
     /// Global tag at which the contained reactions are ready.
     pub(super) tag: Tag,
     /// Reactions ready to execute at [`tag`](Self::tag).
@@ -138,6 +138,8 @@ pub(super) struct ReadyEvent<K: tinymap::Key> {
     pub(super) terminal: bool,
     /// Whether this event includes work other than terminal shutdown processing.
     pub(super) has_nonterminal_work: bool,
+    /// Action identities whose values caused this ready event.
+    pub(super) action_values: Vec<A>,
 }
 
 /// Owns root and scope-local event queues for modal scheduling.
@@ -163,10 +165,14 @@ pub(super) struct EventManager<S: Schedule> {
     frontier: BinaryHeap<ScopeFrontierEntry<S::Scope>>,
     /// Reusable reaction sets for merged ready events.
     free_reaction_sets: Vec<KeySet<S::Reaction>>,
+    /// Reusable action-identity scratch returned with each ready event.
+    ready_action_values: Vec<S::Action>,
     /// Key and level limits used when allocating reaction sets.
     reaction_set_limits: ReactionSetLimits,
     /// Whether this graph has any modal scopes requiring local queues.
     has_local_scopes: bool,
+    /// Number of queued nonterminal contributions across every event queue.
+    nonterminal_work_count: usize,
 }
 
 impl<S: Schedule> EventManager<S> {
@@ -203,8 +209,10 @@ impl<S: Schedule> EventManager<S> {
             scope_queues,
             frontier: BinaryHeap::new(),
             free_reaction_sets: Vec::new(),
+            ready_action_values: Vec::with_capacity(schedule.action_capacity()),
             reaction_set_limits,
             has_local_scopes: schedule.has_modal_scopes(),
+            nonterminal_work_count: 0,
         }
     }
 
@@ -213,6 +221,7 @@ impl<S: Schedule> EventManager<S> {
         I: IntoIterator<Item = (Level, S::Reaction)>,
     {
         self.root.push_event(tag, reactions, terminal);
+        self.record_nonterminal_push(terminal);
     }
 
     pub(super) fn push_action_event<I>(
@@ -230,14 +239,18 @@ impl<S: Schedule> EventManager<S> {
             stored_tag: tag,
         };
         if !self.has_local_scopes {
-            self.root.push_action_event(tag, None, reactions, terminal);
+            self.root
+                .push_action_event(tag, Some(action_value), reactions, terminal);
+            self.record_nonterminal_push(terminal);
             return;
         }
 
         let scope = schedule.scope_for_action(action_key);
         if !schedule.action_is_logical(action_key) || Self::scope_uses_global_time(schedule, scope)
         {
-            self.root.push_action_event(tag, None, reactions, terminal);
+            self.root
+                .push_action_event(tag, Some(action_value), reactions, terminal);
+            self.record_nonterminal_push(terminal);
             return;
         }
 
@@ -248,6 +261,7 @@ impl<S: Schedule> EventManager<S> {
             reactions,
             terminal,
         );
+        self.record_nonterminal_push(terminal);
         self.refresh_frontier(scope);
     }
 
@@ -263,8 +277,13 @@ impl<S: Schedule> EventManager<S> {
         I: IntoIterator<Item = (Level, S::Reaction)>,
     {
         if Self::scope_uses_global_time(schedule, scope) {
-            self.root
-                .push_action_event(action_value.stored_tag, None, reactions, terminal);
+            self.root.push_action_event(
+                action_value.stored_tag,
+                Some(action_value),
+                reactions,
+                terminal,
+            );
+            self.record_nonterminal_push(terminal);
             return;
         }
 
@@ -274,6 +293,7 @@ impl<S: Schedule> EventManager<S> {
             reactions,
             terminal,
         );
+        self.record_nonterminal_push(terminal);
         self.refresh_frontier(scope);
     }
 
@@ -292,14 +312,23 @@ impl<S: Schedule> EventManager<S> {
         }
     }
 
-    pub(super) fn pop_next_event(&mut self) -> Option<ReadyEvent<S::Reaction>> {
+    /// Whether any queue retains work other than terminal shutdown processing.
+    pub(super) fn has_nonterminal_work(&self) -> bool {
+        self.nonterminal_work_count != 0
+    }
+
+    pub(super) fn pop_next_event(&mut self) -> Option<ReadyEvent<S::Reaction, S::Action>> {
+        let mut action_values = std::mem::take(&mut self.ready_action_values);
+        action_values.clear();
         if !self.has_local_scopes {
-            let event = self.root.pop_next_event()?;
+            let event = self.root.pop_next_event(&mut action_values)?;
+            self.remove_nonterminal_work(event.nonterminal_work_count);
             return Some(ReadyEvent {
                 tag: event.tag,
                 reactions: event.reactions,
                 terminal: event.terminal,
-                has_nonterminal_work: event.has_nonterminal_work,
+                has_nonterminal_work: event.nonterminal_work_count != 0,
+                action_values,
             });
         }
 
@@ -309,29 +338,39 @@ impl<S: Schedule> EventManager<S> {
             reactions: self.next_reaction_set(),
             terminal: false,
             has_nonterminal_work: false,
+            action_values,
         };
 
         if self.root.peek_tag() == Some(tag) {
-            let event = self.root.pop_next_event().unwrap();
+            let event = self.root.pop_next_event(&mut ready.action_values).unwrap();
             ready.reactions.merge(&event.reactions);
             ready.terminal = ready.terminal || event.terminal;
-            ready.has_nonterminal_work |= event.has_nonterminal_work;
+            ready.has_nonterminal_work |= event.nonterminal_work_count != 0;
+            self.remove_nonterminal_work(event.nonterminal_work_count);
             self.root.recycle_reaction_set(event.reactions);
         }
 
         while self.peek_frontier_tag() == Some(tag) {
             let frontier = self.frontier.pop().unwrap();
-            let event = self.scope_queues[frontier.scope].pop_next_event().unwrap();
+            let event = self.scope_queues[frontier.scope]
+                .pop_next_event(&mut ready.action_values)
+                .unwrap();
 
             ready.reactions.merge(&event.reactions);
             ready.terminal = ready.terminal || event.terminal;
-            ready.has_nonterminal_work |= event.has_nonterminal_work;
-
+            ready.has_nonterminal_work |= event.nonterminal_work_count != 0;
+            self.remove_nonterminal_work(event.nonterminal_work_count);
             self.scope_queues[frontier.scope].recycle_reaction_set(event.reactions);
             self.refresh_frontier(frontier.scope);
         }
 
         Some(ready)
+    }
+
+    /// Recycles action-identity scratch after the scheduler processes a ready event.
+    pub(super) fn return_action_values(&mut self, mut values: Vec<S::Action>) {
+        values.clear();
+        self.ready_action_values = values;
     }
 
     pub(super) fn shutdown(&mut self) {
@@ -346,6 +385,24 @@ impl<S: Schedule> EventManager<S> {
         } else {
             self.root.recycle_reaction_set(reaction_set);
         }
+    }
+
+    /// Records one newly queued nonterminal contribution.
+    fn record_nonterminal_push(&mut self, terminal: bool) {
+        if !terminal {
+            self.nonterminal_work_count = self
+                .nonterminal_work_count
+                .checked_add(1)
+                .expect("scheduler nonterminal-work count overflowed");
+        }
+    }
+
+    /// Removes nonterminal contributions returned or discarded by one queue operation.
+    fn remove_nonterminal_work(&mut self, count: usize) {
+        self.nonterminal_work_count = self
+            .nonterminal_work_count
+            .checked_sub(count)
+            .expect("scheduler nonterminal-work count became inconsistent");
     }
 
     pub(super) fn apply_transition<E: ExecutionStorage<S>>(
@@ -395,7 +452,8 @@ impl<S: Schedule> EventManager<S> {
         storage: &mut E,
     ) {
         for scope in schedule.descendant_scopes(root_scope) {
-            self.scope_queues[scope].clear();
+            let removed = self.scope_queues[scope].clear();
+            self.remove_nonterminal_work(removed);
             let clock = &mut self.scope_clocks[scope];
             clock.suspended_local = Tag::ZERO;
             clock.activation_local = Tag::ZERO;

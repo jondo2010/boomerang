@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 mod fingerprint;
 
 /// Macro ABI understood by descriptors emitted from this crate version.
-pub const COMPONENT_DESCRIPTOR_MACRO_ABI: u32 = 1;
+pub use boomerang_runtime::binding::COMPONENT_DESCRIPTOR_MACRO_ABI;
 
 /// Marker for stable reactor binding slots.
 pub enum ReactorSlotMarker {}

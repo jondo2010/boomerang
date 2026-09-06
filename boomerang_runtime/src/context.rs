@@ -1,6 +1,6 @@
 use crate::{
-    event::AsyncEvent, keepalive, ActionCommon, ActionKey, ActionRef, BankInfo, Duration,
-    EnclaveKey, ModeKey, ReactionGraph, ReactionKey, ReactorData, Tag, TransitionKind,
+    event::AsyncEvent, image::ModeIndex, keepalive, ActionCommon, ActionKey, ActionRef, BankInfo,
+    Duration, EnclaveKey, ModeKey, ReactionGraph, ReactionKey, ReactorData, Tag, TransitionKind,
 };
 
 /// A mode transition requested by a reaction.
@@ -31,6 +31,22 @@ impl ModeEffectRef {
     }
 }
 
+/// A canonical compiled mode transition effect passed only to an owned reaction adapter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompiledModeEffectRef {
+    /// Dense target mode in the validated compiled Enclave image.
+    pub target: ModeIndex,
+    /// Reset or history semantics declared for the transition.
+    pub transition: TransitionKind,
+}
+
+impl CompiledModeEffectRef {
+    /// Request this canonical transition after the current compiled reaction finishes.
+    pub fn set(self, ctx: &mut Context) {
+        ctx.set_compiled_mode_transition(self);
+    }
+}
+
 /// Result from a reaction trigger
 #[derive(Debug, Clone)]
 pub(crate) struct TriggerRes {
@@ -40,6 +56,8 @@ pub(crate) struct TriggerRes {
     pub scheduled_shutdown: Option<Tag>,
     /// A mode transition was scheduled
     pub scheduled_mode: Option<ModeTransitionRequest>,
+    /// A canonical compiled mode transition was scheduled.
+    pub scheduled_compiled_mode: Option<CompiledModeEffectRef>,
 }
 
 /// Scheduler context passed into reactor functions.
@@ -144,6 +162,7 @@ impl Context {
                 scheduled_actions: Vec::new(),
                 scheduled_shutdown: None,
                 scheduled_mode: None,
+                scheduled_compiled_mode: None,
             },
         }
     }
@@ -153,6 +172,7 @@ impl Context {
         self.trigger_res.scheduled_actions.clear();
         self.trigger_res.scheduled_shutdown = None;
         self.trigger_res.scheduled_mode = None;
+        self.trigger_res.scheduled_compiled_mode = None;
     }
 
     /// Get the physical start time of the scheduler
@@ -240,6 +260,11 @@ impl Context {
 
     pub(crate) fn set_mode_transition(&mut self, request: ModeTransitionRequest) {
         self.trigger_res.scheduled_mode = Some(request);
+    }
+
+    /// Records a validated-image transition for the compiled scheduler adapter.
+    fn set_compiled_mode_transition(&mut self, request: CompiledModeEffectRef) {
+        self.trigger_res.scheduled_compiled_mode = Some(request);
     }
 }
 

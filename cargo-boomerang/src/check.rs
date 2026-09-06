@@ -12,26 +12,77 @@ use boomerang_builder::compiler::{
     ImplementationBinding, OwnedCompiledDeployment, PlacementAssignment, PlacementGroupId,
     ResolvedDeployment, RuntimeBackendId, TargetTriple,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     driver::{run_resolved_descriptor_driver, DriverOutput},
-    resolve_workspace, CoordinationBackend, ResolvedWorkspace,
+    output::{CommandOutput, Phase},
+    workspace::resolve_workspace_with_output,
+    CoordinationBackend, ResolvedWorkspace,
 };
 
-const COMPILER_SCHEMA: u32 = 1;
+pub(crate) const COMPILER_SCHEMA: u32 = 1;
 
 /// Runs the complete host-side check pipeline and returns the published report path.
 pub fn check(workspace: impl AsRef<Path>, deployment_name: &str) -> Result<PathBuf> {
-    let resolved = resolve_workspace(workspace, deployment_name)?;
-    let driver = run_resolved_descriptor_driver(&resolved)?;
+    check_with_output(workspace, deployment_name, &CommandOutput::silent())
+}
+
+/// Checks one deployment while reporting CLI progress through `output`.
+pub fn check_with_output(
+    workspace: impl AsRef<Path>,
+    deployment_name: &str,
+    output: &CommandOutput,
+) -> Result<PathBuf> {
+    let analyzed = analyze(workspace, deployment_name, output)?;
+    let report = build_report(
+        deployment_name,
+        analyzed.driver.topology(),
+        &analyzed.compiled,
+    )?;
+    output.status(
+        Phase::Publishing,
+        format_args!("check report for '{deployment_name}'"),
+    )?;
+    publish_report(&analyzed.resolved, &report)
+}
+
+/// Complete reusable result of host-side deployment analysis.
+pub(crate) struct AnalyzedDeployment {
+    /// Cargo-resolved source workspace and deployment selection.
+    pub(crate) resolved: ResolvedWorkspace,
+    /// Descriptor-driver output retaining selected implementation descriptors.
+    pub(crate) driver: DriverOutput,
+    /// Validated target-neutral deployment image.
+    pub(crate) compiled: OwnedCompiledDeployment,
+}
+
+/// Resolves, describes, lowers, and validates one deployment without publishing a report.
+pub(crate) fn analyze(
+    workspace: impl AsRef<Path>,
+    deployment_name: &str,
+    output: &CommandOutput,
+) -> Result<AnalyzedDeployment> {
+    output.status(
+        Phase::Analyzing,
+        format_args!("deployment '{deployment_name}'"),
+    )?;
+    let resolved = resolve_workspace_with_output(workspace, deployment_name, output)?;
+    let driver = run_resolved_descriptor_driver(&resolved, output)?;
     let deployment = build_resolved_deployment(&resolved, &driver)?;
+    output.status(
+        Phase::Validating,
+        format_args!("deployment '{deployment_name}'"),
+    )?;
     let compiled = lower(&deployment).context("failed to lower resolved deployment")?;
     compiled
         .validate()
         .context("failed to validate compiled deployment")?;
-    let report = build_report(deployment_name, driver.topology(), &compiled)?;
-    publish_report(&resolved, &report)
+    Ok(AnalyzedDeployment {
+        resolved,
+        driver,
+        compiled,
+    })
 }
 
 /// Converts manifest and descriptor-driver selections into the canonical compiler input.
@@ -112,15 +163,17 @@ struct CheckReport<'a> {
 }
 
 /// Canonically ordered resource bounds for the checked deployment.
-#[derive(Serialize)]
-struct ResourceReport {
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ResourceReport {
     /// Federates in compiler identity order.
     federates: Vec<FederateResourceReport>,
 }
 
 /// Resource projection for one compiled Federate.
-#[derive(Serialize)]
-struct FederateResourceReport {
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FederateResourceReport {
     /// Stable Federate identity.
     id: String,
     /// Selected Rust compilation target.
@@ -132,8 +185,9 @@ struct FederateResourceReport {
 }
 
 /// Fixed storage bounds for one compiled Enclave.
-#[derive(Serialize)]
-struct EnclaveResourceReport {
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct EnclaveResourceReport {
     /// Stable Enclave identity.
     id: String,
     /// Maximum number of reactor-state slots.
@@ -167,6 +221,18 @@ fn build_report<'a>(
 ) -> Result<CheckReport<'a>> {
     let topology = serde_json::to_vec(topology).context("failed to serialize topology")?;
     let topology_digest = format!("blake3:{}", blake3::hash(&topology).to_hex());
+    let resources = resource_report(compiled);
+    Ok(CheckReport {
+        compiler_schema: COMPILER_SCHEMA,
+        deployment: deployment_name,
+        topology_digest,
+        resources,
+        diagnostics: Vec::new(),
+    })
+}
+
+/// Projects validated compiler output into canonical Federate and Enclave resources.
+pub(crate) fn resource_report(compiled: &OwnedCompiledDeployment) -> ResourceReport {
     let federates = compiled
         .federates()
         .iter()
@@ -192,13 +258,7 @@ fn build_report<'a>(
                 .collect(),
         })
         .collect();
-    Ok(CheckReport {
-        compiler_schema: COMPILER_SCHEMA,
-        deployment: deployment_name,
-        topology_digest,
-        resources: ResourceReport { federates },
-        diagnostics: Vec::new(),
-    })
+    ResourceReport { federates }
 }
 
 /// Atomically publishes one successful report beside any previous valid report.

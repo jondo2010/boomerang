@@ -4,7 +4,7 @@ use super::{
     RequiredBinding, RequiredBindings, ResolvedDeployment,
 };
 use crate::{
-    descriptor::{DescriptorBound, ReactionSlotId, ReactorSlotId},
+    descriptor::{ActionSlotId, DescriptorBound, PortSlotId, ReactionSlotId, ReactorSlotId},
     runtime::image::{
         ActionImage, ActionIndex, ActionSlotIndex, ActionTiming, BindingSlotIndex,
         CompiledDeploymentImage, CompiledDeploymentView, CoordinationProjection, EnclaveIndex,
@@ -207,6 +207,45 @@ impl<'a> DescriptorSlots<'a> {
         self.one_slot("reaction", logical.path(), matches)
     }
 
+    /// Resolves the descriptor port slot for one logical port.
+    fn port_slot(
+        &self,
+        logical: &super::PortId,
+        bank: Option<super::BankMember>,
+    ) -> Result<PortSlotId, CompileError> {
+        let declaration = match bank {
+            Some(_) => logical
+                .path()
+                .parent()
+                .expect("validated bank member has a base"),
+            None => logical.path().clone(),
+        };
+        self.one_slot(
+            "port",
+            logical.path(),
+            self.descriptor
+                .port_slots()
+                .iter()
+                .filter(|slot| self.matches_relative_path(&declaration, slot.id.path()))
+                .map(|slot| slot.id.clone())
+                .collect(),
+        )
+    }
+
+    /// Resolves the descriptor action slot for one logical action.
+    fn action_slot(&self, logical: &super::ActionId) -> Result<ActionSlotId, CompileError> {
+        self.one_slot(
+            "action",
+            logical.path(),
+            self.descriptor
+                .action_slots()
+                .iter()
+                .filter(|slot| self.matches_relative_path(logical.path(), slot.id.path()))
+                .map(|slot| slot.id.clone())
+                .collect(),
+        )
+    }
+
     /// Converts a matching descriptor-slot set into one required binding slot.
     fn one_slot<T>(
         &self,
@@ -243,15 +282,6 @@ pub fn lower(deployment: &ResolvedDeployment) -> Result<OwnedCompiledDeployment,
         super::CoordinationSelection::Local
     ) {
         return Err(CompileError::UnsupportedCoordination);
-    }
-    if let Some((reaction, _)) = deployment
-        .topology()
-        .reactions()
-        .find(|(_, reaction)| reaction.options().transition().is_some())
-    {
-        return Err(CompileError::UnsupportedModeTransition {
-            reaction: reaction.clone(),
-        });
     }
     let mut federates = deployment.federates();
     let federate = federates
@@ -454,6 +484,53 @@ fn lower_enclave(
             })
             .collect::<Result<Vec<_>, CompileError>>()?,
     );
+    named_bindings.extend(
+        representatives
+            .iter()
+            .map(|id| {
+                let port = topology.port(id).expect("port representative exists");
+                let component = topology
+                    .reactor(port.reactor())
+                    .expect("validated port reactor exists")
+                    .component();
+                let slots = DescriptorSlots::for_component(deployment, component)?;
+                Ok((
+                    format!("port/{id}"),
+                    RequiredBinding::Port {
+                        component: component.clone(),
+                        implementation: slots.implementation.clone(),
+                        port: slots.port_slot(id, port.bank())?,
+                    },
+                ))
+            })
+            .collect::<Result<Vec<_>, CompileError>>()?,
+    );
+    named_bindings.extend(
+        actions
+            .iter()
+            .filter(|(_, action)| {
+                matches!(
+                    action.kind(),
+                    super::ActionKind::Logical { .. } | super::ActionKind::Physical { .. }
+                )
+            })
+            .map(|(id, action)| {
+                let component = topology
+                    .reactor(action.reactor())
+                    .expect("validated action reactor exists")
+                    .component();
+                let slots = DescriptorSlots::for_component(deployment, component)?;
+                Ok((
+                    format!("action/{id}"),
+                    RequiredBinding::Action {
+                        component: component.clone(),
+                        implementation: slots.implementation.clone(),
+                        action: slots.action_slot(id)?,
+                    },
+                ))
+            })
+            .collect::<Result<Vec<_>, CompileError>>()?,
+    );
     named_bindings.sort_by(|left, right| left.0.cmp(&right.0));
     let binding_entries = named_bindings
         .iter()
@@ -503,34 +580,34 @@ fn lower_enclave(
         })
         .collect::<Result<tinymap::TinyMap<ReactorIndex, _>, CompileError>>()?;
     let mut flattened_triggers = Vec::new();
-    let mut action_triggers = vec![Vec::new(); actions.len()];
+    let mut action_triggers = (0..actions.len())
+        .map(|_| Vec::new())
+        .collect::<tinymap::TinyMap<ActionIndex, Vec<LevelReactionImage>>>();
     for (id, reaction) in &reactions {
         for relation in reaction.relations() {
             if !relation.flags().is_trigger() {
                 continue;
             }
             if let super::ReactionRelationTarget::Action(action) = relation.target() {
-                action_triggers[action_indices[action].as_u32() as usize].push(
-                    LevelReactionImage::new(analysis.reaction_levels[*id], reaction_indices[*id]),
-                );
+                action_triggers[action_indices[action]].push(LevelReactionImage::new(
+                    analysis.reaction_levels[*id],
+                    reaction_indices[*id],
+                ));
             }
         }
     }
-    for triggers in &mut action_triggers {
+    for triggers in action_triggers.values_mut() {
         triggers.sort_unstable();
         triggers.dedup();
     }
     let action_images = actions
         .iter()
+        .zip(action_triggers.values())
         .enumerate()
-        .map(|(index, (_, action))| {
+        .map(|(index, ((id, action), triggers))| {
             let start = checked_u32(flattened_triggers.len(), enclave_id, "reaction-triggers")?;
-            flattened_triggers.extend_from_slice(&action_triggers[index]);
-            let len = checked_u32(
-                action_triggers[index].len(),
-                enclave_id,
-                "reaction-triggers",
-            )?;
+            flattened_triggers.extend_from_slice(triggers);
+            let len = checked_u32(triggers.len(), enclave_id, "reaction-triggers")?;
             let timing = match action.kind() {
                 super::ActionKind::Logical { minimum_delay } => ActionTiming::Standard {
                     domain: TimingDomain::Logical,
@@ -553,39 +630,45 @@ fn lower_enclave(
                 ActionSlotIndex::new(checked_u32(index, enclave_id, "actions")?),
                 timing,
                 TableRange::new(start, len),
+                matches!(
+                    action.kind(),
+                    super::ActionKind::Logical { .. } | super::ActionKind::Physical { .. }
+                )
+                .then(|| binding_indices[&format!("action/{id}")]),
             ))
         })
         .collect::<Result<tinymap::TinyMap<ActionIndex, _>, CompileError>>()?;
-    let mut port_triggers = vec![Vec::new(); representatives.len()];
+    let mut port_triggers = (0..representatives.len())
+        .map(|_| Vec::new())
+        .collect::<tinymap::TinyMap<PortIndex, Vec<LevelReactionImage>>>();
     for (id, reaction) in &reactions {
         for relation in reaction.relations() {
             if relation.flags().is_trigger() {
                 if let super::ReactionRelationTarget::Port(port) = relation.target() {
-                    port_triggers[port_indices[port].as_u32() as usize].push(
-                        LevelReactionImage::new(
-                            analysis.reaction_levels[*id],
-                            reaction_indices[*id],
-                        ),
-                    );
+                    port_triggers[port_indices[port]].push(LevelReactionImage::new(
+                        analysis.reaction_levels[*id],
+                        reaction_indices[*id],
+                    ));
                 }
             }
         }
     }
-    for triggers in &mut port_triggers {
+    for triggers in port_triggers.values_mut() {
         triggers.sort_unstable();
         triggers.dedup();
     }
     let port_images = representatives
         .iter()
-        .enumerate()
-        .map(|(index, id)| {
+        .zip(port_triggers.values())
+        .map(|(id, triggers)| {
             let port = topology.port(id).expect("port representative exists");
             let start = checked_u32(flattened_triggers.len(), enclave_id, "reaction-triggers")?;
-            flattened_triggers.extend_from_slice(&port_triggers[index]);
-            let len = checked_u32(port_triggers[index].len(), enclave_id, "reaction-triggers")?;
+            flattened_triggers.extend_from_slice(triggers);
+            let len = checked_u32(triggers.len(), enclave_id, "reaction-triggers")?;
             Ok(PortImage::new(
                 scope_for(port.reactor(), port.mode()),
                 TableRange::new(start, len),
+                binding_indices[&format!("port/{id}")],
             ))
         })
         .collect::<Result<tinymap::TinyMap<PortIndex, _>, CompileError>>()?;
@@ -628,7 +711,7 @@ fn lower_enclave(
                     .iter()
                     .map(|mode| mode_indices[mode]),
             );
-            Ok(ReactionImage::new(
+            let image = ReactionImage::new(
                 reactor_indices[reaction.reactor()],
                 scope_for(reaction.reactor(), reaction.options().mode()),
                 analysis.reaction_levels[*id],
@@ -652,23 +735,36 @@ fn lower_enclave(
                     enclave_id,
                     "reaction-modes",
                 )?,
-            ))
+            );
+            Ok(reaction.options().transition().map_or(image, |transition| {
+                image.with_mode_effect(crate::runtime::CompiledModeEffectRef {
+                    target: mode_indices[transition.target()],
+                    transition: match transition.kind() {
+                        super::ModeTransitionKind::Reset => crate::runtime::TransitionKind::Reset,
+                        super::ModeTransitionKind::History => {
+                            crate::runtime::TransitionKind::History
+                        }
+                    },
+                })
+            }))
         })
         .collect::<Result<tinymap::TinyMap<ReactionIndex, _>, CompileError>>()?;
     let mode_images = modes
         .iter()
         .map(|(id, mode)| ModeImage::new(reactor_indices[mode.reactor()], mode_scopes[*id]))
         .collect::<tinymap::TinyMap<ModeIndex, _>>();
-    let mut scope_parents = Vec::with_capacity(reactors.len() + modes.len());
+    let mut scope_parents = tinymap::TinyMap::<ScopeIndex, Option<ScopeIndex>>::with_capacity(
+        reactors.len() + modes.len(),
+    );
     for (_, reactor) in &reactors {
-        scope_parents.push(reactor.parent().and_then(|parent| {
+        scope_parents.insert(reactor.parent().and_then(|parent| {
             root_scopes
                 .get(parent)
                 .map(|root| reactor.scope_mode().map_or(*root, |mode| mode_scopes[mode]))
         }));
     }
     for (_, mode) in &modes {
-        scope_parents.push(Some(
+        scope_parents.insert(Some(
             mode.parent()
                 .map_or(root_scopes[mode.reactor()], |parent| mode_scopes[parent]),
         ));
@@ -676,11 +772,11 @@ fn lower_enclave(
     let action_scopes = actions
         .iter()
         .map(|(_, action)| scope_for(action.reactor(), action.mode()))
-        .collect::<Vec<_>>();
+        .collect::<tinymap::TinyMap<ActionIndex, _>>();
     let reaction_scopes = reactions
         .iter()
         .map(|(_, reaction)| scope_for(reaction.reactor(), reaction.options().mode()))
-        .collect::<Vec<_>>();
+        .collect::<tinymap::TinyMap<ReactionIndex, _>>();
     let level_reaction = |reaction: &super::ReactionId| {
         LevelReactionImage::new(
             analysis.reaction_levels[reaction],
@@ -703,12 +799,18 @@ fn lower_enclave(
             _ => {}
         }
     }
-    let mut reset_by_scope = vec![Vec::new(); scope_parents.len()];
-    let mut startup_by_scope = vec![Vec::new(); scope_parents.len()];
-    let mut shutdown_by_scope = vec![Vec::new(); scope_parents.len()];
-    for ((id, reaction), scope) in reactions.iter().zip(reaction_scopes.iter().copied()) {
+    let mut reset_by_scope = (0..scope_parents.len())
+        .map(|_| Vec::new())
+        .collect::<tinymap::TinyMap<ScopeIndex, Vec<LevelReactionImage>>>();
+    let mut startup_by_scope = (0..scope_parents.len())
+        .map(|_| Vec::new())
+        .collect::<tinymap::TinyMap<ScopeIndex, Vec<LifecycleReactionImage>>>();
+    let mut shutdown_by_scope = (0..scope_parents.len())
+        .map(|_| Vec::new())
+        .collect::<tinymap::TinyMap<ScopeIndex, Vec<LifecycleReactionImage>>>();
+    for ((id, reaction), scope) in reactions.iter().zip(reaction_scopes.values().copied()) {
         for mode in reaction.options().reset_modes() {
-            reset_by_scope[mode_scopes[mode].as_u32() as usize].push(level_reaction(id));
+            reset_by_scope[mode_scopes[mode]].push(level_reaction(id));
         }
         for relation in reaction.relations() {
             if !relation.flags().is_trigger() {
@@ -723,19 +825,20 @@ fn lower_enclave(
                 .expect("reaction action exists")
                 .kind()
             {
-                super::ActionKind::Startup => startup_by_scope[scope.as_u32() as usize].push(entry),
-                super::ActionKind::Shutdown => {
-                    shutdown_by_scope[scope.as_u32() as usize].push(entry)
-                }
+                super::ActionKind::Startup => startup_by_scope[scope].push(entry),
+                super::ActionKind::Shutdown => shutdown_by_scope[scope].push(entry),
                 _ => {}
             }
         }
     }
-    for values in &mut reset_by_scope {
+    for values in reset_by_scope.values_mut() {
         values.sort_unstable();
         values.dedup();
     }
-    for values in startup_by_scope.iter_mut().chain(&mut shutdown_by_scope) {
+    for values in startup_by_scope
+        .values_mut()
+        .chain(shutdown_by_scope.values_mut())
+    {
         values.sort_by_key(|entry| entry.reaction());
         values.dedup_by_key(|entry| entry.reaction());
     }
@@ -743,7 +846,7 @@ fn lower_enclave(
         if candidate == ancestor {
             break true;
         }
-        let Some(parent) = scope_parents[candidate.as_u32() as usize] else {
+        let Some(parent) = scope_parents[candidate] else {
             break false;
         };
         candidate = parent;
@@ -754,14 +857,14 @@ fn lower_enclave(
     let mut scope_reset_reactions = Vec::new();
     let mut scope_startup_reactions = Vec::new();
     let mut scope_shutdown_reactions = Vec::new();
-    let scope_images = (0..scope_parents.len())
-        .map(|position| {
-            let scope = ScopeIndex::new(checked_u32(position, enclave_id, "scopes")?);
+    let scope_images = scope_parents
+        .iter()
+        .enumerate()
+        .map(|(position, (scope, parent))| {
             let descendants = push_range(
                 &mut scope_descendants,
-                (0u32..)
-                    .take(scope_parents.len())
-                    .map(ScopeIndex::new)
+                scope_parents
+                    .keys()
                     .filter(|candidate| is_descendant(*candidate, scope)),
                 enclave_id,
                 "scope-descendants",
@@ -770,7 +873,7 @@ fn lower_enclave(
                 &mut scope_logical_actions,
                 actions
                     .iter()
-                    .zip(action_scopes.iter().copied())
+                    .zip(action_scopes.values().copied())
                     .filter(|((_, action), action_scope)| {
                         !matches!(action.kind(), super::ActionKind::Physical { .. })
                             && is_descendant(*action_scope, scope)
@@ -781,9 +884,10 @@ fn lower_enclave(
             )?;
             let timer_startups = push_range(
                 &mut scope_timer_startups,
-                timer_startup_actions.iter().copied().filter(|entry| {
-                    is_descendant(action_scopes[entry.action().as_u32() as usize], scope)
-                }),
+                timer_startup_actions
+                    .iter()
+                    .copied()
+                    .filter(|entry| is_descendant(action_scopes[entry.action()], scope)),
                 enclave_id,
                 "scope-timer-startups",
             )?;
@@ -792,9 +896,8 @@ fn lower_enclave(
                 {
                     let mut values = reset_by_scope
                         .iter()
-                        .zip(0u32..)
-                        .filter(|(_, index)| is_descendant(ScopeIndex::new(*index), scope))
-                        .flat_map(|(values, _)| values.iter().copied())
+                        .filter(|(candidate, _)| is_descendant(*candidate, scope))
+                        .flat_map(|(_, values)| values.iter().copied())
                         .collect::<Vec<_>>();
                     values.sort_unstable();
                     values.dedup();
@@ -805,13 +908,13 @@ fn lower_enclave(
             )?;
             let startup_reactions = push_range(
                 &mut scope_startup_reactions,
-                startup_by_scope[position].iter().copied(),
+                startup_by_scope[scope].iter().copied(),
                 enclave_id,
                 "scope-startup-reactions",
             )?;
             let shutdown_reactions = push_range(
                 &mut scope_shutdown_reactions,
-                shutdown_by_scope[position].iter().copied(),
+                shutdown_by_scope[scope].iter().copied(),
                 enclave_id,
                 "scope-shutdown-reactions",
             )?;
@@ -822,7 +925,7 @@ fn lower_enclave(
                 (reactor_indices[mode.reactor()], Some(mode_indices[mode_id]))
             };
             Ok(ScopeImage::new(
-                scope_parents[position],
+                *parent,
                 reactor,
                 mode,
                 descendants,
@@ -835,7 +938,7 @@ fn lower_enclave(
         })
         .collect::<Result<tinymap::TinyMap<ScopeIndex, _>, CompileError>>()?;
     let mut shutdown_reactions = shutdown_by_scope
-        .iter()
+        .values()
         .flat_map(|values| values.iter().copied())
         .collect::<Vec<_>>();
     shutdown_reactions.sort_by_key(|entry| entry.reaction());
@@ -1367,8 +1470,8 @@ mod tests {
     use super::{checked_u32, lower, CompileError};
     use crate::{
         compiler::{
-            ActionId, ActionKind, ApplicationTopology, ApplicationTopologyBuilder, BoundaryBinding,
-            BoundaryId, CodecCapabilityId, ComponentInstance, ComponentInstanceId,
+            ActionId, ActionKind, ApplicationTopology, ApplicationTopologyBuilder, BankMember,
+            BoundaryBinding, BoundaryId, CodecCapabilityId, ComponentInstance, ComponentInstanceId,
             ConnectionSemantics, CoordinationBackendId, CoordinationSelection, FederateConfig,
             FederateId, ImplementationBinding, ImplementationId, ModeId, ModeTransition,
             ModeTransitionKind, PlacementAssignment, PlacementGroupId, PortDirection, PortId,
@@ -1377,12 +1480,13 @@ mod tests {
             RuntimeBackendId, StableEnclaveId, TargetTriple, TransportCapabilityId,
         },
         descriptor::{
-            ComponentDescriptor, DescriptorBound, DescriptorBounds, ReactionSlot, ReactionSlotId,
-            ReactorSlot, ReactorSlotId, COMPONENT_DESCRIPTOR_MACRO_ABI,
+            ActionSlot, ActionSlotId, ComponentDescriptor, DescriptorBound, DescriptorBounds,
+            PortSlot, PortSlotId, ReactionSlot, ReactionSlotId, ReactorSlot, ReactorSlotId,
+            COMPONENT_DESCRIPTOR_MACRO_ABI,
         },
         runtime::image::{
-            ActionIndex, ActionTiming, ModeIndex, ReactionIndex, ReactorIndex, RouteDirection,
-            RouteIndex, ScopeIndex, TimingDomain,
+            ActionIndex, ActionTiming, BindingKind, ModeIndex, ReactionIndex, ReactorIndex,
+            RouteDirection, RouteIndex, ScopeIndex, TimingDomain,
         },
     };
     fn descriptor(contract: &str, bounds: DescriptorBounds) -> ComponentDescriptor {
@@ -1424,6 +1528,27 @@ mod tests {
             _ => panic!("unexpected test descriptor contract {contract}"),
         };
         let reactor = ReactorSlotId::new(root).unwrap();
+        let port = |name| PortSlot {
+            id: PortSlotId::new(format!("{root}/{name}")).unwrap(),
+            reactor: reactor.clone(),
+            direction: if name == "output" {
+                PortDirection::Output
+            } else {
+                PortDirection::Input
+            },
+        };
+        let action = |name| ActionSlot {
+            id: ActionSlotId::new(format!("{root}/{name}")).unwrap(),
+            reactor: reactor.clone(),
+        };
+        let (ports, actions) = match contract {
+            "controller.v1" => (
+                vec![port("output"), port("array_in"), port("bank_in")],
+                vec![action("pulse")],
+            ),
+            "sensor.v1" => (vec![port("input")], vec![action("ack")]),
+            _ => unreachable!(),
+        };
         ComponentDescriptor::try_new(
             contract.parse().unwrap(),
             1,
@@ -1432,8 +1557,8 @@ mod tests {
                 id: reactor.clone(),
                 parent: None,
             }],
-            vec![],
-            vec![],
+            ports,
+            actions,
             reactions
                 .iter()
                 .map(|reaction| ReactionSlot {
@@ -1611,6 +1736,22 @@ mod tests {
         ) {
             topology
                 .add_port(id, reactor, direction, None, 0, None)
+                .unwrap();
+        }
+        for (position, name) in ["array_in", "array_in", "bank_in", "bank_in"]
+            .into_iter()
+            .enumerate()
+        {
+            let index = position as u32 % 2;
+            topology
+                .add_port(
+                    PortId::new(format!("vehicle/controller/{name}/#b{index}")).unwrap(),
+                    controller_reactor.clone(),
+                    PortDirection::Input,
+                    Some(BankMember::new(index, 2).unwrap()),
+                    position as u32 + 1,
+                    None,
+                )
                 .unwrap();
         }
         topology
@@ -1990,6 +2131,13 @@ mod tests {
                 .map(RequiredBinding::symbol)
                 .collect::<Vec<_>>(),
             [
+                "action_Shared_2fpulse",
+                "action_Shared_2fack",
+                "port_Shared_2farray_5fin",
+                "port_Shared_2farray_5fin",
+                "port_Shared_2fbank_5fin",
+                "port_Shared_2fbank_5fin",
+                "port_Shared_2foutput",
                 "reaction_Shared_2femit",
                 "reaction_Shared_2freset_5factive",
                 "reaction_Shared_2fshutdown",
@@ -2013,7 +2161,9 @@ mod tests {
                     implementation.to_string(),
                     binding.symbol(),
                 )),
-                RequiredBinding::Reaction { .. } => None,
+                RequiredBinding::Reaction { .. }
+                | RequiredBinding::Port { .. }
+                | RequiredBinding::Action { .. } => None,
             })
             .collect::<Vec<_>>();
         assert_eq!(
@@ -2033,6 +2183,15 @@ mod tests {
         );
 
         let image = enclave.view().unwrap();
+        assert_eq!(
+            image
+                .ports()
+                .values()
+                .map(|port| port.binding())
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            5
+        );
         assert_ne!(
             image.reactors()[ReactorIndex::new(0)].state_binding(),
             image.reactors()[ReactorIndex::new(1)].state_binding()
@@ -2086,19 +2245,21 @@ mod tests {
         assert!(matches!(error, CompileError::UnsupportedCoordination));
     }
     #[test]
-    fn lowering_rejects_mode_transitions_until_the_image_preserves_them() {
-        let error = lower(&local_deployment(
+    fn lowering_preserves_canonical_mode_transition_identity() {
+        let compiled = lower(&local_deployment(
             false,
             ConnectionSemantics::Logical { after: None },
             DependencyCase::ModeTransition,
         ))
-        .unwrap_err();
+        .unwrap();
+        let enclave = compiled.federates()[0].enclaves()[0].view().unwrap();
 
         assert_eq!(
-            error,
-            CompileError::UnsupportedModeTransition {
-                reaction: ReactionId::new("vehicle/controller/reset_active").unwrap(),
-            }
+            enclave.reactions()[ReactionIndex::new(1)].mode_effect(),
+            Some(crate::runtime::CompiledModeEffectRef {
+                target: ModeIndex::new(1),
+                transition: crate::runtime::TransitionKind::Reset,
+            })
         );
     }
     #[test]
@@ -2205,7 +2366,7 @@ mod tests {
             ))
             .unwrap();
             let enclave = compiled.federates()[0].enclaves()[0].view().unwrap();
-            assert_eq!(enclave.ports().len(), 1);
+            assert_eq!(enclave.ports().len(), 5);
             assert!(enclave.routes().is_empty());
         }
     }
@@ -2293,7 +2454,7 @@ mod tests {
             enclave.reactions()[ReactionIndex::new(5)].dependency_level(),
             2
         );
-        assert_eq!(enclave.required_bindings().len(), 8);
+        assert_eq!(enclave.required_bindings().len(), 15);
     }
     #[test]
     fn modes_actions_lifecycle_and_scopes_are_fully_lowered() {
@@ -2312,6 +2473,17 @@ mod tests {
                 domain: TimingDomain::Logical,
                 min_delay_nanos: 3,
             }
+        );
+        let standard_action = enclave.actions()[ActionIndex::new(0)];
+        assert_eq!(
+            enclave.required_bindings()[standard_action.binding().unwrap()].kind(),
+            BindingKind::Action
+        );
+        assert_eq!(enclave.actions()[ActionIndex::new(3)].binding(), None);
+        let port_binding = enclave.ports()[crate::runtime::image::PortIndex::new(0)].binding();
+        assert_eq!(
+            enclave.required_bindings()[port_binding].kind(),
+            BindingKind::Port
         );
         assert_eq!(
             enclave.actions()[ActionIndex::new(3)].timing(),
@@ -2394,7 +2566,7 @@ mod tests {
             .values()
             .enumerate()
             .all(|(index, reaction)| {
-                reaction.binding().as_u32() == u32::try_from(index).unwrap()
+                reaction.binding().as_u32() == u32::try_from(index).unwrap() + 7
             }));
     }
     #[test]

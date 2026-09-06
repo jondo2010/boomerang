@@ -1,0 +1,2 @@
+[build]
+rustflags = ["--cfg=boomerang_cargo_config_probe"]

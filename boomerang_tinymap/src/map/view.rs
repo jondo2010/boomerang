@@ -74,8 +74,6 @@ mod tests {
 
     crate::key_type!(TestKey);
 
-    const _: () = assert!(TableRange::<TestKey>::new(u32::MAX, 1).contains(u32::MAX));
-
     #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
     struct ManualKey(usize);
 
@@ -128,8 +126,8 @@ mod tests {
             Some(u64::from(u32::MAX) + 1)
         );
         let terminal = TableRange::<TestKey>::new(u32::MAX, 1);
-        assert!(terminal.contains(u32::MAX));
-        assert!(!terminal.contains(u32::MAX - 1));
+        assert!(terminal.contains(TestKey::new(u32::MAX)));
+        assert!(!terminal.contains(TestKey::new(u32::MAX - 1)));
     }
 
     #[test]

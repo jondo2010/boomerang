@@ -2,7 +2,7 @@ use super::{
     identity::canonical_identity_text, ComponentInstanceId, FederateId, ImplementationId,
     RuntimeBackendId, StableEnclaveId, StablePath, TargetTriple,
 };
-use crate::descriptor::{ReactionSlotId, ReactorSlotId};
+use crate::descriptor::{ActionSlotId, PortSlotId, ReactionSlotId, ReactorSlotId};
 use crate::runtime::image::{
     ActionImage, ActionIndex, BindingKind, BindingSlotIndex, CoordinationProjection, EnclaveImage,
     EnclaveImageView, FederateImage, FederateIndex,
@@ -48,6 +48,24 @@ pub enum RequiredBinding {
         /// Implementation-local descriptor reaction slot.
         reaction: ReactionSlotId,
     },
+    /// Constructs one concrete port payload type.
+    Port {
+        /// Logical component instance receiving this binding.
+        component: ComponentInstanceId,
+        /// Selected implementation exporting this binding's symbol.
+        implementation: ImplementationId,
+        /// Implementation-local descriptor port slot.
+        port: PortSlotId,
+    },
+    /// Constructs one concrete standard-action payload type.
+    Action {
+        /// Logical component instance receiving this binding.
+        component: ComponentInstanceId,
+        /// Selected implementation exporting this binding's symbol.
+        implementation: ImplementationId,
+        /// Implementation-local descriptor action slot.
+        action: ActionSlotId,
+    },
 }
 
 impl RequiredBinding {
@@ -56,6 +74,8 @@ impl RequiredBinding {
         match self {
             Self::State { .. } => BindingKind::StateInitializer,
             Self::Reaction { .. } => BindingKind::Reaction,
+            Self::Port { .. } => BindingKind::Port,
+            Self::Action { .. } => BindingKind::Action,
         }
     }
 
@@ -68,6 +88,10 @@ impl RequiredBinding {
             Self::Reaction { reaction, .. } => {
                 direct_binding_symbol(BindingKind::Reaction, reaction.path())
             }
+            Self::Port { port, .. } => direct_binding_symbol(BindingKind::Port, port.path()),
+            Self::Action { action, .. } => {
+                direct_binding_symbol(BindingKind::Action, action.path())
+            }
         }
     }
 }
@@ -79,6 +103,8 @@ pub fn direct_binding_symbol(kind: BindingKind, slot: &StablePath) -> String {
     let mut symbol = match kind {
         BindingKind::StateInitializer => String::from("state_"),
         BindingKind::Reaction => String::from("reaction_"),
+        BindingKind::Port => String::from("port_"),
+        BindingKind::Action => String::from("action_"),
     };
     for byte in slot.to_string().bytes() {
         if byte.is_ascii_alphanumeric() {
@@ -395,6 +421,16 @@ mod tests {
         let unicode = ReactionSlotId::new("Mätsch/ø").unwrap();
         let separator = ReactorSlotId::new("Match/left/right").unwrap();
         let escaped_separator = ReactorSlotId::new("Match/left_2fright").unwrap();
+        let port = RequiredBinding::Port {
+            component: ComponentInstanceId::new("root").unwrap(),
+            implementation: ImplementationId::new("root-host").unwrap(),
+            port: PortSlotId::new("root/input").unwrap(),
+        };
+        let action = RequiredBinding::Action {
+            component: ComponentInstanceId::new("root").unwrap(),
+            implementation: ImplementationId::new("root-host").unwrap(),
+            action: ActionSlotId::new("root/tick").unwrap(),
+        };
 
         assert_eq!(
             direct_binding_symbol(BindingKind::StateInitializer, reactor.path()),
@@ -432,6 +468,10 @@ mod tests {
             direct_binding_symbol(BindingKind::StateInitializer, reactor.path()),
             direct_binding_symbol(BindingKind::Reaction, reactor.path())
         );
+        assert_eq!(port.kind(), BindingKind::Port);
+        assert_eq!(port.symbol(), "port_root_2finput");
+        assert_eq!(action.kind(), BindingKind::Action);
+        assert_eq!(action.symbol(), "action_root_2ftick");
     }
 
     #[test]

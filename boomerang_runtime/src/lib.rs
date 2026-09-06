@@ -39,8 +39,7 @@ pub use env::{
     LifecycleReaction, ModalScheduleIndex, Mode, ModeFilter, ModeKey, ReactionGraph, ScopeInfo,
     ScopeKey, TransitionKind,
 };
-#[cfg(feature = "federated")]
-pub use event::AsyncEvent;
+pub use event::{AsyncEvent, AsyncEventTarget};
 #[cfg(feature = "federated")]
 pub use federated::{
     FederatedEndpointError, FederatedFaultState, FederatedInboundEndpoint,
@@ -57,11 +56,14 @@ pub use reaction::{
     EnclaveSenderReactionFn, FromRefs, Reaction, ReactionFn, ReactionKey,
 };
 pub use reactor::*;
-pub use reference::{execute_owned, ExecuteOwnedError, OwnedExecutionResult, StateAccessError};
+pub use reference::{
+    execute_owned, execute_owned_federate, EnclaveExecution, ExecuteOwnedError,
+    ExecuteOwnedFederateError, FederateBindings, FederateExecution, StateAccessError,
+};
 pub use refs::{Refs, RefsMut};
 pub use refs_extract::{ReactionRefs, ReactionRefsError, ReactionRefsExtract};
 pub use sched::*;
-pub use storage::owned::{OwnedBindings, OwnedStorage, OwnedStorageError, ReactionBindingError};
+pub use storage::owned::{EnclaveBindings, OwnedStorage, OwnedStorageError, ReactionBindingError};
 pub use time::*;
 
 /// Types implementing this trait can be used as data in ports, actions, and reactors.
@@ -71,10 +73,34 @@ impl<T> ReactorData for T where T: Send + Sync + 'static {}
 
 downcast_rs::impl_downcast!(ReactorData);
 
+/// Zero-sized witness for the payload type exported by a direct port or action binding.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PayloadType<T: ReactorData>(std::marker::PhantomData<fn() -> T>);
+
+impl<T: ReactorData> PayloadType<T> {
+    /// Creates a payload type witness without constructing a payload value.
+    pub const fn new() -> Self {
+        Self(std::marker::PhantomData)
+    }
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum RuntimeError {
     #[error("Port Key not found: {}", 0)]
     PortKeyNotFound(PortKey),
+
+    /// Live graphs do not admit ordinary synchronous ports through the async channel.
+    #[error("async boundary port target is not available in a live graph: {0}")]
+    AsyncBoundaryPortUnsupported(image::PortIndex),
+
+    /// Advancing a logical tag by a positive duration exceeded the tag range.
+    #[error("logical tag {tag} cannot advance by {period} without overflowing")]
+    LogicalTimeOverflow {
+        /// Last representable logical tag reached by the scheduler.
+        tag: Tag,
+        /// Positive recurrence period that cannot be represented at `tag`.
+        period: Duration,
+    },
 
     #[error("Mismatched Dynamic Types found {found} but wanted {wanted}")]
     TypeMismatch {

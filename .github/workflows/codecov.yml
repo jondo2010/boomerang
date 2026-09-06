@@ -28,13 +28,25 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Configure Cargo target directory
+        shell: bash
+        run: echo "CARGO_TARGET_DIR=target" >> "$GITHUB_ENV"
+
       - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
 
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
 
       - name: Generate code coverage
-        run: cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
+        run: |
+          cargo llvm-cov --no-report --all-features --workspace --exclude boomerang --exclude cargo-boomerang
+          cargo llvm-cov --no-clean -p boomerang --features hosted,serde,parallel,replay,federated
+          cargo llvm-cov --no-clean -p boomerang --lib --no-default-features --features __boomerang_payload
+          cargo llvm-cov --no-clean -p boomerang --lib --no-default-features --features __boomerang_descriptor
+          cargo llvm-cov --no-clean --all-features -p cargo-boomerang --lib --bins --test manifest --test workspace
+          cargo llvm-cov report --lcov --output-path lcov.info
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v7

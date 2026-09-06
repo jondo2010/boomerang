@@ -5,7 +5,7 @@ on:
     branches: ["main"]
 
   pull_request:
-    branches: ["main"]
+    branches: ["main", "codex/deployment-phase4-integration"]
 
 permissions:
   contents: read
@@ -37,9 +37,18 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      - name: Configure Cargo target directory
+        shell: bash
+        run: echo "CARGO_TARGET_DIR=target" >> "$GITHUB_ENV"
       - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
       - name: Check with Clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: |
+          cargo clippy --workspace --exclude boomerang --all-targets --all-features -- -D warnings
+          cargo clippy -p boomerang --all-targets --features hosted,serde,parallel,replay,federated -- -D warnings
+          cargo clippy -p boomerang --lib --no-default-features --features __boomerang_payload -- -D warnings
+          cargo clippy -p boomerang --lib --no-default-features --features __boomerang_descriptor -- -D warnings
 
   test:
     strategy:
@@ -59,17 +68,42 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
-      - uses: swatinem/rust-cache@v2
+      - name: Configure Cargo target directory
+        shell: bash
+        run: echo "CARGO_TARGET_DIR=target" >> "$GITHUB_ENV"
       - name: fetch Rust
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.toolchain }}
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
 
       - name: toolchain version
         run: cargo -vV
 
-      - name: test
-        run: cargo test --all --verbose
+      - name: prime generated-workspace dependency cache
+        run: cargo fetch
+
+      - name: test cargo-boomerang fast targets
+        run: >-
+          cargo test -p cargo-boomerang --lib --bin cargo-boomerang
+          --test manifest --test workspace --verbose
+
+      - name: test workspace except cargo-boomerang
+        run: cargo test --workspace --exclude cargo-boomerang --verbose
+
+      - name: smoke test cargo-boomerang toolchain on Windows
+        if: matrix.os == 'windows-latest' && matrix.toolchain == 'stable'
+        run: >-
+          cargo test -p cargo-boomerang --test toolchain --
+          run::run_forwards_application_streams_without_reframing --exact
+
+      - name: test cargo-boomerang toolchain on Ubuntu
+        if: matrix.os == 'ubuntu-latest' && matrix.toolchain == 'stable'
+        run: >-
+          cargo test -p cargo-boomerang --test toolchain --
+          --test-threads=1
 
   miri:
     runs-on: ubuntu-latest
@@ -77,12 +111,17 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
-      - uses: swatinem/rust-cache@v2
+      - name: Configure Cargo target directory
+        shell: bash
+        run: echo "CARGO_TARGET_DIR=target" >> "$GITHUB_ENV"
       - name: fetch Rust
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: nightly
           components: miri
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
       - name: Test with Miri

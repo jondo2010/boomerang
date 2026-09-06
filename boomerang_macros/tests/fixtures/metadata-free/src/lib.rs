@@ -17,6 +17,8 @@ fn hosted_reaction_payload() {}
 #[reactor]
 pub fn Hosted(
     #[output] output: usize,
+    #[logical_action(min_delay = 10 msec)] _logical: u32,
+    #[physical_action] _physical: u16,
     #[state(default = hosted_state_constructor())] count: usize,
 ) -> impl Reactor {
     reaction! {

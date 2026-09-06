@@ -52,6 +52,7 @@ mod static_federation;
 pub use static_federation::{execute_federation_in_memory, execute_federation_over_tcp};
 
 // Re-exports
+#[cfg(feature = "hosted")]
 pub use boomerang_builder as builder;
 #[cfg(feature = "federated")]
 pub use boomerang_federated as federated;
@@ -60,6 +61,7 @@ pub use boomerang_runtime as runtime;
 pub mod prelude {
     //! Re-exported common types and traits for Boomerang
 
+    #[cfg(feature = "hosted")]
     pub use super::builder::{
         Assembly, AssemblyError, AssemblyFqn, AssemblyModeKey, AssemblyReactorKey, BoundaryKind,
         Contained, Input, InterPartitionEdge, InterPartitionPlan, Local, Logical, ModeEffectSpec,
@@ -92,6 +94,7 @@ pub mod prelude {
 /// Top-level error type for Boomerang
 #[derive(thiserror::Error, Debug)]
 pub enum BoomerangError {
+    #[cfg(feature = "hosted")]
     #[error(transparent)]
     Assembly(#[from] builder::AssemblyError),
 

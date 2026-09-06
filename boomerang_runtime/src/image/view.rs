@@ -164,6 +164,16 @@ pub enum ImageValidationError<'a> {
         /// Binding field.
         field: &'static str,
     },
+    /// A binding is present for an executor-owned record or absent for a payload record.
+    #[error("{table}[{index}].{field} has the wrong binding presence")]
+    BindingPresenceMismatch {
+        /// Source table.
+        table: &'static str,
+        /// Source record index.
+        index: u32,
+        /// Binding field.
+        field: &'static str,
+    },
     /// A scheduler-boundary route has no opposite-direction peer.
     #[error("boundary route '{boundary}' has no peer for its {direction:?} half")]
     UnpairedRoute {
@@ -259,8 +269,13 @@ impl<'a> FederateImageView<'a> {
         ))
     }
 
+    /// Returns the typed deployment-wide range of Enclaves owned by this Federate.
+    pub const fn enclaves(&self) -> TableRange<EnclaveIndex> {
+        self.federate.enclaves()
+    }
+
     /// Iterates validated Enclave views in canonical identity order.
-    pub fn enclaves(&self) -> impl ExactSizeIterator<Item = EnclaveImageView<'a>> + 'a {
+    pub fn enclave_views(&self) -> impl ExactSizeIterator<Item = EnclaveImageView<'a>> + 'a {
         let images = self
             .image
             .enclaves
@@ -455,21 +470,21 @@ fn check_len<K: Key>(table: &'static str, len: usize) -> Result<(), ImageValidat
     }
 }
 
-fn check_ref<'a>(
+fn check_ref<'a, K: Key, V>(
     table: &'static str,
     index: u32,
     field: &'static str,
     target: &'static str,
-    value: u32,
-    len: usize,
+    value: K,
+    values: TinyMapView<'_, K, V>,
 ) -> Result<(), ImageValidationError<'a>> {
-    if value as usize >= len {
+    if values.get(value).is_none() {
         Err(ImageValidationError::ReferenceOutOfBounds {
             table,
             index,
             field,
             target,
-            referenced: value,
+            referenced: u32::try_from(value.index()).unwrap_or(u32::MAX),
         })
     } else {
         Ok(())
@@ -623,8 +638,8 @@ fn validate_compiled_deployment<'a>(
             i as u32,
             "federate",
             "federates",
-            member.as_u32(),
-            image.federates.len(),
+            member,
+            image.federates,
         )?;
         if member.as_u32() != i as u32 {
             return Err(ImageValidationError::EntriesNotSorted {
@@ -642,16 +657,16 @@ fn validate_compiled_deployment<'a>(
             index,
             "source",
             "federates",
-            edge.source().as_u32(),
-            image.federates.len(),
+            edge.source(),
+            image.federates,
         )?;
         check_ref(
             "federation.edges",
             index,
             "target",
             "federates",
-            edge.target().as_u32(),
-            image.federates.len(),
+            edge.target(),
+            image.federates,
         )?;
         let boundary = identity_slice(
             image.identity_data,
@@ -772,8 +787,8 @@ fn validate_level_ref<'a>(
         index,
         "reaction",
         "reactions",
-        entry.reaction().as_u32(),
-        image.reactions.len(),
+        entry.reaction(),
+        image.reactions,
     )?;
     if image.reactions[entry.reaction()].dependency_level() != entry.level() {
         return Err(ImageValidationError::OwnershipMismatch {
@@ -822,8 +837,8 @@ fn validate_lifecycle<'a>(
             index,
             "action",
             "actions",
-            entry.action().as_u32(),
-            image.actions.len(),
+            entry.action(),
+            image.actions,
         )?;
         validate_level_ref(table, index, entry.reaction(), image)?;
         if let Some(before) = previous {
@@ -848,6 +863,14 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
     check_len::<ScopeIndex>("scopes", image.scopes.len())?;
     check_len::<RouteIndex>("routes", image.routes.len())?;
     check_len::<BindingSlotIndex>("required_bindings", image.required_bindings.len())?;
+    check_ref(
+        "image",
+        0,
+        "root_reactor",
+        "reactors",
+        ReactorIndex::new(0),
+        image.reactors,
+    )?;
     let enclave_id = identity_slice(
         image.identity_data,
         "image",
@@ -865,8 +888,8 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
             index,
             "state_binding",
             "required_bindings",
-            reactor.state_binding().as_u32(),
-            image.required_bindings.len(),
+            reactor.state_binding(),
+            image.required_bindings,
         )?;
         if image.required_bindings[reactor.state_binding()].kind() != BindingKind::StateInitializer
         {
@@ -890,8 +913,8 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
             index,
             "root_scope",
             "scopes",
-            reactor.root_scope().as_u32(),
-            image.scopes.len(),
+            reactor.root_scope(),
+            image.scopes,
         )?;
         let root_scope = image.scopes[reactor.root_scope()];
         if root_scope.reactor() != ReactorIndex::new(index) || root_scope.mode().is_some() {
@@ -916,10 +939,10 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
                 index,
                 "initial_mode",
                 "modes",
-                mode.as_u32(),
-                image.modes.len(),
+                mode,
+                image.modes,
             )?;
-            if !reactor.modes().contains(mode.as_u32()) {
+            if !reactor.modes().contains(mode) {
                 return Err(ImageValidationError::OwnershipMismatch {
                     table: "reactors",
                     index,
@@ -946,8 +969,8 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
             index,
             "scope",
             "scopes",
-            action.scope().as_u32(),
-            image.scopes.len(),
+            action.scope(),
+            image.scopes,
         )?;
         if action.storage_slot().as_u32() >= image.storage_bounds.action_slots() {
             return Err(ImageValidationError::StorageBoundExceeded {
@@ -957,6 +980,34 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
                 slot: action.storage_slot().as_u32(),
                 bound: image.storage_bounds.action_slots(),
             });
+        }
+        match (action.timing(), action.binding()) {
+            (ActionTiming::Standard { .. }, Some(binding)) => {
+                check_ref(
+                    "actions",
+                    index,
+                    "binding",
+                    "required_bindings",
+                    binding,
+                    image.required_bindings,
+                )?;
+                if image.required_bindings[binding].kind() != BindingKind::Action {
+                    return Err(ImageValidationError::BindingKindMismatch {
+                        table: "actions",
+                        index,
+                        field: "binding",
+                    });
+                }
+            }
+            (ActionTiming::Standard { .. }, None)
+            | (ActionTiming::Timer { .. } | ActionTiming::Shutdown, Some(_)) => {
+                return Err(ImageValidationError::BindingPresenceMismatch {
+                    table: "actions",
+                    index,
+                    field: "binding",
+                });
+            }
+            (ActionTiming::Timer { .. } | ActionTiming::Shutdown, None) => {}
         }
         check_range(
             "actions",
@@ -974,10 +1025,25 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
         check_ref(
             "ports",
             index,
+            "binding",
+            "required_bindings",
+            port.binding(),
+            image.required_bindings,
+        )?;
+        if image.required_bindings[port.binding()].kind() != BindingKind::Port {
+            return Err(ImageValidationError::BindingKindMismatch {
+                table: "ports",
+                index,
+                field: "binding",
+            });
+        }
+        check_ref(
+            "ports",
+            index,
             "scope",
             "scopes",
-            port.scope().as_u32(),
-            image.scopes.len(),
+            port.scope(),
+            image.scopes,
         )?;
         check_range(
             "ports",
@@ -998,24 +1064,24 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
             index,
             "reactor",
             "reactors",
-            reaction.reactor().as_u32(),
-            image.reactors.len(),
+            reaction.reactor(),
+            image.reactors,
         )?;
         check_ref(
             "reactions",
             index,
             "scope",
             "scopes",
-            reaction.scope().as_u32(),
-            image.scopes.len(),
+            reaction.scope(),
+            image.scopes,
         )?;
         check_ref(
             "reactions",
             index,
             "binding",
             "required_bindings",
-            reaction.binding().as_u32(),
-            image.required_bindings.len(),
+            reaction.binding(),
+            image.required_bindings,
         )?;
         if image.required_bindings[reaction.binding()].kind() != BindingKind::Reaction {
             return Err(ImageValidationError::BindingKindMismatch {
@@ -1030,6 +1096,23 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
                 index,
                 field: "scope.reactor",
             });
+        }
+        if let Some(effect) = reaction.mode_effect() {
+            check_ref(
+                "reactions",
+                index,
+                "mode_effect.target",
+                "modes",
+                effect.target,
+                image.modes,
+            )?;
+            if image.modes[effect.target].reactor() != reaction.reactor() {
+                return Err(ImageValidationError::OwnershipMismatch {
+                    table: "reactions",
+                    index,
+                    field: "mode_effect.target.reactor",
+                });
+            }
         }
         check_range(
             "reactions",
@@ -1076,16 +1159,16 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
             index,
             "reactor",
             "reactors",
-            mode.reactor().as_u32(),
-            image.reactors.len(),
+            mode.reactor(),
+            image.reactors,
         )?;
         check_ref(
             "modes",
             index,
             "scope",
             "scopes",
-            mode.scope().as_u32(),
-            image.scopes.len(),
+            mode.scope(),
+            image.scopes,
         )?;
         let scope = image.scopes[mode.scope()];
         if scope.reactor() != mode.reactor() {
@@ -1103,7 +1186,7 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
             });
         }
         let modes = image.reactors[mode.reactor()].modes();
-        if !modes.contains(index) {
+        if !modes.contains(ModeIndex::new(index)) {
             return Err(ImageValidationError::OwnershipMismatch {
                 table: "modes",
                 index,
@@ -1120,28 +1203,14 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
             index,
             "reactor",
             "reactors",
-            scope.reactor().as_u32(),
-            image.reactors.len(),
+            scope.reactor(),
+            image.reactors,
         )?;
         if let Some(parent) = scope.parent() {
-            check_ref(
-                "scopes",
-                index,
-                "parent",
-                "scopes",
-                parent.as_u32(),
-                image.scopes.len(),
-            )?;
+            check_ref("scopes", index, "parent", "scopes", parent, image.scopes)?;
         }
         if let Some(mode) = scope.mode() {
-            check_ref(
-                "scopes",
-                index,
-                "mode",
-                "modes",
-                mode.as_u32(),
-                image.modes.len(),
-            )?;
+            check_ref("scopes", index, "mode", "modes", mode, image.modes)?;
             let owner = image.modes[mode];
             if owner.scope() != ScopeIndex::new(index) || owner.reactor() != scope.reactor() {
                 return Err(ImageValidationError::OwnershipMismatch {
@@ -1245,8 +1314,8 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
             i as u32,
             "port",
             "ports",
-            value.as_u32(),
-            image.ports.len(),
+            *value,
+            image.ports,
         )?;
     }
     for (i, value) in image.reaction_effect_ports.iter().enumerate() {
@@ -1255,8 +1324,8 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
             i as u32,
             "port",
             "ports",
-            value.as_u32(),
-            image.ports.len(),
+            *value,
+            image.ports,
         )?;
     }
     for (i, value) in image.reaction_actions.iter().enumerate() {
@@ -1265,8 +1334,8 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
             i as u32,
             "action",
             "actions",
-            value.as_u32(),
-            image.actions.len(),
+            *value,
+            image.actions,
         )?;
     }
     for (i, value) in image.reaction_modes.iter().enumerate() {
@@ -1275,8 +1344,8 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
             i as u32,
             "mode",
             "modes",
-            value.as_u32(),
-            image.modes.len(),
+            *value,
+            image.modes,
         )?;
     }
     for (i, reaction) in image.reactions.values().copied().enumerate() {
@@ -1300,8 +1369,8 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
             i as u32,
             "scope",
             "scopes",
-            value.as_u32(),
-            image.scopes.len(),
+            *value,
+            image.scopes,
         )?;
     }
     for (i, value) in image.scope_logical_actions.iter().enumerate() {
@@ -1310,8 +1379,8 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
             i as u32,
             "action",
             "actions",
-            value.as_u32(),
-            image.actions.len(),
+            *value,
+            image.actions,
         )?;
     }
     for (i, value) in image.scope_timer_startups.iter().enumerate() {
@@ -1320,8 +1389,8 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
             i as u32,
             "action",
             "actions",
-            value.action().as_u32(),
-            image.actions.len(),
+            value.action(),
+            image.actions,
         )?;
     }
     for scope in image.scopes.values().copied() {
@@ -1369,8 +1438,8 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
                 i as u32,
                 "action",
                 "actions",
-                entry.action().as_u32(),
-                image.actions.len(),
+                entry.action(),
+                image.actions,
             )?;
             validate_level_ref(table, i as u32, entry.reaction(), image)?;
         }
@@ -1381,8 +1450,8 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
             i as u32,
             "action",
             "actions",
-            value.action().as_u32(),
-            image.actions.len(),
+            value.action(),
+            image.actions,
         )?;
     }
     for (i, value) in image.timer_startup_actions.iter().enumerate() {
@@ -1391,8 +1460,8 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
             i as u32,
             "action",
             "actions",
-            value.action().as_u32(),
-            image.actions.len(),
+            value.action(),
+            image.actions,
         )?;
     }
     validate_lifecycle("shutdown_reactions", 0, image.shutdown_reactions, image)?;
@@ -1403,8 +1472,8 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
             i as u32,
             "action",
             "actions",
-            action.as_u32(),
-            image.actions.len(),
+            action,
+            image.actions,
         )?;
         if let Some(previous) = previous_action {
             if action == previous {
@@ -1469,8 +1538,8 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
             i as u32,
             "local_port",
             "ports",
-            route.local_port().as_u32(),
-            image.ports.len(),
+            route.local_port(),
+            image.ports,
         )?;
     }
     let mut previous = None;
@@ -1534,10 +1603,19 @@ mod tests {
             min_delay_nanos: 7,
         },
         TableRange::new(0, 2),
+        Some(BindingSlotIndex::new(5)),
     )];
     static PORTS: [PortImage; 2] = [
-        PortImage::new(ScopeIndex::new(0), TableRange::new(2, 1)),
-        PortImage::new(ScopeIndex::new(2), TableRange::new(3, 1)),
+        PortImage::new(
+            ScopeIndex::new(0),
+            TableRange::new(2, 1),
+            BindingSlotIndex::new(4),
+        ),
+        PortImage::new(
+            ScopeIndex::new(2),
+            TableRange::new(3, 1),
+            BindingSlotIndex::new(4),
+        ),
     ];
     static REACTIONS: [ReactionImage; 2] = [
         ReactionImage::new(
@@ -1653,11 +1731,13 @@ mod tests {
         10,
     )];
     static EMPTY_ROUTES: [RouteImage; 0] = [];
-    static REQUIRED_BINDINGS: [RequiredBindingImage; 4] = [
+    static REQUIRED_BINDINGS: [RequiredBindingImage; 6] = [
         RequiredBindingImage::new(IdentityRange::new(23, 11), BindingKind::Reaction),
         RequiredBindingImage::new(IdentityRange::new(34, 11), BindingKind::Reaction),
         RequiredBindingImage::new(IdentityRange::new(45, 8), BindingKind::StateInitializer),
         RequiredBindingImage::new(IdentityRange::new(53, 8), BindingKind::StateInitializer),
+        RequiredBindingImage::new(IdentityRange::new(15, 5), BindingKind::Port),
+        RequiredBindingImage::new(IdentityRange::new(16, 4), BindingKind::Action),
     ];
 
     static IMAGE: EnclaveImage<'static> = EnclaveImage {
@@ -1735,6 +1815,14 @@ mod tests {
         );
         assert_eq!(view.actions().len(), 1);
         assert_eq!(
+            view.actions()[ActionIndex::new(0)].binding(),
+            Some(BindingSlotIndex::new(5))
+        );
+        assert_eq!(
+            view.ports()[PortIndex::new(0)].binding(),
+            BindingSlotIndex::new(4)
+        );
+        assert_eq!(
             view.actions()[ActionIndex::new(0)].timing(),
             ActionTiming::Standard {
                 domain: TimingDomain::Logical,
@@ -1792,7 +1880,8 @@ mod tests {
         assert_eq!(view.federates().len(), 1);
         let federate = view.federate(FederateIndex::new(0));
         assert_eq!(federate.id().as_str(), "host");
-        assert_eq!(federate.enclaves().count(), 2);
+        assert_eq!(federate.enclaves(), TableRange::new(0, 2));
+        assert_eq!(federate.enclave_views().count(), 2);
     }
 
     #[test]
@@ -1951,7 +2040,7 @@ mod tests {
         let view = CompiledDeploymentView::new(&image).unwrap();
         let second_ids = view
             .federate(FederateIndex::new(1))
-            .enclaves()
+            .enclave_views()
             .map(|enclave| enclave.enclave_id().as_str())
             .collect::<Vec<_>>();
         assert_eq!(second_ids, ["aaaaa/control", "aaaab/control"]);
@@ -2000,6 +2089,7 @@ mod tests {
                 ActionSlotIndex::new(0),
                 timing,
                 TableRange::new(0, 2),
+                matches!(timing, ActionTiming::Standard { .. }).then_some(BindingSlotIndex::new(5)),
             )];
             let image = EnclaveImage {
                 actions: TinyMapView::new(&actions),
@@ -2007,6 +2097,10 @@ mod tests {
             };
             let view = EnclaveImageView::new(&image).unwrap();
             assert_eq!(view.actions()[ActionIndex::new(0)].timing(), timing);
+            assert_eq!(
+                view.actions()[ActionIndex::new(0)].binding(),
+                matches!(timing, ActionTiming::Standard { .. }).then_some(BindingSlotIndex::new(5))
+            );
         }
     }
 
@@ -2030,6 +2124,7 @@ mod tests {
                 min_delay_nanos: 7,
             },
             TableRange::new(4, 1),
+            Some(BindingSlotIndex::new(5)),
         )];
         let cases = [
             (
@@ -2162,6 +2257,13 @@ mod tests {
     #[test]
     fn invalid_ownership_identity_and_storage_report_specific_errors() {
         let bad_modes = [ModeImage::new(ReactorIndex::new(1), ScopeIndex::new(1))];
+        let bad_mode_effect_reactions = [
+            REACTIONS[0],
+            REACTIONS[1].with_mode_effect(crate::CompiledModeEffectRef {
+                target: ModeIndex::new(0),
+                transition: crate::TransitionKind::Reset,
+            }),
+        ];
         let invalid_routes = [RouteImage::new(
             IdentityRange::new(13, 9),
             PortIndex::new(1),
@@ -2192,6 +2294,8 @@ mod tests {
             RequiredBindingImage::new(IdentityRange::new(13, 4), BindingKind::Reaction),
             RequiredBindingImage::new(IdentityRange::new(17, 8), BindingKind::StateInitializer),
             RequiredBindingImage::new(IdentityRange::new(25, 8), BindingKind::StateInitializer),
+            RequiredBindingImage::new(IdentityRange::new(18, 7), BindingKind::Port),
+            RequiredBindingImage::new(IdentityRange::new(9, 4), BindingKind::Action),
         ];
         let duplicate_binding_identity_data = "plant/controlsamestate/r0state/r1";
         let invalid_bank_reactors = [
@@ -2216,6 +2320,18 @@ mod tests {
                     table: "modes",
                     index: 0,
                     field: "scope.reactor",
+                },
+            ),
+            (
+                "mode effect ownership",
+                EnclaveImage {
+                    reactions: TinyMapView::new(&bad_mode_effect_reactions),
+                    ..IMAGE
+                },
+                ImageValidationError::OwnershipMismatch {
+                    table: "reactions",
+                    index: 1,
+                    field: "mode_effect.target.reactor",
                 },
             ),
             (
@@ -2292,5 +2408,48 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn enclave_image_requires_a_root_reactor() {
+        let image = EnclaveImage {
+            identity_data: "rootless",
+            enclave_id: IdentityRange::new(0, 8),
+            reactors: TinyMapView::new(&[]),
+            actions: TinyMapView::new(&[]),
+            ports: TinyMapView::new(&[]),
+            reactions: TinyMapView::new(&[]),
+            modes: TinyMapView::new(&[]),
+            scopes: TinyMapView::new(&[]),
+            reaction_triggers: &[],
+            reaction_use_ports: &[],
+            reaction_effect_ports: &[],
+            reaction_actions: &[],
+            reaction_modes: &[],
+            scope_descendants: &[],
+            scope_logical_actions: &[],
+            scope_timer_startups: &[],
+            scope_reset_reactions: &[],
+            scope_startup_reactions: &[],
+            scope_shutdown_reactions: &[],
+            startup_actions: &[],
+            timer_startup_actions: &[],
+            shutdown_reactions: &[],
+            shutdown_actions: &[],
+            routes: TinyMapView::new(&[]),
+            required_bindings: TinyMapView::new(&[]),
+            storage_bounds: StorageBounds::new(0, 0, 0, 0, 0, 0),
+        };
+
+        assert_eq!(
+            EnclaveImageView::new(&image).unwrap_err(),
+            ImageValidationError::ReferenceOutOfBounds {
+                table: "image",
+                index: 0,
+                field: "root_reactor",
+                target: "reactors",
+                referenced: 0,
+            }
+        );
     }
 }

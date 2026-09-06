@@ -39,6 +39,9 @@ jobs:
       - name: toolchain version
         run: cargo -vV
 
+      - name: prime generated-workspace dependency cache
+        run: cargo fetch
+
       - name: test cargo-boomerang toolchain
         run: >-
           cargo test -p cargo-boomerang --test toolchain --

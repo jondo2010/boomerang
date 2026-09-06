@@ -414,7 +414,7 @@ GitHub milestone.
 - Add the explicit recovery, boundary-failure, transport, codec, timing, and security policy schema;
   unsupported behaviors may remain compile-time errors.
 - Preserve the federated-reactors research brief in the repository as provenance and translate its
-  normative concepts into protocol conformance requirements.
+  relevant semantic concepts into explicit Boomerang protocol conformance requirements.
 - Remove legacy `RuntimeAssembly` federation construction, `PendingFederation`, the runtime bridge,
   static runner, and public `execute_federation_*` entry points.
 - Make Federate structure unconditional.

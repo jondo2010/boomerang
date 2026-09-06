@@ -324,3 +324,48 @@ fn panic_payload_message(payload: Box<dyn std::any::Any + Send + 'static>) -> St
         },
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    use super::*;
+
+    #[test]
+    fn foxglove_recording_preserves_replay_metadata_and_payload() {
+        let writer = foxglove::McapWriter::new()
+            .create(Cursor::new(Vec::new()))
+            .expect("create in-memory MCAP writer");
+        let recorder =
+            RecorderFn::<u32>::new("replay-compat", EnclaveKey::from(1), ActionKey::from(2))
+                .expect("create recorder");
+
+        recorder.channel.log_with_meta(
+            EncodeWrapper::new(&7),
+            foxglove::PartialMetadata { log_time: Some(42) },
+        );
+        let bytes = writer.close().expect("close MCAP writer").into_inner();
+
+        let summary = mcap::Summary::read(&bytes)
+            .expect("read MCAP summary")
+            .expect("MCAP summary is present");
+        let channel = summary.channels.values().next().expect("recorded channel");
+        assert_eq!(channel.topic, "replay-compat");
+        assert_eq!(
+            channel.metadata.get(ENCLAVE).map(String::as_str),
+            Some("EnclaveKey(1)")
+        );
+        assert_eq!(
+            channel.metadata.get(ACTION).map(String::as_str),
+            Some("ActionKey(2)")
+        );
+
+        let messages = mcap::MessageStream::new(&bytes)
+            .expect("create MCAP message stream")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("read MCAP messages");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].log_time, 42);
+        assert_eq!(messages[0].data.as_ref(), b"7");
+    }
+}

@@ -140,6 +140,7 @@ pub(crate) fn run_resolved_descriptor_driver(
             validate_generated_graph(resolved, &metadata)
         },
     )?;
+    let host_target = target_lexicon::HOST.to_string();
     let (execution, executable, compiled_artifacts) = generated.with_locked_target(|target| {
         let build = cargo(
             &cargo_program,
@@ -153,6 +154,8 @@ pub(crate) fn run_resolved_descriptor_driver(
                 generated.manifest_path().as_os_str(),
                 OsStr::new("--target-dir"),
                 target.as_os_str(),
+                OsStr::new("--target"),
+                OsStr::new(&host_target),
             ],
             output,
         )?;

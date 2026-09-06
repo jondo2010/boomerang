@@ -162,6 +162,43 @@ fn run_forwards_application_streams_without_reframing() {
 }
 
 #[test]
+fn implicit_host_run_overrides_ambient_cargo_build_target() {
+    let _guard = support::toolchain_lock();
+    let target = support::toolchain_target();
+    support::reset_deployment_output(&target, "production");
+    let output = run_cli(
+        "production",
+        &[("CARGO_BUILD_TARGET", "invalid-boomerang-test-target")],
+    );
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "sensor received command 42\n"
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    support::assert_progress_phases(
+        &stderr,
+        &[
+            "Analyzing",
+            "Generating",
+            "Building",
+            "Validating",
+            "Generating",
+            "Building",
+            "Bundling",
+            "Publishing",
+            "Validating",
+            "Running",
+        ],
+    );
+}
+
+#[test]
 fn generated_launcher_honors_rust_log_trace() {
     let _guard = support::toolchain_lock();
     let target = support::toolchain_target();

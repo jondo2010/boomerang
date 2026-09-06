@@ -35,6 +35,7 @@ pub struct GeneratedLauncher {
     application_workspace: PathBuf,
     /// Cargo executable snapshotted for the complete generated-launcher request.
     cargo_program: OsString,
+    /// Cargo output policy forwarded to generated launcher commands.
     output: crate::CommandOutput,
     /// Exact generated root package selected by locked Cargo metadata.
     package_id: PackageId,
@@ -99,8 +100,11 @@ impl ConfiguredFiles {
 ///
 /// The executable is copied into an invocation-private directory before the cache lock is released.
 pub struct BuiltLauncher {
+    /// Keeps the copied executable directory alive for the caller's use.
     _private_directory: tempfile::TempDir,
+    /// Invocation-private path to the verified generated executable.
     executable_path: PathBuf,
+    /// Number of non-fresh Cargo compiler artifacts emitted by the build.
     compiled_artifacts: usize,
 }
 
@@ -250,6 +254,11 @@ impl GeneratedLauncher {
             ]);
         } else if let Some(target) = &self.federate.target {
             arguments.extend([OsString::from("--target"), OsString::from(target)]);
+        } else {
+            arguments.extend([
+                OsString::from("--target"),
+                OsString::from(target_lexicon::HOST.to_string()),
+            ]);
         }
         if let Some(profile) = &self.federate.profile {
             arguments.extend([OsString::from("--profile"), OsString::from(profile)]);
@@ -500,7 +509,13 @@ fn launcher_request_identity(
         identity.field("compile-input-key", Some(key.as_bytes()));
         identity.field("compile-input-value", Some(value.as_bytes()));
     }
-    identity.field("target", federate.target.as_deref().map(str::as_bytes));
+    let effective_target = federate.target_json.is_none().then(|| {
+        federate
+            .target
+            .clone()
+            .unwrap_or_else(|| target_lexicon::HOST.to_string())
+    });
+    identity.field("target", effective_target.as_deref().map(str::as_bytes));
     identity.field("profile", federate.profile.as_deref().map(str::as_bytes));
     identity.field(
         "toolchain",
@@ -893,6 +908,37 @@ mod tests {
         assert_ne!(
             first,
             identity(target_a.path(), config_a.path(), "custom-cargo")
+        );
+    }
+
+    #[test]
+    fn launcher_request_identity_normalizes_an_implicit_host_target() {
+        let identity = |target: Option<String>| {
+            let federate = ResolvedFederate {
+                groups: Vec::new(),
+                target,
+                toolchain: None,
+                profile: None,
+                runtime: String::from("std"),
+                target_json: None,
+                cargo_config: None,
+            };
+            let configured_files = ConfiguredFiles::new(&federate).unwrap();
+            launcher_request_identity(
+                b"manifest",
+                b"source",
+                &[7; 32],
+                &[],
+                &federate,
+                &configured_files,
+                OsStr::new("cargo"),
+            )
+            .unwrap()
+        };
+
+        assert_eq!(
+            identity(None),
+            identity(Some(target_lexicon::HOST.to_string()))
         );
     }
 

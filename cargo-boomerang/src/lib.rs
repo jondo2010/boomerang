@@ -17,8 +17,9 @@ pub use check::{check, check_with_output};
 pub use codegen::{generate_launcher, BuiltLauncher, GeneratedLauncher};
 pub use driver::{run_descriptor_driver, DriverOutput};
 pub use manifest::{
-    load_manifest, parse_manifest, Binding, Coordination, CoordinationBackend, Deployment,
-    ExecutionPolicy, Federate, Manifest, Rti, Topology,
+    load_manifest, parse_manifest, Binding, Boundary, BoundaryFailurePolicy, CodecPolicy,
+    Coordination, CoordinationBackend, Deployment, ExecutionPolicy, Federate, Manifest,
+    RecoveryPolicy, Rti, SecurityPolicy, TimingPolicy, Topology, TransportPolicy,
 };
 pub use output::{ColorChoice, CommandOutput};
 pub use run::{run, run_with_output, ExecutionStats, ExecutionSummary, RunOutcome};

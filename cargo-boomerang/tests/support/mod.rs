@@ -8,8 +8,8 @@ use std::{
 
 use boomerang_builder::compiler::{
     lower, CoordinationBackendId, CoordinationSelection, FederateConfig, FederateId,
-    ImplementationBinding, PlacementAssignment, PlacementGroupId, ResolvedDeployment,
-    RuntimeBackendId, TargetTriple,
+    ImplementationBinding, PlacementAssignment, PlacementGroupId, RecoveryPolicyId,
+    ResolvedDeployment, RuntimeBackendId, TargetTriple,
 };
 use boomerang_runtime::{
     execute_owned_federate,
@@ -134,6 +134,7 @@ pub fn owned_reference_summary(deployment_name: &str) -> Value {
                 FederateId::new(id.as_str())?,
                 TargetTriple::new(target)?,
                 RuntimeBackendId::new(config.runtime.as_str())?,
+                RecoveryPolicyId::new(config.recovery.as_str())?,
             ))
         })
         .collect::<anyhow::Result<Vec<_>>>()

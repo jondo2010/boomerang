@@ -1,17 +1,21 @@
+use super::coordination::project_central_rti;
 use super::identity::canonical_identity_text;
 use super::{
-    GlobalFederationImage, OwnedCompiledDeployment, OwnedEnclaveImage, OwnedFederateImage,
-    RequiredBinding, RequiredBindings, ResolvedDeployment,
+    federation::{
+        analyze_federation_graph, AnalyzedFederationGraph, FederationDelay, FederationEdge,
+    },
+    GlobalFederationImage, OwnedCompiledDeployment, OwnedCoordinationProjection, OwnedEnclaveImage,
+    OwnedFederateImage, RequiredBinding, RequiredBindings, ResolvedDeployment,
 };
 use crate::{
     descriptor::{ActionSlotId, DescriptorBound, PortSlotId, ReactionSlotId, ReactorSlotId},
     runtime::image::{
         ActionImage, ActionIndex, ActionSlotIndex, ActionTiming, BindingSlotIndex,
-        CompiledDeploymentImage, CompiledDeploymentView, CoordinationProjection, EnclaveIndex,
-        FederateImage, FederateIndex, IdentityRange, LevelReactionImage, LifecycleReactionImage,
-        ModeImage, ModeIndex, PortImage, PortIndex, ReactionImage, ReactionIndex, ReactorImage,
-        ReactorIndex, RequiredBindingImage, RouteDirection, RouteImage, ScopeImage, ScopeIndex,
-        StateSlotIndex, StorageBounds, TableRange, TimerStartupImage, TimingDomain,
+        CompiledDeploymentImage, CompiledDeploymentView, EnclaveIndex, FederateImage,
+        FederateIndex, IdentityRange, LevelReactionImage, LifecycleReactionImage, ModeImage,
+        ModeIndex, PortImage, PortIndex, ReactionImage, ReactionIndex, ReactorImage, ReactorIndex,
+        RequiredBindingImage, RouteDirection, RouteImage, ScopeImage, ScopeIndex, StateSlotIndex,
+        StorageBounds, TableRange, TimerStartupImage, TimingDomain,
     },
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -22,6 +26,34 @@ pub enum CompileError {
     /// This slice cannot project a distributed coordination backend.
     #[error("distributed coordination projection is not implemented")]
     UnsupportedCoordination,
+    /// A physical connection crosses Federates before physical-time coordination is defined.
+    #[error("cross-Federate physical connection '{boundary}' is unsupported")]
+    UnsupportedPhysicalFederation {
+        /// Stable boundary reserved for a later physical-time slice.
+        boundary: super::BoundaryId,
+    },
+    /// Backend-neutral federation analysis rejected the resolved deployment graph.
+    #[error(transparent)]
+    FederationAnalysis(#[from] super::federation::FederationAnalysisError),
+    /// The analyzed federation cannot be represented by the selected coordination image.
+    #[error(transparent)]
+    CoordinationProjection(#[from] super::CoordinationProjectionError),
+    /// A policy identity is well formed but absent from the roadmap vocabulary.
+    #[error("unknown {category} policy '{selection}'")]
+    UnknownPolicy {
+        /// Policy category being selected.
+        category: &'static str,
+        /// Unrecognized stable policy identity.
+        selection: String,
+    },
+    /// A known roadmap policy is not supported by this compiler slice.
+    #[error("unsupported {category} policy '{selection}'")]
+    UnsupportedPolicy {
+        /// Policy category being selected.
+        category: &'static str,
+        /// Known but unavailable stable policy identity.
+        selection: String,
+    },
     /// A reaction requests a mode transition that the compiled image cannot yet represent.
     #[error("reaction {reaction} requests an unsupported compiled mode transition")]
     UnsupportedModeTransition {
@@ -114,6 +146,8 @@ pub enum CompileError {
 
 /// Canonical deployment-wide facts computed before image slicing.
 struct GlobalAnalysis {
+    /// Canonical backend-neutral federation facts projected by coordination adapters.
+    federation: AnalyzedFederationGraph,
     /// Smallest stable port identity representing each zero-delay local equivalence class.
     port_representatives: BTreeMap<super::PortId, super::PortId>,
     /// Longest-predecessor dependency level for every reaction.
@@ -275,65 +309,127 @@ impl<'a> DescriptorSlots<'a> {
     }
 }
 
-/// Lowers a resolved local deployment into canonical immutable compiled images.
+/// Lowers a resolved deployment into canonical immutable compiled images.
 pub fn lower(deployment: &ResolvedDeployment) -> Result<OwnedCompiledDeployment, CompileError> {
-    if !matches!(
-        deployment.coordination(),
-        super::CoordinationSelection::Local
-    ) {
-        return Err(CompileError::UnsupportedCoordination);
-    }
-    let mut federates = deployment.federates();
-    let federate = federates
-        .next()
-        .expect("resolved local deployment has one Federate");
-    if federates.next().is_some() {
-        return Err(CompileError::UnsupportedCoordination);
-    }
+    validate_policies(deployment)?;
     let analysis = analyze(deployment)?;
-    let mut enclaves = deployment
-        .topology()
-        .enclaves()
-        .filter(|(_, enclave)| {
-            let root = deployment
-                .topology()
-                .reactor(enclave.root())
-                .expect("validated Enclave root exists");
-            let group = root
-                .placement_group()
-                .expect("resolved Enclave root is placed");
-            deployment
-                .placement(group)
-                .expect("resolved placement group is assigned")
-                .federate()
-                == federate.id()
-        })
-        .collect::<Vec<_>>();
-    sort_by_encoded_identity(&mut enclaves);
-    let enclaves = enclaves
+    let mut federates = deployment.federates().collect::<Vec<_>>();
+    federates.sort_by_cached_key(|federate| canonical_identity_text(federate.id()));
+    let members = analysis.federation.members().to_vec().into_boxed_slice();
+    let federation_edges = analysis.federation.edges().to_vec().into_boxed_slice();
+    let federates = federates
         .into_iter()
-        .map(|(id, _)| lower_enclave(deployment, id, &analysis))
-        .collect::<Result<Box<[_]>, _>>()?;
-    let owned_federate = OwnedFederateImage {
-        id: federate.id().clone(),
-        target: federate.target().clone(),
-        runtime: federate.runtime().clone(),
-        enclaves,
-    };
+        .map(|federate| {
+            let mut enclaves = deployment
+                .topology()
+                .enclaves()
+                .filter(|(_, enclave)| {
+                    let root = deployment
+                        .topology()
+                        .reactor(enclave.root())
+                        .expect("validated Enclave root exists");
+                    let group = root
+                        .placement_group()
+                        .expect("resolved Enclave root is placed");
+                    deployment
+                        .placement(group)
+                        .expect("resolved placement group is assigned")
+                        .federate()
+                        == federate.id()
+                })
+                .collect::<Vec<_>>();
+            sort_by_encoded_identity(&mut enclaves);
+            let enclaves = enclaves
+                .into_iter()
+                .map(|(id, _)| lower_enclave(deployment, id, &analysis))
+                .collect::<Result<Box<[_]>, _>>()?;
+            Ok(OwnedFederateImage {
+                id: federate.id().clone(),
+                target: federate.target().clone(),
+                runtime: federate.runtime().clone(),
+                enclaves,
+            })
+        })
+        .collect::<Result<Box<[_]>, CompileError>>()?;
     let compiled = OwnedCompiledDeployment {
         federation: GlobalFederationImage {
-            members: vec![federate.id().clone()].into_boxed_slice(),
+            members,
+            edges: federation_edges,
         },
-        federates: vec![owned_federate].into_boxed_slice(),
-        coordination: CoordinationProjection::Local,
+        federates,
+        coordination: match deployment.coordination() {
+            super::CoordinationSelection::Local => OwnedCoordinationProjection::Local,
+            super::CoordinationSelection::Distributed { backend }
+                if matches!(backend.as_str(), "central-rti" | "rti") =>
+            {
+                OwnedCoordinationProjection::CentralRti(Box::new(project_central_rti(
+                    &analysis.federation,
+                    deployment,
+                )?))
+            }
+            super::CoordinationSelection::Distributed { .. } => {
+                return Err(CompileError::UnsupportedCoordination);
+            }
+        },
     };
     validate_root_image(&compiled)?;
     Ok(compiled)
 }
 
+/// Fails closed on unknown or not-yet-supported roadmap policy selections.
+#[rustfmt::skip]
+fn validate_policies(deployment: &ResolvedDeployment) -> Result<(), CompileError> {
+    macro_rules! check { ($category:literal, $selection:expr, $supported:literal, [$($known:literal),+ $(,)?]) => {
+        validate_policy($category, $selection, &[$($known),+], $supported)?
+    }; }
+    for federate in deployment.federates() {
+        check!("recovery", federate.recovery().as_str(), "fail-stop", ["fail-stop", "restart-reset", "transient-rejoin", "redundant-failover", "application-state-transfer", "checkpoint-restore"]);
+    }
+    for boundary in deployment.boundary_bindings() {
+        let policies = boundary.policies();
+        check!("boundary-failure", policies.failure().as_str(), "propagate-stop", ["propagate-stop", "produce-absence", "bounded-safe-value", "enter-degraded-mode", "switch-to-standby"]);
+        check!("transport", policies.transport().as_str(), "reliable-ordered-framed", ["reliable-ordered-framed"]);
+        check!("codec", policies.codec().as_str(), "canonical-bounded", ["canonical-bounded"]);
+        check!("timing", policies.timing().as_str(), "best-effort", ["hard-bound", "soft-target", "best-effort"]);
+        check!("security", policies.security().as_str(), "none", ["none", "integrity-only", "authenticated", "authenticated-encrypted"]);
+    }
+    Ok(())
+}
+
+/// Validates one stable selection against known and currently supported vocabularies.
+fn validate_policy(
+    category: &'static str,
+    selection: &str,
+    known: &[&str],
+    supported: &str,
+) -> Result<(), CompileError> {
+    if !known.contains(&selection) {
+        return Err(CompileError::UnknownPolicy {
+            category,
+            selection: selection.to_owned(),
+        });
+    }
+    if selection != supported {
+        return Err(CompileError::UnsupportedPolicy {
+            category,
+            selection: selection.to_owned(),
+        });
+    }
+    Ok(())
+}
+
 /// Computes canonical port equivalence and reaction levels over the complete deployment.
 fn analyze(deployment: &ResolvedDeployment) -> Result<GlobalAnalysis, CompileError> {
     let topology = deployment.topology();
+    let federation = analyze_federation_graph(
+        deployment.federates().map(|federate| federate.id().clone()),
+        topology
+            .connections()
+            .map(|(_, connection)| federation_edge(deployment, connection))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten(),
+    )?;
     let port_representatives = canonical_port_representatives(topology);
     let mut levels = BTreeMap::new();
     for (enclave, _) in topology.enclaves() {
@@ -353,9 +449,52 @@ fn analyze(deployment: &ResolvedDeployment) -> Result<GlobalAnalysis, CompileErr
         )?);
     }
     Ok(GlobalAnalysis {
+        federation,
         port_representatives,
         reaction_levels: levels,
     })
+}
+
+/// Resolves one cross-Federate connection into a backend-neutral graph edge.
+fn federation_edge(
+    deployment: &ResolvedDeployment,
+    connection: &super::Connection,
+) -> Result<Option<FederationEdge>, CompileError> {
+    let topology = deployment.topology();
+    let owner = |port: &super::PortId| {
+        let reactor = topology
+            .port(port)
+            .and_then(|port| topology.reactor(port.reactor()))?;
+        let enclave = topology.enclave(reactor.enclave())?;
+        let group = topology.reactor(enclave.root())?.placement_group()?;
+        Some(deployment.placement(group)?.federate())
+    };
+    let Some(source) = owner(connection.source()) else {
+        return Ok(None);
+    };
+    let Some(target) = owner(connection.target()) else {
+        return Ok(None);
+    };
+    if source == target {
+        return Ok(None);
+    }
+    let after = match connection.semantics() {
+        super::ConnectionSemantics::Logical { after } => after,
+        super::ConnectionSemantics::Physical { .. } => {
+            return Err(CompileError::UnsupportedPhysicalFederation {
+                boundary: connection.id().clone(),
+            });
+        }
+    };
+    let Ok(delay) = u64::try_from(after.map_or(0, |delay| delay.whole_nanoseconds())) else {
+        return Ok(None);
+    };
+    Ok(Some(FederationEdge::new(
+        source.clone(),
+        target.clone(),
+        connection.id().clone(),
+        FederationDelay::from_nanos(delay),
+    )))
 }
 
 /// Lowers one canonically ordered Enclave slice using deployment-wide analysis.
@@ -1432,6 +1571,7 @@ fn validate_root_image(compiled: &OwnedCompiledDeployment) -> Result<(), Compile
     };
     let mut federates = Vec::new();
     let mut enclave_images = Vec::new();
+    let mut federation_edges = Vec::new();
     for federate in &compiled.federates {
         let id = push_root_identity(federate.id.as_str())?;
         let target = push_root_identity(federate.target.as_str())?;
@@ -1452,13 +1592,32 @@ fn validate_root_image(compiled: &OwnedCompiledDeployment) -> Result<(), Compile
         .map(|index| checked_root(index).map(FederateIndex::new))
         .collect::<Result<Vec<_>, CompileError>>()?;
     checked_root(enclave_images.len())?;
-    let federation = crate::runtime::image::GlobalFederationImage::new(&members, &[]);
+    for edge in compiled.federation.edges() {
+        let boundary = push_root_identity(&edge.id().to_string())?;
+        let source = compiled
+            .federation
+            .members()
+            .binary_search(edge.source())
+            .expect("analyzed edge source is a member");
+        let target = compiled
+            .federation
+            .members()
+            .binary_search(edge.target())
+            .expect("analyzed edge target is a member");
+        federation_edges.push(crate::runtime::image::FederationEdgeImage::new(
+            boundary,
+            FederateIndex::new(checked_root(source)?),
+            FederateIndex::new(checked_root(target)?),
+            edge.delay().as_nanos(),
+        ));
+    }
+    let federation = crate::runtime::image::GlobalFederationImage::new(&members, &federation_edges);
     let image = CompiledDeploymentImage {
         identity_data: &identity_data,
         federation,
         federates: tinymap::TinyMapView::new(&federates),
         enclaves: tinymap::TinyMapView::new(&enclave_images),
-        coordination: compiled.coordination,
+        coordination: compiled.coordination.image(),
     };
     CompiledDeploymentView::new(&image).map_err(|error| CompileError::InvalidDeployment {
         message: error.to_string(),
@@ -1471,13 +1630,16 @@ mod tests {
     use crate::{
         compiler::{
             ActionId, ActionKind, ApplicationTopology, ApplicationTopologyBuilder, BankMember,
-            BoundaryBinding, BoundaryId, CodecCapabilityId, ComponentInstance, ComponentInstanceId,
+            BoundaryBinding, BoundaryFailurePolicyId, BoundaryId, BoundaryPolicies,
+            CodecCapabilityId, CodecPolicyId, ComponentInstance, ComponentInstanceId,
             ConnectionSemantics, CoordinationBackendId, CoordinationSelection, FederateConfig,
-            FederateId, ImplementationBinding, ImplementationId, ModeId, ModeTransition,
-            ModeTransitionKind, PlacementAssignment, PlacementGroupId, PortDirection, PortId,
+            FederateId, FlowId, ImplementationBinding, ImplementationId, ModeId, ModeTransition,
+            ModeTransitionKind, OwnedCompiledDeployment, PhysicalBoundaryId,
+            PhysicalBoundaryMetadata, PlacementAssignment, PlacementGroupId, PortDirection, PortId,
             ReactionId, ReactionOptions, ReactionRelation, ReactionRelationFlags,
-            ReactionRelationTarget, Reactor, ReactorId, RequiredBinding, ResolvedDeployment,
-            RuntimeBackendId, StableEnclaveId, TargetTriple, TransportCapabilityId,
+            ReactionRelationTarget, Reactor, ReactorId, RecoveryPolicyId, RequiredBinding,
+            ResolvedDeployment, RuntimeBackendId, SecurityPolicyId, StableEnclaveId, TargetTriple,
+            TimingPolicyId, TransportCapabilityId, TransportPolicyId,
         },
         descriptor::{
             ActionSlot, ActionSlotId, ComponentDescriptor, DescriptorBound, DescriptorBounds,
@@ -1485,8 +1647,9 @@ mod tests {
             COMPONENT_DESCRIPTOR_MACRO_ABI,
         },
         runtime::image::{
-            ActionIndex, ActionTiming, BindingKind, ModeIndex, ReactionIndex, ReactorIndex,
-            RouteDirection, RouteIndex, ScopeIndex, TimingDomain,
+            ActionIndex, ActionTiming, BindingKind, CoordinationProjection, FederateIndex,
+            ModeIndex, ReactionIndex, ReactorIndex, RouteDirection, RouteIndex, RtiImage,
+            ScopeIndex, TimingDomain,
         },
     };
     fn descriptor(contract: &str, bounds: DescriptorBounds) -> ComponentDescriptor {
@@ -1596,6 +1759,7 @@ mod tests {
         shared_enclave: bool,
         semantics: ConnectionSemantics,
         dependency_case: DependencyCase,
+        parallel: bool,
     ) -> ApplicationTopology {
         let mut topology = ApplicationTopologyBuilder::new("vehicle").unwrap();
         let controller = ComponentInstanceId::new("vehicle/controller").unwrap();
@@ -1756,12 +1920,27 @@ mod tests {
         }
         topology
             .add_connection(
-                BoundaryId::new("controller-to-sensor").unwrap(),
-                output,
-                input,
+                BoundaryId::new(if parallel {
+                    "route/-"
+                } else {
+                    "controller-to-sensor"
+                })
+                .unwrap(),
+                output.clone(),
+                input.clone(),
                 semantics,
             )
             .unwrap();
+        if parallel {
+            topology
+                .add_connection(
+                    BoundaryId::new("route/%2F").unwrap(),
+                    output,
+                    input,
+                    semantics,
+                )
+                .unwrap();
+        }
         let mut emit_relations = vec![
             ReactionRelation::new(
                 ReactionRelationTarget::Action(pulse.clone()),
@@ -1909,6 +2088,7 @@ mod tests {
             scratch_bytes: DescriptorBound::Known(64),
         }
     }
+    #[allow(clippy::too_many_arguments, reason = "shared lowering test fixture")]
     fn deployment_with_bounds(
         reverse: bool,
         distributed: bool,
@@ -1916,6 +2096,8 @@ mod tests {
         semantics: ConnectionSemantics,
         bounds: [DescriptorBounds; 2],
         dependency_case: DependencyCase,
+        recovery: &str,
+        parallel: bool,
     ) -> ResolvedDeployment {
         let mut bindings = vec![
             ImplementationBinding::new(
@@ -1943,6 +2125,7 @@ mod tests {
             FederateId::new("host").unwrap(),
             TargetTriple::new("x86_64-unknown-linux-gnu").unwrap(),
             RuntimeBackendId::new("native").unwrap(),
+            RecoveryPolicyId::new(recovery).unwrap(),
         )];
         let mut boundary_bindings = vec![];
         if distributed {
@@ -1950,12 +2133,35 @@ mod tests {
                 FederateId::new("edge").unwrap(),
                 TargetTriple::new("aarch64-unknown-none").unwrap(),
                 RuntimeBackendId::new("rtic").unwrap(),
+                RecoveryPolicyId::new("fail-stop").unwrap(),
             ));
-            boundary_bindings.push(BoundaryBinding::new(
-                BoundaryId::new("controller-to-sensor").unwrap(),
-                CodecCapabilityId::new("postcard").unwrap(),
-                TransportCapabilityId::new("udp").unwrap(),
-            ));
+            let boundary_binding = |boundary| {
+                BoundaryBinding::new(
+                    BoundaryId::new(boundary).unwrap(),
+                    FlowId::new("sensor-control").unwrap(),
+                    PhysicalBoundaryMetadata::new(
+                        Some(PhysicalBoundaryId::new("plant/z").unwrap()),
+                        Some(PhysicalBoundaryId::new("plant/#g1").unwrap()),
+                    ),
+                    CodecCapabilityId::new("postcard").unwrap(),
+                    TransportCapabilityId::new("udp").unwrap(),
+                    BoundaryPolicies::new(
+                        BoundaryFailurePolicyId::new("propagate-stop").unwrap(),
+                        TransportPolicyId::new("reliable-ordered-framed").unwrap(),
+                        CodecPolicyId::new("canonical-bounded").unwrap(),
+                        TimingPolicyId::new("best-effort").unwrap(),
+                        SecurityPolicyId::new("none").unwrap(),
+                    ),
+                )
+            };
+            boundary_bindings.push(boundary_binding(if parallel {
+                "route/-"
+            } else {
+                "controller-to-sensor"
+            }));
+            if parallel {
+                boundary_bindings.push(boundary_binding("route/%2F"));
+            }
         }
         if reverse {
             bindings.reverse();
@@ -1964,7 +2170,13 @@ mod tests {
             boundary_bindings.reverse();
         }
         ResolvedDeployment::new(
-            topology(reverse, shared_enclave, semantics, dependency_case),
+            topology(
+                reverse,
+                shared_enclave,
+                semantics,
+                dependency_case,
+                parallel,
+            ),
             bindings,
             placements,
             federates,
@@ -1987,6 +2199,8 @@ mod tests {
             ConnectionSemantics::Logical { after: None },
             [known_bounds(); 2],
             DependencyCase::None,
+            "fail-stop",
+            false,
         )
     }
     fn local_deployment(
@@ -2001,7 +2215,31 @@ mod tests {
             semantics,
             [known_bounds(); 2],
             dependency_case,
+            "fail-stop",
+            false,
         )
+    }
+    fn distributed_with(
+        semantics: ConnectionSemantics,
+        recovery: &str,
+        parallel: bool,
+    ) -> ResolvedDeployment {
+        deployment_with_bounds(
+            false,
+            true,
+            false,
+            semantics,
+            [known_bounds(); 2],
+            DependencyCase::None,
+            recovery,
+            parallel,
+        )
+    }
+    fn central_rti(compiled: &OwnedCompiledDeployment) -> RtiImage<'_> {
+        let CoordinationProjection::CentralRti(rti) = compiled.coordination() else {
+            panic!("distributed deployment must select the central RTI projection");
+        };
+        rti
     }
 
     fn shared_implementation_deployment(reverse: bool) -> ResolvedDeployment {
@@ -2037,6 +2275,7 @@ mod tests {
                 true,
                 ConnectionSemantics::Logical { after: None },
                 DependencyCase::None,
+                false,
             ),
             bindings,
             placements,
@@ -2044,6 +2283,7 @@ mod tests {
                 FederateId::new("host").unwrap(),
                 TargetTriple::new("x86_64-unknown-linux-gnu").unwrap(),
                 RuntimeBackendId::new("native").unwrap(),
+                RecoveryPolicyId::new("fail-stop").unwrap(),
             )],
             CoordinationSelection::Local,
             [],
@@ -2060,6 +2300,7 @@ mod tests {
                 false,
                 ConnectionSemantics::Logical { after: None },
                 DependencyCase::None,
+                false,
             ),
             [
                 ImplementationBinding::new(
@@ -2087,6 +2328,7 @@ mod tests {
                 FederateId::new("host").unwrap(),
                 TargetTriple::new("x86_64-unknown-linux-gnu").unwrap(),
                 RuntimeBackendId::new("native").unwrap(),
+                RecoveryPolicyId::new("fail-stop").unwrap(),
             )],
             CoordinationSelection::Local,
             [],
@@ -2240,9 +2482,163 @@ mod tests {
         }
     }
     #[test]
-    fn lowering_rejects_distributed_coordination_in_this_slice() {
-        let error = lower(&deployment(false, true)).unwrap_err();
-        assert!(matches!(error, CompileError::UnsupportedCoordination));
+    fn distributed_lowering_preserves_canonical_member_identities() {
+        let forward = lower(&deployment(false, true)).unwrap();
+        let reverse = lower(&deployment(true, true)).unwrap();
+        assert_eq!(forward, reverse);
+        assert_eq!(
+            forward
+                .federation()
+                .members()
+                .iter()
+                .map(FederateId::as_str)
+                .collect::<Vec<_>>(),
+            ["edge", "host"]
+        );
+    }
+
+    #[test]
+    fn central_rti_projection_uses_precomputed_dense_dependencies() {
+        let compiled = lower(&deployment(false, true)).unwrap();
+        let rti = central_rti(&compiled);
+        let edge = FederateIndex::new(0);
+        let host = FederateIndex::new(1);
+        assert_eq!(
+            rti.direct_incoming(edge)
+                .iter()
+                .map(|dependency| (dependency.source(), dependency.delay_nanos()))
+                .collect::<Vec<_>>(),
+            [(host, 0)]
+        );
+        assert_eq!(
+            rti.transitive_incoming(edge)
+                .iter()
+                .map(|dependency| (dependency.source(), dependency.delay_nanos()))
+                .collect::<Vec<_>>(),
+            [(host, 0)]
+        );
+        assert_eq!(rti.affected_downstream(host), [edge]);
+    }
+
+    #[test]
+    fn central_rti_projection_preserves_route_identity_and_delay() {
+        let compiled = lower(&distributed_with(
+            ConnectionSemantics::Logical {
+                after: Some(crate::runtime::Duration::milliseconds(5)),
+            },
+            "fail-stop",
+            false,
+        ))
+        .unwrap();
+        let rti = central_rti(&compiled);
+        let route = rti.routes()[0];
+        assert_eq!(rti.route_boundary(route), "controller-to-sensor");
+        assert_eq!(route.source(), FederateIndex::new(1));
+        assert_eq!(route.target(), FederateIndex::new(0));
+        assert_eq!(route.delay_nanos(), 5_000_000);
+    }
+
+    #[test]
+    fn backend_neutral_federation_remains_authoritative_after_projection() {
+        let compiled = lower(&deployment(false, true)).unwrap();
+        let edge = &compiled.federation().edges()[0];
+        assert_eq!(edge.id().to_string(), "controller-to-sensor");
+        assert_eq!(edge.source().as_str(), "host");
+        assert_eq!(edge.target().as_str(), "edge");
+        assert_eq!(edge.delay().as_nanos(), 0);
+    }
+
+    #[test]
+    fn central_rti_projection_preserves_flow_and_physical_boundary_identities() {
+        let compiled = lower(&distributed_with(
+            ConnectionSemantics::Logical { after: None },
+            "fail-stop",
+            false,
+        ))
+        .unwrap();
+        let rti = central_rti(&compiled);
+        let route = rti.routes()[0];
+        assert_eq!(rti.route_flow(route), "sensor-control");
+        assert_eq!(rti.route_physical_input(route), Some("plant/z"));
+        assert_eq!(rti.route_physical_output(route), Some("plant/#g1"));
+    }
+
+    #[rustfmt::skip]
+    #[test]
+    fn cross_federate_physical_connection_is_reserved_for_later_slices() {
+        let error = lower(&distributed_with(ConnectionSemantics::Physical { after: None }, "fail-stop", false)).unwrap_err();
+        assert_eq!(error.to_string(), "cross-Federate physical connection 'controller-to-sensor' is unsupported");
+    }
+
+    #[test]
+    fn one_flow_identity_may_span_parallel_boundary_identities() {
+        let compiled = lower(&distributed_with(
+            ConnectionSemantics::Logical { after: None },
+            "fail-stop",
+            true,
+        ))
+        .unwrap();
+        let rti = central_rti(&compiled);
+        assert_eq!(rti.flow_count(), 1);
+        assert_eq!(
+            rti.routes()
+                .iter()
+                .copied()
+                .map(|route| (rti.route_boundary(route), rti.route_flow(route)))
+                .collect::<Vec<_>>(),
+            [
+                ("route/%2F", "sensor-control"),
+                ("route/-", "sensor-control"),
+            ]
+        );
+    }
+
+    #[test]
+    fn central_rti_projection_preserves_dense_policy_and_capability_references() {
+        let compiled = lower(&deployment(false, true)).unwrap();
+        let rti = central_rti(&compiled);
+        let route = rti.routes()[0];
+        assert_eq!(
+            rti.member_recovery_policy(FederateIndex::new(1)),
+            "fail-stop"
+        );
+        assert_eq!(rti.route_failure_policy(route), "propagate-stop");
+        assert_eq!(rti.route_transport_policy(route), "reliable-ordered-framed");
+        assert_eq!(rti.route_codec_policy(route), "canonical-bounded");
+        assert_eq!(rti.route_timing_policy(route), "best-effort");
+        assert_eq!(rti.route_security_policy(route), "none");
+        assert_eq!(rti.route_transport_capability(route), "udp");
+        assert_eq!(rti.route_codec_capability(route), "postcard");
+    }
+
+    #[test]
+    fn unknown_policy_selection_fails_during_compilation() {
+        let error = lower(&distributed_with(
+            ConnectionSemantics::Logical { after: None },
+            "mystery-recovery",
+            false,
+        ))
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            CompileError::UnknownPolicy { category: "recovery", selection }
+                if selection == "mystery-recovery"
+        ));
+    }
+
+    #[test]
+    fn known_unsupported_policy_selection_fails_closed() {
+        let error = lower(&distributed_with(
+            ConnectionSemantics::Logical { after: None },
+            "restart-reset",
+            false,
+        ))
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            CompileError::UnsupportedPolicy { category: "recovery", selection }
+                if selection == "restart-reset"
+        ));
     }
     #[test]
     fn lowering_preserves_canonical_mode_transition_identity() {
@@ -2288,6 +2684,8 @@ mod tests {
                 ConnectionSemantics::Logical { after: None },
                 [bounds; 2],
                 DependencyCase::None,
+                "fail-stop",
+                false,
             ))
             .unwrap_err();
             assert!(matches!(
@@ -2328,6 +2726,8 @@ mod tests {
                 ConnectionSemantics::Logical { after: None },
                 bounds,
                 DependencyCase::None,
+                "fail-stop",
+                false,
             ))
             .unwrap_err();
             assert!(matches!(
@@ -2387,6 +2787,7 @@ mod tests {
                 FederateId::new("host").unwrap(),
                 TargetTriple::new("x86_64-unknown-linux-gnu").unwrap(),
                 RuntimeBackendId::new("native").unwrap(),
+                RecoveryPolicyId::new("fail-stop").unwrap(),
             )],
             CoordinationSelection::Local,
             [],

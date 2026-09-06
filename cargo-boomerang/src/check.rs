@@ -8,9 +8,12 @@ use std::{
 
 use anyhow::{Context, Result};
 use boomerang_builder::compiler::{
-    lower, CoordinationBackendId, CoordinationSelection, FederateConfig, FederateId,
-    ImplementationBinding, OwnedCompiledDeployment, PlacementAssignment, PlacementGroupId,
-    ResolvedDeployment, RuntimeBackendId, TargetTriple,
+    lower, BoundaryBinding, BoundaryFailurePolicyId, BoundaryId, BoundaryPolicies,
+    CodecCapabilityId, CodecPolicyId, CoordinationBackendId, CoordinationSelection, FederateConfig,
+    FederateId, FlowId, ImplementationBinding, OwnedCompiledDeployment, PhysicalBoundaryId,
+    PhysicalBoundaryMetadata, PlacementAssignment, PlacementGroupId, RecoveryPolicyId,
+    ResolvedDeployment, RuntimeBackendId, SecurityPolicyId, TargetTriple, TimingPolicyId,
+    TransportCapabilityId, TransportPolicyId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -123,6 +126,7 @@ fn build_resolved_deployment(
                 FederateId::new(id.as_str())?,
                 TargetTriple::new(target)?,
                 RuntimeBackendId::new(config.runtime.as_str())?,
+                RecoveryPolicyId::new(config.recovery.as_str())?,
             ))
         })
         .collect::<Result<Vec<_>>>()?;
@@ -135,6 +139,38 @@ fn build_resolved_deployment(
             })?,
         },
     };
+    let boundary_bindings = resolved
+        .deployment()
+        .boundaries
+        .iter()
+        .map(|(id, boundary)| {
+            Ok(BoundaryBinding::new(
+                BoundaryId::new(id)?,
+                FlowId::new(boundary.flow.as_str())?,
+                PhysicalBoundaryMetadata::new(
+                    boundary
+                        .physical_input
+                        .as_deref()
+                        .map(PhysicalBoundaryId::new)
+                        .transpose()?,
+                    boundary
+                        .physical_output
+                        .as_deref()
+                        .map(PhysicalBoundaryId::new)
+                        .transpose()?,
+                ),
+                CodecCapabilityId::new(boundary.codec.as_str())?,
+                TransportCapabilityId::new(boundary.transport.as_str())?,
+                BoundaryPolicies::new(
+                    BoundaryFailurePolicyId::new(boundary.failure_policy.as_str())?,
+                    TransportPolicyId::new(boundary.transport_policy.as_str())?,
+                    CodecPolicyId::new(boundary.codec_policy.as_str())?,
+                    TimingPolicyId::new(boundary.timing_policy.as_str())?,
+                    SecurityPolicyId::new(boundary.security_policy.as_str())?,
+                ),
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
 
     ResolvedDeployment::new(
         driver.topology().clone(),
@@ -142,7 +178,7 @@ fn build_resolved_deployment(
         placements,
         federates,
         coordination,
-        [],
+        boundary_bindings,
     )
     .context("failed to resolve deployment selections")
 }

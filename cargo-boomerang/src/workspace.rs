@@ -7,7 +7,9 @@ use std::{
 use anyhow::{anyhow, bail, Context, Result};
 use cargo_metadata::{Metadata, MetadataCommand, Package, PackageId};
 
-use crate::{load_manifest, Binding, CommandOutput, Deployment, Federate, Topology};
+use crate::{
+    load_manifest, Binding, CommandOutput, Deployment, Federate, RecoveryPolicy, Topology,
+};
 
 const DESCRIPTOR_FEATURE: &str = "__boomerang_descriptor";
 const PAYLOAD_FEATURE: &str = "__boomerang_payload";
@@ -42,6 +44,8 @@ pub struct ResolvedFederate {
     pub profile: Option<String>,
     /// Runtime backend required by the generated Federate.
     pub runtime: String,
+    /// Explicit recovery behavior selected for the Federate.
+    pub recovery: RecoveryPolicy,
     /// Workspace-relative target JSON resolved to an absolute path.
     pub target_json: Option<PathBuf>,
     /// Workspace-relative Cargo configuration resolved to an absolute path.
@@ -218,6 +222,7 @@ pub(crate) fn resolve_workspace_with_output(
             coordination: deployment.coordination.clone(),
             rti: deployment.rti.clone(),
             execution: deployment.execution.clone(),
+            boundaries: deployment.boundaries.clone(),
         },
         packages,
         host_builder,
@@ -397,6 +402,7 @@ fn resolve_federate(workspace_root: &Path, federate: &Federate) -> ResolvedFeder
         toolchain: federate.toolchain.clone(),
         profile: federate.profile.clone(),
         runtime: federate.runtime.clone(),
+        recovery: federate.recovery,
         target_json: resolve_optional_path(workspace_root, federate.target_json.as_deref()),
         cargo_config: resolve_optional_path(workspace_root, federate.cargo_config.as_deref()),
     }

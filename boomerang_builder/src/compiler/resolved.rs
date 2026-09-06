@@ -438,12 +438,14 @@ impl ResolvedDeployment {
 #[cfg(test)]
 mod tests {
     use crate::compiler::{
-        ApplicationTopology, ApplicationTopologyBuilder, BoundaryBinding, BoundaryId,
-        CodecCapabilityId, ComponentInstance, ComponentInstanceId, ConnectionSemantics, ContractId,
-        CoordinationBackendId, CoordinationSelection, FederateConfig, FederateId,
-        ImplementationBinding, ImplementationId, PlacementAssignment, PlacementGroupId,
-        PortDirection, PortId, Reactor, ReactorId, ResolveError, ResolvedDeployment,
-        RuntimeBackendId, StableEnclaveId, TargetTriple, TransportCapabilityId,
+        ApplicationTopology, ApplicationTopologyBuilder, BoundaryBinding, BoundaryFailurePolicyId,
+        BoundaryId, BoundaryPolicies, CodecCapabilityId, CodecPolicyId, ComponentInstance,
+        ComponentInstanceId, ConnectionSemantics, ContractId, CoordinationBackendId,
+        CoordinationSelection, FederateConfig, FederateId, FlowId, ImplementationBinding,
+        ImplementationId, PhysicalBoundaryMetadata, PlacementAssignment, PlacementGroupId,
+        PortDirection, PortId, Reactor, ReactorId, RecoveryPolicyId, ResolveError,
+        ResolvedDeployment, RuntimeBackendId, SecurityPolicyId, StableEnclaveId, TargetTriple,
+        TimingPolicyId, TransportCapabilityId, TransportPolicyId,
     };
     use crate::descriptor::{
         ComponentDescriptor, DescriptorBounds, COMPONENT_DESCRIPTOR_MACRO_ABI,
@@ -592,14 +594,24 @@ mod tests {
             FederateId::new(id).unwrap(),
             TargetTriple::new(target).unwrap(),
             RuntimeBackendId::new(runtime).unwrap(),
+            RecoveryPolicyId::new("fail-stop").unwrap(),
         )
     }
 
     fn boundary_binding(boundary: &str, codec: &str, transport: &str) -> BoundaryBinding {
         BoundaryBinding::new(
             BoundaryId::new(boundary).unwrap(),
+            FlowId::new("sensor-control").unwrap(),
+            PhysicalBoundaryMetadata::new(None, None),
             CodecCapabilityId::new(codec).unwrap(),
             TransportCapabilityId::new(transport).unwrap(),
+            BoundaryPolicies::new(
+                BoundaryFailurePolicyId::new("propagate-stop").unwrap(),
+                TransportPolicyId::new("reliable-ordered-framed").unwrap(),
+                CodecPolicyId::new("canonical-bounded").unwrap(),
+                TimingPolicyId::new("best-effort").unwrap(),
+                SecurityPolicyId::new("none").unwrap(),
+            ),
         )
     }
 

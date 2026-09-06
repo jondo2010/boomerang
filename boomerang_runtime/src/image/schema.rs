@@ -187,9 +187,15 @@ impl<'a> GlobalFederationImage<'a> {
 
 /// Selected immutable logical-time coordination projection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CoordinationProjection {
+#[allow(
+    clippy::large_enum_variant,
+    reason = "zero-allocation Copy image schema"
+)]
+pub enum CoordinationProjection<'a> {
     /// No distributed coordinator is required.
     Local,
+    /// A generated central RTI consumes the enclosed dense immutable image.
+    CentralRti(super::RtiImage<'a>),
 }
 
 /// An unchecked aggregate of one complete compiled deployment.
@@ -204,7 +210,7 @@ pub struct CompiledDeploymentImage<'a> {
     /// Federate-grouped Enclave scheduler images.
     pub enclaves: TinyMapView<'a, EnclaveIndex, EnclaveImage<'a>>,
     /// Selected backend-specific coordination projection.
-    pub coordination: CoordinationProjection,
+    pub coordination: CoordinationProjection<'a>,
 }
 
 /// An immutable reactor scheduler record.

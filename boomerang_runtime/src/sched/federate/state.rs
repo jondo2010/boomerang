@@ -1,4 +1,10 @@
-// The adapter that consumes this pure core is added in a later task.
+//! Pure lifecycle and logical-time coordination for one compiled Federate.
+//!
+//! The state machine aggregates scheduler candidates and completions by compiled [`EnclaveIndex`],
+//! advances revision-bound fixed-point phases, and latches terminal stop or failure without owning
+//! channels, clocks, scheduler storage, or a concrete coordination backend. A later adapter maps
+//! these semantic [`CoordinationAction`] values onto runtime operations.
+
 #![allow(dead_code)]
 
 use tinymap::TinySecondaryMap;
@@ -6,86 +12,167 @@ use tinymap::TinySecondaryMap;
 use super::{CoordinationRevision, FederateAcquisition, FederateCompletion, FederatePublication};
 use crate::{image::EnclaveIndex, Tag};
 
+/// Policy applied when every participant has published no next logical event.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum LifecyclePolicy {
+    /// Remain parked until a changed candidate resumes the Federate.
     KeepAlive,
+    /// Confirm a stable fixed point and stop the Federate.
     TerminateWhenIdle,
 }
 
+/// Current phase of the pure Federate coordination state machine.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CoordinationPhase {
+    /// At least one participant may still have logical work.
     Active,
+    /// Participants are confirming the candidate revision before parking.
     Probing,
+    /// Participants are entering their parked state.
     Parking,
+    /// Parked participants are checking the candidate revision again.
     Rechecking,
+    /// KeepAlive participants are unanimously idle and wakeable.
     Parked,
+    /// The Federate has committed stop or failure and accepts no more work.
     Stopped,
 }
 
+/// One participant's acknowledgement of a fixed-point phase.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Observation {
+    /// The participant confirmed the probed revision.
     Probed,
+    /// The participant entered its parked state.
     Parked,
+    /// The participant rechecked the unchanged revision while parked.
     Rechecked,
 }
 
+/// Scheduler-originated input to the pure coordination state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SchedulerMessage {
+    /// Publish one participant's optional next logical event.
     Publish {
+        /// Compiled participant reporting the candidate.
         enclave: EnclaveIndex,
+        /// Earliest pending event, or `None` when the participant is idle.
         next_event: Option<Tag>,
     },
+    /// Report the greatest logical tag completed by one participant.
     CompleteTag {
+        /// Compiled participant reporting completion.
         enclave: EnclaveIndex,
+        /// Monotonic participant completion tag.
         tag: Tag,
     },
+    /// Report that a participant has observed terminal stop.
     ParticipantStopped {
+        /// Compiled participant reporting stop.
         enclave: EnclaveIndex,
     },
+    /// Report a supervision failure with an optional typed participant origin.
     Failed {
+        /// Compiled origin when the failure belongs to a participant.
         enclave: Option<EnclaveIndex>,
     },
 }
 
+/// Semantic operation emitted by a pure coordination transition.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CoordinationAction {
-    Publish(FederatePublication),
-    Grant { enclave: EnclaveIndex, tag: Tag },
-    Complete(FederateCompletion),
-    Probe { revision: CoordinationRevision },
-    Park { revision: CoordinationRevision },
-    Recheck { revision: CoordinationRevision },
-    Resume { revision: CoordinationRevision },
+    /// Publish the Federate-wide optional next logical event.
+    Publish(
+        /// Aggregate publication for the current revision.
+        FederatePublication,
+    ),
+    /// Grant logical progress to a covered participant candidate.
+    Grant {
+        /// Compiled participant receiving the grant.
+        enclave: EnclaveIndex,
+        /// Candidate tag covered by the acquired Federate grant.
+        tag: Tag,
+    },
+    /// Publish a newly safe Federate-wide completion frontier.
+    Complete(
+        /// Aggregate monotonic completion frontier.
+        FederateCompletion,
+    ),
+    /// Ask every participant to confirm the candidate revision.
+    Probe {
+        /// Candidate revision being confirmed.
+        revision: CoordinationRevision,
+    },
+    /// Ask every probed participant to park at the revision.
+    Park {
+        /// Candidate revision being parked.
+        revision: CoordinationRevision,
+    },
+    /// Ask every parked participant to recheck the revision.
+    Recheck {
+        /// Candidate revision being rechecked.
+        revision: CoordinationRevision,
+    },
+    /// Resume participants after a changed candidate invalidates fixed-point work.
+    Resume {
+        /// New candidate revision that invalidated the fixed point.
+        revision: CoordinationRevision,
+    },
+    /// Stop the Federate after an unchanged fixed point or explicit request.
     Stop,
+    /// Abort the Federate after the first supervision failure.
     Abort,
 }
 
+/// Invalid construction or transition at the pure coordination boundary.
 #[derive(Debug, Eq, PartialEq, thiserror::Error)]
 pub(crate) enum CoordinationStateError {
+    /// Construction received no compiled participants.
     #[error("a Federate coordination state requires at least one compiled Enclave")]
     NoParticipants,
+    /// Construction received the same compiled participant more than once.
     #[error("compiled Enclave {enclave:?} occurs more than once in the Federate")]
-    DuplicateEnclave { enclave: EnclaveIndex },
+    DuplicateEnclave {
+        /// Repeated compiled participant identity.
+        enclave: EnclaveIndex,
+    },
+    /// A transition names an identity outside this compiled Federate.
     #[error("compiled Enclave {enclave:?} does not belong to the Federate")]
-    UnknownEnclave { enclave: EnclaveIndex },
+    UnknownEnclave {
+        /// Unrecognized compiled participant identity.
+        enclave: EnclaveIndex,
+    },
+    /// A current-revision acknowledgement is ahead of the active phase.
     #[error("observation {observation:?} is invalid while coordination is {phase:?}")]
     InvalidObservationTransition {
+        /// Phase that rejected the acknowledgement.
         phase: CoordinationPhase,
+        /// Out-of-order acknowledgement that was rejected.
         observation: Observation,
     },
+    /// A participant reported stop before coordination entered a terminal phase.
     #[error("compiled Enclave {enclave:?} stopped before Federate coordination became terminal")]
-    ParticipantStoppedBeforeTerminal { enclave: EnclaveIndex },
+    ParticipantStoppedBeforeTerminal {
+        /// Compiled participant that stopped prematurely.
+        enclave: EnclaveIndex,
+    },
 }
 
+/// Mutable candidate, completion, and observation state for one participant.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ParticipantState {
+    /// Most recently published optional next logical event.
     candidate: Option<Tag>,
+    /// Greatest logical completion tag reported by this participant.
     completed: Option<Tag>,
+    /// Whether the candidate participates in the current aggregate publication.
     published: bool,
+    /// Current phase acknowledgement, if this participant has supplied one.
     observation: Option<Observation>,
 }
 
 impl ParticipantState {
+    /// Creates an unpublished participant with no completion or observation.
     const fn new() -> Self {
         Self {
             candidate: None,
@@ -96,18 +183,27 @@ impl ParticipantState {
     }
 }
 
+/// Pure coordination state for every compiled participant in one Federate.
 #[derive(Debug)]
 pub(crate) struct FederateCoordinationState {
+    /// Sparse participant state keyed by original compiled identity.
     participants: TinySecondaryMap<EnclaveIndex, ParticipantState>,
+    /// Version of the current aggregate candidate.
     revision: CoordinationRevision,
+    /// Current publication awaiting acquisition, if any.
     pending_publication: Option<FederatePublication>,
+    /// Greatest completion frontier emitted for the whole Federate.
     completed_frontier: Option<Tag>,
+    /// Typed origin of the first failure when one was supplied.
     first_failure: Option<EnclaveIndex>,
+    /// Idle behavior selected by the runtime adapter.
     lifecycle: LifecyclePolicy,
+    /// Current active, fixed-point, or terminal phase.
     phase: CoordinationPhase,
 }
 
 impl FederateCoordinationState {
+    /// Constructs state for a non-empty set of unique compiled participant identities.
     pub(crate) fn new(
         enclaves: impl IntoIterator<Item = EnclaveIndex>,
         lifecycle: LifecyclePolicy,
@@ -136,33 +232,40 @@ impl FederateCoordinationState {
         })
     }
 
+    /// Returns the current aggregate candidate revision.
     pub(crate) const fn revision(&self) -> CoordinationRevision {
         self.revision
     }
 
+    /// Returns the current lifecycle or fixed-point phase.
     pub(crate) const fn phase(&self) -> CoordinationPhase {
         self.phase
     }
 
+    /// Returns whether stop or failure has made this state terminal.
     pub(crate) const fn is_stopped(&self) -> bool {
         matches!(self.phase, CoordinationPhase::Stopped)
     }
 
+    /// Returns the typed participant origin retained from the first failure.
     pub(crate) const fn first_failure(&self) -> Option<EnclaveIndex> {
         self.first_failure
     }
 
+    /// Returns a known participant's optional candidate, preserving unknown identity separately.
     pub(crate) fn candidate(&self, enclave: EnclaveIndex) -> Option<Option<Tag>> {
         self.participants
             .get(enclave)
             .map(|participant| participant.candidate)
     }
 
+    /// Returns the aggregate publication retained for acquisition assertions.
     #[cfg(test)]
     fn pending_publication(&self) -> Option<FederatePublication> {
         self.pending_publication
     }
 
+    /// Applies one scheduler-originated transition and returns its semantic actions.
     pub(crate) fn handle_scheduler(
         &mut self,
         message: SchedulerMessage,
@@ -185,6 +288,7 @@ impl FederateCoordinationState {
         }
     }
 
+    /// Applies an acquired Federate grant when it matches the current pending revision.
     pub(crate) fn handle_acquisition(
         &mut self,
         acquisition: FederateAcquisition,
@@ -225,6 +329,10 @@ impl FederateCoordinationState {
         Ok(actions)
     }
 
+    /// Applies one revision-bound participant acknowledgement.
+    ///
+    /// Stale and obsolete acknowledgements are harmless; future acknowledgements for the current
+    /// phase remain typed errors. A phase action is emitted only after every participant confirms.
     pub(crate) fn handle_observation(
         &mut self,
         enclave: EnclaveIndex,
@@ -233,6 +341,16 @@ impl FederateCoordinationState {
     ) -> Result<Vec<CoordinationAction>, CoordinationStateError> {
         self.participant(enclave)?;
         if self.is_stopped() || revision != self.revision {
+            return Ok(Vec::new());
+        }
+        if matches!(
+            (self.phase, observation),
+            (CoordinationPhase::Parking, Observation::Probed)
+                | (
+                    CoordinationPhase::Rechecking,
+                    Observation::Probed | Observation::Parked
+                )
+        ) {
             return Ok(Vec::new());
         }
 
@@ -285,6 +403,7 @@ impl FederateCoordinationState {
         Ok(vec![action])
     }
 
+    /// Enters terminal stop and emits `Stop` at most once.
     pub(crate) fn stop(&mut self) -> Vec<CoordinationAction> {
         if self.is_stopped() {
             return Vec::new();
@@ -294,6 +413,7 @@ impl FederateCoordinationState {
         vec![CoordinationAction::Stop]
     }
 
+    /// Resolves a compiled participant or returns an identity error without mutation.
     fn participant(
         &self,
         enclave: EnclaveIndex,
@@ -303,6 +423,7 @@ impl FederateCoordinationState {
             .ok_or(CoordinationStateError::UnknownEnclave { enclave })
     }
 
+    /// Advances and emits the monotonic minimum participant completion frontier.
     fn complete(
         &mut self,
         enclave: EnclaveIndex,
@@ -339,6 +460,7 @@ impl FederateCoordinationState {
         ))])
     }
 
+    /// Latches the first optional typed failure origin and emits `Abort` at most once.
     fn fail(
         &mut self,
         enclave: Option<EnclaveIndex>,
@@ -355,6 +477,7 @@ impl FederateCoordinationState {
         Ok(vec![CoordinationAction::Abort])
     }
 
+    /// Records a participant candidate and publishes when all candidates are available.
     fn publish(
         &mut self,
         enclave: EnclaveIndex,
@@ -420,17 +543,25 @@ impl FederateCoordinationState {
 
 #[cfg(test)]
 mod tests {
+    //! Focused invariant tests for the pure Federate coordination state.
+
     use super::*;
     use crate::{image::EnclaveIndex, Duration, Tag};
 
+    /// Observable candidate state captured alongside one transition's actions.
     #[derive(Debug, Eq, PartialEq)]
     struct CandidateSnapshot {
+        /// Aggregate candidate revision after the transition.
         revision: CoordinationRevision,
+        /// Requested participant candidates, including unknown identities.
         candidates: Vec<(EnclaveIndex, Option<Option<Tag>>)>,
+        /// Aggregate publication awaiting a current-revision acquisition.
         pending_publication: Option<FederatePublication>,
+        /// Literal semantic actions emitted by the transition.
         actions: Vec<CoordinationAction>,
     }
 
+    /// Captures candidate-facing state and the supplied transition actions.
     fn snapshot(
         state: &FederateCoordinationState,
         enclaves: impl IntoIterator<Item = EnclaveIndex>,
@@ -447,6 +578,7 @@ mod tests {
         }
     }
 
+    /// Verifies an acquisition grants only covered non-contiguous participant candidates.
     #[test]
     fn current_acquisition_grants_covered_candidates() {
         let first = EnclaveIndex::new(3);
@@ -535,6 +667,7 @@ mod tests {
         );
     }
 
+    /// Verifies a stale acquisition leaves current candidate state unchanged.
     #[test]
     fn stale_acquisition_is_ignored() {
         let enclave = EnclaveIndex::new(3);
@@ -584,6 +717,7 @@ mod tests {
         );
     }
 
+    /// Verifies only a changed candidate advances the aggregate revision.
     #[test]
     fn changed_publication_revises_candidate() {
         let enclave = EnclaveIndex::new(7);
@@ -632,28 +766,49 @@ mod tests {
         );
     }
 
+    /// Verifies unanimous idle emits the exact action sequence selected by lifecycle policy.
     #[test]
     fn all_idle_obeys_lifecycle_policy() {
-        // Mutation caught: route unanimous idle through the same phase for both policies.
-        let enclave = EnclaveIndex::new(3);
-        for (policy, expected_phase) in [
-            (LifecyclePolicy::KeepAlive, CoordinationPhase::Parked),
+        // Mutation caught: omit the Probe action or enter idle before every participant publishes.
+        let first = EnclaveIndex::new(3);
+        let second = EnclaveIndex::new(7);
+        let idle_revision = CoordinationRevision::new(0);
+        for (policy, expected_phase, expected_actions) in [
+            (
+                LifecyclePolicy::KeepAlive,
+                CoordinationPhase::Parked,
+                vec![CoordinationAction::Publish(FederatePublication::new(
+                    idle_revision,
+                    None,
+                ))],
+            ),
             (
                 LifecyclePolicy::TerminateWhenIdle,
                 CoordinationPhase::Probing,
+                vec![
+                    CoordinationAction::Publish(FederatePublication::new(idle_revision, None)),
+                    CoordinationAction::Probe {
+                        revision: idle_revision,
+                    },
+                ],
             ),
         ] {
-            let mut state = FederateCoordinationState::new([enclave], policy).unwrap();
+            let mut state = FederateCoordinationState::new([first, second], policy).unwrap();
+            assert!(state
+                .handle_scheduler(SchedulerMessage::Publish {
+                    enclave: first,
+                    next_event: None,
+                })
+                .unwrap()
+                .is_empty());
+            assert_eq!(state.phase(), CoordinationPhase::Active);
             let actions = state
                 .handle_scheduler(SchedulerMessage::Publish {
-                    enclave,
+                    enclave: second,
                     next_event: None,
                 })
                 .unwrap();
-            assert!(actions.iter().any(|action| matches!(
-                action,
-                CoordinationAction::Publish(publication) if publication.next_event().is_none()
-            )));
+            assert_eq!(actions, expected_actions);
             assert_eq!(state.phase(), expected_phase);
             assert!(!state.is_stopped());
 
@@ -663,7 +818,7 @@ mod tests {
                 assert_eq!(
                     state
                         .handle_scheduler(SchedulerMessage::Publish {
-                            enclave,
+                            enclave: first,
                             next_event: Some(wake_tag),
                         })
                         .unwrap(),
@@ -683,43 +838,92 @@ mod tests {
         }
     }
 
+    /// Verifies each fixed-point phase requires unanimous, idempotent acknowledgements.
     #[test]
     fn unchanged_fixed_point_commits_once() {
-        // Mutation caught: skip, reorder, or repeat a revision-bound fixed-point action.
-        let enclave = EnclaveIndex::new(3);
+        // Mutation caught: advance a phase before every participant confirms it.
+        let first = EnclaveIndex::new(3);
+        let second = EnclaveIndex::new(7);
         let mut state =
-            FederateCoordinationState::new([enclave], LifecyclePolicy::TerminateWhenIdle).unwrap();
+            FederateCoordinationState::new([first, second], LifecyclePolicy::TerminateWhenIdle)
+                .unwrap();
+        assert!(state
+            .handle_scheduler(SchedulerMessage::Publish {
+                enclave: first,
+                next_event: None,
+            })
+            .unwrap()
+            .is_empty());
         state
             .handle_scheduler(SchedulerMessage::Publish {
-                enclave,
+                enclave: second,
                 next_event: None,
             })
             .unwrap();
         let revision = state.revision();
         assert_eq!(
+            state.handle_observation(first, revision, Observation::Parked),
+            Err(CoordinationStateError::InvalidObservationTransition {
+                phase: CoordinationPhase::Probing,
+                observation: Observation::Parked,
+            })
+        );
+        assert!(state
+            .handle_observation(first, revision, Observation::Probed)
+            .unwrap()
+            .is_empty());
+        assert!(state
+            .handle_observation(first, revision, Observation::Probed)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
             state
-                .handle_observation(enclave, revision, Observation::Probed)
+                .handle_observation(second, revision, Observation::Probed)
                 .unwrap(),
             vec![CoordinationAction::Park { revision }]
         );
+        assert!(state
+            .handle_observation(first, revision, Observation::Probed)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            state.handle_observation(first, revision, Observation::Rechecked),
+            Err(CoordinationStateError::InvalidObservationTransition {
+                phase: CoordinationPhase::Parking,
+                observation: Observation::Rechecked,
+            })
+        );
+        assert!(state
+            .handle_observation(first, revision, Observation::Parked)
+            .unwrap()
+            .is_empty());
         assert_eq!(
             state
-                .handle_observation(enclave, revision, Observation::Parked)
+                .handle_observation(second, revision, Observation::Parked)
                 .unwrap(),
             vec![CoordinationAction::Recheck { revision }]
         );
+        assert!(state
+            .handle_observation(first, revision, Observation::Parked)
+            .unwrap()
+            .is_empty());
+        assert!(state
+            .handle_observation(first, revision, Observation::Rechecked)
+            .unwrap()
+            .is_empty());
         assert_eq!(
             state
-                .handle_observation(enclave, revision, Observation::Rechecked)
+                .handle_observation(second, revision, Observation::Rechecked)
                 .unwrap(),
             vec![CoordinationAction::Stop]
         );
         assert!(state
-            .handle_observation(enclave, revision, Observation::Rechecked)
+            .handle_observation(first, revision, Observation::Rechecked)
             .unwrap()
             .is_empty());
     }
 
+    /// Verifies completion advances only at the monotonic aggregate safe frontier.
     #[test]
     fn completion_advances_only_at_safe_frontier() {
         // Mutation caught: publish an individual completion instead of the monotonic minimum.
@@ -756,6 +960,7 @@ mod tests {
         );
     }
 
+    /// Verifies stop is terminal and emits its action at most once.
     #[test]
     fn stop_is_terminal_and_idempotent() {
         // Mutation caught: emit stop twice or process a scheduler message after terminal stop.
@@ -770,6 +975,7 @@ mod tests {
             .is_empty());
     }
 
+    /// Verifies failure retains the first typed origin and emits one abort.
     #[test]
     fn first_failure_is_retained() {
         // Mutation caught: overwrite the first typed origin or emit more than one abort.

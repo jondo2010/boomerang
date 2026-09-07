@@ -9,6 +9,24 @@ use crate::{image::EnclaveIndex, Tag};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum LifecyclePolicy {
     KeepAlive,
+    TerminateWhenIdle,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CoordinationPhase {
+    Active,
+    Probing,
+    Parking,
+    Rechecking,
+    Parked,
+    Stopped,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Observation {
+    Probed,
+    Parked,
+    Rechecked,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -50,21 +68,30 @@ pub(crate) enum CoordinationStateError {
     DuplicateEnclave { enclave: EnclaveIndex },
     #[error("compiled Enclave {enclave:?} does not belong to the Federate")]
     UnknownEnclave { enclave: EnclaveIndex },
-    #[error("this scheduler transition belongs to a later coordination-state task")]
-    DeferredSchedulerTransition,
+    #[error("observation {observation:?} is invalid while coordination is {phase:?}")]
+    InvalidObservationTransition {
+        phase: CoordinationPhase,
+        observation: Observation,
+    },
+    #[error("compiled Enclave {enclave:?} stopped before Federate coordination became terminal")]
+    ParticipantStoppedBeforeTerminal { enclave: EnclaveIndex },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ParticipantState {
     candidate: Option<Tag>,
+    completed: Option<Tag>,
     published: bool,
+    observation: Option<Observation>,
 }
 
 impl ParticipantState {
     const fn new() -> Self {
         Self {
             candidate: None,
+            completed: None,
             published: false,
+            observation: None,
         }
     }
 }
@@ -74,7 +101,10 @@ pub(crate) struct FederateCoordinationState {
     participants: TinySecondaryMap<EnclaveIndex, ParticipantState>,
     revision: CoordinationRevision,
     pending_publication: Option<FederatePublication>,
-    _lifecycle: LifecyclePolicy,
+    completed_frontier: Option<Tag>,
+    first_failure: Option<EnclaveIndex>,
+    lifecycle: LifecyclePolicy,
+    phase: CoordinationPhase,
 }
 
 impl FederateCoordinationState {
@@ -99,12 +129,27 @@ impl FederateCoordinationState {
             participants,
             revision: CoordinationRevision::new(0),
             pending_publication: None,
-            _lifecycle: lifecycle,
+            completed_frontier: None,
+            first_failure: None,
+            lifecycle,
+            phase: CoordinationPhase::Active,
         })
     }
 
     pub(crate) const fn revision(&self) -> CoordinationRevision {
         self.revision
+    }
+
+    pub(crate) const fn phase(&self) -> CoordinationPhase {
+        self.phase
+    }
+
+    pub(crate) const fn is_stopped(&self) -> bool {
+        matches!(self.phase, CoordinationPhase::Stopped)
+    }
+
+    pub(crate) const fn first_failure(&self) -> Option<EnclaveIndex> {
+        self.first_failure
     }
 
     pub(crate) fn candidate(&self, enclave: EnclaveIndex) -> Option<Option<Tag>> {
@@ -127,17 +172,16 @@ impl FederateCoordinationState {
                 enclave,
                 next_event,
             } => self.publish(enclave, next_event),
-            SchedulerMessage::CompleteTag { enclave, .. }
-            | SchedulerMessage::ParticipantStopped { enclave }
-            | SchedulerMessage::Failed {
-                enclave: Some(enclave),
-            } => {
+            SchedulerMessage::CompleteTag { enclave, tag } => self.complete(enclave, tag),
+            SchedulerMessage::ParticipantStopped { enclave } => {
                 self.participant(enclave)?;
-                Err(CoordinationStateError::DeferredSchedulerTransition)
+                if self.is_stopped() {
+                    Ok(Vec::new())
+                } else {
+                    Err(CoordinationStateError::ParticipantStoppedBeforeTerminal { enclave })
+                }
             }
-            SchedulerMessage::Failed { enclave: None } => {
-                Err(CoordinationStateError::DeferredSchedulerTransition)
-            }
+            SchedulerMessage::Failed { enclave } => self.fail(enclave),
         }
     }
 
@@ -181,6 +225,75 @@ impl FederateCoordinationState {
         Ok(actions)
     }
 
+    pub(crate) fn handle_observation(
+        &mut self,
+        enclave: EnclaveIndex,
+        revision: CoordinationRevision,
+        observation: Observation,
+    ) -> Result<Vec<CoordinationAction>, CoordinationStateError> {
+        self.participant(enclave)?;
+        if self.is_stopped() || revision != self.revision {
+            return Ok(Vec::new());
+        }
+
+        let expected = match self.phase {
+            CoordinationPhase::Probing => Observation::Probed,
+            CoordinationPhase::Parking => Observation::Parked,
+            CoordinationPhase::Rechecking => Observation::Rechecked,
+            phase => {
+                return Err(CoordinationStateError::InvalidObservationTransition {
+                    phase,
+                    observation,
+                });
+            }
+        };
+        if observation != expected {
+            return Err(CoordinationStateError::InvalidObservationTransition {
+                phase: self.phase,
+                observation,
+            });
+        }
+        if self.participants[enclave].observation == Some(observation) {
+            return Ok(Vec::new());
+        }
+
+        self.participants[enclave].observation = Some(observation);
+        if self
+            .participants
+            .values()
+            .any(|participant| participant.observation != Some(observation))
+        {
+            return Ok(Vec::new());
+        }
+        for (_, participant) in self.participants.iter_mut() {
+            participant.observation = None;
+        }
+
+        let action = match observation {
+            Observation::Probed => {
+                self.phase = CoordinationPhase::Parking;
+                CoordinationAction::Park { revision }
+            }
+            Observation::Parked => {
+                self.phase = CoordinationPhase::Rechecking;
+                CoordinationAction::Recheck { revision }
+            }
+            Observation::Rechecked => {
+                return Ok(self.stop());
+            }
+        };
+        Ok(vec![action])
+    }
+
+    pub(crate) fn stop(&mut self) -> Vec<CoordinationAction> {
+        if self.is_stopped() {
+            return Vec::new();
+        }
+        self.phase = CoordinationPhase::Stopped;
+        self.pending_publication = None;
+        vec![CoordinationAction::Stop]
+    }
+
     fn participant(
         &self,
         enclave: EnclaveIndex,
@@ -190,18 +303,78 @@ impl FederateCoordinationState {
             .ok_or(CoordinationStateError::UnknownEnclave { enclave })
     }
 
+    fn complete(
+        &mut self,
+        enclave: EnclaveIndex,
+        tag: Tag,
+    ) -> Result<Vec<CoordinationAction>, CoordinationStateError> {
+        let participant = self.participant(enclave)?;
+        if self.is_stopped()
+            || participant
+                .completed
+                .is_some_and(|completed| tag <= completed)
+        {
+            return Ok(Vec::new());
+        }
+        self.participants[enclave].completed = Some(tag);
+
+        let Some(frontier) = self
+            .participants
+            .values()
+            .map(|participant| participant.completed)
+            .collect::<Option<Vec<_>>>()
+            .and_then(|completed| completed.into_iter().min())
+        else {
+            return Ok(Vec::new());
+        };
+        if self
+            .completed_frontier
+            .is_some_and(|completed| frontier <= completed)
+        {
+            return Ok(Vec::new());
+        }
+        self.completed_frontier = Some(frontier);
+        Ok(vec![CoordinationAction::Complete(FederateCompletion::new(
+            frontier,
+        ))])
+    }
+
+    fn fail(
+        &mut self,
+        enclave: Option<EnclaveIndex>,
+    ) -> Result<Vec<CoordinationAction>, CoordinationStateError> {
+        if let Some(enclave) = enclave {
+            self.participant(enclave)?;
+        }
+        if self.is_stopped() {
+            return Ok(Vec::new());
+        }
+        self.first_failure = enclave;
+        self.phase = CoordinationPhase::Stopped;
+        self.pending_publication = None;
+        Ok(vec![CoordinationAction::Abort])
+    }
+
     fn publish(
         &mut self,
         enclave: EnclaveIndex,
         next_event: Option<Tag>,
     ) -> Result<Vec<CoordinationAction>, CoordinationStateError> {
         let participant = self.participant(enclave)?;
+        if self.is_stopped() {
+            return Ok(Vec::new());
+        }
         let changed = participant.candidate != next_event;
         let was_published = participant.published;
+        let resume = changed && self.phase != CoordinationPhase::Active;
 
         if changed {
             self.revision = self.revision.next();
             self.pending_publication = None;
+            self.phase = CoordinationPhase::Active;
+            for (_, participant) in self.participants.iter_mut() {
+                participant.observation = None;
+            }
         } else if was_published {
             return Ok(Vec::new());
         }
@@ -225,7 +398,23 @@ impl FederateCoordinationState {
             .min();
         let publication = FederatePublication::new(self.revision, next_event);
         self.pending_publication = Some(publication);
-        Ok(vec![CoordinationAction::Publish(publication)])
+        let mut actions = vec![CoordinationAction::Publish(publication)];
+        if resume {
+            actions.push(CoordinationAction::Resume {
+                revision: self.revision,
+            });
+        }
+        self.phase = match (next_event, self.lifecycle) {
+            (None, LifecyclePolicy::KeepAlive) => CoordinationPhase::Parked,
+            (None, LifecyclePolicy::TerminateWhenIdle) => {
+                actions.push(CoordinationAction::Probe {
+                    revision: self.revision,
+                });
+                CoordinationPhase::Probing
+            }
+            (Some(_), _) => CoordinationPhase::Active,
+        };
+        Ok(actions)
     }
 }
 
@@ -441,5 +630,167 @@ mod tests {
                 ))],
             }
         );
+    }
+
+    #[test]
+    fn all_idle_obeys_lifecycle_policy() {
+        // Mutation caught: route unanimous idle through the same phase for both policies.
+        let enclave = EnclaveIndex::new(3);
+        for (policy, expected_phase) in [
+            (LifecyclePolicy::KeepAlive, CoordinationPhase::Parked),
+            (
+                LifecyclePolicy::TerminateWhenIdle,
+                CoordinationPhase::Probing,
+            ),
+        ] {
+            let mut state = FederateCoordinationState::new([enclave], policy).unwrap();
+            let actions = state
+                .handle_scheduler(SchedulerMessage::Publish {
+                    enclave,
+                    next_event: None,
+                })
+                .unwrap();
+            assert!(actions.iter().any(|action| matches!(
+                action,
+                CoordinationAction::Publish(publication) if publication.next_event().is_none()
+            )));
+            assert_eq!(state.phase(), expected_phase);
+            assert!(!state.is_stopped());
+
+            if policy == LifecyclePolicy::KeepAlive {
+                let wake_tag = Tag::new(Duration::seconds(1), 0);
+                let resumed_revision = CoordinationRevision::new(1);
+                assert_eq!(
+                    state
+                        .handle_scheduler(SchedulerMessage::Publish {
+                            enclave,
+                            next_event: Some(wake_tag),
+                        })
+                        .unwrap(),
+                    vec![
+                        CoordinationAction::Publish(FederatePublication::new(
+                            resumed_revision,
+                            Some(wake_tag),
+                        )),
+                        CoordinationAction::Resume {
+                            revision: resumed_revision,
+                        },
+                    ]
+                );
+                assert_eq!(state.phase(), CoordinationPhase::Active);
+                assert!(!state.is_stopped());
+            }
+        }
+    }
+
+    #[test]
+    fn unchanged_fixed_point_commits_once() {
+        // Mutation caught: skip, reorder, or repeat a revision-bound fixed-point action.
+        let enclave = EnclaveIndex::new(3);
+        let mut state =
+            FederateCoordinationState::new([enclave], LifecyclePolicy::TerminateWhenIdle).unwrap();
+        state
+            .handle_scheduler(SchedulerMessage::Publish {
+                enclave,
+                next_event: None,
+            })
+            .unwrap();
+        let revision = state.revision();
+        assert_eq!(
+            state
+                .handle_observation(enclave, revision, Observation::Probed)
+                .unwrap(),
+            vec![CoordinationAction::Park { revision }]
+        );
+        assert_eq!(
+            state
+                .handle_observation(enclave, revision, Observation::Parked)
+                .unwrap(),
+            vec![CoordinationAction::Recheck { revision }]
+        );
+        assert_eq!(
+            state
+                .handle_observation(enclave, revision, Observation::Rechecked)
+                .unwrap(),
+            vec![CoordinationAction::Stop]
+        );
+        assert!(state
+            .handle_observation(enclave, revision, Observation::Rechecked)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn completion_advances_only_at_safe_frontier() {
+        // Mutation caught: publish an individual completion instead of the monotonic minimum.
+        let first = EnclaveIndex::new(3);
+        let second = EnclaveIndex::new(7);
+        let one = Tag::new(Duration::seconds(1), 0);
+        let two = Tag::new(Duration::seconds(2), 0);
+        let mut state =
+            FederateCoordinationState::new([first, second], LifecyclePolicy::KeepAlive).unwrap();
+        assert!(state
+            .handle_scheduler(SchedulerMessage::CompleteTag {
+                enclave: first,
+                tag: two,
+            })
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            state
+                .handle_scheduler(SchedulerMessage::CompleteTag {
+                    enclave: second,
+                    tag: one,
+                })
+                .unwrap(),
+            vec![CoordinationAction::Complete(FederateCompletion::new(one))]
+        );
+        assert_eq!(
+            state
+                .handle_scheduler(SchedulerMessage::CompleteTag {
+                    enclave: second,
+                    tag: two,
+                })
+                .unwrap(),
+            vec![CoordinationAction::Complete(FederateCompletion::new(two))]
+        );
+    }
+
+    #[test]
+    fn stop_is_terminal_and_idempotent() {
+        // Mutation caught: emit stop twice or process a scheduler message after terminal stop.
+        let enclave = EnclaveIndex::new(3);
+        let mut state =
+            FederateCoordinationState::new([enclave], LifecyclePolicy::KeepAlive).unwrap();
+        assert_eq!(state.stop(), vec![CoordinationAction::Stop]);
+        assert!(state.stop().is_empty());
+        assert!(state
+            .handle_scheduler(SchedulerMessage::ParticipantStopped { enclave })
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn first_failure_is_retained() {
+        // Mutation caught: overwrite the first typed origin or emit more than one abort.
+        let first = EnclaveIndex::new(3);
+        let second = EnclaveIndex::new(7);
+        let mut state =
+            FederateCoordinationState::new([first, second], LifecyclePolicy::KeepAlive).unwrap();
+        assert_eq!(
+            state
+                .handle_scheduler(SchedulerMessage::Failed {
+                    enclave: Some(first),
+                })
+                .unwrap(),
+            vec![CoordinationAction::Abort]
+        );
+        assert!(state
+            .handle_scheduler(SchedulerMessage::Failed {
+                enclave: Some(second),
+            })
+            .unwrap()
+            .is_empty());
+        assert_eq!(state.first_failure(), Some(first));
     }
 }

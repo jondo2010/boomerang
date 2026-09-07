@@ -544,11 +544,11 @@ mod tests {
             None,
         );
         let event_tx = storage.scheduler_event_tx();
+        event_tx
+            .send(AsyncEvent::provisional(upstream, control_tag))
+            .unwrap();
         let barrier_calls = Arc::clone(&calls);
         let event_thread = std::thread::spawn(move || {
-            event_tx
-                .send(AsyncEvent::provisional(upstream, control_tag))
-                .unwrap();
             for expected in [control_tag, reaction_tag] {
                 let request = upstream_rx
                     .recv_timeout(std::time::Duration::from_secs(1))

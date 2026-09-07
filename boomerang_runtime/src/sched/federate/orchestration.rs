@@ -80,6 +80,11 @@ pub(crate) trait FederateSchedulerCoordination {
         tag: Tag,
     ) -> Result<FederateControlAuthorization, FederateCoordinationError>;
 
+    /// Consumes a queued terminal command after the coordinator closes the scheduler event queue.
+    fn terminal_after_event_channel_closed(&mut self) -> Result<bool, FederateCoordinationError> {
+        Ok(false)
+    }
+
     /// Reports completion of one processed logical tag.
     #[allow(dead_code)]
     fn logical_tag_complete(&mut self, tag: Tag) -> Result<(), FederateCoordinationError>;
@@ -177,6 +182,8 @@ pub(crate) struct FederateCoordinator<B: FederateCoordinationBackend> {
     report_rx: mpsc::Receiver<CoordinatorReport>,
     /// Per-participant command senders keyed by compiled identity.
     commands: TinySecondaryMap<EnclaveIndex, mpsc::Sender<ParticipantCommand>>,
+    /// Per-participant scheduler wake senders closed only after a terminal command is queued.
+    events: TinySecondaryMap<EnclaveIndex, crate::Sender<AsyncEvent>>,
     /// Authoritative candidate, phase, completion, and terminal state.
     state: FederateCoordinationState,
     /// Selected transport-neutral coordination backend.
@@ -283,7 +290,7 @@ impl<B: FederateCoordinationBackend> FederateCoordinator<B> {
                 }
                 action @ (CoordinationAction::Stop | CoordinationAction::Abort) => {
                     let backend_result = self.backend.stop();
-                    self.send_available(ParticipantCommand::Action(action));
+                    self.terminate_available(ParticipantCommand::Action(action));
                     backend_result?;
                     return Ok(true);
                 }
@@ -333,13 +340,26 @@ impl<B: FederateCoordinationBackend> FederateCoordinator<B> {
         }
     }
 
+    /// Queues one terminal command before closing each participant's scheduler wake channel.
+    fn terminate_available(&self, command: ParticipantCommand) {
+        for (enclave, sender) in self.commands.iter() {
+            if sender.send(command).is_ok() {
+                let event = self
+                    .events
+                    .get(enclave)
+                    .expect("every participant command sender has a scheduler event sender");
+                let _ = event.close();
+            }
+        }
+    }
+
     /// Wakes participants and stops the backend without replacing the first returned error.
     fn abort_after_error(&mut self) {
         let _ = self
             .state
             .handle_scheduler(SchedulerMessage::Failed { enclave: None });
         let _ = self.backend.stop();
-        self.send_available(ParticipantCommand::Action(CoordinationAction::Abort));
+        self.terminate_available(ParticipantCommand::Action(CoordinationAction::Abort));
     }
 }
 
@@ -615,6 +635,25 @@ impl FederateSchedulerCoordination for EnclaveCoordinationPort {
         }
     }
 
+    /// Drains already-queued commands until the terminal command that precedes event closure.
+    fn terminal_after_event_channel_closed(&mut self) -> Result<bool, FederateCoordinationError> {
+        self.take_deferred_error()?;
+        loop {
+            match self.command_rx.try_recv() {
+                Ok(command) if self.apply_control_command(command) => return Ok(true),
+                Ok(_) => {}
+                Err(mpsc::TryRecvError::Empty) => return Ok(false),
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    return Err(
+                        FederateCoordinationError::ParticipantCommandChannelDisconnected {
+                            enclave: self.enclave,
+                        },
+                    );
+                }
+            }
+        }
+    }
+
     /// Reports logical completion through the coordinator so backend failures remain supervised.
     fn logical_tag_complete(&mut self, tag: Tag) -> Result<(), FederateCoordinationError> {
         self.take_deferred_error()?;
@@ -678,21 +717,29 @@ impl<B: FederateCoordinationBackend> FederateCoordinationParts<B> {
 
     /// Creates one participant per unique compiled identity and one shared coordinator.
     pub(crate) fn new(
-        participants: impl IntoIterator<Item = (EnclaveIndex, crate::Receiver<AsyncEvent>)>,
+        participants: impl IntoIterator<
+            Item = (
+                EnclaveIndex,
+                crate::Sender<AsyncEvent>,
+                crate::Receiver<AsyncEvent>,
+            ),
+        >,
         lifecycle: LifecyclePolicy,
         backend: B,
     ) -> Result<Self, FederateCoordinationError> {
         let participants = participants.into_iter().collect::<Vec<_>>();
         let state = FederateCoordinationState::new(
-            participants.iter().map(|(enclave, _)| *enclave),
+            participants.iter().map(|(enclave, _, _)| *enclave),
             lifecycle,
         )?;
         let (report_tx, report_rx) = mpsc::channel();
         let mut commands = TinySecondaryMap::new();
+        let mut events = TinySecondaryMap::new();
         let mut ports = TinySecondaryMap::new();
-        for (enclave, event_rx) in participants {
+        for (enclave, event_tx, event_rx) in participants {
             let (command_tx, command_rx) = mpsc::channel();
             commands.insert(enclave, command_tx);
+            events.insert(enclave, event_tx);
             ports.insert(
                 enclave,
                 EnclaveCoordinationPort {
@@ -715,6 +762,7 @@ impl<B: FederateCoordinationBackend> FederateCoordinationParts<B> {
             coordinator: FederateCoordinator {
                 report_rx,
                 commands,
+                events,
                 state,
                 backend,
                 #[cfg(test)]
@@ -1102,13 +1150,13 @@ mod tests {
     #[test]
     fn first_backend_failure_survives_abort_cleanup() {
         let enclave = EnclaveIndex::new(3);
-        let (_event_tx, event_rx) = kanal::unbounded();
+        let (event_tx, event_rx) = kanal::unbounded();
         let FederateCoordinationParts {
             coordinator,
             participants,
             ..
         } = FederateCoordinationParts::new(
-            [(enclave, event_rx)],
+            [(enclave, event_tx, event_rx)],
             LifecyclePolicy::KeepAlive,
             PublishAndStopFailingBackend,
         )
@@ -1135,14 +1183,14 @@ mod tests {
     #[test]
     fn successful_participant_waits_for_fixed_point_before_closing() {
         let enclave = EnclaveIndex::new(3);
-        let (_event_tx, event_rx) = kanal::unbounded();
+        let (event_tx, event_rx) = kanal::unbounded();
         let (call_tx, call_rx) = mpsc::channel();
         let FederateCoordinationParts {
             coordinator,
             participants,
             ..
         } = FederateCoordinationParts::new(
-            [(enclave, event_rx)],
+            [(enclave, event_tx, event_rx)],
             LifecyclePolicy::TerminateWhenIdle,
             CallRecordingBackend { call_tx },
         )
@@ -1167,7 +1215,7 @@ mod tests {
     #[test]
     fn failed_participant_drop_does_not_publish_idle() {
         let enclave = EnclaveIndex::new(3);
-        let (_event_tx, event_rx) = kanal::unbounded();
+        let (event_tx, event_rx) = kanal::unbounded();
         let (call_tx, call_rx) = mpsc::channel();
         let FederateCoordinationParts {
             abort_handle,
@@ -1175,7 +1223,7 @@ mod tests {
             participants,
             ..
         } = FederateCoordinationParts::new(
-            [(enclave, event_rx)],
+            [(enclave, event_tx, event_rx)],
             LifecyclePolicy::TerminateWhenIdle,
             CallRecordingBackend { call_tx },
         )
@@ -1199,14 +1247,17 @@ mod tests {
         let eventful = EnclaveIndex::new(3);
         let peer = EnclaveIndex::new(7);
         let (eventful_tx, eventful_rx) = kanal::unbounded();
-        let (_peer_tx, peer_rx) = kanal::unbounded();
+        let (peer_tx, peer_rx) = kanal::unbounded();
         let FederateCoordinationParts {
             abort_handle,
             mut coordinator,
             participants,
             ..
         } = FederateCoordinationParts::new(
-            [(eventful, eventful_rx), (peer, peer_rx)],
+            [
+                (eventful, eventful_tx.clone(), eventful_rx),
+                (peer, peer_tx, peer_rx),
+            ],
             LifecyclePolicy::TerminateWhenIdle,
             LocalFederateCoordinationBackend::default(),
         )
@@ -1288,7 +1339,7 @@ mod tests {
         let eventful = EnclaveIndex::new(3);
         let peer = EnclaveIndex::new(7);
         let (eventful_tx, eventful_rx) = kanal::unbounded();
-        let (_peer_tx, peer_rx) = kanal::unbounded();
+        let (peer_tx, peer_rx) = kanal::unbounded();
         let (progress_tx, progress_rx) = mpsc::channel();
         let FederateCoordinationParts {
             abort_handle,
@@ -1296,7 +1347,10 @@ mod tests {
             participants,
             ..
         } = FederateCoordinationParts::new(
-            [(eventful, eventful_rx), (peer, peer_rx)],
+            [
+                (eventful, eventful_tx.clone(), eventful_rx),
+                (peer, peer_tx, peer_rx),
+            ],
             LifecyclePolicy::KeepAlive,
             IdlePollingBackend {
                 local: LocalFederateCoordinationBackend::default(),

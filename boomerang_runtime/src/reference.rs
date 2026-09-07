@@ -554,7 +554,13 @@ fn request_federate_shutdown(senders: &[crate::Sender<AsyncEvent>]) {
 fn build_federate_coordination(
     deployment: &CompiledDeploymentImage<'_>,
     federate: FederateIndex,
-    receivers: impl IntoIterator<Item = (EnclaveIndex, crate::Receiver<AsyncEvent>)>,
+    channels: impl IntoIterator<
+        Item = (
+            EnclaveIndex,
+            crate::Sender<AsyncEvent>,
+            crate::Receiver<AsyncEvent>,
+        ),
+    >,
     config: &Config,
 ) -> Result<FederateCoordinationParts<LocalFederateCoordinationBackend>, ExecuteOwnedFederateError>
 {
@@ -568,13 +574,14 @@ fn build_federate_coordination(
         .keys()
         .filter(|enclave| selected.enclaves().contains(*enclave))
         .collect::<Vec<_>>();
-    let mut receivers = receivers.into_iter().collect::<Vec<_>>();
-    let ordered_receivers = participant_indices.iter().copied().map(|enclave| {
-        let position = receivers
+    let mut channels = channels.into_iter().collect::<Vec<_>>();
+    let ordered_channels = participant_indices.iter().copied().map(|enclave| {
+        let position = channels
             .iter()
-            .position(|(candidate, _)| *candidate == enclave)
-            .expect("validated Federate storage supplies every compiled scheduler receiver");
-        (enclave, receivers.swap_remove(position).1)
+            .position(|(candidate, _, _)| *candidate == enclave)
+            .expect("validated Federate storage supplies every compiled scheduler channel");
+        let (_, event_tx, event_rx) = channels.swap_remove(position);
+        (enclave, event_tx, event_rx)
     });
     let lifecycle_policy = if config.keep_alive {
         LifecyclePolicy::KeepAlive
@@ -582,14 +589,14 @@ fn build_federate_coordination(
         LifecyclePolicy::TerminateWhenIdle
     };
     let coordination = FederateCoordinationParts::new(
-        ordered_receivers,
+        ordered_channels,
         lifecycle_policy,
         LocalFederateCoordinationBackend::default(),
     )
     .expect("validated Federate layout has unique compiled Enclave identities");
     assert!(
-        receivers.is_empty(),
-        "validated Federate storage supplies only selected compiled scheduler receivers"
+        channels.is_empty(),
+        "validated Federate storage supplies only selected compiled scheduler channels"
     );
 
     Ok(coordination)
@@ -936,9 +943,13 @@ fn execute_owned_federate_with_spawn_guard(
     } = build_federate_coordination(
         deployment,
         federate,
-        storages
-            .iter()
-            .map(|(enclave, storage)| (*enclave, storage.scheduler_event_rx())),
+        storages.iter().map(|(enclave, storage)| {
+            (
+                *enclave,
+                storage.scheduler_event_tx(),
+                storage.scheduler_event_rx(),
+            )
+        }),
         &config,
     )?;
     let origin = Instant::now();
@@ -966,7 +977,6 @@ fn execute_owned_federate_with_spawn_guard(
         };
         let abort = || {
             abort_handle.abort();
-            request_federate_shutdown(&event_senders);
         };
         let mut handles = Vec::with_capacity(enclave_count);
         let mut failure = None;
@@ -1274,15 +1284,17 @@ mod scoped_spawn_tests {
             (true, LifecyclePolicy::KeepAlive),
             (false, LifecyclePolicy::TerminateWhenIdle),
         ] {
-            let receivers = [
-                (EnclaveIndex::new(2), kanal::unbounded().1),
-                (EnclaveIndex::new(1), kanal::unbounded().1),
+            let (second_tx, second_rx) = kanal::unbounded();
+            let (first_tx, first_rx) = kanal::unbounded();
+            let channels = [
+                (EnclaveIndex::new(2), second_tx, second_rx),
+                (EnclaveIndex::new(1), first_tx, first_rx),
             ];
             let coordination: FederateCoordinationParts<LocalFederateCoordinationBackend> =
                 build_federate_coordination(
                     &OFFSET_DEPLOYMENT,
                     FederateIndex::new(1),
-                    receivers,
+                    channels,
                     &Config::default().with_keep_alive(keep_alive),
                 )
                 .unwrap();

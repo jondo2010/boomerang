@@ -1,3 +1,5 @@
+//! Typed scheduler event priority queue with reusable reaction-set storage.
+
 use std::collections::BinaryHeap;
 
 use crate::{key_set::KeySet, Level, ReactionSetLimits, Tag};

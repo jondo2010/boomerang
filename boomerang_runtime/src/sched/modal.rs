@@ -1,3 +1,5 @@
+//! Modal-scope event management and logical-clock rebasing for the scheduler.
+
 use std::collections::BinaryHeap;
 
 use super::{

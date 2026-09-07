@@ -230,6 +230,16 @@ pub(crate) enum SchedulerError<E> {
     },
 }
 
+/// Outcome of one uninterrupted wall-clock deadline receive.
+enum WallClockSynchronization {
+    /// The requested physical deadline elapsed normally.
+    DeadlineReached,
+    /// A scheduler event interrupted the deadline.
+    Interrupted,
+    /// Federate coordination terminated the scheduler through its existing event channel.
+    FederateStopped,
+}
+
 impl<S, E> SchedulerCore<'_, '_, S, E>
 where
     S: Schedule,
@@ -583,9 +593,13 @@ where
 
             if !self.config.fast_forward {
                 let target = next_tag.to_logical_time(*self.start_time);
-                if self.synchronize_wall_clock(target)? {
-                    // Woken up by async event
-                    return Ok(true);
+                match self.synchronize_wall_clock(target)? {
+                    WallClockSynchronization::DeadlineReached => {}
+                    WallClockSynchronization::Interrupted => return Ok(true),
+                    WallClockSynchronization::FederateStopped => {
+                        self.stop_for_federate_termination();
+                        return Ok(false);
+                    }
                 }
             }
 
@@ -714,7 +728,7 @@ where
     fn synchronize_wall_clock(
         &mut self,
         target: std::time::Instant,
-    ) -> Result<bool, SchedulerError<E::Error>> {
+    ) -> Result<WallClockSynchronization, SchedulerError<E::Error>> {
         let now = std::time::Instant::now();
 
         match now.cmp(&target) {
@@ -737,9 +751,17 @@ where
                         }
                         self.handle_async_event(event)
                             .map_err(SchedulerError::Execution)?;
-                        return Ok(true);
+                        return Ok(WallClockSynchronization::Interrupted);
                     }
                     Err(ReceiveErrorTimeout::Closed) | Err(ReceiveErrorTimeout::SendClosed) => {
+                        if let Some(coordination) = self.federate_coordination.as_deref_mut() {
+                            let terminal = coordination
+                                .terminal_after_event_channel_closed()
+                                .map_err(SchedulerError::FederateCoordination)?;
+                            if terminal {
+                                return Ok(WallClockSynchronization::FederateStopped);
+                            }
+                        }
                         let remaining = target.checked_duration_since(std::time::Instant::now());
                         if let Some(remaining) = remaining {
                             tracing::debug!(target: "boomerang_runtime::sched", remaining = ?remaining,
@@ -760,7 +782,7 @@ where
             std::cmp::Ordering::Equal => {}
         }
 
-        Ok(false)
+        Ok(WallClockSynchronization::DeadlineReached)
     }
 
     /// Process the reactions at this tag in increasing order of level.

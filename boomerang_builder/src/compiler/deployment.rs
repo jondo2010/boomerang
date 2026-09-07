@@ -248,7 +248,9 @@ impl BoundaryPolicies {
 pub struct BoundaryBinding {
     /// Logical boundary receiving the selections.
     boundary: BoundaryId,
-    /// Stable end-to-end flow containing this boundary.
+    /// End-to-end application flow grouping this boundary with related route hops.
+    ///
+    /// Multiple boundary bindings may share one flow identity.
     flow: super::FlowId,
     /// Optional physical input and output endpoint identities.
     physical: PhysicalBoundaryMetadata,
@@ -285,7 +287,9 @@ impl BoundaryBinding {
         &self.boundary
     }
 
-    /// Returns the end-to-end flow containing this boundary.
+    /// Returns the end-to-end flow grouping this boundary with related route hops.
+    ///
+    /// Multiple boundary bindings may return the same flow identity.
     pub fn flow(&self) -> &super::FlowId {
         &self.flow
     }

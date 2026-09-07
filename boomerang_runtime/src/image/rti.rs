@@ -9,6 +9,27 @@
 //! transport implementation. Mutable session state remains separate: grants,
 //! membership epochs, in-transit tags, queues, sockets, and secrets are never part of
 //! this image.
+//!
+//! ## Routes and flows
+//!
+//! A **route** is one concrete directed cross-Federate boundary hop. It has one stable
+//! boundary identity, source and target Federates, direct delay, policy selection, and
+//! transport/codec capabilities. A **flow** is the stable end-to-end application identity
+//! that groups one or more such routes. Consequently, routes and flows are not one-to-one:
+//! several sequential or parallel routes may carry the same flow.
+//!
+//! For example, an application flow can cross three Federates through two routes:
+//!
+//! ```text
+//! flow "sensor-control"
+//!   route "sensor-reading":  sensor     -> controller
+//!   route "actuator-command": controller -> actuator
+//! ```
+//!
+//! [`RtiImage`] stores `"sensor-control"` once in its flow table, while both
+//! [`RtiRouteImage`] records reference that entry through the same [`FlowIndex`]. Each route
+//! still retains its own boundary identity and route-specific settings. The flow association
+//! is preserved metadata; it does not ask the RTI image to reconstruct or analyze a flow graph.
 
 use super::{
     BoundaryFailurePolicy, CodecPolicy, FederateIndex, IdentityRange, IdentityTable,
@@ -66,12 +87,16 @@ pub struct RtiMemberImage {
     pub(super) affected_downstream: TableRange<FederateIndex>,
 }
 
-/// One preserved cross-Federate route in canonical stable-identity order.
+/// One concrete directed cross-Federate boundary hop.
+///
+/// Every route has its own stable boundary identity and route-specific settings. Its
+/// [`FlowIndex`] may be shared with other sequential or parallel routes belonging to the same
+/// end-to-end application flow.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RtiRouteImage {
-    /// Stable boundary identity stored in the RTI identity blob.
+    /// Stable identity of this concrete boundary hop, stored in the RTI identity blob.
     pub(super) boundary: IdentityRange,
-    /// Dense stable flow shared by every route in the same end-to-end flow.
+    /// Dense end-to-end application flow grouping this route with related hops.
     pub(super) flow: FlowIndex,
     /// Optional dense physical input identity.
     pub(super) physical_input: Option<PhysicalBoundaryIndex>,
@@ -190,9 +215,9 @@ pub struct RtiImage<'a> {
     pub(super) dependencies: &'a [RtiDependencyImage],
     /// Flattened affected-downstream Federate keys.
     pub(super) affected_downstream: &'a [FederateIndex],
-    /// Canonically ordered cross-Federate routes, including parallel routes.
+    /// Concrete directed boundary hops in canonical order, including parallel routes.
     pub(super) routes: &'a [RtiRouteImage],
-    /// Canonically ordered stable flow identities.
+    /// Distinct end-to-end application identities shared by one or more routes.
     pub(super) flows: IdentityTable<'a, FlowIndex>,
     /// Canonically ordered stable physical input/output identities.
     pub(super) physical_boundaries: IdentityTable<'a, PhysicalBoundaryIndex>,
@@ -276,19 +301,24 @@ impl<'a> RtiImage<'a> {
         }
     }
 
-    /// Returns all cross-Federate routes in canonical order.
+    /// Returns all concrete directed cross-Federate boundary hops in canonical order.
+    ///
+    /// Multiple returned routes may belong to the same end-to-end flow.
     #[must_use]
     pub const fn routes(self) -> &'a [RtiRouteImage] {
         self.routes
     }
 
-    /// Returns the number of distinct stable flows referenced by all routes.
+    /// Returns the number of distinct end-to-end flows referenced by all routes.
+    ///
+    /// This may be smaller than [`Self::routes`]'s length because several routes may share a
+    /// flow identity.
     #[must_use]
     pub const fn flow_count(self) -> usize {
         self.flows.len()
     }
 
-    /// Resolves the stable boundary identity carried by one route.
+    /// Resolves the stable identity of one concrete boundary hop.
     #[must_use]
     pub fn route_boundary(self, route: RtiRouteImage) -> &'a str {
         route
@@ -297,7 +327,9 @@ impl<'a> RtiImage<'a> {
             .expect("validated RTI route boundary range")
     }
 
-    /// Resolves the stable end-to-end flow identity carried by one route.
+    /// Resolves the stable end-to-end application identity grouping this route.
+    ///
+    /// Other routes may resolve to the same identity.
     #[must_use]
     pub fn route_flow(self, route: RtiRouteImage) -> &'a str {
         self.flows

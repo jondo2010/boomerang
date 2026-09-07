@@ -45,9 +45,9 @@ pub struct OwnedRtiImage {
     dependencies: Box<[RtiDependencyImage]>,
     /// Flattened affected-downstream Federate keys.
     affected_downstream: Box<[FederateIndex]>,
-    /// Canonically ordered cross-Federate routes, including parallel routes.
+    /// Concrete directed cross-Federate boundary hops, including parallel routes.
     routes: Box<[RtiRouteImage]>,
-    /// Canonically ordered stable end-to-end flow identities.
+    /// Distinct end-to-end flow identities shared by one or more routes.
     flows: Box<[IdentityRange]>,
     /// Canonically ordered stable physical input/output identities.
     physical_boundaries: Box<[IdentityRange]>,

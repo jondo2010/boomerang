@@ -199,7 +199,9 @@ pub struct Federate {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct Boundary {
-    /// Stable end-to-end flow containing this boundary.
+    /// End-to-end application flow grouping this boundary with related route hops.
+    ///
+    /// Multiple boundary entries may select the same flow identity.
     pub flow: String,
     /// Optional physical input identity where external data enters Boomerang.
     pub physical_input: Option<String>,

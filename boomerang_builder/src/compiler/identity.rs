@@ -422,7 +422,7 @@ text_id!(
     TransportCapabilityId
 );
 text_id!(
-    /// Stable identity of an end-to-end application flow.
+    /// Stable identity grouping one or more concrete boundary routes into an end-to-end flow.
     FlowId
 );
 path_id!(

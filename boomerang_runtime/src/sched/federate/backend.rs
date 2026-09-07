@@ -1,8 +1,20 @@
+//! Backend-neutral compiled-Federate coordination contract.
+//!
+//! The compiled scheduler remains the authority for logical tag and revision
+//! semantics. This module preserves those values as publication, acquisition,
+//! and completion records while a selected backend carries them between
+//! coordination participants. Backends consume this contract mechanically and
+//! must not depend on scheduler event receivers, RTI types, Federate
+//! identities, or transport-specific state.
+
 use crate::Tag;
 
 /// Monotonically advancing version of a Federate coordination exchange.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct CoordinationRevision(u64);
+pub struct CoordinationRevision(
+    /// Transport-neutral integer value of this revision.
+    u64,
+);
 
 impl CoordinationRevision {
     /// Creates a coordination revision from its transport-neutral value.
@@ -24,7 +36,9 @@ impl CoordinationRevision {
 /// A Federate's current revision and optional next logical event.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FederatePublication {
+    /// Revision that identifies this publication exchange.
     revision: CoordinationRevision,
+    /// Next finite logical event, if the Federate has one to publish.
     next_event: Option<Tag>,
 }
 
@@ -51,7 +65,9 @@ impl FederatePublication {
 /// A granted logical tag for a specific Federate coordination revision.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FederateAcquisition {
+    /// Revision whose publication this grant answers.
     revision: CoordinationRevision,
+    /// Logical tag that the backend granted for processing.
     granted: Tag,
 }
 
@@ -75,6 +91,7 @@ impl FederateAcquisition {
 /// A completed logical tag reported by a Federate.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FederateCompletion {
+    /// Logical tag that the Federate finished processing.
     completed: Tag,
 }
 
@@ -94,6 +111,7 @@ impl FederateCompletion {
 #[derive(Debug, thiserror::Error)]
 #[error("federate coordination failed: {source}")]
 pub struct FederateCoordinationError {
+    /// Concrete backend failure preserved without transport-specific conversion.
     #[source]
     source: Box<dyn std::error::Error + Send + Sync + 'static>,
 }
@@ -132,10 +150,12 @@ pub trait FederateCoordinationBackend: Send {
 /// In-process backend used by local compiled Federate execution.
 #[derive(Default)]
 pub(crate) struct LocalFederateCoordinationBackend {
+    /// Latest finite publication awaiting one local acquisition.
     pending_publication: Option<FederatePublication>,
 }
 
 impl FederateCoordinationBackend for LocalFederateCoordinationBackend {
+    /// Retains the latest publication with a finite next event for local delivery.
     fn publish(
         &mut self,
         publication: FederatePublication,
@@ -149,6 +169,7 @@ impl FederateCoordinationBackend for LocalFederateCoordinationBackend {
         Ok(())
     }
 
+    /// Consumes the retained publication and derives its one matching acquisition.
     fn poll_acquisition(
         &mut self,
         _timeout: std::time::Duration,
@@ -160,6 +181,7 @@ impl FederateCoordinationBackend for LocalFederateCoordinationBackend {
         }))
     }
 
+    /// Accepts completion because local coordination needs no additional acknowledgment.
     fn complete(
         &mut self,
         _completion: FederateCompletion,
@@ -167,6 +189,7 @@ impl FederateCoordinationBackend for LocalFederateCoordinationBackend {
         Ok(())
     }
 
+    /// Discards pending local work when coordination stops.
     fn stop(&mut self) -> Result<(), FederateCoordinationError> {
         self.pending_publication = None;
         Ok(())
@@ -174,18 +197,25 @@ impl FederateCoordinationBackend for LocalFederateCoordinationBackend {
 }
 
 #[cfg(test)]
+/// Contract tests using an in-process recording backend without a transport.
 mod tests {
     use super::*;
 
     #[derive(Default)]
+    /// Test backend that records the contract calls it receives.
     struct RecordingBackend {
+        /// Publications supplied to the test backend.
         publications: Vec<FederatePublication>,
+        /// Completions supplied to the test backend.
         completions: Vec<FederateCompletion>,
+        /// One acquisition returned by the next poll.
         acquisition: Option<FederateAcquisition>,
+        /// Whether the test backend received a stop call.
         stopped: bool,
     }
 
     impl FederateCoordinationBackend for RecordingBackend {
+        /// Records the publication so the contract test can inspect it.
         fn publish(
             &mut self,
             publication: FederatePublication,
@@ -194,6 +224,7 @@ mod tests {
             Ok(())
         }
 
+        /// Returns the configured acquisition once without waiting.
         fn poll_acquisition(
             &mut self,
             _timeout: std::time::Duration,
@@ -201,6 +232,7 @@ mod tests {
             Ok(self.acquisition.take())
         }
 
+        /// Records the completion so the contract test can inspect it.
         fn complete(
             &mut self,
             completion: FederateCompletion,
@@ -209,6 +241,7 @@ mod tests {
             Ok(())
         }
 
+        /// Records that the contract requested shutdown.
         fn stop(&mut self) -> Result<(), FederateCoordinationError> {
             self.stopped = true;
             Ok(())
@@ -216,6 +249,7 @@ mod tests {
     }
 
     #[test]
+    /// Verifies the values and operations required by the transport-neutral contract.
     fn backend_contract_is_transport_neutral() {
         let revision = CoordinationRevision::new(u64::MAX);
         let next_revision = revision.next();

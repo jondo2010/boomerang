@@ -224,9 +224,15 @@ pub struct RtiImage<'a> {
     pub(super) identity_data: &'a str,
     /// Per-Federate ranges in canonical dense-key order.
     pub(super) members: TinyMapView<'a, FederateIndex, RtiMemberImage>,
-    /// Flattened direct and transitive dependency records.
+    /// Packed range backing storage for members' direct and transitive dependencies.
+    ///
+    /// Entries have no independent identity: [`RtiMemberImage`] owns each relationship set through
+    /// its typed ranges into this slice.
     pub(super) dependencies: &'a [RtiDependencyImage],
-    /// Flattened affected-downstream Federate keys.
+    /// Packed range backing storage for members' affected-downstream Federate keys.
+    ///
+    /// Each value is already a typed [`FederateIndex`]; [`RtiMemberImage`] owns each set through
+    /// its affected-downstream range rather than through a synthetic per-entry key.
     pub(super) affected_downstream: &'a [FederateIndex],
     /// Concrete directed boundary hops keyed in canonical deployment-wide RTI order.
     pub(super) routes: TinyMapView<'a, RtiRouteIndex, RtiRouteImage>,

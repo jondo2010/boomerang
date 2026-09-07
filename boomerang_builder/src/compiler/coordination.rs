@@ -41,9 +41,15 @@ pub struct OwnedRtiImage {
     identity_data: Box<str>,
     /// Per-Federate coordination ranges in canonical dense-key order.
     members: TinyMap<FederateIndex, RtiMemberImage>,
-    /// Flattened direct and transitive dependency records.
+    /// Packed range backing storage for members' direct and transitive dependencies.
+    ///
+    /// Entries have no independent identity: [`RtiMemberImage`] owns each relationship set through
+    /// its typed ranges into this slice.
     dependencies: Box<[RtiDependencyImage]>,
-    /// Flattened affected-downstream Federate keys.
+    /// Packed range backing storage for members' affected-downstream Federate keys.
+    ///
+    /// Each value is already a typed [`FederateIndex`]; [`RtiMemberImage`] owns each set through
+    /// its affected-downstream range rather than through a synthetic per-entry key.
     affected_downstream: Box<[FederateIndex]>,
     /// Complete deployment-wide RTI route hops keyed independently of local scheduler route halves.
     routes: TinyMap<RtiRouteIndex, RtiRouteImage>,

@@ -20,8 +20,8 @@ use crate::{
     run_owned_scheduler,
     sched::{
         federate::{
-            EnclaveDependencies, FederateQuiescence, FederateQuiescenceCoordinator,
-            FederateQuiescenceHandle,
+            EnclaveDependencies, FederateCoordinator, FederateQuiescence, FederateQuiescenceHandle,
+            FederateSchedulerCoordination, LifecyclePolicy, LocalFederateCoordinationBackend,
         },
         run_owned_scheduler_with_coordination,
     },
@@ -418,6 +418,12 @@ pub enum ExecuteOwnedFederateError {
         #[source]
         source: std::io::Error,
     },
+    /// The Federate coordination thread panicked before returning its typed result.
+    #[error("Federate coordination thread panicked: {message}")]
+    CoordinatorThreadPanicked {
+        /// Best-effort panic payload diagnostic.
+        message: String,
+    },
     /// One Enclave scheduler thread could not be created.
     #[error("failed to spawn scheduler thread for Enclave {enclave}: {source}")]
     ThreadSpawn {
@@ -445,6 +451,13 @@ pub enum ExecuteOwnedFederateError {
         #[source]
         source: RuntimeError,
     },
+    /// Federate-wide coordination failed while supervising compiled execution.
+    #[error("Federate coordination failed: {source}")]
+    FederateCoordination {
+        /// Closed coordination failure reported by the channel adapter or backend.
+        #[source]
+        source: crate::FederateCoordinationError,
+    },
     /// One Enclave scheduler thread panicked before producing a result.
     #[error("Enclave {enclave} thread panicked: {message}")]
     ThreadPanicked {
@@ -467,6 +480,23 @@ fn panic_message(payload: Box<dyn Any + Send>) -> String {
             .map(|message| (*message).to_owned())
             .unwrap_or_else(|_| "non-string panic payload".to_owned()),
     }
+}
+
+/// Retains a joined coordinator failure only when no worker failure was observed first.
+fn latch_coordinator_result(
+    failure: &mut Option<ExecuteOwnedFederateError>,
+    result: std::thread::Result<Result<(), crate::FederateCoordinationError>>,
+) {
+    if failure.is_some() {
+        return;
+    }
+    *failure = match result {
+        Ok(Ok(())) => None,
+        Ok(Err(source)) => Some(ExecuteOwnedFederateError::FederateCoordination { source }),
+        Err(payload) => Some(ExecuteOwnedFederateError::CoordinatorThreadPanicked {
+            message: panic_message(payload),
+        }),
+    };
 }
 
 /// Requests immediate shutdown from every still-live Enclave scheduler without blocking.
@@ -810,13 +840,18 @@ fn execute_owned_federate_with_spawn_guard(
     }
     let enclave_count = storages.len();
     let quiescence = (!config.keep_alive).then(|| {
-        FederateQuiescence::new(storages.iter().map(|(enclave, storage)| {
-            (runtime_enclave_key(*enclave), storage.scheduler_event_rx())
-        }))
+        FederateQuiescence::new(
+            storages
+                .iter()
+                .map(|(enclave, storage)| (*enclave, storage.scheduler_event_rx())),
+            LifecyclePolicy::TerminateWhenIdle,
+            LocalFederateCoordinationBackend::default(),
+        )
+        .expect("validated Federate storage has unique compiled Enclave identities")
     });
     let (quiescence_handle, quiescence_coordinator, mut quiescence_participants): (
         Option<FederateQuiescenceHandle>,
-        Option<FederateQuiescenceCoordinator>,
+        Option<FederateCoordinator<LocalFederateCoordinationBackend>>,
         _,
     ) = match quiescence {
         Some(quiescence) => (
@@ -865,8 +900,7 @@ fn execute_owned_federate_with_spawn_guard(
         for ((enclave, mut storage), (_, coordination)) in storages.into_iter().zip(coordinations) {
             let result_tx = result_tx.clone();
             let config = config.clone();
-            let key = runtime_enclave_key(enclave);
-            let mut participant = quiescence_participants.remove(&key);
+            let mut participant = quiescence_participants.remove(&enclave);
             let spawned = if fail_spawn(Some(enclave)) {
                 Err(std::io::Error::other(
                     "injected scoped thread spawn failure",
@@ -884,29 +918,47 @@ fn execute_owned_federate_with_spawn_guard(
                                 participant.as_mut(),
                             )
                         }));
-                        drop(participant);
                         let result = match execution {
-                            Ok(Ok(OwnedSchedulerOutcome { final_tag, stats })) => {
-                                Ok(EnclaveExecution {
+                            Ok(Ok(OwnedSchedulerOutcome { final_tag, stats })) => match participant
+                                .as_mut()
+                                .map(|participant| participant.finish_success())
+                                .transpose()
+                            {
+                                Ok(_) => Ok(EnclaveExecution {
                                     states: storage.into_states(),
                                     final_tag,
                                     stats,
-                                })
-                            }
+                                }),
+                                Err(source) => {
+                                    Err(ExecuteOwnedFederateError::FederateCoordination { source })
+                                }
+                            },
                             Ok(Err(crate::sched::SchedulerError::Execution(source))) => {
+                                if let Some(participant) = participant.as_mut() {
+                                    participant.fail();
+                                }
                                 Err(ExecuteOwnedFederateError::EnclaveExecution { enclave, source })
                             }
                             Ok(Err(crate::sched::SchedulerError::Coordination(source))) => {
+                                if let Some(participant) = participant.as_mut() {
+                                    participant.fail();
+                                }
                                 Err(ExecuteOwnedFederateError::EnclaveCoordination {
                                     enclave,
                                     source,
                                 })
                             }
-                            Err(payload) => Err(ExecuteOwnedFederateError::ThreadPanicked {
-                                enclave,
-                                message: panic_message(payload),
-                            }),
+                            Err(payload) => {
+                                if let Some(participant) = participant.as_mut() {
+                                    participant.fail();
+                                }
+                                Err(ExecuteOwnedFederateError::ThreadPanicked {
+                                    enclave,
+                                    message: panic_message(payload),
+                                })
+                            }
                         };
+                        drop(participant);
                         let _ = result_tx.send((enclave, result));
                     })
             };
@@ -956,7 +1008,7 @@ fn execute_owned_federate_with_spawn_guard(
             }
         }
         if let Some(handle) = coordinator_thread {
-            let _ = handle.join();
+            latch_coordinator_result(&mut failure, handle.join());
         }
         (results, failure)
     });
@@ -1180,5 +1232,48 @@ mod scoped_spawn_tests {
             ExecuteOwnedFederateError::ThreadSpawn { enclave, source }
                 if enclave == failed_enclave && source.kind() == ErrorKind::Other
         ));
+    }
+
+    /// Verifies a joined coordinator failure is reported unless a worker failed first.
+    #[test]
+    fn coordinator_join_failure_is_latched_without_replacing_worker_failure() {
+        std::thread::scope(|scope| {
+            let coordinator = scope.spawn(|| {
+                Err(crate::FederateCoordinationError::BackendStop {
+                    message: "coordinator failed".to_owned(),
+                })
+            });
+            let mut failure = None;
+            latch_coordinator_result(&mut failure, coordinator.join());
+            assert!(matches!(
+                failure,
+                Some(ExecuteOwnedFederateError::FederateCoordination {
+                    source: crate::FederateCoordinationError::BackendStop { ref message },
+                }) if message == "coordinator failed"
+            ));
+
+            let coordinator = scope.spawn(|| -> Result<(), crate::FederateCoordinationError> {
+                panic!("coordinator panic")
+            });
+            let mut failure = None;
+            latch_coordinator_result(&mut failure, coordinator.join());
+            assert!(matches!(
+                failure,
+                Some(ExecuteOwnedFederateError::CoordinatorThreadPanicked { ref message })
+                    if message == "coordinator panic"
+            ));
+
+            let coordinator = scope.spawn(|| {
+                Err(crate::FederateCoordinationError::BackendStop {
+                    message: "later coordinator failure".to_owned(),
+                })
+            });
+            let mut failure = Some(ExecuteOwnedFederateError::ResultChannelClosed);
+            latch_coordinator_result(&mut failure, coordinator.join());
+            assert!(matches!(
+                failure,
+                Some(ExecuteOwnedFederateError::ResultChannelClosed)
+            ));
+        });
     }
 }

@@ -5,9 +5,11 @@
 //! and completion records while a selected backend carries them between
 //! coordination participants. Backends consume this contract mechanically and
 //! must not depend on scheduler event receivers, RTI types, Federate
-//! identities, or transport-specific state.
+//! identities, or transport-specific state. Coordination failures form a
+//! closed operation and channel taxonomy without erasing their category behind
+//! a dynamically typed source.
 
-use crate::Tag;
+use crate::{image::EnclaveIndex, Tag};
 
 /// Monotonically advancing version of a Federate coordination exchange.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -107,43 +109,100 @@ impl FederateCompletion {
     }
 }
 
-/// Protocol-free error returned by a Federate coordination backend.
-#[derive(Debug, thiserror::Error)]
-#[error("federate coordination failed: {source}")]
-pub struct FederateCoordinationError {
-    /// Concrete backend failure preserved without transport-specific conversion.
-    #[source]
-    source: Box<dyn std::error::Error + Send + Sync + 'static>,
-}
-
-impl FederateCoordinationError {
-    /// Preserves a concrete backend error as this transport-neutral error's source.
-    pub fn from_error(error: impl std::error::Error + Send + Sync + 'static) -> Self {
-        Self {
-            source: Box::new(error),
-        }
-    }
+/// Closed, protocol-free failures from compiled Federate coordination.
+#[derive(Debug, Eq, PartialEq, thiserror::Error)]
+pub enum FederateCoordinationError {
+    /// The immutable Federate layout contains no compiled participants.
+    #[error("a Federate coordination state requires at least one compiled Enclave")]
+    NoParticipants,
+    /// The immutable Federate layout contains one compiled participant more than once.
+    #[error("compiled Enclave {enclave:?} occurs more than once in the Federate")]
+    DuplicateEnclave {
+        /// Repeated compiled participant identity.
+        enclave: EnclaveIndex,
+    },
+    /// A coordination operation names an identity outside the immutable Federate layout.
+    #[error("compiled Enclave {enclave:?} does not belong to the Federate")]
+    UnknownEnclave {
+        /// Unrecognized compiled participant identity.
+        enclave: EnclaveIndex,
+    },
+    /// A fixed-point acknowledgement is incompatible with the private current phase.
+    #[error("a fixed-point acknowledgement is invalid for the current coordination phase")]
+    InvalidObservationTransition,
+    /// A participant reports stop before coordination reaches a terminal phase.
+    #[error("compiled Enclave {enclave:?} stopped before Federate coordination became terminal")]
+    ParticipantStoppedBeforeTerminal {
+        /// Compiled participant that stopped prematurely.
+        enclave: EnclaveIndex,
+    },
+    /// The participant-to-coordinator report channel is disconnected.
+    #[error(
+        "Federate coordinator report channel disconnected (reporting participant: {enclave:?})"
+    )]
+    CoordinatorReportChannelDisconnected {
+        /// Reporting participant when the send side observed disconnection, otherwise unknown.
+        enclave: Option<EnclaveIndex>,
+    },
+    /// The coordinator-to-participant command channel is disconnected.
+    #[error("compiled participant {enclave:?} command channel disconnected")]
+    ParticipantCommandChannelDisconnected {
+        /// Compiled participant whose command channel disconnected.
+        enclave: EnclaveIndex,
+    },
+    /// The selected backend rejected an aggregate publication.
+    #[error("Federate coordination backend publish failed: {message}")]
+    BackendPublish {
+        /// Backend-owned diagnostic at the publication operation boundary.
+        message: String,
+    },
+    /// The selected backend failed while polling for an acquisition.
+    #[error("Federate coordination backend acquisition failed: {message}")]
+    BackendAcquire {
+        /// Backend-owned diagnostic at the acquisition operation boundary.
+        message: String,
+    },
+    /// The selected backend rejected an aggregate completion.
+    #[error("Federate coordination backend completion failed: {message}")]
+    BackendComplete {
+        /// Backend-owned diagnostic at the completion operation boundary.
+        message: String,
+    },
+    /// The selected backend failed to stop coordination.
+    #[error("Federate coordination backend stop failed: {message}")]
+    BackendStop {
+        /// Backend-owned diagnostic at the stop operation boundary.
+        message: String,
+    },
 }
 
 /// Transport-neutral coordination boundary for one compiled Federate.
 pub trait FederateCoordinationBackend: Send {
     /// Publishes the Federate's current revision and optional next event.
+    ///
+    /// Failures must use [FederateCoordinationError::BackendPublish].
     fn publish(
         &mut self,
         publication: FederatePublication,
     ) -> Result<(), FederateCoordinationError>;
 
     /// Polls for a grant without exposing a backend-specific transport.
+    ///
+    /// Failures must use [FederateCoordinationError::BackendAcquire].
     fn poll_acquisition(
         &mut self,
         timeout: std::time::Duration,
     ) -> Result<Option<FederateAcquisition>, FederateCoordinationError>;
 
     /// Reports completion of a logical tag.
+    ///
+    /// Failures must use [FederateCoordinationError::BackendComplete].
     fn complete(&mut self, completion: FederateCompletion)
         -> Result<(), FederateCoordinationError>;
 
     /// Stops coordination and releases any backend-owned pending state.
+    ///
+    /// Failures must use [FederateCoordinationError::BackendStop].
     fn stop(&mut self) -> Result<(), FederateCoordinationError>;
 }
 
@@ -314,5 +373,38 @@ mod tests {
                 .unwrap(),
             None
         );
+    }
+
+    #[test]
+    /// Verifies backend failures retain an owned diagnostic in an operation-specific category.
+    fn backend_failures_are_closed_and_operation_specific() {
+        for (error, expected) in [
+            (
+                FederateCoordinationError::BackendPublish {
+                    message: "publish rejected".to_owned(),
+                },
+                "Federate coordination backend publish failed: publish rejected",
+            ),
+            (
+                FederateCoordinationError::BackendAcquire {
+                    message: "acquisition rejected".to_owned(),
+                },
+                "Federate coordination backend acquisition failed: acquisition rejected",
+            ),
+            (
+                FederateCoordinationError::BackendComplete {
+                    message: "completion rejected".to_owned(),
+                },
+                "Federate coordination backend completion failed: completion rejected",
+            ),
+            (
+                FederateCoordinationError::BackendStop {
+                    message: "stop rejected".to_owned(),
+                },
+                "Federate coordination backend stop failed: stop rejected",
+            ),
+        ] {
+            assert_eq!(error.to_string(), expected);
+        }
     }
 }

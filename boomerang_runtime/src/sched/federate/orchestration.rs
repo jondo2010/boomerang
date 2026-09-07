@@ -181,8 +181,6 @@ pub(crate) struct FederateCoordinator<B: FederateCoordinationBackend> {
     state: FederateCoordinationState,
     /// Selected transport-neutral coordination backend.
     backend: B,
-    /// Finite publication revision tracked for backend-operation bookkeeping only.
-    pending_acquisition: Option<CoordinationRevision>,
     #[cfg(test)]
     /// One-shot queue-race hook immediately before the final parked recheck.
     commit_window_hook: Option<Box<dyn FnOnce() + Send>>,
@@ -220,11 +218,7 @@ impl<B: FederateCoordinationBackend> FederateCoordinator<B> {
     ) -> Result<bool, FederateCoordinationError> {
         match report {
             CoordinatorReport::Scheduler(message) => {
-                let prior_revision = self.state.revision();
                 let actions = self.state.handle_scheduler(message)?;
-                if self.state.revision() != prior_revision {
-                    self.pending_acquisition = None;
-                }
                 self.execute_actions(actions)
             }
             CoordinatorReport::Observation {
@@ -239,7 +233,6 @@ impl<B: FederateCoordinationBackend> FederateCoordinator<B> {
             }
             CoordinatorReport::LogicalHorizon { enclave, tag } => {
                 self.require_participant(enclave)?;
-                self.pending_acquisition = None;
                 let _ = self.state.stop();
                 let backend_result = self.backend.stop();
                 self.send_available(ParticipantCommand::LogicalHorizon(tag));
@@ -267,8 +260,6 @@ impl<B: FederateCoordinationBackend> FederateCoordinator<B> {
             match action {
                 CoordinationAction::Publish(publication) => {
                     self.backend.publish(publication)?;
-                    self.pending_acquisition =
-                        publication.next_event().map(|_| publication.revision());
                 }
                 action @ CoordinationAction::AdvanceHorizon { .. } => {
                     self.send_all(ParticipantCommand::Action(action))?;
@@ -291,7 +282,6 @@ impl<B: FederateCoordinationBackend> FederateCoordinator<B> {
                     self.send_available(ParticipantCommand::Action(action));
                 }
                 action @ (CoordinationAction::Stop | CoordinationAction::Abort) => {
-                    self.pending_acquisition = None;
                     let backend_result = self.backend.stop();
                     self.send_available(ParticipantCommand::Action(action));
                     backend_result?;
@@ -307,9 +297,6 @@ impl<B: FederateCoordinationBackend> FederateCoordinator<B> {
         let Some(acquisition) = self.backend.progress(StdDuration::from_millis(1))? else {
             return Ok(false);
         };
-        if self.pending_acquisition == Some(acquisition.revision()) {
-            self.pending_acquisition = None;
-        }
         let actions = self.state.handle_acquisition(acquisition)?;
         self.execute_actions(actions)
     }
@@ -348,7 +335,6 @@ impl<B: FederateCoordinationBackend> FederateCoordinator<B> {
 
     /// Wakes participants and stops the backend without replacing the first returned error.
     fn abort_after_error(&mut self) {
-        self.pending_acquisition = None;
         let _ = self
             .state
             .handle_scheduler(SchedulerMessage::Failed { enclave: None });
@@ -731,7 +717,6 @@ impl<B: FederateCoordinationBackend> FederateCoordinationParts<B> {
                 commands,
                 state,
                 backend,
-                pending_acquisition: None,
                 #[cfg(test)]
                 commit_window_hook: None,
             },
@@ -770,25 +755,30 @@ mod tests {
     struct IdlePollingBackend {
         /// Real in-process backend used for publication and acquisition behavior.
         local: LocalFederateCoordinationBackend,
-        /// Test-harness signal emitted when the coordinator progresses external backend input.
+        /// Whether the coordinator has published no future event for every idle participant.
+        idle_published: bool,
+        /// Test-harness signal emitted by progress after the no-future publication.
         progress_tx: mpsc::Sender<()>,
     }
 
     impl FederateCoordinationBackend for IdlePollingBackend {
-        /// Forwards the publication to the real local backend.
+        /// Arms the test after no-future publication before forwarding to the local backend.
         fn publish(
             &mut self,
             publication: FederatePublication,
         ) -> Result<(), FederateCoordinationError> {
+            self.idle_published |= publication.next_event().is_none();
             self.local.publish(publication)
         }
 
-        /// Signals polling before progressing the real local backend.
+        /// Signals only progress that follows the no-future publication.
         fn progress(
             &mut self,
             timeout: StdDuration,
         ) -> Result<Option<FederateAcquisition>, FederateCoordinationError> {
-            self.progress_tx.send(()).unwrap();
+            if self.idle_published {
+                self.progress_tx.send(()).unwrap();
+            }
             self.local.progress(timeout)
         }
 
@@ -1290,6 +1280,9 @@ mod tests {
     }
 
     /// Verifies a unanimously idle kept-alive Federate progresses its backend and admits later work.
+    ///
+    /// Mutation caught: polling only while a finite acquisition is pending leaves the post-idle
+    /// progress signal unsent and prevents later work from being admitted.
     #[test]
     fn kept_alive_all_idle_participants_wake_for_later_input() {
         let eventful = EnclaveIndex::new(3);
@@ -1307,6 +1300,7 @@ mod tests {
             LifecyclePolicy::KeepAlive,
             IdlePollingBackend {
                 local: LocalFederateCoordinationBackend::default(),
+                idle_published: false,
                 progress_tx,
             },
         )

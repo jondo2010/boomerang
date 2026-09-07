@@ -30,6 +30,8 @@ pub(super) struct ScheduledEvent<K: tinymap::Key, A: Copy> {
     pub(super) reactions: KeySet<K>,
     /// Whether processing this event terminates the scheduler.
     pub(super) terminal: bool,
+    /// Whether every same-tag contribution is local control with no executable or terminal work.
+    pub(super) control_only: bool,
     /// Number of queued nonterminal contributions merged into this event.
     pub(super) nonterminal_work_count: usize,
     /// Optional action value metadata needed for modal rebasing.
@@ -75,7 +77,12 @@ impl<K: tinymap::Key, A: Copy + PartialEq> EventQueue<K, A> {
     where
         I: IntoIterator<Item = (Level, K)>,
     {
-        self.push_event_inner(tag, reactions, terminal, None);
+        self.push_event_inner(tag, reactions, terminal, false, None);
+    }
+
+    /// Pushes a provisional local-barrier event that requires only retained-horizon authorization.
+    pub(crate) fn push_control_event(&mut self, tag: Tag) {
+        self.push_event_inner(tag, std::iter::empty(), false, true, None);
     }
 
     pub(crate) fn push_action_event<I>(
@@ -87,7 +94,7 @@ impl<K: tinymap::Key, A: Copy + PartialEq> EventQueue<K, A> {
     ) where
         I: IntoIterator<Item = (Level, K)>,
     {
-        self.push_event_inner(tag, reactions, terminal, action_value);
+        self.push_event_inner(tag, reactions, terminal, false, action_value);
     }
 
     fn push_event_inner<I>(
@@ -95,6 +102,7 @@ impl<K: tinymap::Key, A: Copy + PartialEq> EventQueue<K, A> {
         tag: Tag,
         reactions: I,
         terminal: bool,
+        control_only: bool,
         action_value: Option<ScheduledActionValue<A>>,
     ) where
         I: IntoIterator<Item = (Level, K)>,
@@ -108,9 +116,10 @@ impl<K: tinymap::Key, A: Copy + PartialEq> EventQueue<K, A> {
             let mut event = self.event_queue.peek_mut().unwrap();
             event.reactions.extend_above(reactions);
             event.terminal = event.terminal || terminal;
+            event.control_only &= control_only;
             event.nonterminal_work_count = event
                 .nonterminal_work_count
-                .checked_add(usize::from(!terminal))
+                .checked_add(usize::from(!terminal && !control_only))
                 .expect("queued nonterminal-work count overflowed");
             if action_value.is_some() {
                 event.action_value = action_value;
@@ -123,7 +132,8 @@ impl<K: tinymap::Key, A: Copy + PartialEq> EventQueue<K, A> {
                 tag,
                 reactions: reaction_set,
                 terminal,
-                nonterminal_work_count: usize::from(!terminal),
+                control_only,
+                nonterminal_work_count: usize::from(!terminal && !control_only),
                 action_value,
             };
             self.event_queue.push(event);
@@ -152,6 +162,7 @@ impl<K: tinymap::Key, A: Copy + PartialEq> EventQueue<K, A> {
                     }
                     event.reactions.merge(&next_event.reactions);
                     event.terminal = event.terminal || next_event.terminal;
+                    event.control_only &= next_event.control_only;
                     event.nonterminal_work_count = event
                         .nonterminal_work_count
                         .checked_add(next_event.nonterminal_work_count)
@@ -184,6 +195,13 @@ impl<K: tinymap::Key, A: Copy + PartialEq> EventQueue<K, A> {
     /// Peek the tag of the next event in the queue
     pub(crate) fn peek_tag(&self) -> Option<Tag> {
         self.event_queue.peek().map(|event| event.tag)
+    }
+
+    /// Returns whether the next event contains only provisional local-barrier control work.
+    pub(crate) fn peek_is_control_only(&self) -> bool {
+        self.event_queue
+            .peek()
+            .is_some_and(|event| event.control_only)
     }
 
     /// If the event queue still has events on it, report that.
@@ -264,6 +282,7 @@ mod tests {
             tag: Tag::new(Duration::seconds(1), 0),
             reactions: KeySet::default(),
             terminal: false,
+            control_only: false,
             nonterminal_work_count: 1,
             action_value: None,
         });
@@ -271,6 +290,7 @@ mod tests {
             tag: Tag::new(Duration::seconds(1), 0),
             reactions: KeySet::default(),
             terminal: true,
+            control_only: false,
             nonterminal_work_count: 0,
             action_value: None,
         });
@@ -278,6 +298,7 @@ mod tests {
             tag: Tag::new(Duration::seconds(0), 0),
             reactions: KeySet::default(),
             terminal: false,
+            control_only: false,
             nonterminal_work_count: 1,
             action_value: None,
         });
@@ -310,5 +331,28 @@ mod tests {
 
         queue.push_event(tag.delay(Duration::seconds(1)), std::iter::empty(), false);
         assert_eq!(queue.clear(), 1);
+    }
+
+    /// Verifies executable or terminal same-tag work permanently revokes control-only status.
+    #[test]
+    fn control_only_event_merge_requires_coordination() {
+        let mut queue = EventQueue::<DefaultKey, u8>::new(ReactionSetLimits {
+            max_level: Level::from(0),
+            num_keys: 1,
+        });
+        let tag = Tag::new(Duration::seconds(1), 0);
+        let reaction = DefaultKey::from(0);
+
+        queue.push_control_event(tag);
+        assert!(queue.peek_is_control_only());
+        queue.push_event(tag, [(Level::from(0), reaction)], false);
+        assert!(!queue.peek_is_control_only());
+        queue.clear();
+
+        let terminal_tag = tag.delay(Duration::seconds(1));
+        queue.push_control_event(terminal_tag);
+        assert!(queue.peek_is_control_only());
+        queue.push_event(terminal_tag, std::iter::empty(), true);
+        assert!(!queue.peek_is_control_only());
     }
 }

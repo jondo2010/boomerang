@@ -20,49 +20,78 @@ use super::{
 };
 use crate::{image::EnclaveIndex, AsyncEvent, Tag};
 
+/// Returns whether one asynchronous event introduces executable or terminal scheduler work.
+fn revises_candidate(event: &AsyncEvent) -> bool {
+    matches!(
+        event,
+        AsyncEvent::Logical { .. } | AsyncEvent::Physical { .. } | AsyncEvent::Shutdown { .. }
+    )
+}
+
+/// Result of blocking while a compiled scheduler has no local candidate.
+#[derive(Debug)]
+pub(crate) enum FederateIdleWait {
+    /// New scheduler work interrupted the idle wait.
+    Interrupted(AsyncEvent),
+    /// The scheduler may process the shared terminal logical horizon.
+    LogicalHorizon(Tag),
+    /// Federate coordination terminated without granting scheduler work.
+    Stopped,
+}
+
+/// Result of requesting permission to process one compiled scheduler tag.
+#[derive(Debug)]
+pub(crate) enum FederateTagAcquisition {
+    /// The requested logical tag may proceed to wall-clock synchronization.
+    Granted,
+    /// New scheduler work invalidated the candidate before it was granted.
+    Interrupted(AsyncEvent),
+    /// The scheduler may process the shared terminal logical horizon.
+    LogicalHorizon(Tag),
+    /// Federate coordination terminated without granting the requested tag.
+    Stopped,
+}
+
+/// Result of waiting for a Federate horizon that authorizes local control advancement.
+#[derive(Debug)]
+pub(crate) enum FederateControlAuthorization {
+    /// The retained Federate grant covers the requested control tag.
+    Authorized,
+    /// An asynchronous scheduler event must be handled before retrying authorization.
+    Interrupted(AsyncEvent),
+    /// Federate stop or failure forbids further logical advancement.
+    Stopped,
+}
+
 /// Scheduler-facing coordination port without a backend or transport type.
 pub(crate) trait FederateSchedulerCoordination {
     /// Reports work observed before the scheduler can publish its revised candidate.
     fn active(&mut self);
 
     /// Publishes no local candidate and waits for asynchronous work or terminal coordination.
-    fn wait(&mut self) -> Result<Option<AsyncEvent>, FederateCoordinationError>;
+    fn wait(&mut self) -> Result<FederateIdleWait, FederateCoordinationError>;
 
     /// Publishes a local candidate and waits for its grant or an asynchronous interruption.
-    #[allow(dead_code)]
-    fn acquire_tag(&mut self, tag: Tag) -> Result<Option<AsyncEvent>, FederateCoordinationError>;
+    fn acquire_tag(
+        &mut self,
+        tag: Tag,
+    ) -> Result<FederateTagAcquisition, FederateCoordinationError>;
+
+    /// Waits until the retained Federate grant covers a control-only tag.
+    fn authorize_control(
+        &mut self,
+        tag: Tag,
+    ) -> Result<FederateControlAuthorization, FederateCoordinationError>;
 
     /// Reports completion of one processed logical tag.
     #[allow(dead_code)]
     fn logical_tag_complete(&mut self, tag: Tag) -> Result<(), FederateCoordinationError>;
 
-    /// Returns the legacy shared logical horizon, when one ended coordination.
-    fn logical_horizon(&self) -> Option<Tag>;
-
     /// Reports that the legacy shared logical horizon is being processed.
     fn logical_horizon_reached(&mut self, tag: Tag);
-
-    /// Requests planned Federate-wide stop.
-    #[allow(dead_code)]
-    fn stop(&mut self);
 
     /// Reports scheduler failure and requests Federate-wide abortion.
     fn fail(&mut self);
-}
-
-/// Temporary infallible scheduler seam retained until Task 5 generalizes `SchedulerCore`.
-pub(crate) trait QuiescenceControl {
-    /// Reports work observed by the legacy compiled scheduler.
-    fn active(&mut self);
-
-    /// Waits for asynchronous work or legacy quiescence termination.
-    fn wait(&mut self) -> Option<AsyncEvent>;
-
-    /// Returns the legacy shared logical horizon, when one ended coordination.
-    fn logical_horizon(&self) -> Option<Tag>;
-
-    /// Reports that the legacy shared logical horizon is being processed.
-    fn logical_horizon_reached(&mut self, tag: Tag);
 }
 
 /// Participant-to-coordinator messages that retain only typed state inputs and legacy requests.
@@ -80,12 +109,6 @@ enum CoordinatorReport {
         revision: CoordinationRevision,
         /// Queue or parking observation for that revision.
         observation: Observation,
-    },
-    /// Planned stop requested by one compiled participant.
-    #[allow(dead_code)]
-    Stop {
-        /// Compiled participant requesting stop.
-        enclave: EnclaveIndex,
     },
     /// Legacy shared logical horizon reached by one compiled participant.
     LogicalHorizon {
@@ -225,12 +248,6 @@ impl<B: FederateCoordinationBackend> FederateCoordinator<B> {
                     .handle_observation(enclave, revision, observation)?;
                 self.execute_actions(actions)
             }
-            CoordinatorReport::Stop { enclave } => {
-                self.require_participant(enclave)?;
-                self.pending_acquisition = None;
-                let actions = self.state.stop();
-                self.execute_actions(actions)
-            }
             CoordinatorReport::LogicalHorizon { enclave, tag } => {
                 self.require_participant(enclave)?;
                 self.pending_acquisition = None;
@@ -263,6 +280,9 @@ impl<B: FederateCoordinationBackend> FederateCoordinator<B> {
                     self.backend.publish(publication)?;
                     self.pending_acquisition =
                         publication.next_event().map(|_| publication.revision());
+                }
+                action @ CoordinationAction::AdvanceHorizon { .. } => {
+                    self.send_all(ParticipantCommand::Action(action))?;
                 }
                 action @ CoordinationAction::Grant { enclave, .. } => {
                     self.send_one(enclave, ParticipantCommand::Action(action))?;
@@ -365,6 +385,8 @@ pub(crate) struct FederateCoordinationParticipant {
     parked_revision: Option<CoordinationRevision>,
     /// Legacy shared logical horizon, when one ended coordination.
     logical_horizon: Option<Tag>,
+    /// Greatest broadcast Federate grant retained for control-only authorization.
+    grant_horizon: Option<Tag>,
     /// First report-channel error produced by an infallible compatibility method.
     deferred_error: Option<FederateCoordinationError>,
     /// Whether this participant observed terminal coordinator release.
@@ -372,10 +394,40 @@ pub(crate) struct FederateCoordinationParticipant {
 }
 
 impl FederateCoordinationParticipant {
+    /// Retains one broadcast Federate grant without allowing the horizon to regress.
+    fn advance_horizon(&mut self, tag: Tag) {
+        self.grant_horizon = Some(self.grant_horizon.map_or(tag, |current| current.max(tag)));
+    }
+
+    /// Applies one command while control-only work waits for authorization.
+    fn apply_control_command(&mut self, command: ParticipantCommand) -> bool {
+        match command {
+            ParticipantCommand::Action(CoordinationAction::AdvanceHorizon { tag }) => {
+                self.advance_horizon(tag);
+                false
+            }
+            ParticipantCommand::LogicalHorizon(tag) => {
+                self.logical_horizon = Some(tag);
+                self.terminal = true;
+                true
+            }
+            ParticipantCommand::Action(CoordinationAction::Stop | CoordinationAction::Abort) => {
+                self.terminal = true;
+                true
+            }
+            ParticipantCommand::Action(_) => false,
+        }
+    }
+
     /// Publishes successful terminal idleness and remains available for fixed-point commands.
     pub(crate) fn finish_success(&mut self) -> Result<(), FederateCoordinationError> {
+        self.take_deferred_error()?;
         while !self.terminal {
-            let _ = FederateSchedulerCoordination::wait(self)?;
+            match FederateSchedulerCoordination::wait(self)? {
+                FederateIdleWait::Interrupted(_) => {}
+                FederateIdleWait::LogicalHorizon(_) => {}
+                FederateIdleWait::Stopped => break,
+            }
         }
         Ok(())
     }
@@ -417,7 +469,7 @@ impl FederateCoordinationParticipant {
     /// Takes queued work and reports that it invalidates an idle or fixed-point candidate.
     fn take_active_event(&self) -> Result<Option<AsyncEvent>, FederateCoordinationError> {
         let event = self.event_rx.try_recv().ok().flatten();
-        if event.is_some() {
+        if event.as_ref().is_some_and(revises_candidate) {
             self.report(CoordinatorReport::Scheduler(SchedulerMessage::Active {
                 enclave: self.enclave,
             }))?;
@@ -435,7 +487,7 @@ impl FederateSchedulerCoordination for FederateCoordinationParticipant {
     }
 
     /// Publishes idle and blocks while translating fixed-point commands around the event queue.
-    fn wait(&mut self) -> Result<Option<AsyncEvent>, FederateCoordinationError> {
+    fn wait(&mut self) -> Result<FederateIdleWait, FederateCoordinationError> {
         self.take_deferred_error()?;
         self.parked_revision = None;
         self.report(CoordinatorReport::Scheduler(SchedulerMessage::Publish {
@@ -445,18 +497,18 @@ impl FederateSchedulerCoordination for FederateCoordinationParticipant {
 
         loop {
             if let Some(event) = self.take_active_event()? {
-                return Ok(Some(event));
+                return Ok(FederateIdleWait::Interrupted(event));
             }
             match self.command_rx.recv_timeout(StdDuration::from_millis(1)) {
                 Ok(ParticipantCommand::Action(CoordinationAction::Probe { revision })) => {
                     if let Some(event) = self.take_active_event()? {
-                        return Ok(Some(event));
+                        return Ok(FederateIdleWait::Interrupted(event));
                     }
                     self.observe(revision, Observation::Probed)?;
                 }
                 Ok(ParticipantCommand::Action(CoordinationAction::Park { revision })) => {
                     if let Some(event) = self.take_active_event()? {
-                        return Ok(Some(event));
+                        return Ok(FederateIdleWait::Interrupted(event));
                     }
                     self.parked_revision = Some(revision);
                     self.observe(revision, Observation::Parked)?;
@@ -465,23 +517,26 @@ impl FederateSchedulerCoordination for FederateCoordinationParticipant {
                     if self.parked_revision == Some(revision) =>
                 {
                     if let Some(event) = self.take_active_event()? {
-                        return Ok(Some(event));
+                        return Ok(FederateIdleWait::Interrupted(event));
                     }
                     self.observe(revision, Observation::Rechecked)?;
                 }
                 Ok(ParticipantCommand::Action(CoordinationAction::Resume { .. })) => {
                     self.parked_revision = None;
                 }
+                Ok(ParticipantCommand::Action(CoordinationAction::AdvanceHorizon { tag })) => {
+                    self.advance_horizon(tag);
+                }
                 Ok(ParticipantCommand::LogicalHorizon(tag)) => {
                     self.logical_horizon = Some(tag);
                     self.terminal = true;
-                    return Ok(None);
+                    return Ok(FederateIdleWait::LogicalHorizon(tag));
                 }
                 Ok(ParticipantCommand::Action(
                     CoordinationAction::Stop | CoordinationAction::Abort,
                 )) => {
                     self.terminal = true;
-                    return Ok(None);
+                    return Ok(FederateIdleWait::Stopped);
                 }
                 Ok(ParticipantCommand::Action(_)) => {}
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -497,7 +552,10 @@ impl FederateSchedulerCoordination for FederateCoordinationParticipant {
     }
 
     /// Publishes a finite candidate and blocks until it is granted or asynchronously interrupted.
-    fn acquire_tag(&mut self, tag: Tag) -> Result<Option<AsyncEvent>, FederateCoordinationError> {
+    fn acquire_tag(
+        &mut self,
+        tag: Tag,
+    ) -> Result<FederateTagAcquisition, FederateCoordinationError> {
         self.take_deferred_error()?;
         self.report(CoordinatorReport::Scheduler(SchedulerMessage::Publish {
             enclave: self.enclave,
@@ -506,24 +564,27 @@ impl FederateSchedulerCoordination for FederateCoordinationParticipant {
 
         loop {
             if let Some(event) = self.take_active_event()? {
-                return Ok(Some(event));
+                return Ok(FederateTagAcquisition::Interrupted(event));
             }
             match self.command_rx.recv_timeout(StdDuration::from_millis(1)) {
                 Ok(ParticipantCommand::Action(CoordinationAction::Grant {
                     tag: granted, ..
                 })) if granted >= tag => {
-                    return Ok(None);
+                    return Ok(FederateTagAcquisition::Granted);
+                }
+                Ok(ParticipantCommand::Action(CoordinationAction::AdvanceHorizon { tag })) => {
+                    self.advance_horizon(tag);
                 }
                 Ok(ParticipantCommand::LogicalHorizon(tag)) => {
                     self.logical_horizon = Some(tag);
                     self.terminal = true;
-                    return Ok(None);
+                    return Ok(FederateTagAcquisition::LogicalHorizon(tag));
                 }
                 Ok(ParticipantCommand::Action(
                     CoordinationAction::Stop | CoordinationAction::Abort,
                 )) => {
                     self.terminal = true;
-                    return Ok(None);
+                    return Ok(FederateTagAcquisition::Stopped);
                 }
                 Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -532,6 +593,49 @@ impl FederateSchedulerCoordination for FederateCoordinationParticipant {
                             enclave: self.enclave,
                         },
                     );
+                }
+            }
+        }
+    }
+
+    /// Waits for retained-horizon authorization without publishing executable work.
+    fn authorize_control(
+        &mut self,
+        tag: Tag,
+    ) -> Result<FederateControlAuthorization, FederateCoordinationError> {
+        self.take_deferred_error()?;
+        if self.terminal {
+            return Ok(FederateControlAuthorization::Stopped);
+        }
+
+        loop {
+            loop {
+                match self.command_rx.try_recv() {
+                    Ok(command) if self.apply_control_command(command) => {
+                        return Ok(FederateControlAuthorization::Stopped);
+                    }
+                    Ok(_) => {}
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        self.terminal = true;
+                        return Ok(FederateControlAuthorization::Stopped);
+                    }
+                }
+            }
+            if let Some(event) = self.take_active_event()? {
+                return Ok(FederateControlAuthorization::Interrupted(event));
+            }
+            if self.grant_horizon.is_some_and(|horizon| horizon >= tag) {
+                return Ok(FederateControlAuthorization::Authorized);
+            }
+            match self.command_rx.recv_timeout(StdDuration::from_millis(1)) {
+                Ok(command) if self.apply_control_command(command) => {
+                    return Ok(FederateControlAuthorization::Stopped);
+                }
+                Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    self.terminal = true;
+                    return Ok(FederateControlAuthorization::Stopped);
                 }
             }
         }
@@ -548,23 +652,16 @@ impl FederateSchedulerCoordination for FederateCoordinationParticipant {
         ))
     }
 
-    /// Returns the retained legacy shared logical horizon.
-    fn logical_horizon(&self) -> Option<Tag> {
-        self.logical_horizon
-    }
-
     /// Reports a legacy shared logical horizon without changing key domains.
     fn logical_horizon_reached(&mut self, tag: Tag) {
+        if self.logical_horizon == Some(tag) {
+            return;
+        }
+        self.logical_horizon = Some(tag);
+        self.terminal = true;
         self.report_infallible(CoordinatorReport::LogicalHorizon {
             enclave: self.enclave,
             tag,
-        });
-    }
-
-    /// Requests pure-state stop.
-    fn stop(&mut self) {
-        self.report_infallible(CoordinatorReport::Stop {
-            enclave: self.enclave,
         });
     }
 
@@ -573,29 +670,6 @@ impl FederateSchedulerCoordination for FederateCoordinationParticipant {
         self.report_infallible(CoordinatorReport::Scheduler(SchedulerMessage::Failed {
             enclave: Some(self.enclave),
         }));
-    }
-}
-
-impl QuiescenceControl for FederateCoordinationParticipant {
-    /// Forwards legacy activity to the generalized scheduler port.
-    fn active(&mut self) {
-        FederateSchedulerCoordination::active(self);
-    }
-
-    /// Forwards legacy waiting and exposes impossible channel loss as a supervisor-visible panic.
-    fn wait(&mut self) -> Option<AsyncEvent> {
-        FederateSchedulerCoordination::wait(self)
-            .unwrap_or_else(|error| panic!("legacy Federate coordination failed: {error}"))
-    }
-
-    /// Returns the horizon retained by the generalized scheduler port.
-    fn logical_horizon(&self) -> Option<Tag> {
-        FederateSchedulerCoordination::logical_horizon(self)
-    }
-
-    /// Forwards the legacy logical-horizon report to the generalized scheduler port.
-    fn logical_horizon_reached(&mut self, tag: Tag) {
-        FederateSchedulerCoordination::logical_horizon_reached(self, tag);
     }
 }
 
@@ -636,6 +710,7 @@ impl<B: FederateCoordinationBackend> FederateCoordination<B> {
                     event_rx,
                     parked_revision: None,
                     logical_horizon: None,
+                    grant_horizon: None,
                     deferred_error: None,
                     terminal: false,
                 },
@@ -665,17 +740,15 @@ pub(crate) type FederateQuiescence = FederateCoordination<LocalFederateCoordinat
 /// Temporary supervisor-handle name retained for reference supervision until Task 6.
 pub(crate) type FederateQuiescenceHandle = FederateCoordinationHandle;
 
-/// Temporary participant name retained by the compiled scheduler seam until Task 5.
-pub(crate) type QuiescenceParticipant = FederateCoordinationParticipant;
-
 #[cfg(test)]
 mod tests {
     //! Channel-level tests for wakeable idle execution and the parked queue race.
 
     use super::super::state::CoordinationPhase;
     use super::{
-        CoordinationStateError, CoordinatorReport, FederateCoordination,
-        FederateCoordinationParticipant, FederateSchedulerCoordination, Observation,
+        CoordinationAction, CoordinationStateError, CoordinatorReport,
+        FederateControlAuthorization, FederateCoordination, FederateCoordinationParticipant,
+        FederateIdleWait, FederateSchedulerCoordination, FederateTagAcquisition, Observation,
         ParticipantCommand, SchedulerMessage,
     };
     use crate::{
@@ -832,17 +905,138 @@ mod tests {
         report_tx: mpsc::Sender<CoordinatorReport>,
         command_rx: mpsc::Receiver<ParticipantCommand>,
     ) -> FederateCoordinationParticipant {
-        let (_event_tx, event_rx) = kanal::unbounded();
-        FederateCoordinationParticipant {
+        participant_with_events(enclave, report_tx, command_rx).0
+    }
+
+    /// Builds one participant and retains its scheduler-event sender for priority tests.
+    fn participant_with_events(
+        enclave: EnclaveIndex,
+        report_tx: mpsc::Sender<CoordinatorReport>,
+        command_rx: mpsc::Receiver<ParticipantCommand>,
+    ) -> (FederateCoordinationParticipant, crate::Sender<AsyncEvent>) {
+        let (event_tx, event_rx) = kanal::unbounded();
+        let participant = FederateCoordinationParticipant {
             enclave,
             report_tx,
             command_rx,
             event_rx,
             parked_revision: None,
             logical_horizon: None,
+            grant_horizon: None,
             deferred_error: None,
             terminal: false,
+        };
+        (participant, event_tx)
+    }
+
+    /// Verifies terminal coordination cannot be mistaken for an acquired logical tag.
+    #[test]
+    fn terminal_acquisition_is_explicit() {
+        let enclave = EnclaveIndex::new(3);
+        let (report_tx, _report_rx) = mpsc::channel();
+        let (command_tx, command_rx) = mpsc::channel();
+        let mut participant = participant(enclave, report_tx, command_rx);
+        command_tx
+            .send(ParticipantCommand::Action(CoordinationAction::Stop))
+            .unwrap();
+
+        assert!(matches!(
+            participant.acquire_tag(Tag::ZERO).unwrap(),
+            FederateTagAcquisition::Stopped
+        ));
+    }
+
+    /// Verifies control work waits for a covering broadcast horizon without publishing a candidate.
+    #[test]
+    fn control_authorization_waits_for_broadcast_horizon() {
+        let enclave = EnclaveIndex::new(3);
+        let (report_tx, report_rx) = mpsc::channel();
+        let (command_tx, command_rx) = mpsc::channel();
+        let mut participant = participant(enclave, report_tx, command_rx);
+        let requested = Tag::new(Duration::seconds(2), 0);
+        let weaker = Tag::new(Duration::seconds(1), 0);
+
+        std::thread::scope(|scope| {
+            let (result_tx, result_rx) = mpsc::channel();
+            let authorization = scope.spawn(move || {
+                result_tx
+                    .send(participant.authorize_control(requested))
+                    .unwrap();
+            });
+            command_tx
+                .send(ParticipantCommand::Action(
+                    CoordinationAction::AdvanceHorizon { tag: weaker },
+                ))
+                .unwrap();
+            assert!(result_rx
+                .recv_timeout(StdDuration::from_millis(10))
+                .is_err());
+            command_tx
+                .send(ParticipantCommand::Action(
+                    CoordinationAction::AdvanceHorizon { tag: requested },
+                ))
+                .unwrap();
+            assert!(matches!(
+                result_rx.recv_timeout(StdDuration::from_secs(1)).unwrap(),
+                Ok(FederateControlAuthorization::Authorized)
+            ));
+            authorization.join().unwrap();
+        });
+        assert!(report_rx.try_recv().is_err());
+    }
+
+    /// Verifies queued terminal coordination wins over a retained covering horizon.
+    #[test]
+    fn cached_control_authorization_observes_queued_terminal_command() {
+        let enclave = EnclaveIndex::new(3);
+        let requested = Tag::new(Duration::seconds(2), 0);
+        for terminal in [
+            ParticipantCommand::Action(CoordinationAction::Stop),
+            ParticipantCommand::Action(CoordinationAction::Abort),
+            ParticipantCommand::LogicalHorizon(requested),
+        ] {
+            let (report_tx, _report_rx) = mpsc::channel();
+            let (command_tx, command_rx) = mpsc::channel();
+            let mut participant = participant(enclave, report_tx, command_rx);
+            command_tx
+                .send(ParticipantCommand::Action(
+                    CoordinationAction::AdvanceHorizon { tag: requested },
+                ))
+                .unwrap();
+            assert!(matches!(
+                participant.authorize_control(requested).unwrap(),
+                FederateControlAuthorization::Authorized
+            ));
+
+            command_tx
+                .send(ParticipantCommand::Action(
+                    CoordinationAction::AdvanceHorizon { tag: requested },
+                ))
+                .unwrap();
+            command_tx.send(terminal).unwrap();
+            assert!(matches!(
+                participant.authorize_control(requested).unwrap(),
+                FederateControlAuthorization::Stopped
+            ));
         }
+    }
+
+    /// Verifies queued scheduler work also wins over a retained covering horizon.
+    #[test]
+    fn cached_control_authorization_observes_queued_event() {
+        let enclave = EnclaveIndex::new(3);
+        let (report_tx, _report_rx) = mpsc::channel();
+        let (_command_tx, command_rx) = mpsc::channel();
+        let (mut participant, event_tx) = participant_with_events(enclave, report_tx, command_rx);
+        let requested = Tag::new(Duration::seconds(2), 0);
+        participant.advance_horizon(requested);
+        event_tx.send(AsyncEvent::shutdown(Duration::ZERO)).unwrap();
+
+        assert!(matches!(
+            participant.authorize_control(requested).unwrap(),
+            FederateControlAuthorization::Interrupted(AsyncEvent::Shutdown { delay })
+                if delay == Duration::ZERO
+        ));
     }
 
     /// Verifies every private pure-state failure maps to a closed public category.
@@ -933,7 +1127,10 @@ mod tests {
 
         std::thread::scope(|scope| {
             let coordinator = scope.spawn(move || coordinator.run());
-            assert!(participant.wait().unwrap().is_none());
+            assert!(matches!(
+                participant.wait().unwrap(),
+                FederateIdleWait::Stopped
+            ));
             assert_eq!(
                 coordinator.join().unwrap().unwrap_err(),
                 FederateCoordinationError::BackendPublish {
@@ -1072,15 +1269,16 @@ mod tests {
                 *enclave == eventful
                     && matches!(
                         event,
-                        Ok(Some(AsyncEvent::Shutdown { delay })) if *delay == Duration::ZERO
+                        Ok(FederateIdleWait::Interrupted(AsyncEvent::Shutdown { delay }))
+                            if *delay == Duration::ZERO
                     )
             }));
             assert!(observations
                 .iter()
-                .any(|(enclave, event)| *enclave == eventful && matches!(event, Ok(None))));
-            assert!(observations
-                .iter()
-                .any(|(enclave, event)| *enclave == peer && matches!(event, Ok(None))));
+                .any(|(enclave, event)| *enclave == eventful
+                    && matches!(event, Ok(FederateIdleWait::Stopped))));
+            assert!(observations.iter().any(|(enclave, event)| *enclave == peer
+                && matches!(event, Ok(FederateIdleWait::Stopped))));
         });
     }
 
@@ -1127,12 +1325,18 @@ mod tests {
                 .unwrap();
             assert!(matches!(
                 result_rx.recv_timeout(StdDuration::from_secs(1)).unwrap(),
-                (enclave, Ok(Some(AsyncEvent::Shutdown { delay })))
+                (
+                    enclave,
+                    Ok(FederateIdleWait::Interrupted(AsyncEvent::Shutdown { delay }))
+                )
                     if enclave == eventful && delay == Duration::ZERO
             ));
             abort_handle.abort();
             eventful_thread.join().unwrap();
-            assert!(peer_thread.join().unwrap().unwrap().is_none());
+            assert!(matches!(
+                peer_thread.join().unwrap().unwrap(),
+                FederateIdleWait::Stopped
+            ));
             coordinator.join().unwrap().unwrap();
         });
     }

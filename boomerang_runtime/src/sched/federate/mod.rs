@@ -13,10 +13,9 @@ pub use backend::{
 pub(crate) use dependencies::EnclaveDependencies;
 #[allow(unused_imports)]
 pub(crate) use quiescence::{
-    FederateCoordination, FederateCoordinationHandle, FederateCoordinationParticipant,
-    FederateCoordinator, FederateSchedulerCoordination,
+    FederateControlAuthorization, FederateCoordination, FederateCoordinationHandle,
+    FederateCoordinationParticipant, FederateCoordinator, FederateIdleWait,
+    FederateSchedulerCoordination, FederateTagAcquisition,
 };
-pub(crate) use quiescence::{
-    FederateQuiescence, FederateQuiescenceHandle, QuiescenceControl, QuiescenceParticipant,
-};
+pub(crate) use quiescence::{FederateQuiescence, FederateQuiescenceHandle};
 pub(crate) use state::LifecyclePolicy;

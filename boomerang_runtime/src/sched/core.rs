@@ -3,10 +3,16 @@
 use kanal::ReceiveErrorTimeout;
 
 use super::{
-    barrier::LogicalTimeBarrier, federate::QuiescenceControl, modal::EventManager, Config, Stats,
+    barrier::LogicalTimeBarrier,
+    federate::{
+        FederateControlAuthorization, FederateCoordinationError, FederateIdleWait,
+        FederateSchedulerCoordination, FederateTagAcquisition,
+    },
+    modal::EventManager,
+    Config, Stats,
 };
 #[cfg(feature = "federated")]
-use super::{FederatedBarrierError, FederatedBarrierOutcome, FederatedTimeBarrier};
+use super::{FederatedBarrierOutcome, FederatedTimeBarrier};
 use crate::{
     event::{AsyncEvent, AsyncEventTarget},
     keepalive,
@@ -159,7 +165,7 @@ pub(crate) trait ExecutionStorage<S: Schedule> {
 ///
 /// Coordination, clocks, wake reception, and shutdown remain concrete here; this
 /// core is not a backend and performs no lowering.
-pub(super) struct SchedulerCore<'a, S, E>
+pub(super) struct SchedulerCore<'a, 'coordination, S, E>
 where
     S: Schedule,
     E: ExecutionStorage<S>,
@@ -174,8 +180,9 @@ where
     pub(super) storage: &'a mut E,
     /// Existing asynchronous wake receiver.
     pub(super) event_rx: &'a crate::Receiver<AsyncEvent>,
-    /// Optional owned-Federate quiescence hook; live schedulers never install one.
-    pub(super) quiescence: Option<&'a mut dyn QuiescenceControl>,
+    /// Optional backend-neutral coordination port installed only by compiled schedulers.
+    pub(super) federate_coordination:
+        Option<&'coordination mut (dyn FederateSchedulerCoordination + 'coordination)>,
     /// Root and modal event queues typed by the schedule keys.
     pub(super) events: &'a mut EventManager<S>,
     /// Physical origin used to translate logical tags.
@@ -192,9 +199,9 @@ where
     pub(super) upstream_enclaves: &'a mut tinymap::TinySecondaryMap<EnclaveKey, LogicalTimeBarrier>,
     /// Existing local downstream wake senders.
     pub(super) downstream_enclaves: &'a tinymap::TinySecondaryMap<EnclaveKey, SendContext>,
-    /// Existing feature-gated federated time barrier.
+    /// Existing feature-gated federated time barrier installed only by live schedulers.
     #[cfg(feature = "federated")]
-    pub(super) federated_time_barrier: &'a mut Box<dyn FederatedTimeBarrier>,
+    pub(super) federated_time_barrier: Option<&'a mut dyn FederatedTimeBarrier>,
     /// Accumulated runtime statistics.
     pub(super) stats: &'a mut Stats,
     /// Reusable enabled-reaction scratch.
@@ -212,11 +219,18 @@ where
 pub(crate) enum SchedulerError<E> {
     /// Existing local or federated logical-time coordination failed.
     Coordination(RuntimeError),
+    /// The compiled Federate coordination port failed with a closed typed error.
+    FederateCoordination(FederateCoordinationError),
     /// A reaction invocation in the execution storage failed.
     Execution(E),
+    /// The compiled scheduler already emitted its one Federate failure report for this error.
+    FederateFailureReported {
+        /// Original typed scheduler failure retained without formatting or reparsing.
+        source: Box<SchedulerError<E>>,
+    },
 }
 
-impl<S, E> SchedulerCore<'_, S, E>
+impl<S, E> SchedulerCore<'_, '_, S, E>
 where
     S: Schedule,
     E: ExecutionStorage<S>,
@@ -245,7 +259,7 @@ where
                 if let Some(barrier) = self.upstream_enclaves.get_mut(enclave) {
                     barrier.release_tag_provisional(tag);
                 }
-                self.events.push_event(tag, std::iter::empty(), false);
+                self.events.push_control_event(tag);
             }
             AsyncEvent::Logical { tag, target, value } => {
                 if tag <= *self.current_tag {
@@ -381,8 +395,6 @@ where
                 tracing::debug!(target: "boomerang_runtime::sched", "Cannot wait, already past programmed shutdown time...");
                 None
             }
-        } else if let Some(quiescence) = self.quiescence.as_deref_mut() {
-            quiescence.wait()
         } else if self.config.keep_alive {
             tracing::debug!(target: "boomerang_runtime::sched", "Waiting indefinitely for async event.");
             self.event_rx.recv().ok()
@@ -405,17 +417,29 @@ where
         }
     }
 
-    #[cfg(feature = "federated")]
-    fn acquire_federated_tag(
+    /// Reports one scheduler failure and marks its ownership for the supervising layer.
+    fn report_federate_failure(
         &mut self,
-        tag: Tag,
-    ) -> Result<FederatedBarrierOutcome, FederatedBarrierError> {
-        self.federated_time_barrier.acquire_tag(tag, self.event_rx)
+        error: SchedulerError<E::Error>,
+    ) -> SchedulerError<E::Error> {
+        if let Some(coordination) = self.federate_coordination.take() {
+            coordination.fail();
+            SchedulerError::FederateFailureReported {
+                source: Box::new(error),
+            }
+        } else {
+            error
+        }
     }
 
-    #[cfg(feature = "federated")]
-    fn federated_logical_tag_complete(&mut self, tag: Tag) -> Result<(), FederatedBarrierError> {
-        self.federated_time_barrier.logical_tag_complete(tag)
+    /// Terminates this scheduler after coordination ends without granting further work.
+    fn stop_for_federate_termination(&mut self) {
+        self.federate_coordination.take();
+        self.shutdown_tx.shutdown();
+        self.events.shutdown();
+        if self.shutdown_tag.is_none() {
+            *self.shutdown_tag = Some(self.next_shutdown_tag());
+        }
     }
 
     /// Process one scheduler step, returning coordination failures to the caller.
@@ -427,56 +451,132 @@ where
 
         // Pump the event queue
         while let Ok(Some(async_event)) = self.event_rx.try_recv() {
-            if let Some(quiescence) = self.quiescence.as_deref_mut() {
-                quiescence.active();
+            if matches!(
+                &async_event,
+                AsyncEvent::Logical { .. }
+                    | AsyncEvent::Physical { .. }
+                    | AsyncEvent::Shutdown { .. }
+            ) {
+                if let Some(coordination) = self.federate_coordination.as_deref_mut() {
+                    coordination.active();
+                }
             }
             self.handle_async_event(async_event)
                 .map_err(SchedulerError::Execution)?;
         }
 
         if let Some(next_tag) = self.events.peek_tag() {
+            let control_only = self.events.peek_is_control_only();
             let logical_horizon = self.config.timeout.map(|timeout| Tag::ZERO.delay(timeout));
-            if let Some(quiescence) = self.quiescence.as_deref_mut() {
+            if let Some(coordination) = self.federate_coordination.as_deref_mut() {
                 if logical_horizon == Some(next_tag) && !self.events.has_nonterminal_work() {
-                    if let Some(async_event) = quiescence.wait() {
-                        self.handle_async_event(async_event)
-                            .map_err(SchedulerError::Execution)?;
-                        return Ok(true);
-                    }
-                    if quiescence.logical_horizon() != Some(next_tag) {
-                        self.schedule_shutdown_at(self.next_shutdown_tag());
-                        return Ok(true);
+                    match coordination
+                        .wait()
+                        .map_err(SchedulerError::FederateCoordination)
+                    {
+                        Ok(FederateIdleWait::Interrupted(async_event)) => {
+                            self.handle_async_event(async_event)
+                                .map_err(SchedulerError::Execution)?;
+                            return Ok(true);
+                        }
+                        Ok(FederateIdleWait::LogicalHorizon(tag)) => {
+                            tracing::trace!(tag = %tag, "Federate logical horizon ended coordination");
+                            self.stop_for_federate_termination();
+                            return Ok(false);
+                        }
+                        Ok(FederateIdleWait::Stopped) => {
+                            self.stop_for_federate_termination();
+                            return Ok(false);
+                        }
+                        Err(error) => {
+                            return Err(self.report_federate_failure(error));
+                        }
                     }
                 }
-                quiescence.active();
+                if !control_only {
+                    coordination.active();
+                }
             }
             tracing::trace!(target: "boomerang_runtime::sched", next_tag = %next_tag, "Trying next tag");
 
-            // Wait until all upstream barriers are released
+            if let Some(coordination) = self.federate_coordination.as_deref_mut() {
+                if control_only {
+                    match coordination
+                        .authorize_control(next_tag)
+                        .map_err(SchedulerError::FederateCoordination)
+                    {
+                        Ok(FederateControlAuthorization::Authorized) => {}
+                        Ok(FederateControlAuthorization::Interrupted(async_event)) => {
+                            self.handle_async_event(async_event)
+                                .map_err(SchedulerError::Execution)?;
+                            return Ok(true);
+                        }
+                        Ok(FederateControlAuthorization::Stopped) => {
+                            self.stop_for_federate_termination();
+                            return Ok(false);
+                        }
+                        Err(error) => return Err(self.report_federate_failure(error)),
+                    }
+                } else {
+                    match coordination
+                        .acquire_tag(next_tag)
+                        .map_err(SchedulerError::FederateCoordination)
+                    {
+                        Ok(FederateTagAcquisition::Granted) => {}
+                        Ok(FederateTagAcquisition::Interrupted(async_event)) => {
+                            self.handle_async_event(async_event)
+                                .map_err(SchedulerError::Execution)?;
+                            return Ok(true);
+                        }
+                        Ok(FederateTagAcquisition::LogicalHorizon(tag)) => {
+                            tracing::trace!(tag = %tag, "Federate logical horizon ended acquisition");
+                            self.stop_for_federate_termination();
+                            return Ok(false);
+                        }
+                        Ok(FederateTagAcquisition::Stopped) => {
+                            self.stop_for_federate_termination();
+                            return Ok(false);
+                        }
+                        Err(error) => return Err(self.report_federate_failure(error)),
+                    }
+                }
+            }
+            // Wait until all upstream barriers are released.
             for (_upstream_enclave_key, barrier) in self.upstream_enclaves.iter_mut() {
                 if let Some(async_event) = barrier
                     .acquire_tag(next_tag, self.key, self.event_rx)
                     .map_err(|error| SchedulerError::Coordination(error.into()))?
                 {
+                    if matches!(
+                        &async_event,
+                        AsyncEvent::Logical { .. }
+                            | AsyncEvent::Physical { .. }
+                            | AsyncEvent::Shutdown { .. }
+                    ) {
+                        if let Some(coordination) = self.federate_coordination.as_deref_mut() {
+                            coordination.active();
+                        }
+                    }
                     self.handle_async_event(async_event)
                         .map_err(SchedulerError::Execution)?;
-                    // Returned early due to async event
+                    // Returned early due to async event.
                     return Ok(true);
                 }
             }
 
             #[cfg(feature = "federated")]
-            {
-                match self
-                    .acquire_federated_tag(next_tag)
-                    .map_err(|error| SchedulerError::Coordination(error.into()))?
-                {
-                    FederatedBarrierOutcome::Granted => {}
-                    FederatedBarrierOutcome::Interrupted(async_event) => {
-                        self.handle_async_event(async_event)
-                            .map_err(SchedulerError::Execution)?;
-                        // Returned early due to async event
-                        return Ok(true);
+            if self.federate_coordination.is_none() {
+                if let Some(barrier) = self.federated_time_barrier.as_deref_mut() {
+                    match barrier
+                        .acquire_tag(next_tag, self.event_rx)
+                        .map_err(|error| SchedulerError::Coordination(error.into()))?
+                    {
+                        FederatedBarrierOutcome::Granted => {}
+                        FederatedBarrierOutcome::Interrupted(async_event) => {
+                            self.handle_async_event(async_event)
+                                .map_err(SchedulerError::Execution)?;
+                            return Ok(true);
+                        }
                     }
                 }
             }
@@ -495,9 +595,10 @@ where
 
             if event.terminal {
                 if logical_horizon == Some(event.tag) {
-                    if let Some(quiescence) = self.quiescence.as_deref_mut() {
-                        quiescence.logical_horizon_reached(event.tag);
+                    if let Some(coordination) = self.federate_coordination.as_deref_mut() {
+                        coordination.logical_horizon_reached(event.tag);
                     }
+                    self.federate_coordination.take();
                 }
                 // Signal to any waiting threads that the scheduler is shutting down.
                 self.shutdown_tx.shutdown();
@@ -527,9 +628,21 @@ where
 
             // Release the current tag to downstream reactors
             self.release_tag_downstream(*self.current_tag);
-            #[cfg(feature = "federated")]
-            self.federated_logical_tag_complete(*self.current_tag)
-                .map_err(|error| SchedulerError::Coordination(error.into()))?;
+            if let Some(coordination) = self.federate_coordination.as_deref_mut() {
+                if let Err(error) = coordination
+                    .logical_tag_complete(*self.current_tag)
+                    .map_err(SchedulerError::FederateCoordination)
+                {
+                    return Err(self.report_federate_failure(error));
+                }
+            } else {
+                #[cfg(feature = "federated")]
+                if let Some(barrier) = self.federated_time_barrier.as_deref_mut() {
+                    barrier
+                        .logical_tag_complete(*self.current_tag)
+                        .map_err(|error| SchedulerError::Coordination(error.into()))?;
+                }
+            }
 
             self.stats.increment_processed_tags();
 
@@ -537,6 +650,25 @@ where
                 // Break out of the event loop;
                 *self.shutdown_tag = Some(*self.current_tag);
                 return Ok(false);
+            }
+        } else if let Some(coordination) = self.federate_coordination.as_deref_mut() {
+            match coordination
+                .wait()
+                .map_err(SchedulerError::FederateCoordination)
+            {
+                Ok(FederateIdleWait::Interrupted(async_event)) => {
+                    self.handle_async_event(async_event)
+                        .map_err(SchedulerError::Execution)?;
+                }
+                Ok(FederateIdleWait::LogicalHorizon(_)) => {
+                    self.stop_for_federate_termination();
+                    return Ok(false);
+                }
+                Ok(FederateIdleWait::Stopped) => {
+                    self.stop_for_federate_termination();
+                    return Ok(false);
+                }
+                Err(error) => return Err(self.report_federate_failure(error)),
             }
         } else if let Some(async_event) = self.receive_event_async() {
             self.handle_async_event(async_event)
@@ -562,6 +694,10 @@ where
                 Ok(true) => {}
                 Ok(false) => break,
                 Err(error) => {
+                    let error = match error {
+                        error @ SchedulerError::FederateFailureReported { .. } => error,
+                        error => self.report_federate_failure(error),
+                    };
                     self.shutdown_tx.shutdown();
                     self.events.shutdown();
                     return Err(error);
@@ -589,6 +725,16 @@ where
                 match self.event_rx.recv_timeout(advance) {
                     Ok(event) => {
                         tracing::debug!(target: "boomerang_runtime::sched", event = %event, "Sleep interrupted by");
+                        if matches!(
+                            &event,
+                            AsyncEvent::Logical { .. }
+                                | AsyncEvent::Physical { .. }
+                                | AsyncEvent::Shutdown { .. }
+                        ) {
+                            if let Some(coordination) = self.federate_coordination.as_deref_mut() {
+                                coordination.active();
+                            }
+                        }
                         self.handle_async_event(event)
                             .map_err(SchedulerError::Execution)?;
                         return Ok(true);

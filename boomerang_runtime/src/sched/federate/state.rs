@@ -93,6 +93,11 @@ pub(crate) enum CoordinationAction {
         /// Aggregate publication for the current revision.
         FederatePublication,
     ),
+    /// Broadcast a monotonically acquired Federate grant horizon to every participant.
+    AdvanceHorizon {
+        /// Greatest logical tag authorized for control-only local advancement.
+        tag: Tag,
+    },
     /// Grant logical progress to a covered participant candidate.
     Grant {
         /// Compiled participant receiving the grant.
@@ -189,6 +194,8 @@ pub(crate) struct FederateCoordinationState {
     pending_publication: Option<FederatePublication>,
     /// Greatest completion frontier emitted for the whole Federate.
     completed_frontier: Option<Tag>,
+    /// Greatest valid backend grant retained across candidate revisions.
+    grant_horizon: Option<Tag>,
     /// Typed origin of the first failure when one was supplied.
     first_failure: Option<EnclaveIndex>,
     /// Idle behavior selected by the runtime adapter.
@@ -221,6 +228,7 @@ impl FederateCoordinationState {
             revision: CoordinationRevision::new(0),
             pending_publication: None,
             completed_frontier: None,
+            grant_horizon: None,
             first_failure: None,
             lifecycle,
             phase: CoordinationPhase::Active,
@@ -230,6 +238,12 @@ impl FederateCoordinationState {
     /// Returns the current aggregate candidate revision.
     pub(crate) const fn revision(&self) -> CoordinationRevision {
         self.revision
+    }
+
+    /// Returns the greatest valid Federate grant retained for control authorization.
+    #[cfg(test)]
+    pub(crate) const fn grant_horizon(&self) -> Option<Tag> {
+        self.grant_horizon
     }
 
     /// Returns the current lifecycle or fixed-point phase.
@@ -301,21 +315,27 @@ impl FederateCoordinationState {
         }
 
         let granted = acquisition.granted();
-        let actions = self
-            .participants
-            .iter()
-            .filter_map(|(enclave, participant)| {
-                participant
-                    .published
-                    .then_some(participant.candidate)
-                    .flatten()
-                    .filter(|candidate| *candidate <= granted)
-                    .map(|candidate| CoordinationAction::Grant {
-                        enclave,
-                        tag: candidate,
-                    })
-            })
-            .collect::<Vec<_>>();
+        let horizon = self
+            .grant_horizon
+            .map_or(granted, |existing| existing.max(granted));
+        self.grant_horizon = Some(horizon);
+        let mut actions = vec![CoordinationAction::AdvanceHorizon { tag: horizon }];
+        actions.extend(
+            self.participants
+                .iter()
+                .filter_map(|(enclave, participant)| {
+                    participant
+                        .published
+                        .then_some(participant.candidate)
+                        .flatten()
+                        .filter(|candidate| *candidate <= granted)
+                        .map(|candidate| CoordinationAction::Grant {
+                            enclave,
+                            tag: candidate,
+                        })
+                })
+                .collect::<Vec<_>>(),
+        );
 
         for action in &actions {
             if let CoordinationAction::Grant { enclave, .. } = *action {
@@ -520,7 +540,21 @@ impl FederateCoordinationState {
                 participant.observation = None;
             }
         } else if was_published {
-            return Ok(Vec::new());
+            let action = match self.phase {
+                CoordinationPhase::Probing => Some(CoordinationAction::Probe {
+                    revision: self.revision,
+                }),
+                CoordinationPhase::Parking => Some(CoordinationAction::Park {
+                    revision: self.revision,
+                }),
+                CoordinationPhase::Rechecking => Some(CoordinationAction::Recheck {
+                    revision: self.revision,
+                }),
+                CoordinationPhase::Active
+                | CoordinationPhase::Parked
+                | CoordinationPhase::Stopped => None,
+            };
+            return Ok(action.into_iter().collect());
         }
 
         let participant = &mut self.participants[enclave];
@@ -696,10 +730,13 @@ mod tests {
                     (second, Some(Some(second_tag)))
                 ],
                 pending_publication: None,
-                actions: vec![CoordinationAction::Grant {
-                    enclave: first,
-                    tag: first_tag,
-                }],
+                actions: vec![
+                    CoordinationAction::AdvanceHorizon { tag: first_tag },
+                    CoordinationAction::Grant {
+                        enclave: first,
+                        tag: first_tag,
+                    },
+                ],
             }
         );
         let republished = publish(&mut state, first, Some(first_tag));
@@ -732,6 +769,7 @@ mod tests {
         let stale = state.revision();
         let revised = publish(&mut state, enclave, Some(revised_tag));
         let current = state.revision();
+        let horizon_before = state.grant_horizon();
 
         assert_ne!(stale, current);
         assert_eq!(
@@ -758,6 +796,7 @@ mod tests {
                 actions: vec![],
             }
         );
+        assert_eq!(state.grant_horizon(), horizon_before);
     }
 
     /// Verifies only a changed candidate advances the aggregate revision.
@@ -885,6 +924,11 @@ mod tests {
         assert!(observe(&mut state, first, revision, Observation::Probed)
             .unwrap()
             .is_empty());
+        assert_eq!(
+            publish(&mut state, first, None),
+            vec![CoordinationAction::Probe { revision }]
+        );
+        assert_eq!(state.revision(), revision);
         assert!(observe(&mut state, first, revision, Observation::Probed)
             .unwrap()
             .is_empty());

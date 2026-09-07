@@ -48,6 +48,9 @@ pub enum ExecuteOwnedError<'image> {
     /// The scheduler's local logical-time coordination failed.
     #[error("compiled scheduler coordination failed: {0}")]
     Coordination(#[source] RuntimeError),
+    /// The scheduler's compiled Federate coordination port failed.
+    #[error("compiled Federate coordination failed: {0}")]
+    FederateCoordination(#[source] crate::FederateCoordinationError),
 }
 
 impl<'image> From<ImageValidationError<'image>> for ExecuteOwnedError<'image> {
@@ -60,7 +63,11 @@ impl<'image> From<crate::sched::SchedulerError<OwnedStorageError>> for ExecuteOw
     fn from(error: crate::sched::SchedulerError<OwnedStorageError>) -> Self {
         match error {
             crate::sched::SchedulerError::Coordination(source) => Self::Coordination(source),
+            crate::sched::SchedulerError::FederateCoordination(source) => {
+                Self::FederateCoordination(source)
+            }
             crate::sched::SchedulerError::Execution(source) => Self::Storage(source),
+            crate::sched::SchedulerError::FederateFailureReported { source } => Self::from(*source),
         }
     }
 }
@@ -469,6 +476,43 @@ pub enum ExecuteOwnedFederateError {
     /// The executor's internal result channel closed before every thread reported.
     #[error("Federate result channel closed before all Enclaves joined")]
     ResultChannelClosed,
+}
+
+/// Layer responsible for emitting the one Federate failure report for a scheduler error.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FailureReportOwnership {
+    /// The scheduler core already emitted the report before returning its typed error.
+    Scheduler,
+    /// The outer supervisor must emit the report because the scheduler could not.
+    Supervisor,
+}
+
+/// Preserves a scheduler error source while classifying failure-report ownership.
+fn classify_scheduler_failure(
+    enclave: EnclaveIndex,
+    error: crate::sched::SchedulerError<OwnedStorageError>,
+) -> (ExecuteOwnedFederateError, FailureReportOwnership) {
+    let (error, ownership) = match error {
+        crate::sched::SchedulerError::FederateFailureReported { source } => {
+            (*source, FailureReportOwnership::Scheduler)
+        }
+        error => (error, FailureReportOwnership::Supervisor),
+    };
+    let error = match error {
+        crate::sched::SchedulerError::Execution(source) => {
+            ExecuteOwnedFederateError::EnclaveExecution { enclave, source }
+        }
+        crate::sched::SchedulerError::Coordination(source) => {
+            ExecuteOwnedFederateError::EnclaveCoordination { enclave, source }
+        }
+        crate::sched::SchedulerError::FederateCoordination(source) => {
+            ExecuteOwnedFederateError::FederateCoordination { source }
+        }
+        crate::sched::SchedulerError::FederateFailureReported { .. } => {
+            unreachable!("reported scheduler failures are unwrapped once")
+        }
+    };
+    (error, ownership)
 }
 
 /// Converts a panic payload into a stable best-effort diagnostic.
@@ -915,7 +959,9 @@ fn execute_owned_federate_with_spawn_guard(
                                 &config,
                                 origin,
                                 coordination,
-                                participant.as_mut(),
+                                participant.as_mut().map(|participant| {
+                                    participant as &mut dyn FederateSchedulerCoordination
+                                }),
                             )
                         }));
                         let result = match execution {
@@ -933,20 +979,14 @@ fn execute_owned_federate_with_spawn_guard(
                                     Err(ExecuteOwnedFederateError::FederateCoordination { source })
                                 }
                             },
-                            Ok(Err(crate::sched::SchedulerError::Execution(source))) => {
-                                if let Some(participant) = participant.as_mut() {
-                                    participant.fail();
+                            Ok(Err(error)) => {
+                                let (error, ownership) = classify_scheduler_failure(enclave, error);
+                                if ownership == FailureReportOwnership::Supervisor {
+                                    if let Some(participant) = participant.as_mut() {
+                                        participant.fail();
+                                    }
                                 }
-                                Err(ExecuteOwnedFederateError::EnclaveExecution { enclave, source })
-                            }
-                            Ok(Err(crate::sched::SchedulerError::Coordination(source))) => {
-                                if let Some(participant) = participant.as_mut() {
-                                    participant.fail();
-                                }
-                                Err(ExecuteOwnedFederateError::EnclaveCoordination {
-                                    enclave,
-                                    source,
-                                })
+                                Err(error)
                             }
                             Err(payload) => {
                                 if let Some(participant) = participant.as_mut() {
@@ -1167,6 +1207,31 @@ mod scoped_spawn_tests {
             move |spawn| spawn == failed_spawn,
         )
         .expect_err("the selected scoped thread creation must fail")
+    }
+
+    /// Verifies the outer supervisor does not repeat a scheduler-owned Federate failure report.
+    #[test]
+    fn reported_scheduler_failure_remains_scheduler_owned() {
+        let enclave = EnclaveIndex::new(1);
+        let source = OwnedStorageError::MissingBinding {
+            slot: BindingSlotIndex::new(0),
+            kind: BindingKind::StateInitializer,
+        };
+        let (error, ownership) = classify_scheduler_failure(
+            enclave,
+            crate::sched::SchedulerError::FederateFailureReported {
+                source: Box::new(crate::sched::SchedulerError::Execution(source)),
+            },
+        );
+
+        assert_eq!(ownership, FailureReportOwnership::Scheduler);
+        assert!(matches!(
+            error,
+            ExecuteOwnedFederateError::EnclaveExecution {
+                enclave: failed,
+                source: OwnedStorageError::MissingBinding { .. },
+            } if failed == enclave
+        ));
     }
 
     #[test]

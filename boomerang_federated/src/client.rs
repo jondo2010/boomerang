@@ -381,6 +381,277 @@ impl FederateClientRoute {
     }
 }
 
+/// One wire request awaiting an RTI grant correlation.
+#[cfg(feature = "runtime")]
+#[derive(Clone, Copy, Debug)]
+struct OutstandingRtiPublication {
+    /// Runtime revision to attach to a sufficient RTI grant.
+    revision: boomerang_runtime::CoordinationRevision,
+    /// Published wire threshold used to reject buffered superseded grants.
+    requested: WireTag,
+}
+
+/// Central-RTI transport adapter for one compiled Federate coordinator.
+///
+/// Logical coordination policy remains in `boomerang_runtime`; this adapter
+/// retains only protocol-session mechanics and the outstanding wire exchange
+/// needed to correlate a sufficient RTI `TAG` frame.
+#[cfg(feature = "runtime")]
+#[derive(Debug)]
+pub struct RtiFederateCoordinationBackend {
+    /// Stable protocol identity used for outgoing frames and inbound route validation.
+    federate_id: FederateId,
+    /// Persistent ordered protocol connection to the RTI.
+    client: FederateProtocolClient,
+    /// Federation route metadata keyed by its stable endpoint identifier.
+    routes: BTreeMap<crate::EndpointId, FederateClientRoute>,
+    /// Shared terminal fault reported by runtime endpoint workers, if any.
+    faults: boomerang_runtime::FederatedFaultState,
+    /// Latest wire publication awaiting correlation with one sufficient RTI grant.
+    outstanding: Option<OutstandingRtiPublication>,
+    /// Whether the no-future and stop frames have already been attempted.
+    stopped: bool,
+}
+
+#[cfg(feature = "runtime")]
+impl RtiFederateCoordinationBackend {
+    /// Creates an RTI backend and validates unique stable endpoint routes.
+    pub fn new(
+        federate_id: FederateId,
+        client: FederateProtocolClient,
+        routes: impl IntoIterator<Item = FederateClientRoute>,
+        faults: boomerang_runtime::FederatedFaultState,
+    ) -> Result<Self, FederateClientError> {
+        let mut route_map = BTreeMap::new();
+        for route in routes {
+            let endpoint = route.endpoint.clone();
+            if route_map.insert(endpoint.clone(), route).is_some() {
+                return Err(FederateClientError::DuplicateRoute(endpoint));
+            }
+        }
+
+        Ok(Self {
+            federate_id,
+            client,
+            routes: route_map,
+            faults,
+            outstanding: None,
+            stopped: false,
+        })
+    }
+
+    /// Sends one aggregate publication as an RTI `NET` frame.
+    fn publish_to_rti(
+        &mut self,
+        publication: boomerang_runtime::FederatePublication,
+    ) -> Result<(), FederateClientError> {
+        if self.stopped {
+            return Err(FederateClientError::RtiStopped);
+        }
+        self.check_runtime_fault()?;
+        let tag = match publication.next_event() {
+            Some(tag) => WireTag::try_from(tag)?,
+            None => WireTag::FOREVER,
+        };
+        self.client.send(FederateToRti::Net {
+            federate_id: self.federate_id.clone(),
+            tag,
+        })?;
+        self.outstanding = Some(OutstandingRtiPublication {
+            revision: publication.revision(),
+            requested: tag,
+        });
+        Ok(())
+    }
+
+    /// Polls one RTI frame, admitting inbound messages before exposing grants.
+    fn poll_rti(
+        &mut self,
+        timeout: StdDuration,
+    ) -> Result<Option<boomerang_runtime::FederateAcquisition>, FederateClientError> {
+        if self.stopped {
+            return Err(FederateClientError::RtiStopped);
+        }
+        self.check_runtime_fault()?;
+        let Some(message) = self.client.recv_timeout(timeout)? else {
+            return Ok(None);
+        };
+        match message {
+            RtiToFederate::Tag { tag } => {
+                let outstanding = self.outstanding.ok_or_else(|| {
+                    FederateClientError::Protocol(
+                        "received TAG without an outstanding Federate publication".into(),
+                    )
+                })?;
+                if tag < outstanding.requested {
+                    return Ok(None);
+                }
+                self.outstanding = None;
+                let granted = boomerang_runtime::Tag::try_from(tag)?;
+                Ok(Some(boomerang_runtime::FederateAcquisition::new(
+                    outstanding.revision,
+                    granted,
+                )))
+            }
+            RtiToFederate::Msg {
+                source,
+                endpoint,
+                tag,
+                payload,
+            } => {
+                self.schedule_inbound_msg(source, endpoint, tag, &payload)?;
+                Ok(None)
+            }
+            RtiToFederate::Stop => {
+                self.outstanding = None;
+                self.stopped = true;
+                Err(FederateClientError::RtiStopped)
+            }
+            RtiToFederate::Error { message } => Err(FederateClientError::RtiError { message }),
+            RtiToFederate::Start { .. } => Err(FederateClientError::Protocol(
+                "unexpected duplicate Start frame".into(),
+            )),
+        }
+    }
+
+    /// Reports one aggregate completion as an RTI `LTC` frame.
+    fn complete_to_rti(
+        &self,
+        completion: boomerang_runtime::FederateCompletion,
+    ) -> Result<(), FederateClientError> {
+        if self.stopped {
+            return Err(FederateClientError::RtiStopped);
+        }
+        self.check_runtime_fault()?;
+        self.client.send(FederateToRti::Ltc {
+            federate_id: self.federate_id.clone(),
+            tag: WireTag::try_from(completion.completed())?,
+        })
+    }
+
+    /// Attempts the established no-future and stop sequence at most once.
+    fn stop_rti(&mut self) -> Result<(), FederateClientError> {
+        if self.stopped {
+            return Ok(());
+        }
+        self.stopped = true;
+        self.outstanding = None;
+        let fault_result = self.check_runtime_fault();
+        let net_result = self.client.send(FederateToRti::Net {
+            federate_id: self.federate_id.clone(),
+            tag: WireTag::FOREVER,
+        });
+        let stop_result = self.client.send(FederateToRti::Stop {
+            federate_id: self.federate_id.clone(),
+        });
+        fault_result?;
+        net_result?;
+        stop_result
+    }
+
+    /// Schedules an admitted inbound message through its bound runtime endpoint.
+    fn schedule_inbound_msg(
+        &self,
+        source: FederateId,
+        endpoint: crate::EndpointId,
+        tag: WireTag,
+        payload: &[u8],
+    ) -> Result<(), FederateClientError> {
+        let route = self.route_for(&endpoint)?;
+        if route.target != self.federate_id {
+            return Err(FederateClientError::RouteTargetMismatch {
+                endpoint: endpoint.clone(),
+                route_target: route.target.clone(),
+                federate_id: self.federate_id.clone(),
+            });
+        }
+        if route.source != source {
+            return Err(FederateClientError::InboundSourceMismatch {
+                endpoint: endpoint.clone(),
+                observed_source: source,
+                route_source: route.source.clone(),
+            });
+        }
+
+        let runtime_tag = boomerang_runtime::Tag::try_from(tag)?;
+        let inbound = route
+            .inbound
+            .as_ref()
+            .ok_or(FederateClientError::UnboundInboundRoute(endpoint))?;
+        inbound.schedule(runtime_tag, payload)?;
+        Ok(())
+    }
+
+    /// Returns a concrete runtime endpoint fault without erasing its category.
+    fn check_runtime_fault(&self) -> Result<(), FederateClientError> {
+        match self.faults.get() {
+            Some(error) => Err(FederateClientError::RuntimeEndpoint(error)),
+            None => Ok(()),
+        }
+    }
+
+    /// Resolves stable route metadata for an inbound endpoint.
+    fn route_for(
+        &self,
+        endpoint: &crate::EndpointId,
+    ) -> Result<&FederateClientRoute, FederateClientError> {
+        self.routes
+            .get(endpoint)
+            .ok_or_else(|| FederateClientError::UnknownRoute(endpoint.clone()))
+    }
+}
+
+#[cfg(feature = "runtime")]
+impl boomerang_runtime::FederateCoordinationBackend for RtiFederateCoordinationBackend {
+    /// Maps a backend-neutral publication to one RTI `NET` frame.
+    fn publish(
+        &mut self,
+        publication: boomerang_runtime::FederatePublication,
+    ) -> Result<(), boomerang_runtime::FederateCoordinationError> {
+        self.publish_to_rti(publication).map_err(|error| {
+            boomerang_runtime::FederateCoordinationError::BackendPublish {
+                message: error.to_string(),
+            }
+        })
+    }
+
+    /// Polls the RTI transport and correlates a `TAG` with its publication revision.
+    fn poll_acquisition(
+        &mut self,
+        timeout: StdDuration,
+    ) -> Result<
+        Option<boomerang_runtime::FederateAcquisition>,
+        boomerang_runtime::FederateCoordinationError,
+    > {
+        self.poll_rti(timeout).map_err(|error| {
+            boomerang_runtime::FederateCoordinationError::BackendAcquire {
+                message: error.to_string(),
+            }
+        })
+    }
+
+    /// Maps a backend-neutral completion to one RTI `LTC` frame.
+    fn complete(
+        &mut self,
+        completion: boomerang_runtime::FederateCompletion,
+    ) -> Result<(), boomerang_runtime::FederateCoordinationError> {
+        self.complete_to_rti(completion).map_err(|error| {
+            boomerang_runtime::FederateCoordinationError::BackendComplete {
+                message: error.to_string(),
+            }
+        })
+    }
+
+    /// Emits the RTI no-future and stop sequence at most once.
+    fn stop(&mut self) -> Result<(), boomerang_runtime::FederateCoordinationError> {
+        self.stop_rti().map_err(
+            |error| boomerang_runtime::FederateCoordinationError::BackendStop {
+                message: error.to_string(),
+            },
+        )
+    }
+}
+
 /// Federated scheduler barrier for one federate runtime enclave.
 #[cfg(feature = "runtime")]
 #[derive(Debug)]
@@ -831,6 +1102,153 @@ mod tests {
         )
         .unwrap();
         (endpoint, enclave.event_rx, action_key, enclave.shutdown_tx)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    /// Verifies the complete backend-neutral coordination mapping onto RTI frames.
+    async fn rti_client_adapts_federate_coordination_messages() {
+        let superseded_tag =
+            boomerang_runtime::Tag::new(boomerang_runtime::Duration::milliseconds(500), 0);
+        let wire_superseded_tag = WireTag::try_from(superseded_tag).unwrap();
+        let finite_tag = boomerang_runtime::Tag::new(boomerang_runtime::Duration::seconds(1), 2);
+        let wire_finite_tag = WireTag::try_from(finite_tag).unwrap();
+        let publications = [
+            (
+                boomerang_runtime::CoordinationRevision::new(7),
+                Some(superseded_tag),
+                wire_superseded_tag,
+            ),
+            (
+                boomerang_runtime::CoordinationRevision::new(8),
+                Some(finite_tag),
+                wire_finite_tag,
+            ),
+            (
+                boomerang_runtime::CoordinationRevision::new(9),
+                None,
+                WireTag::FOREVER,
+            ),
+        ];
+        let (stop_observed_tx, stop_observed_rx) = mpsc::channel();
+        let (client, rti) =
+            connect_client_with_fake_rti(fed("source"), move |mut transport| async move {
+                assert!(matches!(
+                    recv_federate_to_rti(&mut transport).await,
+                    FederateToRti::Hello { federate_id, .. } if federate_id == fed("source")
+                ));
+                send_rti_to_federate(
+                    &mut transport,
+                    RtiToFederate::Start {
+                        start_unix_epoch_ns: 0,
+                    },
+                )
+                .await;
+
+                for (_, _, expected_tag) in publications {
+                    assert_eq!(
+                        recv_federate_to_rti(&mut transport).await,
+                        FederateToRti::Net {
+                            federate_id: fed("source"),
+                            tag: expected_tag,
+                        }
+                    );
+                    send_rti_to_federate(&mut transport, RtiToFederate::Tag { tag: expected_tag })
+                        .await;
+                }
+
+                assert_eq!(
+                    recv_federate_to_rti(&mut transport).await,
+                    FederateToRti::Ltc {
+                        federate_id: fed("source"),
+                        tag: wire_finite_tag,
+                    }
+                );
+                assert_eq!(
+                    recv_federate_to_rti(&mut transport).await,
+                    FederateToRti::Net {
+                        federate_id: fed("source"),
+                        tag: WireTag::FOREVER,
+                    }
+                );
+                assert_eq!(
+                    recv_federate_to_rti(&mut transport).await,
+                    FederateToRti::Stop {
+                        federate_id: fed("source"),
+                    }
+                );
+                stop_observed_tx.send(()).unwrap();
+                assert_eq!(
+                    transport.1.try_next().await.unwrap(),
+                    None,
+                    "repeated stop must not emit another protocol frame"
+                );
+            })
+            .await;
+
+        let mut backend = RtiFederateCoordinationBackend::new(
+            fed("source"),
+            client,
+            [route()],
+            boomerang_runtime::FederatedFaultState::default(),
+        )
+        .unwrap();
+
+        for (revision, next_event, _) in &publications[..2] {
+            boomerang_runtime::FederateCoordinationBackend::publish(
+                &mut backend,
+                boomerang_runtime::FederatePublication::new(*revision, *next_event),
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            boomerang_runtime::FederateCoordinationBackend::poll_acquisition(
+                &mut backend,
+                StdDuration::from_secs(1),
+            )
+            .unwrap(),
+            None,
+            "a stale TAG below the replacement request must not acquire its revision"
+        );
+        let acquisition = boomerang_runtime::FederateCoordinationBackend::poll_acquisition(
+            &mut backend,
+            StdDuration::from_secs(1),
+        )
+        .unwrap()
+        .expect("replacement RTI TAG must produce an acquisition");
+        assert_eq!(acquisition.revision(), publications[1].0);
+        assert_eq!(acquisition.granted(), finite_tag);
+
+        let (revision, next_event, expected_wire_tag) = publications[2];
+        boomerang_runtime::FederateCoordinationBackend::publish(
+            &mut backend,
+            boomerang_runtime::FederatePublication::new(revision, next_event),
+        )
+        .unwrap();
+        let acquisition = boomerang_runtime::FederateCoordinationBackend::poll_acquisition(
+            &mut backend,
+            StdDuration::from_secs(1),
+        )
+        .unwrap()
+        .expect("no-future RTI TAG must produce an acquisition");
+        assert_eq!(acquisition.revision(), revision);
+        assert_eq!(
+            WireTag::try_from(acquisition.granted()).unwrap(),
+            expected_wire_tag
+        );
+
+        boomerang_runtime::FederateCoordinationBackend::complete(
+            &mut backend,
+            boomerang_runtime::FederateCompletion::new(finite_tag),
+        )
+        .unwrap();
+        boomerang_runtime::FederateCoordinationBackend::stop(&mut backend).unwrap();
+        boomerang_runtime::FederateCoordinationBackend::stop(&mut backend).unwrap();
+        stop_observed_rx
+            .recv_timeout(StdDuration::from_secs(1))
+            .unwrap();
+        drop(backend);
+
+        rti.await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

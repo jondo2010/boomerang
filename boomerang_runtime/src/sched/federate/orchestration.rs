@@ -1,18 +1,15 @@
 //! Blocking channel adapter for one compiled Federate's coordination state.
 //!
-//! Participants stamp stored compiled Enclave identities onto scheduler messages and inspect only
+//! Per-Enclave ports stamp stored compiled identities onto scheduler messages and inspect only
 //! their own event queues. The coordinator serializes those messages through the pure state,
 //! executes its semantic actions against a selected backend, and owns no scheduling decisions.
 
-use std::{collections::BTreeMap, sync::mpsc, time::Duration as StdDuration};
+use std::{sync::mpsc, time::Duration as StdDuration};
 
 use tinymap::TinySecondaryMap;
 
 use super::{
-    backend::{
-        CoordinationRevision, FederateCoordinationBackend, FederateCoordinationError,
-        LocalFederateCoordinationBackend,
-    },
+    backend::{CoordinationRevision, FederateCoordinationBackend, FederateCoordinationError},
     state::{
         CoordinationAction, CoordinationStateError, FederateCoordinationState, LifecyclePolicy,
         Observation, SchedulerMessage,
@@ -154,13 +151,13 @@ impl From<CoordinationStateError> for FederateCoordinationError {
     }
 }
 
-/// Supervisor handle for requesting Federate-wide abortion.
-pub(crate) struct FederateCoordinationHandle {
+/// Supervisor-owned handle retained outside worker threads to request Federate-wide abortion.
+pub(crate) struct FederateAbortHandle {
     /// Shared coordinator-report sender used for the terminal failure message.
     report_tx: mpsc::Sender<CoordinatorReport>,
 }
 
-impl FederateCoordinationHandle {
+impl FederateAbortHandle {
     /// Requests idempotent Federate-wide abortion without blocking the supervising thread.
     pub(crate) fn abort(&self) {
         let _ = self
@@ -171,7 +168,10 @@ impl FederateCoordinationHandle {
     }
 }
 
-/// Blocking coordinator that serializes participant messages through the pure state.
+/// Coordinator that exclusively owns the pure state and backend on its dedicated worker thread.
+///
+/// Construction returns this value to the supervisor, which moves it into exactly one coordinator
+/// thread before any scheduler is started.
 pub(crate) struct FederateCoordinator<B: FederateCoordinationBackend> {
     /// Serialized reports from every compiled participant.
     report_rx: mpsc::Receiver<CoordinatorReport>,
@@ -371,8 +371,10 @@ impl<B: FederateCoordinationBackend> FederateCoordinator<B> {
     }
 }
 
-/// Per-scheduler channel adapter keyed by its stored compiled Enclave identity.
-pub(crate) struct FederateCoordinationParticipant {
+/// Per-scheduler channel adapter moved into exactly one scheduler thread.
+///
+/// The stored compiled Enclave identity keeps its channel traffic associated with that scheduler.
+pub(crate) struct EnclaveCoordinationPort {
     /// Compiled identity stamped onto every state message.
     enclave: EnclaveIndex,
     /// Shared participant-report sender.
@@ -393,7 +395,7 @@ pub(crate) struct FederateCoordinationParticipant {
     terminal: bool,
 }
 
-impl FederateCoordinationParticipant {
+impl EnclaveCoordinationPort {
     /// Retains one broadcast Federate grant without allowing the horizon to regress.
     fn advance_horizon(&mut self, tag: Tag) {
         self.grant_horizon = Some(self.grant_horizon.map_or(tag, |current| current.max(tag)));
@@ -478,7 +480,7 @@ impl FederateCoordinationParticipant {
     }
 }
 
-impl FederateSchedulerCoordination for FederateCoordinationParticipant {
+impl FederateSchedulerCoordination for EnclaveCoordinationPort {
     /// Reports work without inventing a candidate tag.
     fn active(&mut self) {
         self.report_infallible(CoordinatorReport::Scheduler(SchedulerMessage::Active {
@@ -673,17 +675,35 @@ impl FederateSchedulerCoordination for FederateCoordinationParticipant {
     }
 }
 
-/// Coordinator, supervisor handle, and scheduler participants for one compiled Federate.
-pub(crate) struct FederateCoordination<B: FederateCoordinationBackend> {
+/// Transient constructor result immediately destructured before worker threads are spawned.
+///
+/// Its coordinator moves to the dedicated coordinator thread, each participant moves to exactly one
+/// scheduler thread, and the abort handle remains owned by the supervising thread.
+pub(crate) struct FederateCoordinationParts<B: FederateCoordinationBackend> {
     /// Supervisor handle used to request Federate-wide abortion.
-    pub(crate) abort_handle: FederateCoordinationHandle,
+    pub(crate) abort_handle: FederateAbortHandle,
     /// Blocking coordinator that owns the pure state and selected backend.
     pub(crate) coordinator: FederateCoordinator<B>,
     /// Participants keyed directly by their compiled Enclave identities.
-    pub(crate) participants: BTreeMap<EnclaveIndex, FederateCoordinationParticipant>,
+    pub(crate) participants: TinySecondaryMap<EnclaveIndex, EnclaveCoordinationPort>,
+    #[cfg(test)]
+    /// Test-visible lifecycle policy supplied to the authoritative pure state.
+    lifecycle_policy: LifecyclePolicy,
 }
 
-impl<B: FederateCoordinationBackend> FederateCoordination<B> {
+impl<B: FederateCoordinationBackend> FederateCoordinationParts<B> {
+    /// Iterates participant identities without rebasing deployment-global Enclave keys.
+    #[cfg(test)]
+    pub(crate) fn participant_indices(&self) -> impl Iterator<Item = EnclaveIndex> + '_ {
+        self.participants.keys()
+    }
+
+    /// Returns the lifecycle policy supplied to the authoritative pure state.
+    #[cfg(test)]
+    pub(crate) const fn lifecycle_policy(&self) -> LifecyclePolicy {
+        self.lifecycle_policy
+    }
+
     /// Creates one participant per unique compiled identity and one shared coordinator.
     pub(crate) fn new(
         participants: impl IntoIterator<Item = (EnclaveIndex, crate::Receiver<AsyncEvent>)>,
@@ -697,13 +717,13 @@ impl<B: FederateCoordinationBackend> FederateCoordination<B> {
         )?;
         let (report_tx, report_rx) = mpsc::channel();
         let mut commands = TinySecondaryMap::new();
-        let mut ports = BTreeMap::new();
+        let mut ports = TinySecondaryMap::new();
         for (enclave, event_rx) in participants {
             let (command_tx, command_rx) = mpsc::channel();
             commands.insert(enclave, command_tx);
             ports.insert(
                 enclave,
-                FederateCoordinationParticipant {
+                EnclaveCoordinationPort {
                     enclave,
                     report_tx: report_tx.clone(),
                     command_rx,
@@ -717,7 +737,7 @@ impl<B: FederateCoordinationBackend> FederateCoordination<B> {
             );
         }
         Ok(Self {
-            abort_handle: FederateCoordinationHandle {
+            abort_handle: FederateAbortHandle {
                 report_tx: report_tx.clone(),
             },
             coordinator: FederateCoordinator {
@@ -730,15 +750,11 @@ impl<B: FederateCoordinationBackend> FederateCoordination<B> {
                 commit_window_hook: None,
             },
             participants: ports,
+            #[cfg(test)]
+            lifecycle_policy: lifecycle,
         })
     }
 }
-
-/// Temporary local-backend name retained for reference construction until Task 6.
-pub(crate) type FederateQuiescence = FederateCoordination<LocalFederateCoordinationBackend>;
-
-/// Temporary supervisor-handle name retained for reference supervision until Task 6.
-pub(crate) type FederateQuiescenceHandle = FederateCoordinationHandle;
 
 #[cfg(test)]
 mod tests {
@@ -746,10 +762,10 @@ mod tests {
 
     use super::super::state::CoordinationPhase;
     use super::{
-        CoordinationAction, CoordinationStateError, CoordinatorReport,
-        FederateControlAuthorization, FederateCoordination, FederateCoordinationParticipant,
-        FederateIdleWait, FederateSchedulerCoordination, FederateTagAcquisition, Observation,
-        ParticipantCommand, SchedulerMessage,
+        CoordinationAction, CoordinationStateError, CoordinatorReport, EnclaveCoordinationPort,
+        FederateControlAuthorization, FederateCoordinationParts, FederateIdleWait,
+        FederateSchedulerCoordination, FederateTagAcquisition, Observation, ParticipantCommand,
+        SchedulerMessage,
     };
     use crate::{
         image::EnclaveIndex,
@@ -904,7 +920,7 @@ mod tests {
         enclave: EnclaveIndex,
         report_tx: mpsc::Sender<CoordinatorReport>,
         command_rx: mpsc::Receiver<ParticipantCommand>,
-    ) -> FederateCoordinationParticipant {
+    ) -> EnclaveCoordinationPort {
         participant_with_events(enclave, report_tx, command_rx).0
     }
 
@@ -913,9 +929,9 @@ mod tests {
         enclave: EnclaveIndex,
         report_tx: mpsc::Sender<CoordinatorReport>,
         command_rx: mpsc::Receiver<ParticipantCommand>,
-    ) -> (FederateCoordinationParticipant, crate::Sender<AsyncEvent>) {
+    ) -> (EnclaveCoordinationPort, crate::Sender<AsyncEvent>) {
         let (event_tx, event_rx) = kanal::unbounded();
-        let participant = FederateCoordinationParticipant {
+        let participant = EnclaveCoordinationPort {
             enclave,
             report_tx,
             command_rx,
@@ -1113,17 +1129,18 @@ mod tests {
     fn first_backend_failure_survives_abort_cleanup() {
         let enclave = EnclaveIndex::new(3);
         let (_event_tx, event_rx) = kanal::unbounded();
-        let FederateCoordination {
+        let FederateCoordinationParts {
             coordinator,
-            mut participants,
+            participants,
             ..
-        } = FederateCoordination::new(
+        } = FederateCoordinationParts::new(
             [(enclave, event_rx)],
             LifecyclePolicy::KeepAlive,
             PublishAndStopFailingBackend,
         )
         .unwrap();
-        let mut participant = participants.remove(&enclave).unwrap();
+        let (participant_enclave, mut participant) = participants.into_iter().next().unwrap();
+        assert_eq!(participant_enclave, enclave);
 
         std::thread::scope(|scope| {
             let coordinator = scope.spawn(move || coordinator.run());
@@ -1146,17 +1163,18 @@ mod tests {
         let enclave = EnclaveIndex::new(3);
         let (_event_tx, event_rx) = kanal::unbounded();
         let (call_tx, call_rx) = mpsc::channel();
-        let FederateCoordination {
+        let FederateCoordinationParts {
             coordinator,
-            mut participants,
+            participants,
             ..
-        } = FederateCoordination::new(
+        } = FederateCoordinationParts::new(
             [(enclave, event_rx)],
             LifecyclePolicy::TerminateWhenIdle,
             CallRecordingBackend { call_tx },
         )
         .unwrap();
-        let mut participant = participants.remove(&enclave).unwrap();
+        let (participant_enclave, mut participant) = participants.into_iter().next().unwrap();
+        assert_eq!(participant_enclave, enclave);
 
         std::thread::scope(|scope| {
             let coordinator = scope.spawn(move || coordinator.run());
@@ -1177,17 +1195,19 @@ mod tests {
         let enclave = EnclaveIndex::new(3);
         let (_event_tx, event_rx) = kanal::unbounded();
         let (call_tx, call_rx) = mpsc::channel();
-        let FederateCoordination {
+        let FederateCoordinationParts {
             abort_handle,
             coordinator,
-            mut participants,
-        } = FederateCoordination::new(
+            participants,
+            ..
+        } = FederateCoordinationParts::new(
             [(enclave, event_rx)],
             LifecyclePolicy::TerminateWhenIdle,
             CallRecordingBackend { call_tx },
         )
         .unwrap();
-        let participant = participants.remove(&enclave).unwrap();
+        let (participant_enclave, participant) = participants.into_iter().next().unwrap();
+        assert_eq!(participant_enclave, enclave);
 
         std::thread::scope(|scope| {
             let coordinator = scope.spawn(move || coordinator.run());
@@ -1206,11 +1226,12 @@ mod tests {
         let peer = EnclaveIndex::new(7);
         let (eventful_tx, eventful_rx) = kanal::unbounded();
         let (_peer_tx, peer_rx) = kanal::unbounded();
-        let FederateCoordination {
+        let FederateCoordinationParts {
             abort_handle,
             mut coordinator,
-            mut participants,
-        } = FederateCoordination::new(
+            participants,
+            ..
+        } = FederateCoordinationParts::new(
             [(eventful, eventful_rx), (peer, peer_rx)],
             LifecyclePolicy::TerminateWhenIdle,
             LocalFederateCoordinationBackend::default(),
@@ -1223,8 +1244,10 @@ mod tests {
                 })
                 .unwrap();
         }));
-        let mut eventful_participant = participants.remove(&eventful).unwrap();
-        let mut peer_participant = participants.remove(&peer).unwrap();
+        let mut participant_ports = participants.into_iter();
+        let (eventful_enclave, mut eventful_participant) = participant_ports.next().unwrap();
+        let (peer_enclave, mut peer_participant) = participant_ports.next().unwrap();
+        assert_eq!((eventful_enclave, peer_enclave), (eventful, peer));
         let (result_tx, result_rx) = mpsc::channel();
 
         std::thread::scope(|scope| {
@@ -1290,11 +1313,12 @@ mod tests {
         let (eventful_tx, eventful_rx) = kanal::unbounded();
         let (_peer_tx, peer_rx) = kanal::unbounded();
         let (idle_tx, idle_rx) = mpsc::channel();
-        let FederateCoordination {
+        let FederateCoordinationParts {
             abort_handle,
             coordinator,
-            mut participants,
-        } = FederateCoordination::new(
+            participants,
+            ..
+        } = FederateCoordinationParts::new(
             [(eventful, eventful_rx), (peer, peer_rx)],
             LifecyclePolicy::KeepAlive,
             IdleSignalingBackend {
@@ -1303,8 +1327,10 @@ mod tests {
             },
         )
         .unwrap();
-        let mut eventful_participant = participants.remove(&eventful).unwrap();
-        let mut peer_participant = participants.remove(&peer).unwrap();
+        let mut participant_ports = participants.into_iter();
+        let (eventful_enclave, mut eventful_participant) = participant_ports.next().unwrap();
+        let (peer_enclave, mut peer_participant) = participant_ports.next().unwrap();
+        assert_eq!((eventful_enclave, peer_enclave), (eventful, peer));
         let (result_tx, result_rx) = mpsc::channel();
 
         std::thread::scope(|scope| {

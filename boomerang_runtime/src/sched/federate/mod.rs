@@ -2,7 +2,7 @@
 
 pub(crate) mod backend;
 mod dependencies;
-mod quiescence;
+mod orchestration;
 pub(crate) mod state;
 
 pub(crate) use backend::LocalFederateCoordinationBackend;
@@ -12,10 +12,9 @@ pub use backend::{
 };
 pub(crate) use dependencies::EnclaveDependencies;
 #[allow(unused_imports)]
-pub(crate) use quiescence::{
-    FederateControlAuthorization, FederateCoordination, FederateCoordinationHandle,
-    FederateCoordinationParticipant, FederateCoordinator, FederateIdleWait,
+pub(crate) use orchestration::{
+    EnclaveCoordinationPort, FederateAbortHandle, FederateControlAuthorization,
+    FederateCoordinationParts, FederateCoordinator, FederateIdleWait,
     FederateSchedulerCoordination, FederateTagAcquisition,
 };
-pub(crate) use quiescence::{FederateQuiescence, FederateQuiescenceHandle};
 pub(crate) use state::LifecyclePolicy;

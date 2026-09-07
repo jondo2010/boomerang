@@ -20,8 +20,8 @@ use crate::{
     run_owned_scheduler,
     sched::{
         federate::{
-            EnclaveDependencies, FederateCoordinator, FederateQuiescence, FederateQuiescenceHandle,
-            FederateSchedulerCoordination, LifecyclePolicy, LocalFederateCoordinationBackend,
+            EnclaveDependencies, FederateCoordinationParts, FederateSchedulerCoordination,
+            LifecyclePolicy, LocalFederateCoordinationBackend,
         },
         run_owned_scheduler_with_coordination,
     },
@@ -418,8 +418,8 @@ pub enum ExecuteOwnedFederateError {
         #[source]
         source: OwnedStorageError,
     },
-    /// The Federate-wide quiescence coordinator thread could not be created.
-    #[error("failed to spawn Federate quiescence coordinator thread: {source}")]
+    /// The Federate-wide coordination thread could not be created.
+    #[error("failed to spawn Federate coordinator thread: {source}")]
     CoordinatorThreadSpawn {
         /// Operating-system thread creation failure.
         #[source]
@@ -548,6 +548,51 @@ fn request_federate_shutdown(senders: &[crate::Sender<AsyncEvent>]) {
     for sender in senders {
         let _ = sender.close();
     }
+}
+
+/// Builds one local-backend coordinator from the selected immutable Federate layout.
+fn build_federate_coordination(
+    deployment: &CompiledDeploymentImage<'_>,
+    federate: FederateIndex,
+    receivers: impl IntoIterator<Item = (EnclaveIndex, crate::Receiver<AsyncEvent>)>,
+    config: &Config,
+) -> Result<FederateCoordinationParts<LocalFederateCoordinationBackend>, ExecuteOwnedFederateError>
+{
+    let selected = deployment
+        .federates
+        .get(federate)
+        .copied()
+        .ok_or(ExecuteOwnedFederateError::FederateNotFound { federate })?;
+    let participant_indices = deployment
+        .enclaves
+        .keys()
+        .filter(|enclave| selected.enclaves().contains(*enclave))
+        .collect::<Vec<_>>();
+    let mut receivers = receivers.into_iter().collect::<Vec<_>>();
+    let ordered_receivers = participant_indices.iter().copied().map(|enclave| {
+        let position = receivers
+            .iter()
+            .position(|(candidate, _)| *candidate == enclave)
+            .expect("validated Federate storage supplies every compiled scheduler receiver");
+        (enclave, receivers.swap_remove(position).1)
+    });
+    let lifecycle_policy = if config.keep_alive {
+        LifecyclePolicy::KeepAlive
+    } else {
+        LifecyclePolicy::TerminateWhenIdle
+    };
+    let coordination = FederateCoordinationParts::new(
+        ordered_receivers,
+        lifecycle_policy,
+        LocalFederateCoordinationBackend::default(),
+    )
+    .expect("validated Federate layout has unique compiled Enclave identities");
+    assert!(
+        receivers.is_empty(),
+        "validated Federate storage supplies only selected compiled scheduler receivers"
+    );
+
+    Ok(coordination)
 }
 
 #[cfg(test)]
@@ -781,9 +826,9 @@ pub fn execute_owned_federate(
 
 /// Executes one owned Federate while consulting a deterministic scoped-spawn failure seam.
 ///
-/// The guard receives `None` for the quiescence coordinator and `Some(enclave)` for each
-/// scheduler. Production always returns `false`; unit tests use the guard to exercise failures
-/// that cannot be induced safely through operating-system resource exhaustion.
+/// The guard receives `None` for the dedicated Federate coordinator thread and `Some(enclave)` for
+/// each scheduler thread. Production always returns `false`; unit tests use the guard to exercise
+/// failures that cannot be induced safely through operating-system resource exhaustion.
 fn execute_owned_federate_with_spawn_guard(
     deployment: &CompiledDeploymentImage<'_>,
     federate: FederateIndex,
@@ -883,68 +928,65 @@ fn execute_owned_federate_with_spawn_guard(
             .add_upstream(source_key, source_context, delay);
     }
     let enclave_count = storages.len();
-    let quiescence = (!config.keep_alive).then(|| {
-        FederateQuiescence::new(
-            storages
-                .iter()
-                .map(|(enclave, storage)| (*enclave, storage.scheduler_event_rx())),
-            LifecyclePolicy::TerminateWhenIdle,
-            LocalFederateCoordinationBackend::default(),
-        )
-        .expect("validated Federate storage has unique compiled Enclave identities")
-    });
-    let (quiescence_handle, quiescence_coordinator, mut quiescence_participants): (
-        Option<FederateQuiescenceHandle>,
-        Option<FederateCoordinator<LocalFederateCoordinationBackend>>,
-        _,
-    ) = match quiescence {
-        Some(quiescence) => (
-            Some(quiescence.abort_handle),
-            Some(quiescence.coordinator),
-            quiescence.participants,
-        ),
-        None => (None, None, BTreeMap::new()),
-    };
+    let FederateCoordinationParts {
+        abort_handle,
+        coordinator,
+        participants,
+        ..
+    } = build_federate_coordination(
+        deployment,
+        federate,
+        storages
+            .iter()
+            .map(|(enclave, storage)| (*enclave, storage.scheduler_event_rx())),
+        &config,
+    )?;
     let origin = Instant::now();
     let (results, failure) = std::thread::scope(|scope| {
         let (result_tx, result_rx) = std::sync::mpsc::channel();
-        let coordinator_thread = match quiescence_coordinator {
-            Some(coordinator) => {
-                let spawned = if fail_spawn(None) {
-                    Err(std::io::Error::other(
-                        "injected scoped thread spawn failure",
-                    ))
-                } else {
-                    std::thread::Builder::new()
-                        .name("federate-quiescence".to_owned())
-                        .spawn_scoped(scope, move || coordinator.run())
-                };
-                match spawned {
-                    Ok(handle) => Some(handle),
-                    Err(source) => {
-                        drop(quiescence_participants);
-                        request_federate_shutdown(&event_senders);
-                        return (
-                            TinySecondaryMap::with_capacity(enclave_count),
-                            Some(ExecuteOwnedFederateError::CoordinatorThreadSpawn { source }),
-                        );
-                    }
-                }
+        let coordinator_thread = if fail_spawn(None) {
+            Err(std::io::Error::other(
+                "injected scoped thread spawn failure",
+            ))
+        } else {
+            std::thread::Builder::new()
+                .name("federate-coordination".to_owned())
+                .spawn_scoped(scope, move || coordinator.run())
+        };
+        let coordinator_thread = match coordinator_thread {
+            Ok(handle) => handle,
+            Err(source) => {
+                drop(participants);
+                request_federate_shutdown(&event_senders);
+                return (
+                    TinySecondaryMap::with_capacity(enclave_count),
+                    Some(ExecuteOwnedFederateError::CoordinatorThreadSpawn { source }),
+                );
             }
-            None => None,
         };
         let abort = || {
-            if let Some(handle) = &quiescence_handle {
-                handle.abort();
-            }
+            abort_handle.abort();
             request_federate_shutdown(&event_senders);
         };
         let mut handles = Vec::with_capacity(enclave_count);
         let mut failure = None;
-        for ((enclave, mut storage), (_, coordination)) in storages.into_iter().zip(coordinations) {
+        let mut participant_ports = participants.into_iter();
+        for ((enclave, mut storage), (coordination_enclave, coordination)) in
+            storages.into_iter().zip(coordinations)
+        {
+            assert_eq!(
+                enclave, coordination_enclave,
+                "compiled scheduler coordination must retain its Enclave identity"
+            );
             let result_tx = result_tx.clone();
             let config = config.clone();
-            let mut participant = quiescence_participants.remove(&enclave);
+            let (participant_enclave, mut participant) = participant_ports
+                .next()
+                .expect("compiled Federate construction provides every scheduler participant");
+            assert_eq!(
+                enclave, participant_enclave,
+                "compiled coordination port must retain its deployment-global Enclave identity"
+            );
             let spawned = if fail_spawn(Some(enclave)) {
                 Err(std::io::Error::other(
                     "injected scoped thread spawn failure",
@@ -959,16 +1001,12 @@ fn execute_owned_federate_with_spawn_guard(
                                 &config,
                                 origin,
                                 coordination,
-                                participant.as_mut().map(|participant| {
-                                    participant as &mut dyn FederateSchedulerCoordination
-                                }),
+                                Some(&mut participant as &mut dyn FederateSchedulerCoordination),
                             )
                         }));
                         let result = match execution {
                             Ok(Ok(OwnedSchedulerOutcome { final_tag, stats })) => match participant
-                                .as_mut()
-                                .map(|participant| participant.finish_success())
-                                .transpose()
+                                .finish_success()
                             {
                                 Ok(_) => Ok(EnclaveExecution {
                                     states: storage.into_states(),
@@ -982,16 +1020,12 @@ fn execute_owned_federate_with_spawn_guard(
                             Ok(Err(error)) => {
                                 let (error, ownership) = classify_scheduler_failure(enclave, error);
                                 if ownership == FailureReportOwnership::Supervisor {
-                                    if let Some(participant) = participant.as_mut() {
-                                        participant.fail();
-                                    }
+                                    participant.fail();
                                 }
                                 Err(error)
                             }
                             Err(payload) => {
-                                if let Some(participant) = participant.as_mut() {
-                                    participant.fail();
-                                }
+                                participant.fail();
                                 Err(ExecuteOwnedFederateError::ThreadPanicked {
                                     enclave,
                                     message: panic_message(payload),
@@ -1011,7 +1045,7 @@ fn execute_owned_federate_with_spawn_guard(
                 }
             }
         }
-        drop(quiescence_participants);
+        drop(participant_ports);
         drop(result_tx);
 
         let started_count = handles.len();
@@ -1047,9 +1081,7 @@ fn execute_owned_federate_with_spawn_guard(
                 }
             }
         }
-        if let Some(handle) = coordinator_thread {
-            latch_coordinator_result(&mut failure, handle.join());
-        }
+        latch_coordinator_result(&mut failure, coordinator_thread.join());
         (results, failure)
     });
 
@@ -1187,6 +1219,32 @@ mod scoped_spawn_tests {
         coordination: CoordinationProjection::Local,
     };
 
+    /// Two-Federate layout whose selected range begins at global Enclave index one.
+    static OFFSET_FEDERATES: [FederateImage; 2] = [
+        FederateImage::new(
+            IdentityRange::new(0, 4),
+            IdentityRange::new(4, 3),
+            IdentityRange::new(7, 6),
+            TableRange::new(0, 1),
+        ),
+        FederateImage::new(
+            IdentityRange::new(13, 4),
+            IdentityRange::new(17, 6),
+            IdentityRange::new(23, 7),
+            TableRange::new(1, 2),
+        ),
+    ];
+    /// Canonical membership for the non-zero-range construction fixture.
+    static OFFSET_MEMBERS: [FederateIndex; 2] = [FederateIndex::new(0), FederateIndex::new(1)];
+    /// Complete deployment fixture used to prove global Enclave indices are never rebased.
+    static OFFSET_DEPLOYMENT: CompiledDeploymentImage<'static> = CompiledDeploymentImage {
+        identity_data: "edgex86nativehosttargetruntime",
+        federation: GlobalFederationImage::new(&OFFSET_MEMBERS, &[]),
+        federates: TinyMapView::new(&OFFSET_FEDERATES),
+        enclaves: TinyMapView::new(&ENCLAVES),
+        coordination: CoordinationProjection::Local,
+    };
+
     fn initialize_state() {}
 
     fn bindings() -> FederateBindings<'static> {
@@ -1207,6 +1265,34 @@ mod scoped_spawn_tests {
             move |spawn| spawn == failed_spawn,
         )
         .expect_err("the selected scoped thread creation must fail")
+    }
+
+    /// Verifies compiled coordination preserves the complete selected Federate layout and policy.
+    #[test]
+    fn compiled_coordination_uses_complete_federate_layout() {
+        for (keep_alive, expected_lifecycle) in [
+            (true, LifecyclePolicy::KeepAlive),
+            (false, LifecyclePolicy::TerminateWhenIdle),
+        ] {
+            let receivers = [
+                (EnclaveIndex::new(2), kanal::unbounded().1),
+                (EnclaveIndex::new(1), kanal::unbounded().1),
+            ];
+            let coordination: FederateCoordinationParts<LocalFederateCoordinationBackend> =
+                build_federate_coordination(
+                    &OFFSET_DEPLOYMENT,
+                    FederateIndex::new(1),
+                    receivers,
+                    &Config::default().with_keep_alive(keep_alive),
+                )
+                .unwrap();
+
+            assert_eq!(
+                coordination.participant_indices().collect::<Vec<_>>(),
+                [EnclaveIndex::new(1), EnclaveIndex::new(2)],
+            );
+            assert_eq!(coordination.lifecycle_policy(), expected_lifecycle);
+        }
     }
 
     /// Verifies the outer supervisor does not repeat a scheduler-owned Federate failure report.

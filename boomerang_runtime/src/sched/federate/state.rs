@@ -235,7 +235,8 @@ impl FederateCoordinationState {
         })
     }
 
-    /// Returns the current aggregate candidate revision.
+    #[cfg(test)]
+    /// Returns the current aggregate candidate revision for state-machine tests.
     pub(crate) const fn revision(&self) -> CoordinationRevision {
         self.revision
     }

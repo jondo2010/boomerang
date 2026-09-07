@@ -23,6 +23,11 @@ pub use barrier::LogicalTimeBarrierError;
 use barrier::NoFederatedTimeBarrier;
 #[cfg(feature = "federated")]
 pub use barrier::{FederatedBarrierError, FederatedBarrierOutcome, FederatedTimeBarrier};
+#[cfg(feature = "federated")]
+pub use federate::{
+    CoordinationRevision, FederateAcquisition, FederateCompletion, FederateCoordinationBackend,
+    FederateCoordinationError, FederatePublication,
+};
 use modal::EventManager;
 
 use crate::{

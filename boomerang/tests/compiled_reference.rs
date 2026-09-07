@@ -1836,7 +1836,7 @@ fn owned_federate_preflight_rejects_before_initializers() {
         TinyMapView::new(&rti_members),
         &[],
         &[],
-        &rti_routes,
+        TinyMapView::new(&rti_routes),
         IdentityTable::new("pipex", TinyMapView::new(&rti_identities)),
         IdentityTable::new("pipex", TinyMapView::new(&[])),
         IdentityTable::new("pipex", TinyMapView::new(&rti_identities)),

@@ -9,7 +9,15 @@ tinymap::key_type!(pub ScopeIndex);
 tinymap::key_type!(pub StateSlotIndex);
 tinymap::key_type!(pub ActionSlotIndex);
 tinymap::key_type!(pub BindingSlotIndex);
-tinymap::key_type!(pub RouteIndex);
+tinymap::key_type!(
+    /// Dense index of one enclave-local scheduler route half.
+    ///
+    /// A connection crossing an Enclave boundary is represented by separate outbound and inbound
+    /// route records in the participating Enclave images. This domain is therefore not
+    /// interchangeable with [`crate::image::RtiRouteIndex`], which identifies one deployment-wide
+    /// cross-Federate hop in a central RTI image.
+    pub RouteIndex
+);
 tinymap::key_type!(pub FederateIndex);
 tinymap::key_type!(pub EnclaveIndex);
 

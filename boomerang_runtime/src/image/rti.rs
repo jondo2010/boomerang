@@ -17,6 +17,9 @@
 //! transport/codec capabilities. A **flow** is the stable end-to-end application identity
 //! that groups one or more such routes. Consequently, routes and flows are not one-to-one:
 //! several sequential or parallel routes may carry the same flow.
+//! [`RtiRouteIndex`] selects one complete deployment-wide route here; it is a different domain
+//! from [`crate::image::RouteIndex`], which selects one local scheduler route half inside an
+//! Enclave image.
 //!
 //! For example, an application flow can cross three Federates through two routes:
 //!
@@ -37,6 +40,16 @@ use super::{
 };
 use tinymap::{TableRange, TinyMapView};
 
+tinymap::key_type!(
+    /// Dense image-local index of one deployment-wide cross-Federate RTI route.
+    ///
+    /// One `RtiRouteIndex` selects one complete directed boundary hop in [`RtiImage`]. It must not
+    /// be confused with [`crate::image::RouteIndex`], whose domain contains enclave-local
+    /// scheduler route halves. The stable boundary identity remains the external/serialized
+    /// identity; this key is only a compact handle within one compiled RTI image and its
+    /// associated runtime state.
+    pub RtiRouteIndex
+);
 tinymap::key_type!(pub FlowIndex);
 tinymap::key_type!(pub PhysicalBoundaryIndex);
 tinymap::key_type!(pub TransportCapabilityIndex);
@@ -89,9 +102,9 @@ pub struct RtiMemberImage {
 
 /// One concrete directed cross-Federate boundary hop.
 ///
-/// Every route has its own stable boundary identity and route-specific settings. Its
-/// [`FlowIndex`] may be shared with other sequential or parallel routes belonging to the same
-/// end-to-end application flow.
+/// [`RtiRouteIndex`] selects this deployment-wide record. Every route has its own stable boundary
+/// identity and route-specific settings. Its [`FlowIndex`] may be shared with other sequential or
+/// parallel routes belonging to the same end-to-end application flow.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RtiRouteImage {
     /// Stable identity of this concrete boundary hop, stored in the RTI identity blob.
@@ -215,8 +228,8 @@ pub struct RtiImage<'a> {
     pub(super) dependencies: &'a [RtiDependencyImage],
     /// Flattened affected-downstream Federate keys.
     pub(super) affected_downstream: &'a [FederateIndex],
-    /// Concrete directed boundary hops in canonical order, including parallel routes.
-    pub(super) routes: &'a [RtiRouteImage],
+    /// Concrete directed boundary hops keyed in canonical deployment-wide RTI order.
+    pub(super) routes: TinyMapView<'a, RtiRouteIndex, RtiRouteImage>,
     /// Distinct end-to-end application identities shared by one or more routes.
     pub(super) flows: IdentityTable<'a, FlowIndex>,
     /// Canonically ordered stable physical input/output identities.
@@ -237,8 +250,7 @@ impl PartialEq for RtiImage<'_> {
         self.identity_data == other.identity_data
             && self.dependencies == other.dependencies
             && self.affected_downstream == other.affected_downstream
-            && self.routes == other.routes
-            && views_equal!(members)
+            && views_equal!(members, routes)
             && self.flows == other.flows
             && self.physical_boundaries == other.physical_boundaries
             && self.transport_capabilities == other.transport_capabilities
@@ -252,7 +264,8 @@ macro_rules! route_identity_accessor {
     ($name:ident, $doc:literal, $table:ident, $field:ident) => {
         #[doc = $doc]
         #[must_use]
-        pub fn $name(self, route: RtiRouteImage) -> &'a str {
+        pub fn $name(self, route: RtiRouteIndex) -> &'a str {
+            let route = self.routes[route];
             self.$table
                 .get(route.$field)
                 .expect("validated RTI identity reference")
@@ -282,7 +295,7 @@ impl<'a> RtiImage<'a> {
         members: TinyMapView<'a, FederateIndex, RtiMemberImage>,
         dependencies: &'a [RtiDependencyImage],
         affected_downstream: &'a [FederateIndex],
-        routes: &'a [RtiRouteImage],
+        routes: TinyMapView<'a, RtiRouteIndex, RtiRouteImage>,
         flows: IdentityTable<'a, FlowIndex>,
         physical_boundaries: IdentityTable<'a, PhysicalBoundaryIndex>,
         transport_capabilities: IdentityTable<'a, TransportCapabilityIndex>,
@@ -305,7 +318,7 @@ impl<'a> RtiImage<'a> {
     ///
     /// Multiple returned routes may belong to the same end-to-end flow.
     #[must_use]
-    pub const fn routes(self) -> &'a [RtiRouteImage] {
+    pub const fn routes(self) -> TinyMapView<'a, RtiRouteIndex, RtiRouteImage> {
         self.routes
     }
 
@@ -320,7 +333,8 @@ impl<'a> RtiImage<'a> {
 
     /// Resolves the stable identity of one concrete boundary hop.
     #[must_use]
-    pub fn route_boundary(self, route: RtiRouteImage) -> &'a str {
+    pub fn route_boundary(self, route: RtiRouteIndex) -> &'a str {
+        let route = self.routes[route];
         route
             .boundary
             .get(self.identity_data)
@@ -331,7 +345,8 @@ impl<'a> RtiImage<'a> {
     ///
     /// Other routes may resolve to the same identity.
     #[must_use]
-    pub fn route_flow(self, route: RtiRouteImage) -> &'a str {
+    pub fn route_flow(self, route: RtiRouteIndex) -> &'a str {
+        let route = self.routes[route];
         self.flows
             .get(route.flow)
             .expect("validated RTI flow identity range")
@@ -339,7 +354,8 @@ impl<'a> RtiImage<'a> {
 
     /// Resolves the route's optional physical input identity.
     #[must_use]
-    pub fn route_physical_input(self, route: RtiRouteImage) -> Option<&'a str> {
+    pub fn route_physical_input(self, route: RtiRouteIndex) -> Option<&'a str> {
+        let route = self.routes[route];
         route.physical_input.map(|index| {
             self.physical_boundaries
                 .get(index)
@@ -349,7 +365,8 @@ impl<'a> RtiImage<'a> {
 
     /// Resolves the route's optional physical output identity.
     #[must_use]
-    pub fn route_physical_output(self, route: RtiRouteImage) -> Option<&'a str> {
+    pub fn route_physical_output(self, route: RtiRouteIndex) -> Option<&'a str> {
+        let route = self.routes[route];
         route.physical_output.map(|index| {
             self.physical_boundaries
                 .get(index)
@@ -365,32 +382,32 @@ impl<'a> RtiImage<'a> {
 
     /// Returns one route's boundary-failure behavior.
     #[must_use]
-    pub const fn route_failure_policy(self, route: RtiRouteImage) -> BoundaryFailurePolicy {
-        route.failure_policy
+    pub fn route_failure_policy(self, route: RtiRouteIndex) -> BoundaryFailurePolicy {
+        self.routes[route].failure_policy
     }
 
     /// Returns one route's transport contract.
     #[must_use]
-    pub const fn route_transport_policy(self, route: RtiRouteImage) -> TransportPolicy {
-        route.transport_policy
+    pub fn route_transport_policy(self, route: RtiRouteIndex) -> TransportPolicy {
+        self.routes[route].transport_policy
     }
 
     /// Returns one route's codec contract.
     #[must_use]
-    pub const fn route_codec_policy(self, route: RtiRouteImage) -> CodecPolicy {
-        route.codec_policy
+    pub fn route_codec_policy(self, route: RtiRouteIndex) -> CodecPolicy {
+        self.routes[route].codec_policy
     }
 
     /// Returns one route's physical-time contract.
     #[must_use]
-    pub const fn route_timing_policy(self, route: RtiRouteImage) -> TimingPolicy {
-        route.timing_policy
+    pub fn route_timing_policy(self, route: RtiRouteIndex) -> TimingPolicy {
+        self.routes[route].timing_policy
     }
 
     /// Returns one route's communication security profile.
     #[must_use]
-    pub const fn route_security_policy(self, route: RtiRouteImage) -> SecurityPolicy {
-        route.security_policy
+    pub fn route_security_policy(self, route: RtiRouteIndex) -> SecurityPolicy {
+        self.routes[route].security_policy
     }
     route_identity_accessor!(
         route_transport_capability,

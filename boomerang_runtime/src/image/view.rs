@@ -721,8 +721,8 @@ fn validate_rti<'a>(
         }
     }
     let mut previous_boundary = None;
-    for (position, route) in rti.routes.iter().copied().enumerate() {
-        let index = position as u32;
+    for (route_index, route) in rti.routes.iter() {
+        let index = route_index.as_u32();
         let boundary = identity_slice(
             rti.identity_data,
             "coordination.rti.routes",
@@ -799,7 +799,7 @@ fn validate_rti<'a>(
             field: "routes",
         });
     }
-    for (position, (route, edge)) in rti.routes.iter().zip(image.federation.edges).enumerate() {
+    for (position, (route, edge)) in rti.routes.values().zip(image.federation.edges).enumerate() {
         let boundary = identity_slice_unchecked(rti.identity_data, route.boundary);
         if boundary != identity_slice_unchecked(image.identity_data, edge.boundary())
             || route.source != edge.source()
@@ -2071,7 +2071,7 @@ mod tests {
             TinyMapView::new(members),
             dependencies,
             &[],
-            routes,
+            TinyMapView::new(routes),
             IdentityTable::new(identity_data, TinyMapView::new(flows)),
             IdentityTable::new(identity_data, TinyMapView::new(&[])),
             IdentityTable::new(identity_data, TinyMapView::new(&RTI_IDENTITIES)),

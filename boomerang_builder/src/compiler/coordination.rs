@@ -16,7 +16,7 @@ use super::{FederateId, ResolvedDeployment};
 use crate::runtime::image::{
     CodecCapabilityIndex, CoordinationProjection, FederateIndex, FlowIndex, IdentityRange,
     IdentityTable, PhysicalBoundaryIndex, RtiDependencyImage, RtiImage, RtiMemberImage,
-    RtiRouteImage, TransportCapabilityIndex,
+    RtiRouteImage, RtiRouteIndex, TransportCapabilityIndex,
 };
 use tinymap::{TableRange, TinyMap};
 
@@ -45,8 +45,8 @@ pub struct OwnedRtiImage {
     dependencies: Box<[RtiDependencyImage]>,
     /// Flattened affected-downstream Federate keys.
     affected_downstream: Box<[FederateIndex]>,
-    /// Concrete directed cross-Federate boundary hops, including parallel routes.
-    routes: Box<[RtiRouteImage]>,
+    /// Complete deployment-wide RTI route hops keyed independently of local scheduler route halves.
+    routes: TinyMap<RtiRouteIndex, RtiRouteImage>,
     /// Distinct end-to-end flow identities shared by one or more routes.
     flows: TinyMap<FlowIndex, IdentityRange>,
     /// Canonically ordered stable physical input/output identities.
@@ -66,7 +66,7 @@ impl OwnedRtiImage {
             self.members.as_view(),
             &self.dependencies,
             &self.affected_downstream,
-            &self.routes,
+            self.routes.as_view(),
             IdentityTable::new(&self.identity_data, self.flows.as_view()),
             IdentityTable::new(&self.identity_data, self.physical_boundaries.as_view()),
             IdentityTable::new(&self.identity_data, self.transport_capabilities.as_view()),
@@ -164,7 +164,7 @@ pub(crate) fn project_central_rti(
                 edge.delay().as_nanos(),
             ))
         })
-        .collect::<Result<Box<[_]>, CoordinationProjectionError>>()?;
+        .collect::<Result<TinyMap<RtiRouteIndex, _>, CoordinationProjectionError>>()?;
     for member in analysis.members() {
         let direct = append_dependencies(
             &mut dependencies,
@@ -279,6 +279,7 @@ mod tests {
     fn owned_rti_image_keeps_every_dense_domain_typed() {
         fn assert_field_types(image: &OwnedRtiImage) {
             assert_tiny_map::<FederateIndex, RtiMemberImage>(&image.members);
+            assert_tiny_map::<RtiRouteIndex, RtiRouteImage>(&image.routes);
             assert_tiny_map::<FlowIndex, IdentityRange>(&image.flows);
             assert_tiny_map::<PhysicalBoundaryIndex, IdentityRange>(&image.physical_boundaries);
             assert_tiny_map::<TransportCapabilityIndex, IdentityRange>(

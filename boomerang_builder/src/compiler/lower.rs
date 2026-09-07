@@ -1625,8 +1625,8 @@ mod tests {
         runtime::image::{
             ActionIndex, ActionTiming, BindingKind, BoundaryFailurePolicy, CodecPolicy,
             CoordinationProjection, FederateIndex, ModeIndex, ReactionIndex, ReactorIndex,
-            RecoveryPolicy, RouteDirection, RouteIndex, RtiImage, ScopeIndex, SecurityPolicy,
-            TimingDomain, TimingPolicy, TransportPolicy,
+            RecoveryPolicy, RouteDirection, RouteIndex, RtiImage, RtiRouteIndex, ScopeIndex,
+            SecurityPolicy, TimingDomain, TimingPolicy, TransportPolicy,
         },
     };
     fn descriptor(contract: &str, bounds: DescriptorBounds) -> ComponentDescriptor {
@@ -2508,8 +2508,9 @@ mod tests {
         ))
         .unwrap();
         let rti = central_rti(&compiled);
-        let route = rti.routes()[0];
-        assert_eq!(rti.route_boundary(route), "controller-to-sensor");
+        let route_index = RtiRouteIndex::new(0);
+        let route = rti.routes()[route_index];
+        assert_eq!(rti.route_boundary(route_index), "controller-to-sensor");
         assert_eq!(route.source(), FederateIndex::new(1));
         assert_eq!(route.target(), FederateIndex::new(0));
         assert_eq!(route.delay_nanos(), 5_000_000);
@@ -2534,7 +2535,7 @@ mod tests {
         ))
         .unwrap();
         let rti = central_rti(&compiled);
-        let route = rti.routes()[0];
+        let route = RtiRouteIndex::new(0);
         assert_eq!(rti.route_flow(route), "sensor-control");
         assert_eq!(rti.route_physical_input(route), Some("plant/z"));
         assert_eq!(rti.route_physical_output(route), Some("plant/#g1"));
@@ -2566,8 +2567,7 @@ mod tests {
         assert_eq!(rti.flow_count(), 1);
         assert_eq!(
             rti.routes()
-                .iter()
-                .copied()
+                .keys()
                 .map(|route| (rti.route_boundary(route), rti.route_flow(route)))
                 .collect::<Vec<_>>(),
             [
@@ -2581,7 +2581,7 @@ mod tests {
     fn central_rti_projection_preserves_typed_policies_and_dense_capability_references() {
         let compiled = lower(&deployment(false, true)).unwrap();
         let rti = central_rti(&compiled);
-        let route = rti.routes()[0];
+        let route = RtiRouteIndex::new(0);
         assert_eq!(
             rti.member_recovery_policy(FederateIndex::new(1)),
             RecoveryPolicy::FailStop

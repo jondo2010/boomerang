@@ -140,7 +140,10 @@ impl FederateCoordinationBackend for LocalFederateCoordinationBackend {
         &mut self,
         publication: FederatePublication,
     ) -> Result<(), FederateCoordinationError> {
-        if publication.next_event.is_some() {
+        if publication
+            .next_event
+            .is_some_and(|tag| tag > Tag::NEVER && tag < Tag::FOREVER)
+        {
             self.pending_publication = Some(publication);
         }
         Ok(())
@@ -261,6 +264,20 @@ mod tests {
         assert_eq!(locally_acquired.granted(), latest_tag);
         assert_eq!(
             local.poll_acquisition(std::time::Duration::ZERO).unwrap(),
+            None
+        );
+
+        let mut terminal = LocalFederateCoordinationBackend::default();
+        terminal
+            .publish(FederatePublication::new(
+                next_revision,
+                Some(crate::Tag::FOREVER),
+            ))
+            .unwrap();
+        assert_eq!(
+            terminal
+                .poll_acquisition(std::time::Duration::ZERO)
+                .unwrap(),
             None
         );
     }

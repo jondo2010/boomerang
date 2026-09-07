@@ -256,8 +256,9 @@ impl FederateCoordinationBackend for LocalFederateCoordinationBackend {
 }
 
 #[cfg(test)]
-/// Contract tests using an in-process recording backend without a transport.
 mod tests {
+    //! Contract tests using an in-process recording backend without a transport.
+
     use super::*;
 
     #[derive(Default)]

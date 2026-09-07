@@ -1,3 +1,12 @@
+//! Canonical backend-neutral federation graph analysis.
+//!
+//! Host compilation preserves declared Federate and boundary identities, parallel routes, and
+//! delays, then computes direct dependencies, minimum non-empty incoming paths, downstream impact
+//! sets, and zero-delay-cycle validity once. The resulting [`AnalyzedFederationGraph`] remains the
+//! semantic authority after a coordination backend is selected. Central RTI projection consumes
+//! these precomputed facts mechanically and must not repeat reachability, SCC, shortest-path, or
+//! equivalent graph work.
+
 use std::{
     cmp::Reverse,
     collections::{BTreeMap, BTreeSet, BinaryHeap},
@@ -8,6 +17,8 @@ use petgraph::{
     stable_graph::{NodeIndex, StableDiGraph},
     visit::{EdgeRef, IntoEdgeReferences},
 };
+
+use super::identity::canonical_identity_text;
 
 use super::{BoundaryId, FederateId};
 
@@ -206,14 +217,7 @@ pub fn analyze_federation_graph(
             }
         }
     }
-    edges.sort_by(|left, right| {
-        (&left.source, &left.target, &left.id, left.delay).cmp(&(
-            &right.source,
-            &right.target,
-            &right.id,
-            right.delay,
-        ))
-    });
+    edges.sort_by_cached_key(|edge| canonical_identity_text(&edge.id));
 
     let mut graph = StableDiGraph::<&FederateId, u128>::new();
     let mut nodes = BTreeMap::<&FederateId, NodeIndex>::new();
@@ -421,9 +425,9 @@ mod tests {
     fn canonicalizes_reordered_members_and_edges() {
         let members = [federate("c"), federate("a"), federate("b")];
         let edges = [
-            edge("a", "b", "a-b", 3),
-            edge("b", "c", "b-c", 4),
-            edge("a", "c", "a-c", 9),
+            edge("a", "b", "route-z", 3),
+            edge("b", "c", "route-a", 4),
+            edge("a", "c", "route-m", 9),
         ];
         let mut reversed_members = members.clone();
         reversed_members.reverse();
@@ -446,7 +450,7 @@ mod tests {
                 .iter()
                 .map(|edge| edge.id().to_canonical_string())
                 .collect::<Vec<_>>(),
-            vec!["a-b", "a-c", "b-c"]
+            vec!["route-a", "route-m", "route-z"]
         );
     }
 

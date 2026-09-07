@@ -1,15 +1,15 @@
 use super::{
     identity::canonical_identity_text, ComponentInstanceId, FederateId, ImplementationId,
-    RuntimeBackendId, StableEnclaveId, StablePath, TargetTriple,
+    OwnedCoordinationProjection, RuntimeBackendId, StableEnclaveId, StablePath, TargetTriple,
 };
 use crate::descriptor::{ActionSlotId, PortSlotId, ReactionSlotId, ReactorSlotId};
 use crate::runtime::image::{
-    ActionImage, ActionIndex, BindingKind, BindingSlotIndex, CoordinationProjection, EnclaveImage,
-    EnclaveImageView, FederateImage, FederateIndex,
-    GlobalFederationImage as BorrowedGlobalFederationImage, IdentityRange, ImageValidationError,
-    LevelReactionImage, LifecycleReactionImage, ModeImage, ModeIndex, PortImage, PortIndex,
-    ReactionImage, ReactionIndex, ReactorImage, ReactorIndex, RequiredBindingImage, RouteImage,
-    RouteIndex, ScopeImage, ScopeIndex, StorageBounds, TimerStartupImage,
+    ActionImage, ActionIndex, BindingKind, BindingSlotIndex, EnclaveImage, EnclaveImageView,
+    FederateImage, FederateIndex, GlobalFederationImage as BorrowedGlobalFederationImage,
+    IdentityRange, ImageValidationError, LevelReactionImage, LifecycleReactionImage, ModeImage,
+    ModeIndex, PortImage, PortIndex, ReactionImage, ReactionIndex, ReactorImage, ReactorIndex,
+    RequiredBindingImage, RouteImage, RouteIndex, ScopeImage, ScopeIndex, StorageBounds,
+    TimerStartupImage,
 };
 use tinymap::{TableRange, TinyMap, TinyMapView};
 
@@ -266,12 +266,19 @@ impl OwnedFederateImage {
 pub struct GlobalFederationImage {
     /// Federates in canonical identity order.
     pub(crate) members: Box<[FederateId]>,
+    /// Canonical cross-Federate routes retained independently of any backend projection.
+    pub(crate) edges: Box<[super::federation::FederationEdge]>,
 }
 
 impl GlobalFederationImage {
     /// Returns canonical federation members.
     pub fn members(&self) -> &[FederateId] {
         &self.members
+    }
+
+    /// Returns canonical cross-Federate edges, including parallel routes.
+    pub fn edges(&self) -> &[super::federation::FederationEdge] {
+        &self.edges
     }
 }
 
@@ -283,7 +290,7 @@ pub struct OwnedCompiledDeployment {
     /// Federate-owned compiled image slices.
     pub(crate) federates: Box<[OwnedFederateImage]>,
     /// Selected coordination projection.
-    pub(crate) coordination: CoordinationProjection,
+    pub(crate) coordination: OwnedCoordinationProjection,
 }
 
 /// An owned validation failure for a host-backed compiled deployment.
@@ -314,8 +321,8 @@ impl OwnedCompiledDeployment {
     }
 
     /// Returns the selected coordination projection.
-    pub const fn coordination(&self) -> CoordinationProjection {
-        self.coordination
+    pub fn coordination(&self) -> crate::runtime::image::CoordinationProjection<'_> {
+        self.coordination.image()
     }
 
     /// Validates the complete target-facing deployment hierarchy.
@@ -343,6 +350,7 @@ impl OwnedCompiledDeployment {
         let mut federates = Vec::with_capacity(self.federates.len());
         let mut enclaves = Vec::new();
         let mut members = Vec::with_capacity(self.federates.len());
+        let mut edges = Vec::with_capacity(self.federation.edges.len());
         if let Err(error) = checked_len("federates", self.federates.len()) {
             return Err(CompiledDeploymentValidationError::from_image(error));
         }
@@ -385,13 +393,41 @@ impl OwnedCompiledDeployment {
             };
             members.push(FederateIndex::new(index));
         }
+        for edge in &self.federation.edges {
+            let boundary = match append_identity(&mut identity_data, edge.id()) {
+                Ok(boundary) => boundary,
+                Err(error) => return Err(CompiledDeploymentValidationError::from_image(error)),
+            };
+            let source = self
+                .federation
+                .members
+                .binary_search(edge.source())
+                .unwrap_or(self.federation.members.len());
+            let target = self
+                .federation
+                .members
+                .binary_search(edge.target())
+                .unwrap_or(self.federation.members.len());
+            edges.push(crate::runtime::image::FederationEdgeImage::new(
+                boundary,
+                FederateIndex::new(match checked_len("federation.edges", source) {
+                    Ok(source) => source,
+                    Err(error) => return Err(CompiledDeploymentValidationError::from_image(error)),
+                }),
+                FederateIndex::new(match checked_len("federation.edges", target) {
+                    Ok(target) => target,
+                    Err(error) => return Err(CompiledDeploymentValidationError::from_image(error)),
+                }),
+                edge.delay().as_nanos(),
+            ));
+        }
 
         let image = crate::runtime::image::CompiledDeploymentImage {
             identity_data: &identity_data,
-            federation: BorrowedGlobalFederationImage::new(&members, &[]),
+            federation: BorrowedGlobalFederationImage::new(&members, &edges),
             federates: TinyMapView::new(&federates),
             enclaves: TinyMapView::new(&enclaves),
-            coordination: self.coordination,
+            coordination: self.coordination.image(),
         };
         crate::runtime::image::CompiledDeploymentView::new(&image)
             .map(|_| ())
@@ -563,6 +599,7 @@ mod tests {
         let deployment = OwnedCompiledDeployment {
             federation: GlobalFederationImage {
                 members: vec![FederateId::new("host").unwrap()].into_boxed_slice(),
+                edges: Box::default(),
             },
             federates: vec![OwnedFederateImage {
                 id: FederateId::new("host").unwrap(),
@@ -571,13 +608,14 @@ mod tests {
                 enclaves: vec![empty_enclave()].into_boxed_slice(),
             }]
             .into_boxed_slice(),
-            coordination: CoordinationProjection::Local,
+            coordination: OwnedCoordinationProjection::Local,
         };
 
         deployment.validate().unwrap();
         let invalid = OwnedCompiledDeployment {
             federation: GlobalFederationImage {
                 members: Box::default(),
+                edges: Box::default(),
             },
             ..deployment.clone()
         };

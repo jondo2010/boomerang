@@ -2,6 +2,7 @@
 #![deny(missing_docs)]
 
 mod compiled;
+mod coordination;
 mod debug;
 /// Explicit deployment selections supplied to the compiler.
 mod deployment;
@@ -19,13 +20,14 @@ pub use compiled::{
     OwnedCompiledDeployment, OwnedEnclaveImage, OwnedFederateImage, RequiredBinding,
     RequiredBindings,
 };
+pub use coordination::{CoordinationProjectionError, OwnedCoordinationProjection, OwnedRtiImage};
 pub use deployment::{
-    BoundaryBinding, CoordinationSelection, FederateConfig, ImplementationBinding,
-    PlacementAssignment,
+    BoundaryBinding, BoundaryPolicies, CoordinationBackend, CoordinationSelection, FederateConfig,
+    ImplementationBinding, PhysicalBoundaryMetadata, PlacementAssignment,
 };
 pub use identity::{
     ActionId, ApplicationId, BindingSlotId, BoundaryId, CodecCapabilityId, ComponentInstanceId,
-    ContractId, CoordinationBackendId, FederateId, ImplementationId, InvalidStableId, ModeId,
+    ContractId, FederateId, FlowId, ImplementationId, InvalidStableId, ModeId, PhysicalBoundaryId,
     PlacementGroupId, PortId, ReactionId, ReactorId, RuntimeBackendId, StableEnclaveId, StablePath,
     StablePathSegment, StableText, TargetTriple, TransportCapabilityId,
 };

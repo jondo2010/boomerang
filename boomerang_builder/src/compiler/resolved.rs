@@ -439,14 +439,19 @@ impl ResolvedDeployment {
 mod tests {
     use crate::compiler::{
         ApplicationTopology, ApplicationTopologyBuilder, BoundaryBinding, BoundaryId,
-        CodecCapabilityId, ComponentInstance, ComponentInstanceId, ConnectionSemantics, ContractId,
-        CoordinationBackendId, CoordinationSelection, FederateConfig, FederateId,
-        ImplementationBinding, ImplementationId, PlacementAssignment, PlacementGroupId,
-        PortDirection, PortId, Reactor, ReactorId, ResolveError, ResolvedDeployment,
-        RuntimeBackendId, StableEnclaveId, TargetTriple, TransportCapabilityId,
+        BoundaryPolicies, CodecCapabilityId, ComponentInstance, ComponentInstanceId,
+        ConnectionSemantics, ContractId, CoordinationBackend, CoordinationSelection,
+        FederateConfig, FederateId, FlowId, ImplementationBinding, ImplementationId,
+        PhysicalBoundaryMetadata, PlacementAssignment, PlacementGroupId, PortDirection, PortId,
+        Reactor, ReactorId, ResolveError, ResolvedDeployment, RuntimeBackendId, StableEnclaveId,
+        TargetTriple, TransportCapabilityId,
     };
     use crate::descriptor::{
         ComponentDescriptor, DescriptorBounds, COMPONENT_DESCRIPTOR_MACRO_ABI,
+    };
+    use crate::runtime::image::{
+        BoundaryFailurePolicy, CodecPolicy, RecoveryPolicy, SecurityPolicy, TimingPolicy,
+        TransportPolicy,
     };
 
     fn descriptor_at_version(contract: &str, contract_version: u64) -> ComponentDescriptor {
@@ -592,20 +597,30 @@ mod tests {
             FederateId::new(id).unwrap(),
             TargetTriple::new(target).unwrap(),
             RuntimeBackendId::new(runtime).unwrap(),
+            RecoveryPolicy::FailStop,
         )
     }
 
     fn boundary_binding(boundary: &str, codec: &str, transport: &str) -> BoundaryBinding {
         BoundaryBinding::new(
             BoundaryId::new(boundary).unwrap(),
+            FlowId::new("sensor-control").unwrap(),
+            PhysicalBoundaryMetadata::new(None, None),
             CodecCapabilityId::new(codec).unwrap(),
             TransportCapabilityId::new(transport).unwrap(),
+            BoundaryPolicies::new(
+                BoundaryFailurePolicy::PropagateStop,
+                TransportPolicy::ReliableOrderedFramed,
+                CodecPolicy::CanonicalBounded,
+                TimingPolicy::BestEffort,
+                SecurityPolicy::None,
+            ),
         )
     }
 
     fn distributed_coordination() -> CoordinationSelection {
         CoordinationSelection::Distributed {
-            backend: CoordinationBackendId::new("rti").unwrap(),
+            backend: CoordinationBackend::CentralRti,
         }
     }
 

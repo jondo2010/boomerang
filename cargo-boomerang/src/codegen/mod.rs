@@ -819,7 +819,7 @@ mod tests {
         configured_metadata_arguments, configured_path_argument, launcher_command,
         launcher_request_identity, rendered_compiler_diagnostics, ConfiguredFiles,
     };
-    use crate::ResolvedFederate;
+    use crate::{RecoveryPolicy, ResolvedFederate};
     use std::{ffi::OsStr, path::Path};
 
     #[test]
@@ -830,6 +830,7 @@ mod tests {
             toolchain: Some(String::from("nightly-test")),
             profile: None,
             runtime: String::from("std"),
+            recovery: RecoveryPolicy::FailStop,
             target_json: None,
             cargo_config: Some(std::path::PathBuf::from("/tmp/cargo-config.toml")),
         };
@@ -883,6 +884,7 @@ mod tests {
                 toolchain: None,
                 profile: None,
                 runtime: String::from("std"),
+                recovery: RecoveryPolicy::FailStop,
                 target_json: Some(target_json.to_path_buf()),
                 cargo_config: Some(cargo_config.to_path_buf()),
             };
@@ -920,6 +922,7 @@ mod tests {
                 toolchain: None,
                 profile: None,
                 runtime: String::from("std"),
+                recovery: RecoveryPolicy::FailStop,
                 target_json: None,
                 cargo_config: None,
             };

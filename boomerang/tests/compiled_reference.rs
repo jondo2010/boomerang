@@ -1675,6 +1675,11 @@ fn wrong_sink_bindings() -> EnclaveBindings {
 
 #[test]
 fn owned_federate_preflight_rejects_before_initializers() {
+    use boomerang::runtime::image::{
+        BoundaryFailurePolicy, CodecCapabilityIndex, CodecPolicy, FederationEdgeImage, FlowIndex,
+        IdentityTable, PhysicalBoundaryIndex, RecoveryPolicy, RtiImage, RtiMemberImage,
+        RtiRouteImage, SecurityPolicy, TimingPolicy, TransportCapabilityIndex, TransportPolicy,
+    };
     ROUTED_INITIALIZATIONS.store(0, Ordering::SeqCst);
     let error = execute_owned_federate(
         &ROUTED_DEPLOYMENT,
@@ -1801,10 +1806,47 @@ fn owned_federate_preflight_rejects_before_initializers() {
         ),
     ];
     let cross_members = [FederateIndex::new(0), FederateIndex::new(1)];
+    let cross_edges = [FederationEdgeImage::new(
+        IdentityRange::new(6, 4),
+        FederateIndex::new(0),
+        FederateIndex::new(1),
+        1_000_000,
+    )];
+    let rti_members =
+        [RtiMemberImage::new(RecoveryPolicy::FailStop, r!(0, 0), r!(0, 0), r!(0, 0)); 2];
+    let rti_routes = [RtiRouteImage::new(
+        IdentityRange::new(0, 4),
+        FlowIndex::new(0),
+        None::<PhysicalBoundaryIndex>,
+        None,
+        BoundaryFailurePolicy::PropagateStop,
+        TransportPolicy::ReliableOrderedFramed,
+        CodecPolicy::CanonicalBounded,
+        TimingPolicy::BestEffort,
+        SecurityPolicy::None,
+        TransportCapabilityIndex::new(0),
+        CodecCapabilityIndex::new(0),
+        FederateIndex::new(0),
+        FederateIndex::new(1),
+        1_000_000,
+    )];
+    let rti_identities = [IdentityRange::new(4, 1)];
+    let rti = RtiImage::new(
+        "pipex",
+        TinyMapView::new(&rti_members),
+        &[],
+        &[],
+        TinyMapView::new(&rti_routes),
+        IdentityTable::new("pipex", TinyMapView::new(&rti_identities)),
+        IdentityTable::new("pipex", TinyMapView::new(&[])),
+        IdentityTable::new("pipex", TinyMapView::new(&rti_identities)),
+        IdentityTable::new("pipex", TinyMapView::new(&rti_identities)),
+    );
     let cross = CompiledDeploymentImage {
-        identity_data: "atrbtr",
-        federation: GlobalFederationImage::new(&cross_members, &[]),
+        identity_data: "atrbtrpipe",
+        federation: GlobalFederationImage::new(&cross_members, &cross_edges),
         federates: TinyMapView::new(&cross_federates),
+        coordination: CoordinationProjection::CentralRti(rti),
         ..ROUTED_DEPLOYMENT
     };
     let error = execute_owned_federate(

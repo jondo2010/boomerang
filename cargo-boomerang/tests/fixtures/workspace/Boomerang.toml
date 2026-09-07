@@ -16,6 +16,7 @@ package = "vehicle-control"
 [deployments.production.federates.host]
 groups = ["placement/backup", "placement/controller", "placement/sensor"]
 runtime = "std"
+recovery = "fail-stop"
 
 [deployments.runtime-failure]
 bindings = { sensor = { package = "sensor-host", features = ["simulated", "runtime-failure"] }, controller = { package = "vehicle-control" }, backup = { package = "vehicle-control" } }
@@ -23,6 +24,7 @@ bindings = { sensor = { package = "sensor-host", features = ["simulated", "runti
 [deployments.runtime-failure.federates.host]
 groups = ["placement/backup", "placement/controller", "placement/sensor"]
 runtime = "std"
+recovery = "fail-stop"
 
 [deployments.execution]
 bindings = { sensor = { package = "sensor-host", features = ["simulated"] }, controller = { package = "vehicle-control" }, backup = { package = "vehicle-control" } }
@@ -30,6 +32,7 @@ bindings = { sensor = { package = "sensor-host", features = ["simulated"] }, con
 [deployments.execution.federates.host]
 groups = ["placement/backup", "placement/controller", "placement/sensor"]
 runtime = "std"
+recovery = "fail-stop"
 
 [deployments.execution.execution]
 fast-forward = true
@@ -42,6 +45,7 @@ bindings = { sensor = { package = "sensor-host", features = ["simulated"] }, con
 [deployments.execution-equivalent.federates.host]
 groups = ["placement/backup", "placement/controller", "placement/sensor"]
 runtime = "std"
+recovery = "fail-stop"
 
 [deployments.execution-equivalent.execution]
 fast-forward = true
@@ -61,6 +65,7 @@ package = "vehicle-control"
 [deployments.broken-payload.federates.host]
 groups = ["placement/backup", "placement/controller", "placement/sensor"]
 runtime = "std"
+recovery = "fail-stop"
 
 [deployments.warning-diagnostic.bindings.sensor]
 package = "sensor-host"
@@ -75,6 +80,7 @@ package = "vehicle-control"
 [deployments.warning-diagnostic.federates.host]
 groups = ["placement/backup", "placement/controller", "placement/sensor"]
 runtime = "std"
+recovery = "fail-stop"
 
 [deployments.broken-descriptor.bindings.sensor]
 package = "sensor-host"
@@ -89,6 +95,7 @@ package = "vehicle-control"
 [deployments.broken-descriptor.federates.host]
 groups = ["placement/backup", "placement/controller", "placement/sensor"]
 runtime = "std"
+recovery = "fail-stop"
 
 [deployments.profile-config.bindings.sensor]
 package = "sensor-host"
@@ -104,6 +111,7 @@ package = "vehicle-control"
 [deployments.profile-config.federates.host]
 groups = ["placement/backup", "placement/controller", "placement/sensor"]
 runtime = "std"
+recovery = "fail-stop"
 profile = "release"
 cargo-config = ".cargo/profile-config.toml"
 
@@ -120,6 +128,7 @@ package = "vehicle-control"
 groups = ["placement/backup", "placement/controller", "placement/sensor"]
 target = "x86_64-unknown-linux-gnu"
 runtime = "std"
+recovery = "fail-stop"
 target-json = "targets/host.json"
 cargo-config = ".cargo/host.toml"
 
@@ -130,6 +139,7 @@ bindings = { sensor = { package = "sensor-host", features = ["simulated"] }, con
 groups = ["placement/backup", "placement/controller", "placement/sensor"]
 target = "x86_64-unknown-linux-gnu"
 runtime = "std"
+recovery = "fail-stop"
 
 [deployments.foreign-aarch64-macos]
 bindings = { sensor = { package = "sensor-host", features = ["simulated"] }, controller = { package = "vehicle-control" }, backup = { package = "vehicle-control" } }
@@ -138,6 +148,7 @@ bindings = { sensor = { package = "sensor-host", features = ["simulated"] }, con
 groups = ["placement/backup", "placement/controller", "placement/sensor"]
 target = "aarch64-apple-darwin"
 runtime = "std"
+recovery = "fail-stop"
 
 [deployments.outside-member.bindings."vehicle/sensor"]
 package = "outside-member"
@@ -145,6 +156,7 @@ package = "outside-member"
 [deployments.outside-member.federates.host]
 groups = ["vehicle"]
 runtime = "std"
+recovery = "fail-stop"
 
 [deployments.payload-alias.bindings."vehicle/sensor"]
 package = "sensor-host"
@@ -152,6 +164,7 @@ features = ["payload-alias"]
 [deployments.payload-alias.federates.host]
 groups = ["vehicle"]
 runtime = "std"
+recovery = "fail-stop"
 
 [deployments.feature-union.bindings.controller]
 package = "vehicle-control"
@@ -165,3 +178,4 @@ features = ["simulated"]
 [deployments.feature-union.federates.host]
 groups = ["placement/backup", "placement/controller", "placement/sensor"]
 runtime = "std"
+recovery = "fail-stop"

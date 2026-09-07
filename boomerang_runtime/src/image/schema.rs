@@ -9,7 +9,15 @@ tinymap::key_type!(pub ScopeIndex);
 tinymap::key_type!(pub StateSlotIndex);
 tinymap::key_type!(pub ActionSlotIndex);
 tinymap::key_type!(pub BindingSlotIndex);
-tinymap::key_type!(pub RouteIndex);
+tinymap::key_type!(
+    /// Dense index of one enclave-local scheduler route half.
+    ///
+    /// A connection crossing an Enclave boundary is represented by separate outbound and inbound
+    /// route records in the participating Enclave images. This domain is therefore not
+    /// interchangeable with [`crate::image::RtiRouteIndex`], which identifies one deployment-wide
+    /// cross-Federate hop in a central RTI image.
+    pub RouteIndex
+);
 tinymap::key_type!(pub FederateIndex);
 tinymap::key_type!(pub EnclaveIndex);
 
@@ -187,9 +195,15 @@ impl<'a> GlobalFederationImage<'a> {
 
 /// Selected immutable logical-time coordination projection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CoordinationProjection {
+#[allow(
+    clippy::large_enum_variant,
+    reason = "zero-allocation Copy image schema"
+)]
+pub enum CoordinationProjection<'a> {
     /// No distributed coordinator is required.
     Local,
+    /// A generated central RTI consumes the enclosed dense immutable image.
+    CentralRti(super::RtiImage<'a>),
 }
 
 /// An unchecked aggregate of one complete compiled deployment.
@@ -204,7 +218,7 @@ pub struct CompiledDeploymentImage<'a> {
     /// Federate-grouped Enclave scheduler images.
     pub enclaves: TinyMapView<'a, EnclaveIndex, EnclaveImage<'a>>,
     /// Selected backend-specific coordination projection.
-    pub coordination: CoordinationProjection,
+    pub coordination: CoordinationProjection<'a>,
 }
 
 /// An immutable reactor scheduler record.

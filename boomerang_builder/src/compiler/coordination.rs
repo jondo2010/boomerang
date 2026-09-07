@@ -18,7 +18,7 @@ use crate::runtime::image::{
     IdentityTable, PhysicalBoundaryIndex, RtiDependencyImage, RtiImage, RtiMemberImage,
     RtiRouteImage, TransportCapabilityIndex,
 };
-use tinymap::{TableRange, TinyMapView};
+use tinymap::{TableRange, TinyMap};
 
 /// Failure to represent an analyzed federation in bounded image coordinates.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
@@ -40,7 +40,7 @@ pub struct OwnedRtiImage {
     /// Concatenated stable identities referenced by RTI records.
     identity_data: Box<str>,
     /// Per-Federate coordination ranges in canonical dense-key order.
-    members: Box<[RtiMemberImage]>,
+    members: TinyMap<FederateIndex, RtiMemberImage>,
     /// Flattened direct and transitive dependency records.
     dependencies: Box<[RtiDependencyImage]>,
     /// Flattened affected-downstream Federate keys.
@@ -48,13 +48,13 @@ pub struct OwnedRtiImage {
     /// Concrete directed cross-Federate boundary hops, including parallel routes.
     routes: Box<[RtiRouteImage]>,
     /// Distinct end-to-end flow identities shared by one or more routes.
-    flows: Box<[IdentityRange]>,
+    flows: TinyMap<FlowIndex, IdentityRange>,
     /// Canonically ordered stable physical input/output identities.
-    physical_boundaries: Box<[IdentityRange]>,
+    physical_boundaries: TinyMap<PhysicalBoundaryIndex, IdentityRange>,
     /// Canonically ordered transport capability identities.
-    transport_capabilities: Box<[IdentityRange]>,
+    transport_capabilities: TinyMap<TransportCapabilityIndex, IdentityRange>,
     /// Canonically ordered codec capability identities.
-    codec_capabilities: Box<[IdentityRange]>,
+    codec_capabilities: TinyMap<CodecCapabilityIndex, IdentityRange>,
 }
 
 impl OwnedRtiImage {
@@ -63,23 +63,14 @@ impl OwnedRtiImage {
     pub fn image(&self) -> RtiImage<'_> {
         RtiImage::new(
             &self.identity_data,
-            TinyMapView::new(&self.members),
+            self.members.as_view(),
             &self.dependencies,
             &self.affected_downstream,
             &self.routes,
-            IdentityTable::new(&self.identity_data, TinyMapView::new(&self.flows)),
-            IdentityTable::new(
-                &self.identity_data,
-                TinyMapView::new(&self.physical_boundaries),
-            ),
-            IdentityTable::new(
-                &self.identity_data,
-                TinyMapView::new(&self.transport_capabilities),
-            ),
-            IdentityTable::new(
-                &self.identity_data,
-                TinyMapView::new(&self.codec_capabilities),
-            ),
+            IdentityTable::new(&self.identity_data, self.flows.as_view()),
+            IdentityTable::new(&self.identity_data, self.physical_boundaries.as_view()),
+            IdentityTable::new(&self.identity_data, self.transport_capabilities.as_view()),
+            IdentityTable::new(&self.identity_data, self.codec_capabilities.as_view()),
         )
     }
 }
@@ -210,7 +201,7 @@ pub(crate) fn project_central_rti(
 
     Ok(OwnedRtiImage {
         identity_data: identity_data.into_boxed_str(),
-        members: members.into_boxed_slice(),
+        members: members.into_iter().collect(),
         dependencies: dependencies.into_boxed_slice(),
         affected_downstream: affected_downstream.into_boxed_slice(),
         routes,
@@ -222,7 +213,7 @@ pub(crate) fn project_central_rti(
 }
 
 /// Converts a canonical stable-identity set into a dense table and lookup map.
-type DenseIdentities<'a, I, K> = (Box<[IdentityRange]>, BTreeMap<&'a I, K>);
+type DenseIdentities<'a, I, K> = (TinyMap<K, IdentityRange>, BTreeMap<&'a I, K>);
 
 fn dense_identities<'a, I, K>(
     identity_data: &mut String,
@@ -243,7 +234,7 @@ where
             K::from(usize::try_from(checked_len("identities", position)?).expect("u32 fits usize")),
         );
     }
-    Ok((values.into_boxed_slice(), indices))
+    Ok((values.into_iter().collect(), indices))
 }
 
 /// Appends one stable identity and returns its checked byte range.
@@ -276,4 +267,26 @@ fn append_dependencies(
 /// Converts one generated table length to its target image representation.
 fn checked_len(table: &'static str, len: usize) -> Result<u32, CoordinationProjectionError> {
     u32::try_from(len).map_err(|_| CoordinationProjectionError::TableTooLarge { table })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_tiny_map<K: tinymap::Key, V>(_: &tinymap::TinyMap<K, V>) {}
+
+    #[test]
+    fn owned_rti_image_keeps_every_dense_domain_typed() {
+        fn assert_field_types(image: &OwnedRtiImage) {
+            assert_tiny_map::<FederateIndex, RtiMemberImage>(&image.members);
+            assert_tiny_map::<FlowIndex, IdentityRange>(&image.flows);
+            assert_tiny_map::<PhysicalBoundaryIndex, IdentityRange>(&image.physical_boundaries);
+            assert_tiny_map::<TransportCapabilityIndex, IdentityRange>(
+                &image.transport_capabilities,
+            );
+            assert_tiny_map::<CodecCapabilityIndex, IdentityRange>(&image.codec_capabilities);
+        }
+
+        let _ = assert_field_types;
+    }
 }

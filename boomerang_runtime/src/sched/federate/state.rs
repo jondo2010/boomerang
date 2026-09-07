@@ -267,13 +267,22 @@ mod tests {
         let mut state =
             FederateCoordinationState::new([first, second], LifecyclePolicy::KeepAlive).unwrap();
 
-        assert!(state
+        let first_publication = state
             .handle_scheduler(SchedulerMessage::Publish {
                 enclave: first,
                 next_event: Some(first_tag),
             })
-            .unwrap()
-            .is_empty());
+            .unwrap();
+        let first_revision = state.revision();
+        assert_eq!(
+            snapshot(&state, [first, second], first_publication),
+            CandidateSnapshot {
+                revision: first_revision,
+                candidates: vec![(first, Some(Some(first_tag))), (second, Some(None))],
+                pending_publication: None,
+                actions: vec![],
+            }
+        );
         let publication = state
             .handle_scheduler(SchedulerMessage::Publish {
                 enclave: second,
@@ -312,6 +321,27 @@ mod tests {
                     enclave: first,
                     tag: first_tag,
                 }],
+            }
+        );
+        let republished = state
+            .handle_scheduler(SchedulerMessage::Publish {
+                enclave: first,
+                next_event: Some(first_tag),
+            })
+            .unwrap();
+        assert_eq!(
+            snapshot(&state, [first, second], republished),
+            CandidateSnapshot {
+                revision,
+                candidates: vec![
+                    (first, Some(Some(first_tag))),
+                    (second, Some(Some(second_tag)))
+                ],
+                pending_publication: Some(FederatePublication::new(revision, Some(first_tag))),
+                actions: vec![CoordinationAction::Publish(FederatePublication::new(
+                    revision,
+                    Some(first_tag),
+                ))],
             }
         );
     }
@@ -384,7 +414,15 @@ mod tests {
                 next_event: Some(tag),
             })
             .unwrap();
-        assert_eq!(state.revision(), published);
+        assert_eq!(
+            snapshot(&state, [enclave], unchanged),
+            CandidateSnapshot {
+                revision: published,
+                candidates: vec![(enclave, Some(Some(tag)))],
+                pending_publication: Some(FederatePublication::new(published, Some(tag))),
+                actions: vec![],
+            }
+        );
         let changed = state
             .handle_scheduler(SchedulerMessage::Publish {
                 enclave,
@@ -403,6 +441,5 @@ mod tests {
                 ))],
             }
         );
-        assert!(unchanged.is_empty());
     }
 }

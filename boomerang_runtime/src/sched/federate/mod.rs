@@ -4,6 +4,8 @@
 pub(crate) mod backend;
 mod dependencies;
 mod quiescence;
+#[cfg(feature = "federated")]
+pub(crate) mod state;
 
 #[cfg(feature = "federated")]
 pub use backend::{

@@ -240,6 +240,43 @@ enum WallClockSynchronization {
     FederateStopped,
 }
 
+/// Raw result from the scheduler event channel before an interruption is handled.
+enum WallClockReceive {
+    /// The requested physical deadline elapsed normally.
+    DeadlineReached,
+    /// A scheduler event interrupted the deadline and remains to be handled.
+    Interrupted(AsyncEvent),
+    /// Federate coordination terminated the scheduler through its existing event channel.
+    FederateStopped,
+}
+
+/// Performs one uninterrupted scheduler-event receive until a physical deadline.
+fn receive_until_wall_clock_deadline(
+    target: std::time::Instant,
+    event_rx: &crate::Receiver<AsyncEvent>,
+    entered_receive: impl FnOnce(),
+    terminal_after_close: impl FnOnce() -> Result<bool, FederateCoordinationError>,
+) -> Result<WallClockReceive, FederateCoordinationError> {
+    let advance = target.saturating_duration_since(std::time::Instant::now());
+    entered_receive();
+    match event_rx.recv_timeout(advance) {
+        Ok(event) => Ok(WallClockReceive::Interrupted(event)),
+        Err(ReceiveErrorTimeout::Closed) | Err(ReceiveErrorTimeout::SendClosed) => {
+            if terminal_after_close()? {
+                return Ok(WallClockReceive::FederateStopped);
+            }
+            if let Some(remaining) = target.checked_duration_since(std::time::Instant::now()) {
+                tracing::debug!(target: "boomerang_runtime::sched", remaining = ?remaining,
+                    "Sleep interrupted disconnect, sleeping for remaining",
+                );
+                std::thread::sleep(remaining);
+            }
+            Ok(WallClockReceive::DeadlineReached)
+        }
+        Err(ReceiveErrorTimeout::Timeout) => Ok(WallClockReceive::DeadlineReached),
+    }
+}
+
 impl<S, E> SchedulerCore<'_, '_, S, E>
 where
     S: Schedule,
@@ -736,8 +773,20 @@ where
                 let advance = target - now;
                 tracing::trace!(target: "boomerang_runtime::sched", advance = ?advance, "Need to sleep");
 
-                match self.event_rx.recv_timeout(advance) {
-                    Ok(event) => {
+                match receive_until_wall_clock_deadline(
+                    target,
+                    self.event_rx,
+                    || {},
+                    || {
+                        self.federate_coordination.as_deref_mut().map_or(
+                            Ok(false),
+                            FederateSchedulerCoordination::terminal_after_event_channel_closed,
+                        )
+                    },
+                )
+                .map_err(SchedulerError::FederateCoordination)?
+                {
+                    WallClockReceive::Interrupted(event) => {
                         tracing::debug!(target: "boomerang_runtime::sched", event = %event, "Sleep interrupted by");
                         if matches!(
                             &event,
@@ -753,24 +802,10 @@ where
                             .map_err(SchedulerError::Execution)?;
                         return Ok(WallClockSynchronization::Interrupted);
                     }
-                    Err(ReceiveErrorTimeout::Closed) | Err(ReceiveErrorTimeout::SendClosed) => {
-                        if let Some(coordination) = self.federate_coordination.as_deref_mut() {
-                            let terminal = coordination
-                                .terminal_after_event_channel_closed()
-                                .map_err(SchedulerError::FederateCoordination)?;
-                            if terminal {
-                                return Ok(WallClockSynchronization::FederateStopped);
-                            }
-                        }
-                        let remaining = target.checked_duration_since(std::time::Instant::now());
-                        if let Some(remaining) = remaining {
-                            tracing::debug!(target: "boomerang_runtime::sched", remaining = ?remaining,
-                                "Sleep interrupted disconnect, sleeping for remaining",
-                            );
-                            std::thread::sleep(remaining);
-                        }
+                    WallClockReceive::FederateStopped => {
+                        return Ok(WallClockSynchronization::FederateStopped);
                     }
-                    Err(ReceiveErrorTimeout::Timeout) => {}
+                    WallClockReceive::DeadlineReached => {}
                 }
             }
 
@@ -961,5 +996,65 @@ where
         );
 
         true
+    }
+}
+
+#[cfg(test)]
+mod wall_clock_tests {
+    //! Exact receive-entry coverage for coordinated wall-clock termination.
+
+    use super::{receive_until_wall_clock_deadline, WallClockReceive};
+    use crate::{
+        image::EnclaveIndex,
+        sched::federate::{
+            FederateCoordinationParts, FederateSchedulerCoordination, LifecyclePolicy,
+            LocalFederateCoordinationBackend,
+        },
+        AsyncEvent,
+    };
+    use std::{sync::mpsc, time::Duration as StdDuration};
+
+    /// Verifies coordinator abort closes an entered timed receive only after queuing termination.
+    #[test]
+    fn coordinated_abort_interrupts_entered_wall_clock_receive() {
+        let enclave = EnclaveIndex::new(0);
+        let (event_tx, event_rx) = kanal::unbounded::<AsyncEvent>();
+        let scheduler_event_rx = event_rx.clone();
+        let FederateCoordinationParts {
+            abort_handle,
+            coordinator,
+            participants,
+            ..
+        } = FederateCoordinationParts::new(
+            [(enclave, event_tx, event_rx)],
+            LifecyclePolicy::KeepAlive,
+            LocalFederateCoordinationBackend::default(),
+        )
+        .unwrap();
+        let (_, mut participant) = participants.into_iter().next().unwrap();
+        let (entered_tx, entered_rx) = mpsc::sync_channel(0);
+        let target = std::time::Instant::now() + StdDuration::from_secs(1);
+
+        std::thread::scope(|scope| {
+            let coordinator = scope.spawn(move || coordinator.run());
+            let waiter = scope.spawn(move || {
+                receive_until_wall_clock_deadline(
+                    target,
+                    &scheduler_event_rx,
+                    || entered_tx.send(()).unwrap(),
+                    || participant.terminal_after_event_channel_closed(),
+                )
+            });
+            entered_rx
+                .recv_timeout(StdDuration::from_millis(100))
+                .expect("scheduler must enter the production timed-receive boundary");
+            abort_handle.abort();
+
+            assert!(matches!(
+                waiter.join().unwrap().unwrap(),
+                WallClockReceive::FederateStopped
+            ));
+            coordinator.join().unwrap().unwrap();
+        });
     }
 }

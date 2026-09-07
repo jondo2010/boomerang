@@ -495,9 +495,6 @@ fn counted_periodic_bindings() -> EnclaveBindings {
 
 static RECURRING_ABORT_PEER_READY: AtomicBool = AtomicBool::new(false);
 
-/// Signals when the wall-clock-paced peer has completed its startup reaction.
-static PACED_ABORT_PEER_READY: AtomicBool = AtomicBool::new(false);
-
 fn signal_recurring_abort_peer_ready(
     _context: &mut Context,
     _state: &mut dyn ReactorData,
@@ -532,48 +529,6 @@ fn aborting_peer_bindings() -> EnclaveBindings {
         .bind_reaction(
             BindingSlotIndex::new(1),
             panic_after_recurring_abort_peer_starts,
-        )
-}
-
-/// Marks the paced scheduler ready before it waits for its far-future timer.
-fn signal_paced_abort_peer_ready(
-    _context: &mut Context,
-    _state: &mut dyn ReactorData,
-    _refs: ReactionRefs<'_>,
-    _mode_effect: Option<CompiledModeEffectRef>,
-) -> Result<(), ReactionBindingError> {
-    PACED_ABORT_PEER_READY.store(true, Ordering::SeqCst);
-    Ok(())
-}
-
-/// Panics only after the paced peer has published its startup progress.
-fn panic_after_paced_abort_peer_starts(
-    _context: &mut Context,
-    _state: &mut dyn ReactorData,
-    _refs: ReactionRefs<'_>,
-    _mode_effect: Option<CompiledModeEffectRef>,
-) -> Result<(), ReactionBindingError> {
-    while !PACED_ABORT_PEER_READY.load(Ordering::SeqCst) {
-        std::thread::yield_now();
-    }
-    std::thread::sleep(std::time::Duration::from_millis(50));
-    panic!("paced peer scheduler panic");
-}
-
-/// Binds the paced peer's startup-ready reaction.
-fn paced_abort_peer_bindings() -> EnclaveBindings {
-    EnclaveBindings::new()
-        .bind_state(BindingSlotIndex::new(0), initialize_counter)
-        .bind_reaction(BindingSlotIndex::new(1), signal_paced_abort_peer_ready)
-}
-
-/// Binds the peer failure that terminates the paced scheduler.
-fn paced_aborting_peer_bindings() -> EnclaveBindings {
-    EnclaveBindings::new()
-        .bind_state(BindingSlotIndex::new(0), initialize_counter)
-        .bind_reaction(
-            BindingSlotIndex::new(1),
-            panic_after_paced_abort_peer_starts,
         )
 }
 
@@ -2158,96 +2113,6 @@ fn owned_federate_abort_stops_peer_with_recurring_internal_work_child() {
                 if enclave == EnclaveIndex::new(1) && message == "peer scheduler panic"
         ));
     }
-}
-
-/// Verifies peer failure interrupts one uninterrupted far-future wall-clock receive.
-#[test]
-#[cfg_attr(
-    miri,
-    ignore = "the bounded wall-clock hang regression requires subprocess support"
-)]
-fn owned_federate_abort_interrupts_far_future_wall_clock_pacing() {
-    let executable = std::env::current_exe().expect("integration test executable is available");
-    let mut child = std::process::Command::new(executable)
-        .args([
-            "--exact",
-            "owned_federate_abort_interrupts_far_future_wall_clock_pacing_child",
-            "--nocapture",
-        ])
-        .env("BOOMERANG_PACED_ABORT_CHILD", "1")
-        .spawn()
-        .expect("paced-abort child process starts");
-    let deadline = Instant::now() + std::time::Duration::from_secs(2);
-
-    loop {
-        if let Some(status) = child.try_wait().expect("paced-abort child can be polled") {
-            assert!(status.success(), "paced-abort child failed with {status}");
-            break;
-        }
-        if Instant::now() >= deadline {
-            child.kill().expect("timed-out paced-abort child is killed");
-            child.wait().expect("killed paced-abort child is reaped");
-            panic!(
-                "Federate abort did not interrupt far-future wall-clock pacing within two seconds"
-            );
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-}
-
-/// Runs the paced peer-failure scenario inside the watchdog subprocess.
-#[test]
-fn owned_federate_abort_interrupts_far_future_wall_clock_pacing_child() {
-    if std::env::var_os("BOOMERANG_PACED_ABORT_CHILD").is_none() {
-        return;
-    }
-
-    let paced_actions = [fixture_timer_action(0, Some(30_000_000_000), r!(0, 1))];
-    let paced_startup = [TimerStartupImage::new(ActionIndex::new(0), 0)];
-    let paced = EnclaveImage {
-        identity_data: "compiled/abortpeercounter-stateincrement-counter",
-        actions: TinyMapView::new(&paced_actions),
-        timer_startup_actions: &paced_startup,
-        ..IMAGE
-    };
-    let panicking_startup = [TimerStartupImage::new(ActionIndex::new(0), 0)];
-    let panicking = EnclaveImage {
-        identity_data: "compiled/panicpeercounter-stateincrement-counter",
-        timer_startup_actions: &panicking_startup,
-        ..IMAGE
-    };
-    let enclaves = [paced, panicking];
-    let federates = [FederateImage::new(
-        IdentityRange::new(0, 4),
-        IdentityRange::new(4, 6),
-        IdentityRange::new(10, 7),
-        r!(0, 2),
-    )];
-    let members = [FederateIndex::new(0)];
-    let deployment = CompiledDeploymentImage {
-        identity_data: "hosttargetruntime",
-        federation: GlobalFederationImage::new(&members, &[]),
-        federates: TinyMapView::new(&federates),
-        enclaves: TinyMapView::new(&enclaves),
-        coordination: CoordinationProjection::Local,
-    };
-
-    PACED_ABORT_PEER_READY.store(false, Ordering::SeqCst);
-    let error = execute_owned_federate(
-        &deployment,
-        FederateIndex::new(0),
-        FederateBindings::new()
-            .bind_enclave(EnclaveIndex::new(0), paced_abort_peer_bindings())
-            .bind_enclave(EnclaveIndex::new(1), paced_aborting_peer_bindings()),
-        Config::default().with_fast_forward(false),
-    )
-    .unwrap_err();
-
-    assert!(matches!(
-        error,
-        ExecuteOwnedFederateError::ThreadPanicked { enclave, ref message }
-            if enclave == EnclaveIndex::new(1) && message == "paced peer scheduler panic"
-    ));
 }
 
 #[test]

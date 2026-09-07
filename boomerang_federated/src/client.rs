@@ -464,8 +464,8 @@ impl RtiFederateCoordinationBackend {
         Ok(())
     }
 
-    /// Polls one RTI frame, admitting inbound messages before exposing grants.
-    fn poll_rti(
+    /// Progresses one RTI frame, admitting inbound messages before exposing grants.
+    fn progress_rti(
         &mut self,
         timeout: StdDuration,
     ) -> Result<Option<boomerang_runtime::FederateAcquisition>, FederateClientError> {
@@ -615,15 +615,15 @@ impl boomerang_runtime::FederateCoordinationBackend for RtiFederateCoordinationB
         })
     }
 
-    /// Polls the RTI transport and correlates a `TAG` with its publication revision.
-    fn poll_acquisition(
+    /// Progresses the RTI transport and correlates a `TAG` with its publication revision.
+    fn progress(
         &mut self,
         timeout: StdDuration,
     ) -> Result<
         Option<boomerang_runtime::FederateAcquisition>,
         boomerang_runtime::FederateCoordinationError,
     > {
-        self.poll_rti(timeout).map_err(|error| {
+        self.progress_rti(timeout).map_err(|error| {
             boomerang_runtime::FederateCoordinationError::BackendAcquire {
                 message: error.to_string(),
             }
@@ -1201,7 +1201,7 @@ mod tests {
             .unwrap();
         }
         assert_eq!(
-            boomerang_runtime::FederateCoordinationBackend::poll_acquisition(
+            boomerang_runtime::FederateCoordinationBackend::progress(
                 &mut backend,
                 StdDuration::from_secs(1),
             )
@@ -1209,7 +1209,7 @@ mod tests {
             None,
             "a stale TAG below the replacement request must not acquire its revision"
         );
-        let acquisition = boomerang_runtime::FederateCoordinationBackend::poll_acquisition(
+        let acquisition = boomerang_runtime::FederateCoordinationBackend::progress(
             &mut backend,
             StdDuration::from_secs(1),
         )
@@ -1224,7 +1224,7 @@ mod tests {
             boomerang_runtime::FederatePublication::new(revision, next_event),
         )
         .unwrap();
-        let acquisition = boomerang_runtime::FederateCoordinationBackend::poll_acquisition(
+        let acquisition = boomerang_runtime::FederateCoordinationBackend::progress(
             &mut backend,
             StdDuration::from_secs(1),
         )

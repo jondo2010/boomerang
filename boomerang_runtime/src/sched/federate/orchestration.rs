@@ -181,7 +181,7 @@ pub(crate) struct FederateCoordinator<B: FederateCoordinationBackend> {
     state: FederateCoordinationState,
     /// Selected transport-neutral coordination backend.
     backend: B,
-    /// Finite publication revision awaiting a backend acquisition.
+    /// Finite publication revision tracked for backend-operation bookkeeping only.
     pending_acquisition: Option<CoordinationRevision>,
     #[cfg(test)]
     /// One-shot queue-race hook immediately before the final parked recheck.
@@ -192,25 +192,14 @@ impl<B: FederateCoordinationBackend> FederateCoordinator<B> {
     /// Runs until pure coordination stops or returns its first backend, state, or channel failure.
     pub(crate) fn run(mut self) -> Result<(), FederateCoordinationError> {
         loop {
-            let outcome = if self.pending_acquisition.is_some() {
-                match self.report_rx.recv_timeout(StdDuration::from_millis(1)) {
-                    Ok(report) => self.handle_report(report),
-                    Err(mpsc::RecvTimeoutError::Timeout) => self.poll_backend(),
-                    Err(mpsc::RecvTimeoutError::Disconnected) => Err(
-                        FederateCoordinationError::CoordinatorReportChannelDisconnected {
-                            enclave: None,
-                        },
-                    ),
-                }
-            } else {
-                self.report_rx
-                    .recv()
-                    .map_err(
-                        |_| FederateCoordinationError::CoordinatorReportChannelDisconnected {
-                            enclave: None,
-                        },
-                    )
-                    .and_then(|report| self.handle_report(report))
+            let outcome = match self.report_rx.recv_timeout(StdDuration::from_millis(1)) {
+                Ok(report) => self.handle_report(report),
+                Err(mpsc::RecvTimeoutError::Timeout) => self.progress_backend(),
+                Err(mpsc::RecvTimeoutError::Disconnected) => Err(
+                    FederateCoordinationError::CoordinatorReportChannelDisconnected {
+                        enclave: None,
+                    },
+                ),
             };
 
             match outcome {
@@ -313,15 +302,12 @@ impl<B: FederateCoordinationBackend> FederateCoordinator<B> {
         Ok(false)
     }
 
-    /// Polls one outstanding publication and applies an acquired grant through the pure state.
-    fn poll_backend(&mut self) -> Result<bool, FederateCoordinationError> {
-        let Some(pending) = self.pending_acquisition else {
+    /// Progresses one backend input and applies any acquired grant through the pure state.
+    fn progress_backend(&mut self) -> Result<bool, FederateCoordinationError> {
+        let Some(acquisition) = self.backend.progress(StdDuration::from_millis(1))? else {
             return Ok(false);
         };
-        let Some(acquisition) = self.backend.poll_acquisition(StdDuration::from_millis(1))? else {
-            return Ok(false);
-        };
-        if acquisition.revision() == pending {
+        if self.pending_acquisition == Some(acquisition.revision()) {
             self.pending_acquisition = None;
         }
         let actions = self.state.handle_acquisition(acquisition)?;
@@ -780,32 +766,30 @@ mod tests {
     };
     use std::{sync::mpsc, time::Duration as StdDuration};
 
-    /// Local backend wrapper that signals an observed no-future publication.
-    struct IdleSignalingBackend {
+    /// Local backend wrapper that signals a coordinator polling cycle.
+    struct IdlePollingBackend {
         /// Real in-process backend used for publication and acquisition behavior.
         local: LocalFederateCoordinationBackend,
-        /// Test-harness signal emitted only after the coordinator publishes no future event.
-        idle_tx: mpsc::Sender<()>,
+        /// Test-harness signal emitted when the coordinator progresses external backend input.
+        progress_tx: mpsc::Sender<()>,
     }
 
-    impl FederateCoordinationBackend for IdleSignalingBackend {
-        /// Signals no-future publication before forwarding it to the real local backend.
+    impl FederateCoordinationBackend for IdlePollingBackend {
+        /// Forwards the publication to the real local backend.
         fn publish(
             &mut self,
             publication: FederatePublication,
         ) -> Result<(), FederateCoordinationError> {
-            if publication.next_event().is_none() {
-                self.idle_tx.send(()).unwrap();
-            }
             self.local.publish(publication)
         }
 
-        /// Polls the real local backend for the publication's matching acquisition.
-        fn poll_acquisition(
+        /// Signals polling before progressing the real local backend.
+        fn progress(
             &mut self,
             timeout: StdDuration,
         ) -> Result<Option<FederateAcquisition>, FederateCoordinationError> {
-            self.local.poll_acquisition(timeout)
+            self.progress_tx.send(()).unwrap();
+            self.local.progress(timeout)
         }
 
         /// Forwards aggregate logical completion to the real local backend.
@@ -855,7 +839,7 @@ mod tests {
         }
 
         /// Supplies no acquisition because terminal tests publish no finite candidate.
-        fn poll_acquisition(
+        fn progress(
             &mut self,
             _timeout: StdDuration,
         ) -> Result<Option<FederateAcquisition>, FederateCoordinationError> {
@@ -892,7 +876,7 @@ mod tests {
         }
 
         /// Returns no acquisition because publication always fails first.
-        fn poll_acquisition(
+        fn progress(
             &mut self,
             _timeout: StdDuration,
         ) -> Result<Option<FederateAcquisition>, FederateCoordinationError> {
@@ -1305,14 +1289,14 @@ mod tests {
         });
     }
 
-    /// Verifies a unanimously idle kept-alive Federate remains wakeable and does not stop.
+    /// Verifies a unanimously idle kept-alive Federate progresses its backend and admits later work.
     #[test]
     fn kept_alive_all_idle_participants_wake_for_later_input() {
         let eventful = EnclaveIndex::new(3);
         let peer = EnclaveIndex::new(7);
         let (eventful_tx, eventful_rx) = kanal::unbounded();
         let (_peer_tx, peer_rx) = kanal::unbounded();
-        let (idle_tx, idle_rx) = mpsc::channel();
+        let (progress_tx, progress_rx) = mpsc::channel();
         let FederateCoordinationParts {
             abort_handle,
             coordinator,
@@ -1321,9 +1305,9 @@ mod tests {
         } = FederateCoordinationParts::new(
             [(eventful, eventful_rx), (peer, peer_rx)],
             LifecyclePolicy::KeepAlive,
-            IdleSignalingBackend {
+            IdlePollingBackend {
                 local: LocalFederateCoordinationBackend::default(),
-                idle_tx,
+                progress_tx,
             },
         )
         .unwrap();
@@ -1343,20 +1327,22 @@ mod tests {
             });
             let peer_thread = scope.spawn(move || peer_participant.wait());
 
-            idle_rx.recv_timeout(StdDuration::from_secs(1)).unwrap();
-            eventful_tx
-                .send(AsyncEvent::Shutdown {
-                    delay: Duration::ZERO,
-                })
-                .unwrap();
-            assert!(matches!(
-                result_rx.recv_timeout(StdDuration::from_secs(1)).unwrap(),
-                (
-                    enclave,
-                    Ok(FederateIdleWait::Interrupted(AsyncEvent::Shutdown { delay }))
-                )
-                    if enclave == eventful && delay == Duration::ZERO
-            ));
+            let progressed = progress_rx.recv_timeout(StdDuration::from_millis(100));
+            if progressed.is_ok() {
+                eventful_tx
+                    .send(AsyncEvent::Shutdown {
+                        delay: Duration::ZERO,
+                    })
+                    .unwrap();
+                assert!(matches!(
+                    result_rx.recv_timeout(StdDuration::from_secs(1)).unwrap(),
+                    (
+                        enclave,
+                        Ok(FederateIdleWait::Interrupted(AsyncEvent::Shutdown { delay }))
+                    )
+                        if enclave == eventful && delay == Duration::ZERO
+                ));
+            }
             abort_handle.abort();
             eventful_thread.join().unwrap();
             assert!(matches!(
@@ -1364,6 +1350,10 @@ mod tests {
                 FederateIdleWait::Stopped
             ));
             coordinator.join().unwrap().unwrap();
+            assert!(
+                progressed.is_ok(),
+                "kept-alive idle coordination must continue backend progress"
+            );
         });
     }
 }

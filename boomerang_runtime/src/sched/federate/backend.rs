@@ -186,10 +186,12 @@ pub trait FederateCoordinationBackend: Send {
         publication: FederatePublication,
     ) -> Result<(), FederateCoordinationError>;
 
-    /// Polls for a grant without exposing a backend-specific transport.
+    /// Progresses backend input without exposing a backend-specific transport.
     ///
+    /// Returns an acquisition when the progressed input authorizes one; the pure
+    /// coordination state decides whether that acquisition is current.
     /// Failures must use [FederateCoordinationError::BackendAcquire].
-    fn poll_acquisition(
+    fn progress(
         &mut self,
         timeout: std::time::Duration,
     ) -> Result<Option<FederateAcquisition>, FederateCoordinationError>;
@@ -229,7 +231,7 @@ impl FederateCoordinationBackend for LocalFederateCoordinationBackend {
     }
 
     /// Consumes the retained publication and derives its one matching acquisition.
-    fn poll_acquisition(
+    fn progress(
         &mut self,
         _timeout: std::time::Duration,
     ) -> Result<Option<FederateAcquisition>, FederateCoordinationError> {
@@ -285,7 +287,7 @@ mod tests {
         }
 
         /// Returns the configured acquisition once without waiting.
-        fn poll_acquisition(
+        fn progress(
             &mut self,
             _timeout: std::time::Duration,
         ) -> Result<Option<FederateAcquisition>, FederateCoordinationError> {
@@ -324,7 +326,7 @@ mod tests {
 
         backend.publish(publication).unwrap();
         let acquired = backend
-            .poll_acquisition(std::time::Duration::ZERO)
+            .progress(std::time::Duration::ZERO)
             .unwrap()
             .unwrap();
         backend.complete(completion).unwrap();
@@ -347,19 +349,13 @@ mod tests {
         local
             .publish(FederatePublication::new(next_revision.next(), None))
             .unwrap();
-        let locally_acquired = local
-            .poll_acquisition(std::time::Duration::ZERO)
-            .unwrap()
-            .unwrap();
+        let locally_acquired = local.progress(std::time::Duration::ZERO).unwrap().unwrap();
         local.publish(latest).unwrap();
         local.stop().unwrap();
 
         assert_eq!(locally_acquired.revision(), next_revision);
         assert_eq!(locally_acquired.granted(), latest_tag);
-        assert_eq!(
-            local.poll_acquisition(std::time::Duration::ZERO).unwrap(),
-            None
-        );
+        assert_eq!(local.progress(std::time::Duration::ZERO).unwrap(), None);
 
         let mut terminal = LocalFederateCoordinationBackend::default();
         terminal
@@ -368,12 +364,7 @@ mod tests {
                 Some(crate::Tag::FOREVER),
             ))
             .unwrap();
-        assert_eq!(
-            terminal
-                .poll_acquisition(std::time::Duration::ZERO)
-                .unwrap(),
-            None
-        );
+        assert_eq!(terminal.progress(std::time::Duration::ZERO).unwrap(), None);
     }
 
     #[test]

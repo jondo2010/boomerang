@@ -402,7 +402,7 @@ impl OwnedCompiledDeployment {
     /// Copies one Federate's Enclaves into an immutable deployment-slice projection.
     ///
     /// The selected [`FederateImage`] retains its complete-root Enclave range so generated
-    /// launchers preserve deployment-wide [`EnclaveIndex`] values.
+    /// launchers preserve deployment-wide [`crate::runtime::image::EnclaveIndex`] values.
     pub fn federate_slice(
         &self,
         federate: FederateIndex,

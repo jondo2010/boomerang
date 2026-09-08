@@ -89,6 +89,22 @@ fn generated_launcher_emits_the_versioned_execution_summary_writer() {
 }
 
 #[test]
+fn run_rejects_distributed_execution_until_issue_131() {
+    let _guard = support::toolchain_lock();
+    let target = support::toolchain_target();
+    support::reset_deployment_output(&target, "sensor-slice");
+    let error = support::with_target_directory(&target, || {
+        cargo_boomerang::run(support::fixture_workspace(), "sensor-slice")
+    })
+    .unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        "distributed deployment execution is unsupported until issue #131"
+    );
+}
+
+#[test]
 fn run_rejects_a_custom_target_before_bundle_generation() {
     let _guard = support::toolchain_lock();
     let target = support::toolchain_target();

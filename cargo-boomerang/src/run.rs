@@ -116,7 +116,7 @@ pub fn run_with_output(
     let analyzed = analyze(workspace.as_ref(), deployment_name, output)?;
     let federates = analyzed.compiled.federates();
     if federates.len() != 1 {
-        bail!("generated execution currently supports exactly one local Federate");
+        bail!("distributed deployment execution is unsupported until issue #131");
     }
     if analyzed.resolved.deployment().coordination.is_some() {
         bail!("generated execution does not support coordination selection");

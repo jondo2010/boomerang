@@ -40,49 +40,67 @@ pub(crate) fn build_analyzed(
 ) -> Result<PathBuf> {
     let deployment_name = analyzed.resolved.deployment_name();
     let compiled_federates = analyzed.compiled.federates();
-    if compiled_federates.len() != 1 {
-        bail!("deployment bundle generation currently supports one local Federate");
-    }
-    let compiled_federate = &compiled_federates[0];
-    let federate_id = compiled_federate.id().as_str();
-    let configuration = analyzed
-        .resolved
-        .deployment()
-        .federates
-        .get(federate_id)
-        .ok_or_else(|| anyhow!("deployment has no configuration for Federate '{federate_id}'"))?;
-    let target_json_hash = optional_hash(configuration.target_json.as_deref())
-        .context("failed to hash configured target JSON before launcher generation")?;
-    let cargo_config_hash = optional_hash(configuration.cargo_config.as_deref())
-        .context("failed to hash configured Cargo configuration before launcher generation")?;
+    let mut launcher_builds = Vec::with_capacity(compiled_federates.len());
+    let mut federates = Vec::with_capacity(compiled_federates.len());
+    for compiled_federate in compiled_federates {
+        let federate_id = compiled_federate.id().as_str();
+        let configuration = analyzed
+            .resolved
+            .deployment()
+            .federates
+            .get(federate_id)
+            .ok_or_else(|| {
+                anyhow!("deployment has no configuration for Federate '{federate_id}'")
+            })?;
+        let target_json_hash = optional_hash(configuration.target_json.as_deref())
+            .context("failed to hash configured target JSON before launcher generation")?;
+        let cargo_config_hash = optional_hash(configuration.cargo_config.as_deref())
+            .context("failed to hash configured Cargo configuration before launcher generation")?;
 
-    output.status(
-        Phase::Generating,
-        format_args!("launcher for '{deployment_name}'"),
-    )?;
-    let generated =
-        generate_analyzed_launcher(analyzed, federate_id, output).with_context(|| {
-            format!(
-            "deployment '{deployment_name}' Federate '{federate_id}' launcher generation failed"
-        )
+        output.status(
+            Phase::Generating,
+            format_args!("launcher for '{deployment_name}' Federate '{federate_id}'"),
+        )?;
+        let generated = generate_analyzed_launcher(analyzed, federate_id, output).with_context(
+            || {
+                format!(
+                    "deployment '{deployment_name}' Federate '{federate_id}' launcher generation failed"
+                )
+            },
+        )?;
+        output.status(
+            Phase::Building,
+            format_args!("launcher for '{deployment_name}' Federate '{federate_id}'"),
+        )?;
+        let built = generated.build_locked_offline().with_context(|| {
+            format!("deployment '{deployment_name}' Federate '{federate_id}' launcher build failed")
         })?;
-    output.status(
-        Phase::Building,
-        format_args!("launcher for '{deployment_name}'"),
-    )?;
-    let built = generated.build_locked_offline().with_context(|| {
-        format!("deployment '{deployment_name}' Federate '{federate_id}' launcher build failed")
-    })?;
-    verify_unchanged_hash(
-        "configured target JSON",
-        configuration.target_json.as_deref(),
-        target_json_hash.as_deref(),
-    )?;
-    verify_unchanged_hash(
-        "configured Cargo configuration",
-        configuration.cargo_config.as_deref(),
-        cargo_config_hash.as_deref(),
-    )?;
+        verify_unchanged_hash(
+            "configured target JSON",
+            configuration.target_json.as_deref(),
+            target_json_hash.as_deref(),
+        )?;
+        verify_unchanged_hash(
+            "configured Cargo configuration",
+            configuration.cargo_config.as_deref(),
+            cargo_config_hash.as_deref(),
+        )?;
+
+        let mut groups = configuration.groups.clone();
+        groups.sort();
+        groups.dedup();
+        federates.push(FederateDocument {
+            id: federate_id.to_owned(),
+            groups,
+            target: compiled_federate.target().to_string(),
+            toolchain: configuration.toolchain.clone(),
+            profile: configuration.profile.clone(),
+            runtime: compiled_federate.runtime().to_string(),
+            target_json_hash,
+            cargo_config_hash,
+        });
+        launcher_builds.push((generated, built));
+    }
 
     output.status(
         Phase::Bundling,
@@ -92,23 +110,20 @@ pub(crate) fn build_analyzed(
         .context("failed to serialize canonical topology")?;
     let topology_hash = hash_bytes(&topology);
     let bindings = binding_records(analyzed)?;
-    let mut groups = configuration.groups.clone();
-    groups.sort();
-    groups.dedup();
-    let federate = FederateDocument {
-        id: federate_id.to_owned(),
-        groups,
-        target: compiled_federate.target().to_string(),
-        toolchain: configuration.toolchain.clone(),
-        profile: configuration.profile.clone(),
-        runtime: compiled_federate.runtime().to_string(),
-        target_json_hash,
-        cargo_config_hash,
-    };
     let resources = resource_report(&analyzed.compiled);
     let source_lock_hash = lowercase_hex(&analyzed.resolved.lockfile().digest);
-    let generated_lock_hash = hash_file(generated.lockfile_path())?;
-    let generated_source_hash = hash_file(generated.source_path())?;
+    let generated_lock_hash = hash_file_collection(
+        federates
+            .iter()
+            .zip(&launcher_builds)
+            .map(|(federate, (generated, _))| (federate.id.as_str(), generated.lockfile_path())),
+    )?;
+    let generated_source_hash = hash_file_collection(
+        federates
+            .iter()
+            .zip(&launcher_builds)
+            .map(|(federate, (generated, _))| (federate.id.as_str(), generated.source_path())),
+    )?;
     let execution = analyzed
         .resolved
         .deployment()
@@ -121,7 +136,16 @@ pub(crate) fn build_analyzed(
         logical_horizon_nanos: execution.logical_horizon,
     };
     let coordination = CoordinationDocument {
-        backend: String::from("local"),
+        backend: analyzed
+            .resolved
+            .deployment()
+            .coordination
+            .as_ref()
+            .map_or("local", |coordination| match coordination.backend {
+                boomerang_builder::compiler::CoordinationBackend::CentralRti => "central-rti",
+                boomerang_builder::compiler::CoordinationBackend::PeerToPeer => "peer-to-peer",
+            })
+            .to_owned(),
         protocol: None,
     };
     let mut document = DeploymentDocument {
@@ -134,7 +158,7 @@ pub(crate) fn build_analyzed(
         generated_lock_hash,
         generated_source_hash,
         bindings,
-        federates: vec![federate],
+        federates,
         execution,
         resources,
         coordination,
@@ -146,17 +170,18 @@ pub(crate) fn build_analyzed(
         Phase::Publishing,
         format_args!("deployment '{deployment_name}'"),
     )?;
-    publish_bundle(
-        analyzed.resolved.target_directory(),
-        document,
-        BundleSource {
-            federate: federate_id,
+    let sources = compiled_federates
+        .iter()
+        .zip(&launcher_builds)
+        .map(|(federate, (generated, built))| BundleSource {
+            federate: federate.id().as_str(),
             manifest: generated.manifest_path(),
             lockfile: generated.lockfile_path(),
             source: generated.source_path(),
             executable: built.executable_path(),
-        },
-    )
+        })
+        .collect::<Vec<_>>();
+    publish_bundle(analyzed.resolved.target_directory(), document, &sources)
 }
 
 /// Builds canonical fingerprint and document records for selected bindings.
@@ -228,6 +253,22 @@ fn verify_unchanged_hash(
 /// Hashes exact file bytes as lowercase BLAKE3 text.
 fn hash_file(path: &Path) -> Result<String> {
     let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+    Ok(hash_bytes(&bytes))
+}
+
+/// Hashes a canonical Federate-ordered file collection while retaining legacy singleton hashes.
+fn hash_file_collection<'a>(
+    files: impl IntoIterator<Item = (&'a str, &'a Path)>,
+) -> Result<String> {
+    let records = files
+        .into_iter()
+        .map(|(federate, path)| Ok((federate, hash_file(path)?)))
+        .collect::<Result<Vec<_>>>()?;
+    if let [(_, digest)] = records.as_slice() {
+        return Ok(digest.clone());
+    }
+    let bytes = serde_json::to_vec(&("boomerang.generated-file-collection.v1", records))
+        .context("failed to serialize canonical generated-file collection")?;
     Ok(hash_bytes(&bytes))
 }
 

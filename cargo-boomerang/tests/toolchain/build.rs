@@ -324,6 +324,120 @@ fn build_publishes_a_valid_fingerprinted_bundle() {
 }
 
 #[test]
+fn build_publishes_canonical_federate_artifact_collection() {
+    let _guard = support::toolchain_lock();
+    let target = support::toolchain_target();
+    support::reset_deployment_output(&target, "sensor-slice");
+    let result = build_fixture("sensor-slice", &target);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+
+    let manifest = PathBuf::from(String::from_utf8(result.stdout).unwrap().trim());
+    let bundle = manifest.parent().unwrap();
+    let document: Value = serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
+    let host_target = target_lexicon::HOST.to_string();
+    assert_eq!(
+        document["federates"],
+        serde_json::json!([
+            {
+                "id": "host",
+                "groups": ["placement/backup", "placement/controller"],
+                "target": host_target,
+                "toolchain": null,
+                "profile": null,
+                "runtime": "std",
+                "target_json_hash": null,
+                "cargo_config_hash": null,
+            },
+            {
+                "id": "sensor",
+                "groups": ["placement/sensor"],
+                "target": target_lexicon::HOST.to_string(),
+                "toolchain": null,
+                "profile": null,
+                "runtime": "std",
+                "target_json_hash": null,
+                "cargo_config_hash": blake3::hash(
+                    &fs::read(fixture_workspace().join(".cargo/sensor-slice.toml")).unwrap()
+                ).to_hex().to_string(),
+            }
+        ])
+    );
+
+    let artifacts = document["artifacts"].as_array().unwrap();
+    assert_eq!(artifacts.len(), 2);
+    assert_eq!(artifacts[0]["federate"], "host");
+    assert_eq!(artifacts[1]["federate"], "sensor");
+    assert_ne!(artifacts[0]["path"], artifacts[1]["path"]);
+    assert_ne!(artifacts[0]["blake3"], artifacts[1]["blake3"]);
+    for artifact in artifacts {
+        let path = bundle.join(artifact["path"].as_str().unwrap());
+        assert_eq!(
+            artifact["blake3"],
+            blake3::hash(&fs::read(path).unwrap()).to_hex().to_string()
+        );
+    }
+
+    let generated = document["generated"].as_array().unwrap();
+    assert_eq!(generated.len(), 6);
+    assert_eq!(
+        generated
+            .iter()
+            .map(|record| record["federate"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["host", "host", "host", "sensor", "sensor", "sensor"]
+    );
+    let host_source = fs::read_to_string(bundle.join("generated/host/src/main.rs")).unwrap();
+    assert!(
+        host_source.contains("FederateSliceImage::new(FederateIndex::new(0)"),
+        "{host_source}"
+    );
+    assert!(
+        host_source.contains("TableRange::new(0, 2)"),
+        "{host_source}"
+    );
+    assert_eq!(
+        host_source
+            .matches("StorageBounds::new(1, 2, 16, 1024, 512, 256)")
+            .count(),
+        2,
+        "{host_source}"
+    );
+    let sensor_source = fs::read_to_string(bundle.join("generated/sensor/src/main.rs")).unwrap();
+    assert!(
+        sensor_source.contains("FederateSliceImage::new(FederateIndex::new(1)"),
+        "{sensor_source}"
+    );
+    assert!(
+        sensor_source.contains("TableRange::new(2, 1)"),
+        "{sensor_source}"
+    );
+    assert!(
+        sensor_source.contains("StorageBounds::new(1, 2, 8, 512, 256, 128)"),
+        "{sensor_source}"
+    );
+    assert_eq!(
+        document["resources"]["federates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|federate| (
+                federate["id"].as_str().unwrap(),
+                federate["target"].as_str().unwrap(),
+                federate["runtime"].as_str().unwrap(),
+            ))
+            .collect::<Vec<_>>(),
+        [
+            ("host", host_target.as_str(), "std"),
+            ("sensor", host_target.as_str(), "std")
+        ]
+    );
+}
+
+#[test]
 fn repeated_build_preserves_the_same_published_bundle() {
     let _guard = support::toolchain_lock();
     let target = support::toolchain_target();

@@ -232,16 +232,6 @@ pub(crate) enum SchedulerError<E> {
     },
 }
 
-/// Outcome of one uninterrupted wall-clock deadline receive.
-enum WallClockSynchronization {
-    /// The requested physical deadline elapsed normally.
-    DeadlineReached,
-    /// A scheduler event interrupted the deadline.
-    Interrupted,
-    /// Federate coordination terminated the scheduler through its existing event channel.
-    FederateTerminated(FederateTermination),
-}
-
 /// Raw result from the scheduler event channel before an interruption is handled.
 enum WallClockReceive {
     /// The requested physical deadline elapsed normally.
@@ -710,16 +700,29 @@ where
         if !self.config.fast_forward {
             let target = next_tag.to_logical_time(*self.start_time);
             match self.synchronize_wall_clock(target)? {
-                WallClockSynchronization::DeadlineReached => {}
-                WallClockSynchronization::Interrupted => return Ok(Some(true)),
-                WallClockSynchronization::FederateTerminated(FederateTermination::Graceful {
-                    tag,
-                }) => {
+                WallClockReceive::DeadlineReached => {}
+                WallClockReceive::Interrupted(event) => {
+                    tracing::debug!(target: "boomerang_runtime::sched", event = %event, "Sleep interrupted by");
+                    if matches!(
+                        &event,
+                        AsyncEvent::Logical { .. }
+                            | AsyncEvent::Physical { .. }
+                            | AsyncEvent::Shutdown { .. }
+                    ) {
+                        if let Some(coordination) = self.federate_coordination.as_deref_mut() {
+                            coordination.active();
+                        }
+                    }
+                    self.handle_async_event(event)
+                        .map_err(SchedulerError::Execution)?;
+                    return Ok(Some(true));
+                }
+                WallClockReceive::FederateTerminated(FederateTermination::Graceful { tag }) => {
                     let tag = tag.unwrap_or_else(|| self.next_shutdown_tag());
                     self.stop_for_federate_termination(tag);
                     return Ok(Some(true));
                 }
-                WallClockSynchronization::FederateTerminated(FederateTermination::Abort) => {
+                WallClockReceive::FederateTerminated(FederateTermination::Abort) => {
                     self.abort_for_federate_termination();
                     return Ok(Some(false));
                 }
@@ -914,7 +917,7 @@ where
     fn synchronize_wall_clock(
         &mut self,
         target: std::time::Instant,
-    ) -> Result<WallClockSynchronization, SchedulerError<E::Error>> {
+    ) -> Result<WallClockReceive, SchedulerError<E::Error>> {
         let now = std::time::Instant::now();
 
         match now.cmp(&target) {
@@ -922,7 +925,7 @@ where
                 let advance = target - now;
                 tracing::trace!(target: "boomerang_runtime::sched", advance = ?advance, "Need to sleep");
 
-                match receive_until_wall_clock_deadline(
+                return receive_until_wall_clock_deadline(
                     target,
                     self.event_rx,
                     || {},
@@ -933,29 +936,7 @@ where
                         )
                     },
                 )
-                .map_err(SchedulerError::FederateCoordination)?
-                {
-                    WallClockReceive::Interrupted(event) => {
-                        tracing::debug!(target: "boomerang_runtime::sched", event = %event, "Sleep interrupted by");
-                        if matches!(
-                            &event,
-                            AsyncEvent::Logical { .. }
-                                | AsyncEvent::Physical { .. }
-                                | AsyncEvent::Shutdown { .. }
-                        ) {
-                            if let Some(coordination) = self.federate_coordination.as_deref_mut() {
-                                coordination.active();
-                            }
-                        }
-                        self.handle_async_event(event)
-                            .map_err(SchedulerError::Execution)?;
-                        return Ok(WallClockSynchronization::Interrupted);
-                    }
-                    WallClockReceive::FederateTerminated(termination) => {
-                        return Ok(WallClockSynchronization::FederateTerminated(termination));
-                    }
-                    WallClockReceive::DeadlineReached => {}
-                }
+                .map_err(SchedulerError::FederateCoordination);
             }
 
             std::cmp::Ordering::Greater => {
@@ -966,7 +947,7 @@ where
             std::cmp::Ordering::Equal => {}
         }
 
-        Ok(WallClockSynchronization::DeadlineReached)
+        Ok(WallClockReceive::DeadlineReached)
     }
 
     /// Process the reactions at this tag in increasing order of level.

@@ -355,14 +355,15 @@ fn normalize_metadata_manifest_path(path: &Path) -> PathBuf {
         let illegal = |c| c < b' ' || br#"<>:"/\|?*"#.contains(&c);
         let safe = |component: Component<'_>| {
             let value = component.as_os_str().to_str().unwrap_or("");
-            let stem = str::to_ascii_uppercase(value.split('.').next().unwrap_or(""));
+            let stem = value.split('.').next().unwrap_or("");
+            let stem = str::to_ascii_uppercase(stem.trim_end_matches([' ', '.']));
             matches!(component, Component::Normal(_))
                 && !value.ends_with(['.', ' '])
                 && !value.bytes().any(illegal)
                 && !matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-                && !(stem.len() == 4
+                && !(stem.chars().count() == 4
                     && (stem.starts_with("COM") || stem.starts_with("LPT"))
-                    && matches!(stem.as_bytes()[3], b'1'..=b'9'))
+                    && stem.ends_with(|c| matches!(c, '1'..='9' | '¹' | '²' | '³')))
         };
         let verbatim_disk = matches!(
             (components.next(), components.next()),

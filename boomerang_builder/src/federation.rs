@@ -321,7 +321,7 @@ fn wire_delay_from_runtime_delay(
     delay: Option<runtime::Duration>,
 ) -> Result<boomerang_federated::WireDelay, AssemblyError> {
     delay
-        .map(boomerang_federated::WireDelay::try_from)
+        .map(boomerang_central_rti::wire_delay_from_runtime)
         .transpose()
         .map_err(AssemblyError::from)
         .map(|delay| delay.unwrap_or(boomerang_federated::WireDelay::ZERO))

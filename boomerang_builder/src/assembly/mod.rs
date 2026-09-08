@@ -87,7 +87,7 @@ type ReplayFunctionFactory = dyn FnOnce(&RuntimeAssembly) -> Box<dyn runtime::re
 #[cfg(feature = "federated")]
 type FederatedInboundEndpointFactory = dyn FnOnce(
     &RuntimeAssembly,
-    &mut boomerang_federated::FederatedRuntimeConnections,
+    &mut boomerang_central_rti::FederatedRuntimeConnections,
 ) -> Result<(), AssemblyError>;
 
 #[cfg(feature = "federated")]

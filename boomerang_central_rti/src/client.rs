@@ -470,7 +470,7 @@ impl RtiFederatedTimeBarrier {
             return self.fail(error);
         }
 
-        let requested = WireTag::try_from(tag)?;
+        let requested = crate::wire_tag_from_runtime(tag)?;
         if self.pending_request != Some(requested) {
             if let Err(error) = self.client.send(FederateToRti::Net {
                 federate_id: self.federate_id.clone(),
@@ -497,7 +497,7 @@ impl RtiFederatedTimeBarrier {
             };
             match message {
                 RtiToFederate::Tag { tag: granted } => {
-                    let runtime_tag = match boomerang_runtime::Tag::try_from(granted) {
+                    let runtime_tag = match crate::runtime_tag_from_wire(granted) {
                         Ok(tag) => tag,
                         Err(error) => {
                             return self.fail(error.into());
@@ -632,7 +632,7 @@ impl RtiFederatedTimeBarrier {
             });
         }
 
-        let runtime_tag = boomerang_runtime::Tag::try_from(tag)?;
+        let runtime_tag = crate::runtime_tag_from_wire(tag)?;
         let inbound = route
             .inbound
             .as_ref()
@@ -667,7 +667,7 @@ impl RtiFederatedTimeBarrier {
     fn send_ltc(&self, tag: boomerang_runtime::Tag) -> Result<(), FederateClientError> {
         self.client.send(FederateToRti::Ltc {
             federate_id: self.federate_id.clone(),
-            tag: WireTag::try_from(tag)?,
+            tag: crate::wire_tag_from_runtime(tag)?,
         })
     }
 

@@ -1,3 +1,4 @@
+//! Owned compiled-image storage and immutable Federate slice projections.
 use super::{
     identity::canonical_identity_text, ComponentInstanceId, FederateId, ImplementationId,
     OwnedCoordinationProjection, RuntimeBackendId, StableEnclaveId, StablePath, TargetTriple,
@@ -298,9 +299,9 @@ pub struct OwnedCompiledDeployment {
 pub struct OwnedFederateSlice {
     /// Deployment-wide dense identity of the selected Federate.
     federate: FederateIndex,
-    /// Root-format UTF-8 storage that preserves the selected record's identity ranges.
+    /// Locally packed UTF-8 storage for the selected record's identity ranges.
     identity_data: Box<str>,
-    /// Unchanged Federate ownership record reconstructed from the complete root image.
+    /// Selected ownership record with its deployment-global Enclave range.
     image: FederateImage,
     /// Selected Enclave images copied from the complete root image.
     enclaves: Box<[OwnedEnclaveImage]>,
@@ -317,7 +318,11 @@ pub enum FederateSliceError {
     },
     /// Root-format slice metadata exceeds the runtime image's representable domain.
     #[error(transparent)]
-    ImageValidation(#[from] ImageValidationError<'static>),
+    ImageValidation(
+        /// Runtime-image validation failure.
+        #[from]
+        ImageValidationError<'static>,
+    ),
 }
 
 impl OwnedFederateSlice {
@@ -383,21 +388,11 @@ impl CompiledDeploymentValidationError {
     }
 }
 
-fn federate_enclave_range(
-    start: u64,
-    len: usize,
-) -> Result<(TableRange<crate::runtime::image::EnclaveIndex>, u64), ImageValidationError<'static>> {
-    let start = u32::try_from(start)
-        .map_err(|_| ImageValidationError::TableTooLarge { table: "enclaves" })?;
-    let len = u32::try_from(len)
-        .map_err(|_| ImageValidationError::TableTooLarge { table: "enclaves" })?;
-    let end = u64::from(start)
-        .checked_add(u64::from(len))
-        .ok_or(ImageValidationError::TableTooLarge { table: "enclaves" })?;
-    if end > u64::from(u32::MAX) + 1 {
-        return Err(ImageValidationError::TableTooLarge { table: "enclaves" });
-    }
-    Ok((TableRange::new(start, len), end))
+/// Converts an Enclave table range into the complete dense key domain.
+fn checked_enclave_bounds(start: usize, len: usize) -> Option<(u32, u32)> {
+    let start = u32::try_from(start).ok()?;
+    let len = u32::try_from(len).ok()?;
+    (u64::from(start) + u64::from(len) <= u64::from(u32::MAX) + 1).then_some((start, len))
 }
 
 impl OwnedCompiledDeployment {
@@ -424,9 +419,10 @@ impl OwnedCompiledDeployment {
         &self,
         federate: FederateIndex,
     ) -> Result<OwnedFederateSlice, FederateSliceError> {
-        if self.federates.get(federate.index()).is_none() {
-            return Err(FederateSliceError::FederateNotFound { federate });
-        }
+        let candidate = self
+            .federates
+            .get(federate.index())
+            .ok_or(FederateSliceError::FederateNotFound { federate })?;
 
         let checked_len = |table: &'static str, len: usize| {
             u32::try_from(len).map_err(|_| ImageValidationError::TableTooLarge { table })
@@ -439,27 +435,27 @@ impl OwnedCompiledDeployment {
             checked_len("identity_data", identity_data.len())?;
             Ok::<_, ImageValidationError<'static>>(IdentityRange::new(start, len))
         };
-        let mut enclave_start = 0_u64;
-        let mut selected = None;
-        for (index, candidate) in self.federates.iter().enumerate() {
-            let id = append_identity(candidate.id.as_str())?;
-            let target = append_identity(candidate.target.as_str())?;
-            let runtime = append_identity(candidate.runtime.as_str())?;
-            let (enclave_range, enclave_end) =
-                federate_enclave_range(enclave_start, candidate.enclaves.len())?;
-            let image = FederateImage::new(id, target, runtime, enclave_range);
-            if index == federate.index() {
-                selected = Some((image, candidate.enclaves.to_vec().into_boxed_slice()));
-            }
-            enclave_start = enclave_end;
-        }
-        let (image, enclaves) = selected.expect("selected Federate was bounds checked");
+        let enclave_start = self.federates[..federate.index()]
+            .iter()
+            .try_fold(0_usize, |start, preceding| {
+                start.checked_add(preceding.enclaves.len())
+            })
+            .ok_or(ImageValidationError::TableTooLarge { table: "enclaves" })?;
+        let (enclave_start, enclave_len) =
+            checked_enclave_bounds(enclave_start, candidate.enclaves.len())
+                .ok_or(ImageValidationError::TableTooLarge { table: "enclaves" })?;
+        let image = FederateImage::new(
+            append_identity(candidate.id.as_str())?,
+            append_identity(candidate.target.as_str())?,
+            append_identity(candidate.runtime.as_str())?,
+            TableRange::new(enclave_start, enclave_len),
+        );
 
         Ok(OwnedFederateSlice {
             federate,
             identity_data: identity_data.into_boxed_str(),
             image,
-            enclaves,
+            enclaves: candidate.enclaves.to_vec().into_boxed_slice(),
         })
     }
 
@@ -733,15 +729,10 @@ mod tests {
     }
 
     #[test]
-    fn federate_enclave_range_preserves_terminal_key() {
-        let (range, exclusive_end) = federate_enclave_range(u64::from(u32::MAX), 1).unwrap();
-
-        assert_eq!(range, TableRange::new(u32::MAX, 1));
-        assert_eq!(exclusive_end, u64::from(u32::MAX) + 1);
-    }
-
-    #[test]
     fn owned_deployment_validates_the_complete_borrowed_hierarchy() {
+        let terminal = usize::try_from(u32::MAX).unwrap();
+        assert!(checked_enclave_bounds(terminal, 1).is_some());
+        assert!(checked_enclave_bounds(terminal, 2).is_none());
         let deployment = OwnedCompiledDeployment {
             federation: GlobalFederationImage {
                 members: vec![FederateId::new("host").unwrap()].into_boxed_slice(),

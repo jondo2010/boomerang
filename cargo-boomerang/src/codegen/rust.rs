@@ -1,3 +1,4 @@
+//! Deterministic Rust source rendering for generated compiled launchers.
 use std::{collections::BTreeMap, fmt::Write as _};
 
 use anyhow::{anyhow, bail, Result};
@@ -106,11 +107,7 @@ pub(super) fn render_launcher(
             "fn main() -> Result<(), Box<dyn std::error::Error>> {\n\
                  init_tracing();\n\
                  let slice = FederateSliceView::new(&FEDERATE_SLICE)?;\n\
-                 let _ = generated_bindings;\n\
-                 let _ = execute_owned_federate;\n\
-                 let _ = write_execution_summary;\n\
-                 let _ = Config::default();\n\
-                 let _ = std::any::type_name::<boomerang_central_rti::TransportError>();\n\
+                 drop(generated_bindings());\n\
                  Err(format!(\"distributed generated launcher execution requires backend injection for {:?}\", slice.federate()).into())\n\
              }",
         );

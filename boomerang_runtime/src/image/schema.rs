@@ -1,3 +1,4 @@
+//! Immutable dense image records consumed by compiled runtime execution.
 pub use tinymap::{TableRange, TinyMapView};
 
 tinymap::key_type!(pub ReactorIndex);
@@ -141,7 +142,7 @@ pub struct FederateSliceImage<'a> {
     federate: FederateIndex,
     /// UTF-8 storage for the selected Federate identity records.
     identity_data: &'a str,
-    /// Unchanged Federate ownership record from the complete deployment image.
+    /// Selected ownership record with its deployment-global Enclave range.
     image: FederateImage,
     /// Locally stored Enclave rows owned by the selected Federate.
     enclaves: &'a [EnclaveImage<'a>],

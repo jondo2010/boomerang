@@ -1,3 +1,4 @@
+//! Checked borrowed views over immutable compiled runtime images.
 use super::*;
 use tinymap::{Key, TinyMapView};
 

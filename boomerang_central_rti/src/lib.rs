@@ -1,5 +1,4 @@
-//! Tokio-backed execution for a central Boomerang RTI.
-
+#![doc=include_str!("../README.md")]
 #![deny(unsafe_code)]
 #![deny(clippy::all)]
 

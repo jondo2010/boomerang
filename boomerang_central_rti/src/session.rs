@@ -1,3 +1,4 @@
+//! Central RTI session coordination over connected asynchronous transports.
 use std::collections::{BTreeMap, BTreeSet};
 
 use futures_util::{Sink, SinkExt, TryStream, TryStreamExt};

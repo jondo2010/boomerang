@@ -102,7 +102,6 @@ fn generated_sensor_federate_slice_excludes_host_payload_and_preserves_canonical
         source.contains("boundary/controller%2Fcommand/sensor%2Fcommand/c0"),
         "{source}"
     );
-
     let metadata = MetadataCommand::new()
         .manifest_path(launcher.manifest_path())
         .other_options(vec![String::from("--locked"), String::from("--offline")])
@@ -127,6 +126,7 @@ fn generated_sensor_federate_slice_excludes_host_payload_and_preserves_canonical
     );
 }
 
+/// Rejects reserved payload activation through an unselected transitive dependency.
 #[test]
 fn generated_launcher_rejects_transitive_payload_for_unselected_implementation() {
     let _guard = support::toolchain_lock();

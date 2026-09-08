@@ -1180,6 +1180,7 @@ mod tests {
         assert!(error.to_string().contains("directory name"), "{error:#}");
     }
 
+    /// Rejects distributed execution until the compiled central RTI runner lands.
     #[test]
     fn published_loader_rejects_distributed_execution_until_issue_131() {
         let parent = tempfile::tempdir().unwrap();
@@ -1228,6 +1229,7 @@ mod tests {
         );
     }
 
+    /// Rejects invalid ownership, ordering, and multiplicity at collection publication.
     #[test]
     fn collection_boundary_rejects_invalid_ownership_and_collisions() {
         let cases = [

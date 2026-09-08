@@ -1,3 +1,4 @@
+//! In-memory and TCP transport adapters for the central RTI wire protocol.
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{

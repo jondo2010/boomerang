@@ -88,6 +88,7 @@ fn generated_launcher_emits_the_versioned_execution_summary_writer() {
     assert!(source.contains("execution.final_tag()"), "{source}");
 }
 
+/// Rejects distributed execution until the compiled central RTI runner lands.
 #[test]
 fn run_rejects_distributed_execution_until_issue_131() {
     let _guard = support::toolchain_lock();

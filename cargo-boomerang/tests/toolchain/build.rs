@@ -323,6 +323,7 @@ fn build_publishes_a_valid_fingerprinted_bundle() {
     );
 }
 
+/// Publishes one canonical generated workspace and artifact per compiled Federate.
 #[test]
 fn build_publishes_canonical_federate_artifact_collection() {
     let _guard = support::toolchain_lock();

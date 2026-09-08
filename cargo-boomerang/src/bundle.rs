@@ -448,8 +448,6 @@ fn platform_rename_noreplace(source: &Path, destination: &Path) -> io::Result<()
 /// Calls Windows `MoveFileExW` without replacement and maps `GetLastError` via `last_os_error`.
 #[cfg(windows)]
 fn platform_rename_noreplace(source: &Path, destination: &Path) -> io::Result<()> {
-    use std::os::windows::ffi::OsStrExt as _;
-
     #[link(name = "kernel32")]
     extern "system" {
         #[link_name = "MoveFileExW"]

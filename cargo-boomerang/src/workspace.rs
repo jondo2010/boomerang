@@ -345,27 +345,36 @@ fn resolve_package(
     Ok(cargo_package(package))
 }
 
-/// Normalizes Windows verbatim disk and UNC paths reported by Cargo metadata.
-/// Every other path form, including non-Windows paths, is returned unchanged.
-fn normalize_metadata_manifest_path(path: PathBuf) -> PathBuf {
+/// Simplifies legacy-safe Windows verbatim disk paths reported by Cargo metadata.
+fn normalize_metadata_manifest_path(path: &Path) -> PathBuf {
     #[cfg(windows)]
     {
-        if let Some(path_text) = path.to_str() {
-            if let Some(unc_path) = path_text.strip_prefix(r"\\?\UNC\") {
-                return PathBuf::from(format!(r"\\{unc_path}"));
-            }
-            if let Some(disk_path) = path_text.strip_prefix(r"\\?\") {
-                let disk_bytes = disk_path.as_bytes();
-                if disk_bytes.len() >= 2
-                    && disk_bytes[0].is_ascii_alphabetic()
-                    && disk_bytes[1] == b':'
-                {
-                    return PathBuf::from(disk_path);
-                }
-            }
+        use std::os::windows::ffi::OsStrExt as _;
+        use std::path::{Component, Prefix};
+        let mut components = path.components();
+        let illegal = |c| c < b' ' || br#"<>:"/\|?*"#.contains(&c);
+        let safe = |component: Component<'_>| {
+            let value = component.as_os_str().to_str().unwrap_or("");
+            let stem = str::to_ascii_uppercase(value.split('.').next().unwrap_or(""));
+            matches!(component, Component::Normal(_))
+                && !value.ends_with(['.', ' '])
+                && !value.bytes().any(illegal)
+                && !matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+                && !(stem.len() == 4
+                    && (stem.starts_with("COM") || stem.starts_with("LPT"))
+                    && matches!(stem.as_bytes()[3], b'1'..=b'9'))
+        };
+        let verbatim_disk = matches!(
+            (components.next(), components.next()),
+            (Some(Component::Prefix(prefix)), Some(Component::RootDir))
+                if matches!(prefix.kind(), Prefix::VerbatimDisk(_))
+        );
+        let short = path.as_os_str().encode_wide().count() < 260;
+        if short && verbatim_disk && components.all(safe) {
+            return path.to_str().map_or_else(|| path.into(), |p| p[4..].into());
         }
     }
-    path
+    path.into()
 }
 
 /// Copies the Cargo identity fields required by generated dependency declarations.
@@ -385,9 +394,7 @@ fn cargo_package(package: &Package) -> CargoPackage {
             })
             .map(|target| target.name.clone()),
         id: package.id.clone(),
-        manifest_path: normalize_metadata_manifest_path(
-            package.manifest_path.clone().into_std_path_buf(),
-        ),
+        manifest_path: normalize_metadata_manifest_path(package.manifest_path.as_std_path()),
     }
 }
 

@@ -85,7 +85,7 @@ impl<K: tinymap::Key> KeySet<K> {
 
 pub struct KeySetView<'a, K: tinymap::Key> {
     levels: &'a mut [tinymap::KeySet<K>],
-    /// Indicates the implicit level at levels[0].
+    /// Indicates the implicit level at `levels[0]`.
     current_level: Level,
 }
 
@@ -131,7 +131,7 @@ impl<K: tinymap::Key> KeySetView<'_, K> {
 
 pub struct KeySetViewMut<'a, K: tinymap::Key> {
     levels: &'a mut [tinymap::KeySet<K>],
-    /// Indicates the implicit level at levels[0].
+    /// Indicates the implicit level at `levels[0]`.
     current_level: Level,
 }
 

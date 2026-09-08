@@ -1,3 +1,8 @@
+//! Live and compiled scheduler composition over one key-generic execution core.
+//!
+//! Compiled execution injects backend-neutral Federate coordination, while the
+//! temporary feature-gated time barrier remains confined to live schedulers.
+
 use std::pin::Pin;
 
 mod barrier;
@@ -23,6 +28,10 @@ pub use barrier::LogicalTimeBarrierError;
 use barrier::NoFederatedTimeBarrier;
 #[cfg(feature = "federated")]
 pub use barrier::{FederatedBarrierError, FederatedBarrierOutcome, FederatedTimeBarrier};
+pub use federate::{
+    CoordinationRevision, FederateAcquisition, FederateCompletion, FederateCoordinationBackend,
+    FederateCoordinationError, FederatePublication,
+};
 use modal::EventManager;
 
 use crate::{
@@ -584,7 +593,7 @@ impl Scheduler {
     }
 
     /// Borrow the live scheduler fields as the two capability concerns and concrete coordination.
-    fn core(&mut self) -> SchedulerCore<'_, ReactionGraph, Pin<Box<Store>>> {
+    fn core(&mut self) -> SchedulerCore<'_, '_, ReactionGraph, Pin<Box<Store>>> {
         let Self {
             key,
             config,
@@ -613,7 +622,8 @@ impl Scheduler {
             schedule: reaction_graph,
             storage: store,
             event_rx,
-            quiescence: None,
+            federate_coordination: None,
+            federate_shutdown_tag: None,
             events,
             start_time,
             current_tag,
@@ -623,7 +633,7 @@ impl Scheduler {
             upstream_enclaves,
             downstream_enclaves,
             #[cfg(feature = "federated")]
-            federated_time_barrier,
+            federated_time_barrier: Some(federated_time_barrier.as_mut()),
             stats,
             reaction_buffer,
             transition_buffer,
@@ -677,7 +687,13 @@ fn live_scheduler_result<T>(
     match result {
         Ok(value) => Ok(value),
         Err(SchedulerError::Coordination(error)) => Err(error),
+        Err(SchedulerError::FederateCoordination(_)) => {
+            unreachable!("live schedulers do not install compiled Federate coordination")
+        }
         Err(SchedulerError::Execution(error)) => Err(error),
+        Err(SchedulerError::FederateFailureReported { source }) => {
+            live_scheduler_result(Err(*source))
+        }
     }
 }
 
@@ -958,6 +974,68 @@ mod tests {
                 HookCall::Acquire(tag),
                 HookCall::Reaction(tag),
                 HookCall::Ltc(tag)
+            ]
+        );
+    }
+
+    /// Verifies live scheduling acquires local barriers before legacy Federated coordination.
+    #[test]
+    fn live_federated_barrier_follows_local_barrier() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let barrier = RecordingBarrier::granting(Arc::clone(&log));
+        let (mut scheduler, reaction) =
+            scheduler_with_recording_reaction(Arc::clone(&log), barrier);
+        let tag = Tag::ZERO;
+        let upstream = EnclaveKey::from(1);
+        let (upstream_tx, upstream_rx) = kanal::unbounded();
+        let (_upstream_shutdown_tx, upstream_shutdown_rx) = keepalive::channel();
+        scheduler.upstream_enclaves.insert(
+            upstream,
+            LogicalTimeBarrier {
+                released_tag: Tag::NEVER,
+                provisional_tag: Tag::NEVER,
+                upstream_ctx: SendContext {
+                    enclave_key: upstream,
+                    async_tx: upstream_tx,
+                    shutdown_rx: upstream_shutdown_rx,
+                },
+                upstream_delay: None,
+            },
+        );
+        let (event_tx, event_rx) = kanal::unbounded();
+        scheduler.event_rx = event_rx;
+        scheduler.startup();
+        scheduler
+            .events
+            .push_event(tag, std::iter::once((Level::from(0), reaction)), false);
+
+        let legacy_called_before_local_release = std::thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                assert!(scheduler.try_next().unwrap());
+                assert!(scheduler.try_next().unwrap());
+            });
+            assert!(matches!(
+                upstream_rx
+                    .recv_timeout(std::time::Duration::from_secs(1))
+                    .unwrap(),
+                AsyncEvent::TagReleaseProvisional {
+                    enclave,
+                    tag: requested,
+                } if enclave == EnclaveKey::from(0) && requested == tag
+            ));
+            let called = !log.lock().unwrap().is_empty();
+            event_tx.send(AsyncEvent::release(upstream, tag)).unwrap();
+            worker.join().unwrap();
+            called
+        });
+
+        assert!(!legacy_called_before_local_release);
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec![
+                HookCall::Acquire(tag),
+                HookCall::Reaction(tag),
+                HookCall::Ltc(tag),
             ]
         );
     }

@@ -397,7 +397,8 @@ impl Reaction {
     }
 }
 
-/// An empty reaction function that does nothing. Used by the [`reaction_closure`] macro.
+/// An empty reaction function that does nothing. Used by the
+/// [`reaction_closure!`](crate::reaction_closure) macro.
 pub fn empty_reaction(_ctx: &mut Context, _reactor: &mut dyn BaseReactor, _refs: ReactionRefs<'_>) {
 }
 

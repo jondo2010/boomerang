@@ -1378,7 +1378,7 @@ fn owned_federate_routes_typed_values_and_shares_one_origin() {
             .unwrap();
 
         assert_eq!(sink_state.values, [42]);
-        assert_eq!(source.final_tag(), Tag::new(Duration::ZERO, usize::MAX));
+        assert_eq!(source.final_tag(), Tag::ZERO);
         assert_eq!(sink.final_tag(), Tag::new(Duration::milliseconds(1), 0));
         assert_eq!(result.final_tag(), source.final_tag().max(sink.final_tag()));
         assert_eq!(
@@ -1422,7 +1422,8 @@ fn owned_federate_routes_typed_values_and_shares_one_origin() {
 }
 
 #[test]
-fn owned_federate_paced_origin_starts_after_delayed_initializer() {
+/// Verifies a paced source retains the shared origin and delivers downstream in logical order.
+fn owned_federate_paced_origin_preserves_downstream_order() {
     const TIMER_DELAY_NANOS: u64 = 100_000_000;
     let result = bounded(|| {
         let timer_startups = [TimerStartupImage::new(
@@ -1460,14 +1461,22 @@ fn owned_federate_paced_origin_starts_after_delayed_initializer() {
     let source = result
         .enclave(EnclaveIndex::new(0))
         .expect("paced source result must be present");
+    let sink = result
+        .enclave(EnclaveIndex::new(1))
+        .expect("paced sink result must be present");
     let state = source
         .state::<RoutedSourceState>(StateSlotIndex::new(0))
         .unwrap();
     let origin = result.origin();
     let fired_at = state.fired_at.expect("paced source timer must fire");
     let timer_delay = std::time::Duration::from_nanos(TIMER_DELAY_NANOS);
+    let sink_state = sink
+        .state::<RoutedSinkState>(StateSlotIndex::new(0))
+        .unwrap();
 
     assert_eq!(state.origin, Some(origin));
+    assert_eq!(sink_state.values, [42]);
+    assert!(source.final_tag() < sink.final_tag());
     assert!(origin >= state.initialized_at);
     assert!(fired_at.duration_since(origin) >= timer_delay);
     assert!(fired_at.duration_since(state.initialized_at) >= timer_delay);
@@ -1530,6 +1539,38 @@ fn owned_federate_quiesces_when_a_source_emits_no_route_value() {
         .is_empty());
 }
 
+/// Verifies an explicit scheduler shutdown terminates a kept-alive compiled Federate.
+#[test]
+fn owned_federate_keep_alive_shutdown_stops_idle_peer() {
+    let result = bounded(|| {
+        execute_owned_federate(
+            &ROUTED_DEPLOYMENT,
+            FederateIndex::new(0),
+            FederateBindings::new()
+                .bind_enclave(
+                    EnclaveIndex::new(0),
+                    routed_reaction_bindings(|context, _, _, _| {
+                        context.schedule_shutdown(Some(Duration::ZERO));
+                        Ok(())
+                    }),
+                )
+                .bind_enclave(EnclaveIndex::new(1), sink_bindings())
+                .bind_route(
+                    route_boundary(),
+                    PayloadType::<u32>::new(),
+                    PayloadType::<u32>::new(),
+                ),
+            Config::default()
+                .with_keep_alive(true)
+                .with_fast_forward(false),
+        )
+        .unwrap()
+    });
+
+    assert!(result.enclave(EnclaveIndex::new(0)).is_some());
+    assert!(result.enclave(EnclaveIndex::new(1)).is_some());
+}
+
 #[test]
 fn owned_federate_quiescence_wins_before_logical_horizon() {
     let result = bounded(|| {
@@ -1555,7 +1596,7 @@ fn owned_federate_quiescence_wins_before_logical_horizon() {
         assert_eq!(
             state.tags,
             [Tag::ZERO],
-            "quiescence must precede the horizon"
+            "graceful quiescence must run every Enclave's shutdown reaction"
         );
         assert_eq!(result.enclave(enclave).unwrap().final_tag(), Tag::NEVER);
     }
@@ -1586,7 +1627,11 @@ fn owned_federate_logical_horizon_stops_all_enclaves_at_one_tag() {
             .unwrap()
             .state::<CounterState>(StateSlotIndex::new(0))
             .unwrap();
-        assert_eq!(state.tags, [expected]);
+        assert_eq!(
+            state.tags,
+            [expected],
+            "every Enclave must run shutdown at the shared logical horizon"
+        );
         assert_eq!(result.enclave(enclave).unwrap().final_tag(), Tag::NEVER);
     }
 }
@@ -2056,10 +2101,11 @@ fn owned_federate_abort_stops_peer_with_recurring_internal_work_child() {
         return;
     }
 
+    let recurring_startup = [TimerStartupImage::new(ActionIndex::new(0), 0)];
     let recurring = EnclaveImage {
         identity_data: "compiled/abortpeercounter-stateincrement-counter",
         actions: TinyMapView::new(&PERIODIC_ACTIONS),
-        timer_startup_actions: &PERIODIC_STARTUP,
+        timer_startup_actions: &recurring_startup,
         ..IMAGE
     };
     let panicking = EnclaveImage {

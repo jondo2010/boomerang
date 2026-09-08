@@ -568,7 +568,7 @@ mod tests {
     use super::*;
     use crate::compiler::{ComponentInstanceId, ImplementationId, StablePath};
     use crate::descriptor::{ReactionSlotId, ReactorSlotId};
-    use crate::runtime::image::{EnclaveIndex, IdentityRange, StateSlotIndex, TableRange};
+    use crate::runtime::image::{IdentityRange, StateSlotIndex, TableRange};
 
     #[test]
     fn direct_binding_symbols_reversibly_escape_descriptor_slots() {
@@ -720,77 +720,6 @@ mod tests {
             },
             storage_bounds: StorageBounds::new(1, 0, 0, 0, 0, 0),
         }
-    }
-
-    /// Builds one valid Enclave fixture with a distinct same-width identity.
-    fn enclave(id: &str) -> OwnedEnclaveImage {
-        let mut enclave = empty_enclave();
-        enclave.id = StableEnclaveId::new(id).unwrap();
-        enclave.identity_data = format!("{id}state/vehicle/main").into();
-        enclave
-    }
-
-    /// Projects only the requested Federate's Enclaves and bindings from a complete deployment.
-    #[test]
-    fn federate_slice_retains_only_selected_federate_rows() {
-        let deployment = OwnedCompiledDeployment {
-            federation: GlobalFederationImage {
-                members: vec![
-                    FederateId::new("edge").unwrap(),
-                    FederateId::new("host").unwrap(),
-                ]
-                .into_boxed_slice(),
-                edges: Box::default(),
-            },
-            federates: vec![
-                OwnedFederateImage {
-                    id: FederateId::new("edge").unwrap(),
-                    target: TargetTriple::new("aarch64-unknown-linux-gnu").unwrap(),
-                    runtime: RuntimeBackendId::new("native").unwrap(),
-                    enclaves: vec![enclave("vehicle/edge")].into_boxed_slice(),
-                },
-                OwnedFederateImage {
-                    id: FederateId::new("host").unwrap(),
-                    target: TargetTriple::new("x86_64-unknown-linux-gnu").unwrap(),
-                    runtime: RuntimeBackendId::new("native").unwrap(),
-                    enclaves: vec![enclave("vehicle/main"), enclave("vehicle/aux_")]
-                        .into_boxed_slice(),
-                },
-            ]
-            .into_boxed_slice(),
-            coordination: OwnedCoordinationProjection::Local,
-        };
-        let slice = deployment.federate_slice(FederateIndex::new(1)).unwrap();
-        assert_eq!(slice.federate(), FederateIndex::new(1));
-        slice.with_image(|image| {
-            assert_eq!(image.image().enclaves(), TableRange::new(1, 2));
-        });
-        assert_eq!(
-            slice
-                .with_view(|view| {
-                    view.enclave_views()
-                        .map(|(key, enclave)| (key, enclave.enclave_id().as_str().to_owned()))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap(),
-            vec![
-                (EnclaveIndex::new(1), "vehicle/main".to_owned()),
-                (EnclaveIndex::new(2), "vehicle/aux_".to_owned()),
-            ]
-        );
-        assert_eq!(slice.enclaves().len(), 2);
-        assert!(slice.enclaves().iter().all(|enclave| {
-            enclave
-                .required_bindings()
-                .iter()
-                .all(|binding| binding.kind() == BindingKind::StateInitializer)
-        }));
-        assert!(matches!(
-            deployment.federate_slice(FederateIndex::new(2)),
-            Err(FederateSliceError::FederateNotFound {
-                federate,
-            }) if federate == FederateIndex::new(2)
-        ));
     }
 
     #[test]

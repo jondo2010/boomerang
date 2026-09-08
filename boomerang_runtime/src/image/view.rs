@@ -304,6 +304,19 @@ impl<'a> FederateSliceView<'a> {
                 field: "enclaves",
             });
         }
+        if !matches!(
+            federate.enclaves().checked_end().and_then(|end| u64::try_from(end).ok()),
+            Some(end) if end <= u64::from(u32::MAX) + 1
+        ) {
+            return Err(ImageValidationError::RangeOutOfBounds {
+                table: "federates",
+                index,
+                field: "enclaves",
+                target: "enclaves",
+                start: federate.enclaves().start(),
+                len: federate.enclaves().len(),
+            });
+        }
         let id = identity_slice(
             image.identity_data(),
             "federates",
@@ -2320,6 +2333,29 @@ mod tests {
                 table: "federates",
                 index: 1,
                 field: "enclaves",
+            })
+        ));
+
+        let overflowing_range = FederateSliceImage::new(
+            FederateIndex::new(1),
+            DEPLOYMENT_IDENTITIES,
+            FederateImage::new(
+                IdentityRange::new(0, 4),
+                IdentityRange::new(4, 25),
+                IdentityRange::new(29, 6),
+                TableRange::new(u32::MAX, 2),
+            ),
+            &ENCLAVES,
+        );
+        assert!(matches!(
+            FederateSliceView::new(&overflowing_range),
+            Err(ImageValidationError::RangeOutOfBounds {
+                table: "federates",
+                index: 1,
+                field: "enclaves",
+                target: "enclaves",
+                start: u32::MAX,
+                len: 2,
             })
         ));
     }

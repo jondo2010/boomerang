@@ -1605,6 +1605,7 @@ fn validate_root_image(compiled: &OwnedCompiledDeployment) -> Result<(), Compile
 #[cfg(test)]
 mod tests {
     use super::{checked_u32, lower, CompileError};
+    use crate::compiler::compiled::FederateSliceError;
     use crate::{
         compiler::{
             ActionId, ActionKind, ApplicationTopology, ApplicationTopologyBuilder, BankMember,
@@ -1624,9 +1625,9 @@ mod tests {
         },
         runtime::image::{
             ActionIndex, ActionTiming, BindingKind, BoundaryFailurePolicy, CodecPolicy,
-            CoordinationProjection, FederateIndex, ModeIndex, ReactionIndex, ReactorIndex,
-            RecoveryPolicy, RouteDirection, RouteIndex, RtiImage, RtiRouteIndex, ScopeIndex,
-            SecurityPolicy, TimingDomain, TimingPolicy, TransportPolicy,
+            CoordinationProjection, EnclaveIndex, FederateIndex, ModeIndex, ReactionIndex,
+            ReactorIndex, RecoveryPolicy, RouteDirection, RouteIndex, RtiImage, RtiRouteIndex,
+            ScopeIndex, SecurityPolicy, TableRange, TimingDomain, TimingPolicy, TransportPolicy,
         },
     };
     fn descriptor(contract: &str, bounds: DescriptorBounds) -> ComponentDescriptor {
@@ -2472,6 +2473,139 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["edge", "host"]
         );
+    }
+
+    /// Projects a real lowered Federate without retaining sibling Enclaves or bindings.
+    #[test]
+    fn federate_slice_from_lowered_deployment_preserves_selected_root_rows() {
+        let compiled = lower(&deployment(false, true)).unwrap();
+        let federate = FederateIndex::new(1);
+        let selected = &compiled.federates()[federate.as_u32() as usize];
+        let enclave_start = compiled
+            .federates()
+            .iter()
+            .take(federate.as_u32() as usize)
+            .map(|federate| federate.enclaves().len())
+            .sum::<usize>() as u32;
+        let expected_range = TableRange::new(enclave_start, selected.enclaves().len() as u32);
+
+        let slice = compiled.federate_slice(federate).unwrap();
+        assert_eq!(slice.federate(), federate);
+        slice.with_image(|image| {
+            assert_eq!(image.federate(), federate);
+            assert_eq!(image.image().enclaves(), expected_range);
+        });
+        assert_eq!(
+            slice
+                .with_view(|view| {
+                    view.enclave_views()
+                        .map(|(key, enclave)| (key, enclave.enclave_id().as_str().to_owned()))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap(),
+            vec![(EnclaveIndex::new(1), "vehicle/controller".to_owned())]
+        );
+        assert_eq!(
+            slice
+                .enclaves()
+                .iter()
+                .flat_map(|enclave| enclave.required_bindings().iter())
+                .map(|binding| match binding {
+                    RequiredBinding::State {
+                        component,
+                        implementation,
+                        ..
+                    }
+                    | RequiredBinding::Reaction {
+                        component,
+                        implementation,
+                        ..
+                    }
+                    | RequiredBinding::Port {
+                        component,
+                        implementation,
+                        ..
+                    }
+                    | RequiredBinding::Action {
+                        component,
+                        implementation,
+                        ..
+                    } => (
+                        component.to_string(),
+                        implementation.to_string(),
+                        binding.symbol(),
+                    ),
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "vehicle/controller".to_owned(),
+                    "controller-host".to_owned(),
+                    "action_Controller_2fpulse".to_owned(),
+                ),
+                (
+                    "vehicle/controller".to_owned(),
+                    "controller-host".to_owned(),
+                    "port_Controller_2farray_5fin".to_owned(),
+                ),
+                (
+                    "vehicle/controller".to_owned(),
+                    "controller-host".to_owned(),
+                    "port_Controller_2farray_5fin".to_owned(),
+                ),
+                (
+                    "vehicle/controller".to_owned(),
+                    "controller-host".to_owned(),
+                    "port_Controller_2fbank_5fin".to_owned(),
+                ),
+                (
+                    "vehicle/controller".to_owned(),
+                    "controller-host".to_owned(),
+                    "port_Controller_2fbank_5fin".to_owned(),
+                ),
+                (
+                    "vehicle/controller".to_owned(),
+                    "controller-host".to_owned(),
+                    "port_Controller_2foutput".to_owned(),
+                ),
+                (
+                    "vehicle/controller".to_owned(),
+                    "controller-host".to_owned(),
+                    "reaction_Controller_2femit".to_owned(),
+                ),
+                (
+                    "vehicle/controller".to_owned(),
+                    "controller-host".to_owned(),
+                    "reaction_Controller_2freset_5factive".to_owned(),
+                ),
+                (
+                    "vehicle/controller".to_owned(),
+                    "controller-host".to_owned(),
+                    "reaction_Controller_2fshutdown".to_owned(),
+                ),
+                (
+                    "vehicle/controller".to_owned(),
+                    "controller-host".to_owned(),
+                    "reaction_Controller_2fstart".to_owned(),
+                ),
+                (
+                    "vehicle/controller".to_owned(),
+                    "controller-host".to_owned(),
+                    "reaction_Controller_2ftimer_5ffired".to_owned(),
+                ),
+                (
+                    "vehicle/controller".to_owned(),
+                    "controller-host".to_owned(),
+                    "state_Controller".to_owned(),
+                ),
+            ]
+        );
+        assert!(matches!(
+            compiled.federate_slice(FederateIndex::new(2)),
+            Err(FederateSliceError::FederateNotFound {
+                federate: missing,
+            }) if missing == FederateIndex::new(2)
+        ));
     }
 
     #[test]

@@ -1221,4 +1221,80 @@ mod tests {
             "distributed deployment execution is unsupported until issue #131"
         );
     }
+
+    #[test]
+    fn collection_boundary_rejects_invalid_ownership_and_collisions() {
+        let cases = [
+            ("source count", "source count"),
+            ("source order", "canonical Federate order"),
+            ("unknown owner", "unknown Federate"),
+            ("duplicate path", "duplicate bundle path"),
+            ("missing artifact", "exactly one artifact record"),
+            ("multiple artifacts", "multiple artifact records"),
+        ];
+        let mut outcomes = Vec::new();
+        for (case, expected) in cases {
+            let result = if case.starts_with("source") {
+                let target = tempfile::tempdir().unwrap();
+                let inputs = tempfile::tempdir().unwrap();
+                let [manifest, lockfile, source, executable] =
+                    write_sample_source_files(inputs.path());
+                let source = BundleSource {
+                    federate: "sensor",
+                    manifest: &manifest,
+                    lockfile: &lockfile,
+                    source: &source,
+                    executable: &executable,
+                };
+                let sources = if case == "source count" {
+                    &[][..]
+                } else {
+                    &[source]
+                };
+                publish_bundle(target.path(), sample_document(), sources).map(|_| ())
+            } else {
+                let bundle = tempfile::tempdir().unwrap();
+                let mut document = write_sample_bundle(bundle.path());
+                match case {
+                    "unknown owner" => {
+                        let path = "generated/sensor/Cargo.toml";
+                        fs::create_dir_all(bundle.path().join("generated/sensor")).unwrap();
+                        fs::rename(
+                            bundle.path().join(&document.generated[0].path),
+                            bundle.path().join(path),
+                        )
+                        .unwrap();
+                        document.generated[0].federate = "sensor".into();
+                        document.generated[0].path = path.into();
+                    }
+                    "duplicate path" => {
+                        document.generated[1].path = document.generated[0].path.clone();
+                    }
+                    "missing artifact" => {
+                        let mut sensor = document.federates[0].clone();
+                        sensor.id = "sensor".into();
+                        document.federates.push(sensor);
+                    }
+                    "multiple artifacts" => {
+                        let path = "artifacts/host/second";
+                        fs::write(bundle.path().join(path), b"fixture").unwrap();
+                        document.artifacts.push(FileRecord {
+                            federate: "host".into(),
+                            path: path.into(),
+                            blake3: blake3::hash(b"fixture").to_hex().to_string(),
+                        });
+                    }
+                    _ => unreachable!(),
+                }
+                validate_bundle(bundle.path(), &document)
+            };
+            outcomes.push((case, result.err().map(|error| error.to_string()), expected));
+        }
+        assert!(
+            outcomes.iter().all(|(_, error, expected)| error
+                .as_deref()
+                .is_some_and(|error| error.contains(expected))),
+            "{outcomes:#?}"
+        );
+    }
 }

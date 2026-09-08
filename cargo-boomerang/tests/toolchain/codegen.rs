@@ -128,6 +128,22 @@ fn generated_sensor_federate_slice_excludes_host_payload_and_preserves_canonical
 }
 
 #[test]
+fn generated_launcher_rejects_transitive_payload_for_unselected_implementation() {
+    let _guard = support::toolchain_lock();
+    let target = tempfile::tempdir().unwrap();
+    let result = support::with_target_directory(target.path(), || {
+        cargo_boomerang::generate_launcher(fixture_workspace(), "transitive-peer", "sensor")
+    });
+    let error = result.err().expect("peer payload must fail").to_string();
+
+    assert!(
+        error.contains("unselected implementation package")
+            && error.contains("activates reserved payload facet"),
+        "{error}"
+    );
+}
+
+#[test]
 fn generated_launcher_check_and_run_apply_federate_cargo_configuration() {
     let _guard = support::toolchain_lock();
     let target = support::toolchain_target();

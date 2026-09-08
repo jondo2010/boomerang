@@ -1,0 +1,10 @@
+[package]
+name = "transitive-host"
+version = "0.1.0"
+edition = "2021"
+[features]
+__boomerang_descriptor = ["sensor-host/__boomerang_descriptor"]
+__boomerang_payload = ["sensor-host/__boomerang_payload", "dep:vehicle-control", "vehicle-control/__boomerang_payload"]
+[dependencies]
+sensor-host = { path = "../sensor-host", default-features = false }
+vehicle-control = { path = "../vehicle-control", default-features = false, optional = true }

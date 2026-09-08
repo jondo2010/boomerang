@@ -671,6 +671,14 @@ fn validate_bundle(bundle: &Path, document: &DeploymentDocument) -> Result<()> {
     if artifact_owners != federates {
         bail!("each compiled Federate must own exactly one artifact record");
     }
+    for federate in federates {
+        for relative in ["Cargo.toml", "Cargo.lock", "src/main.rs"] {
+            let path = format!("generated/{federate}/{relative}");
+            if !paths.contains(path.as_str()) {
+                bail!("Federate {federate} is missing generated workspace record {path}");
+            }
+        }
+    }
     validate_bundle_tree(bundle, &expected_files, &expected_directories)?;
     Ok(())
 }
@@ -1229,6 +1237,7 @@ mod tests {
             ("source order", "canonical Federate order"),
             ("unknown owner", "unknown Federate"),
             ("duplicate path", "duplicate bundle path"),
+            ("missing generated workspace", "generated workspace record"),
             ("missing artifact", "exactly one artifact record"),
             ("multiple artifacts", "multiple artifact records"),
         ];
@@ -1269,6 +1278,10 @@ mod tests {
                     }
                     "duplicate path" => {
                         document.generated[1].path = document.generated[0].path.clone();
+                    }
+                    "missing generated workspace" => {
+                        let missing = document.generated.remove(1);
+                        fs::remove_file(bundle.path().join(missing.path)).unwrap();
                     }
                     "missing artifact" => {
                         let mut sensor = document.federates[0].clone();

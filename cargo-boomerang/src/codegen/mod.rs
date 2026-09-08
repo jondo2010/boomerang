@@ -466,8 +466,8 @@ pub(crate) fn generate_analyzed_launcher(
                 directory,
                 &configuration,
                 &compile_inputs,
+                &aliases,
                 &analyzed.resolved,
-                &application_workspace,
                 &cargo_program,
                 output,
             )
@@ -581,11 +581,16 @@ fn validate_launcher_graph(
     directory: &Path,
     federate: &ResolvedFederate,
     compile_inputs: &[(String, String)],
+    aliases: &BTreeMap<String, String>,
     resolved: &ResolvedWorkspace,
-    application_workspace: &Path,
     cargo_program: &OsStr,
     progress: &crate::CommandOutput,
 ) -> Result<PackageId> {
+    let application_workspace = resolved
+        .lockfile()
+        .path
+        .parent()
+        .expect("canonical workspace lockfile has a parent");
     let mut arguments = configured_metadata_arguments(federate, &directory.join("Cargo.toml"));
     arguments.push(OsString::from("--locked"));
     let mut command = launcher_command(
@@ -646,8 +651,37 @@ fn validate_launcher_graph(
             .expect("Cargo resolve graph contains every dependency");
         pending.extend(node.deps.iter().map(|dependency| dependency.pkg.clone()));
     }
+    let implementation_ids = resolved
+        .deployment()
+        .bindings
+        .values()
+        .map(|binding| {
+            &resolved
+                .package(&binding.package)
+                .expect("resolved implementation package is retained")
+                .id
+        })
+        .collect::<BTreeSet<_>>();
+    let selected_ids = aliases
+        .keys()
+        .map(|implementation| {
+            &resolved
+                .package(implementation)
+                .expect("selected implementation package is retained")
+                .id
+        })
+        .collect::<BTreeSet<_>>();
     for node in graph.nodes.iter().filter(|node| node.id != root.id) {
         let id = node.id.to_string();
+        if node
+            .features
+            .iter()
+            .any(|feature| *feature == "__boomerang_payload")
+            && implementation_ids.contains(&node.id)
+            && !selected_ids.contains(&node.id)
+        {
+            bail!("unselected implementation package {id} activates reserved payload facet");
+        }
         if !resolved.locked_package_ids().contains(&id) && !launcher_dependencies.contains(&node.id)
         {
             bail!("generated launcher package {id} was absent from source metadata");

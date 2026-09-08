@@ -286,7 +286,7 @@ mod tests {
         assert_eq!(block_on(rti_stream.next()), None);
     }
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    #[ignore = "localhost TCP smoke test; run with `cargo test -p boomerang_federated tcp_smoke -- --ignored`"]
+    #[ignore = "localhost TCP smoke test; run with `cargo test -p boomerang_central_rti tcp_smoke -- --ignored`"]
     async fn tcp_smoke_identifies_reverse_order_peers_by_hello() {
         use std::time::Duration as StdDuration;
         use tokio::net::{TcpListener, TcpStream};

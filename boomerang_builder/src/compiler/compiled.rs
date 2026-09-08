@@ -11,7 +11,7 @@ use crate::runtime::image::{
     ReactionImage, ReactionIndex, ReactorImage, ReactorIndex, RequiredBindingImage, RouteImage,
     RouteIndex, ScopeImage, ScopeIndex, StorageBounds, TimerStartupImage,
 };
-use tinymap::{TableRange, TinyMap, TinyMapView};
+use tinymap::{Key, TableRange, TinyMap, TinyMapView};
 
 /// Canonical required payload binding identities for one Enclave.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -383,6 +383,23 @@ impl CompiledDeploymentValidationError {
     }
 }
 
+fn federate_enclave_range(
+    start: u64,
+    len: usize,
+) -> Result<(TableRange<crate::runtime::image::EnclaveIndex>, u64), ImageValidationError<'static>> {
+    let start = u32::try_from(start)
+        .map_err(|_| ImageValidationError::TableTooLarge { table: "enclaves" })?;
+    let len = u32::try_from(len)
+        .map_err(|_| ImageValidationError::TableTooLarge { table: "enclaves" })?;
+    let end = u64::from(start)
+        .checked_add(u64::from(len))
+        .ok_or(ImageValidationError::TableTooLarge { table: "enclaves" })?;
+    if end > u64::from(u32::MAX) + 1 {
+        return Err(ImageValidationError::TableTooLarge { table: "enclaves" });
+    }
+    Ok((TableRange::new(start, len), end))
+}
+
 impl OwnedCompiledDeployment {
     /// Returns the backend-neutral federation structure.
     pub fn federation(&self) -> &GlobalFederationImage {
@@ -407,7 +424,7 @@ impl OwnedCompiledDeployment {
         &self,
         federate: FederateIndex,
     ) -> Result<OwnedFederateSlice, FederateSliceError> {
-        if self.federates.get(federate.as_u32() as usize).is_none() {
+        if self.federates.get(federate.index()).is_none() {
             return Err(FederateSliceError::FederateNotFound { federate });
         }
 
@@ -422,26 +439,19 @@ impl OwnedCompiledDeployment {
             checked_len("identity_data", identity_data.len())?;
             Ok::<_, ImageValidationError<'static>>(IdentityRange::new(start, len))
         };
-        let mut enclave_start = 0;
+        let mut enclave_start = 0_u64;
         let mut selected = None;
         for (index, candidate) in self.federates.iter().enumerate() {
             let id = append_identity(candidate.id.as_str())?;
             let target = append_identity(candidate.target.as_str())?;
             let runtime = append_identity(candidate.runtime.as_str())?;
-            let enclave_len = checked_len("enclaves", candidate.enclaves.len())?;
-            let image = FederateImage::new(
-                id,
-                target,
-                runtime,
-                TableRange::new(enclave_start, enclave_len),
-            );
-            if index == federate.as_u32() as usize {
+            let (enclave_range, enclave_end) =
+                federate_enclave_range(enclave_start, candidate.enclaves.len())?;
+            let image = FederateImage::new(id, target, runtime, enclave_range);
+            if index == federate.index() {
                 selected = Some((image, candidate.enclaves.to_vec().into_boxed_slice()));
             }
-            let enclave_end = (enclave_start as usize)
-                .checked_add(candidate.enclaves.len())
-                .ok_or(ImageValidationError::TableTooLarge { table: "enclaves" })?;
-            enclave_start = checked_len("enclaves", enclave_end)?;
+            enclave_start = enclave_end;
         }
         let (image, enclaves) = selected.expect("selected Federate was bounds checked");
 
@@ -720,6 +730,14 @@ mod tests {
             },
             storage_bounds: StorageBounds::new(1, 0, 0, 0, 0, 0),
         }
+    }
+
+    #[test]
+    fn federate_enclave_range_preserves_terminal_key() {
+        let (range, exclusive_end) = federate_enclave_range(u64::from(u32::MAX), 1).unwrap();
+
+        assert_eq!(range, TableRange::new(u32::MAX, 1));
+        assert_eq!(exclusive_end, u64::from(u32::MAX) + 1);
     }
 
     #[test]

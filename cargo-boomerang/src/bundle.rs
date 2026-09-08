@@ -575,8 +575,8 @@ fn accept_existing(final_directory: &Path, candidate: &DeploymentDocument) -> Re
         })?;
     if existing != *candidate {
         bail!(
-            "deployment bundle conflict at {}: existing document differs from candidate",
-            final_directory.display()
+            "deployment bundle conflict at {}: existing document differs from candidate\nexisting: {existing:#?}\ncandidate: {candidate:#?}",
+            final_directory.display(),
         );
     }
     Ok(final_directory.join("deployment.json"))

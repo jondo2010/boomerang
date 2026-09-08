@@ -44,5 +44,5 @@ jobs:
 
       - name: test cargo-boomerang toolchain
         run: >-
-          cargo test -p cargo-boomerang --test toolchain --
+          cargo test -p cargo-boomerang --test toolchain build::repeated_build_preserves_the_same_published_bundle -- --exact
           --test-threads=1

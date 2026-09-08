@@ -345,6 +345,29 @@ fn resolve_package(
     Ok(cargo_package(package))
 }
 
+/// Normalizes Windows verbatim disk and UNC paths reported by Cargo metadata.
+/// Every other path form, including non-Windows paths, is returned unchanged.
+fn normalize_metadata_manifest_path(path: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        if let Some(path_text) = path.to_str() {
+            if let Some(unc_path) = path_text.strip_prefix(r"\\?\UNC\") {
+                return PathBuf::from(format!(r"\\{unc_path}"));
+            }
+            if let Some(disk_path) = path_text.strip_prefix(r"\\?\") {
+                let disk_bytes = disk_path.as_bytes();
+                if disk_bytes.len() >= 2
+                    && disk_bytes[0].is_ascii_alphabetic()
+                    && disk_bytes[1] == b':'
+                {
+                    return PathBuf::from(disk_path);
+                }
+            }
+        }
+    }
+    path
+}
+
 /// Copies the Cargo identity fields required by generated dependency declarations.
 fn cargo_package(package: &Package) -> CargoPackage {
     CargoPackage {
@@ -362,7 +385,9 @@ fn cargo_package(package: &Package) -> CargoPackage {
             })
             .map(|target| target.name.clone()),
         id: package.id.clone(),
-        manifest_path: package.manifest_path.clone().into_std_path_buf(),
+        manifest_path: normalize_metadata_manifest_path(
+            package.manifest_path.clone().into_std_path_buf(),
+        ),
     }
 }
 

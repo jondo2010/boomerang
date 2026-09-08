@@ -1,24 +1,17 @@
 //! Static federated runtime runners.
-
-#[cfg(feature = "serde-json-codec")]
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    sync::{Arc, Mutex},
-};
-
-#[cfg(feature = "serde-json-codec")]
-use futures_util::StreamExt;
-use futures_util::{Sink, TryStream};
-
-#[cfg(feature = "serde-json-codec")]
 use crate::json_protocol_frame_transport;
-#[cfg(feature = "serde-json-codec")]
 use crate::transport::run_tcp_static_rti_session_compiled;
 use crate::{
     in_memory_transport_pair, CompiledTopology, FederateClientError, FederateClientRoute,
     FederateId, FederateProtocolClient, FederatedTopology, ProtocolFrame, RtiFederatedTimeBarrier,
     RtiSessionEndpoint, SessionError, StaticRtiSession, TransportError,
+};
+use futures_util::StreamExt;
+use futures_util::{Sink, TryStream};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::{Arc, Mutex},
 };
 
 /// Fully lowered federation-specific state required by a static runner.
@@ -124,14 +117,11 @@ impl StaticFederationRuntime {
 }
 
 /// TCP listener configuration for the single-process static federation runner.
-#[cfg(feature = "serde-json-codec")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TcpStaticFederationConfig {
     /// Socket address on which the runner-owned RTI listener should bind.
     pub bind_addr: SocketAddr,
 }
-
-#[cfg(feature = "serde-json-codec")]
 impl Default for TcpStaticFederationConfig {
     fn default() -> Self {
         Self {
@@ -167,7 +157,6 @@ pub enum StaticFederationRunnerError {
     },
 
     #[error("failed to bind the static federation TCP listener at {addr}: {source}")]
-    #[cfg(feature = "serde-json-codec")]
     TcpBind {
         addr: SocketAddr,
         #[source]
@@ -175,14 +164,12 @@ pub enum StaticFederationRunnerError {
     },
 
     #[error("failed to read the static federation TCP listener address: {source}")]
-    #[cfg(feature = "serde-json-codec")]
     TcpLocalAddress {
         #[source]
         source: std::io::Error,
     },
 
     #[error("failed to connect federate `{federate_id}` to {addr}: {source}")]
-    #[cfg(feature = "serde-json-codec")]
     TcpConnect {
         federate_id: FederateId,
         addr: SocketAddr,
@@ -294,7 +281,6 @@ pub fn run_in_memory(
 }
 
 /// Run a lowered static federation over TCP using the shared RTI session and federate clients.
-#[cfg(feature = "serde-json-codec")]
 pub fn run_over_tcp(
     runtime: StaticFederationRuntime,
     enclaves: tinymap::TinyMap<boomerang_runtime::EnclaveKey, boomerang_runtime::Enclave>,
@@ -617,8 +603,6 @@ fn execute_connected_static_federation(
 
     Ok(envs)
 }
-
-#[cfg(feature = "serde-json-codec")]
 fn listener_connect_addr(listener_addr: SocketAddr) -> SocketAddr {
     match listener_addr.ip() {
         IpAddr::V4(ip) if ip.is_unspecified() => {
@@ -924,8 +908,6 @@ mod tests {
                 if what.contains("prebuilt runtime connection")
         ));
     }
-
-    #[cfg(feature = "serde-json-codec")]
     #[test]
     fn tcp_config_defaults_to_ephemeral_ipv4_loopback() {
         assert_eq!(
@@ -933,8 +915,6 @@ mod tests {
             SocketAddr::from((Ipv4Addr::LOCALHOST, 0))
         );
     }
-
-    #[cfg(feature = "serde-json-codec")]
     #[test]
     fn wildcard_listener_addresses_connect_through_same_family_loopback() {
         assert_eq!(
@@ -950,8 +930,6 @@ mod tests {
             SocketAddr::from(([192, 0, 2, 1], 4321))
         );
     }
-
-    #[cfg(feature = "serde-json-codec")]
     #[test]
     fn tcp_runner_validates_parts_before_binding() {
         let runtime = StaticFederationRuntime::new(
@@ -978,8 +956,6 @@ mod tests {
                 if what.contains("non-empty federation topology")
         ));
     }
-
-    #[cfg(feature = "serde-json-codec")]
     #[test]
     fn tcp_runner_validates_configuration_before_binding() {
         let tcp = TcpStaticFederationConfig {

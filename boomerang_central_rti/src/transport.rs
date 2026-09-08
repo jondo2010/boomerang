@@ -1,33 +1,21 @@
-#[cfg(feature = "serde-json-codec")]
 use std::collections::{BTreeMap, BTreeSet};
 
-use futures_channel::mpsc::{self, UnboundedReceiver, UnboundedSender};
-#[cfg(feature = "serde-json-codec")]
-use futures_util::stream::FuturesUnordered;
-use futures_util::{stream::Map, StreamExt};
-#[cfg(feature = "serde-json-codec")]
-use tokio::net::{TcpListener, TcpStream};
-#[cfg(feature = "serde-json-codec")]
-use tokio_util::codec::{Framed, LengthDelimitedCodec};
-
-#[cfg(feature = "serde-json-codec")]
 use crate::{
     FederateId, FederatedTopology, ProtocolFrame, RtiSessionEndpoint, SessionError,
     StaticRtiSession,
 };
-
-#[cfg(feature = "serde-json-codec")]
+use futures_channel::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use futures_util::stream::FuturesUnordered;
+use futures_util::{stream::Map, StreamExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio_util::codec::{Framed, LengthDelimitedCodec};
 pub type JsonProtocolFrameTransport = tokio_serde::SymmetricallyFramed<
     Framed<TcpStream, LengthDelimitedCodec>,
     ProtocolFrame,
     tokio_serde::formats::SymmetricalJson<ProtocolFrame>,
 >;
-
-#[cfg(feature = "serde-json-codec")]
 pub type JsonProtocolFrameSink =
     futures_util::stream::SplitSink<JsonProtocolFrameTransport, ProtocolFrame>;
-
-#[cfg(feature = "serde-json-codec")]
 pub type JsonProtocolFrameStream = futures_util::stream::SplitStream<JsonProtocolFrameTransport>;
 
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
@@ -88,7 +76,6 @@ fn ok_frame<M>(frame: M) -> Result<M, TransportError> {
 ///
 /// Each frame is encoded as a big-endian `u32` byte length followed by that many JSON bytes. The
 /// transport is reliable and ordered because it is backed by a single TCP stream.
-#[cfg(feature = "serde-json-codec")]
 pub fn json_protocol_frame_transport(stream: TcpStream) -> JsonProtocolFrameTransport {
     tokio_serde::SymmetricallyFramed::new(
         Framed::new(stream, LengthDelimitedCodec::new()),
@@ -100,15 +87,12 @@ pub fn json_protocol_frame_transport(stream: TcpStream) -> JsonProtocolFrameTran
 ///
 /// Accepted sockets are identified by their first `Hello` frame, independently of arrival order,
 /// and then driven by [`StaticRtiSession`].
-#[cfg(feature = "serde-json-codec")]
 pub async fn run_tcp_static_rti_session(
     listener: TcpListener,
     topology: FederatedTopology,
 ) -> Result<(), SessionError> {
     run_tcp_static_rti_session_compiled(listener, crate::CompiledTopology::new(topology)?).await
 }
-
-#[cfg(feature = "serde-json-codec")]
 pub(crate) async fn run_tcp_static_rti_session_compiled(
     listener: TcpListener,
     topology: crate::CompiledTopology,
@@ -301,8 +285,6 @@ mod tests {
 
         assert_eq!(block_on(rti_stream.next()), None);
     }
-
-    #[cfg(feature = "serde-json-codec")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[ignore = "localhost TCP smoke test; run with `cargo test -p boomerang_federated tcp_smoke -- --ignored`"]
     async fn tcp_smoke_identifies_reverse_order_peers_by_hello() {
@@ -435,8 +417,6 @@ mod tests {
         drop(sink_client);
         rti.await.unwrap().unwrap();
     }
-
-    #[cfg(feature = "serde-json-codec")]
     async fn connect_tcp_client(
         federate_id: FederateId,
         topology: NeighborStructure,
@@ -447,8 +427,6 @@ mod tests {
             .await
             .unwrap()
     }
-
-    #[cfg(feature = "serde-json-codec")]
     fn recv_rti_message(
         client: &FederateProtocolClient,
         timeout: std::time::Duration,

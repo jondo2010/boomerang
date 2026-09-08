@@ -11,15 +11,6 @@ categories.workspace = true
 readme = "README.md"
 exclude.workspace = true
 
-[features]
-default = ["runtime", "serde-json-codec"]
-
-## JSON framing for TCP static federation transports.
-serde-json-codec = ["boomerang_federated/serde-json-codec"]
-
-## Runtime bridge and static runner interfaces.
-runtime = []
-
 [dependencies]
 boomerang_federated.workspace = true
 boomerang_runtime = { workspace = true, features = ["federated"] }

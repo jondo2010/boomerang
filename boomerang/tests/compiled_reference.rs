@@ -1539,6 +1539,38 @@ fn owned_federate_quiesces_when_a_source_emits_no_route_value() {
         .is_empty());
 }
 
+/// Verifies an explicit scheduler shutdown terminates a kept-alive compiled Federate.
+#[test]
+fn owned_federate_keep_alive_shutdown_stops_idle_peer() {
+    let result = bounded(|| {
+        execute_owned_federate(
+            &ROUTED_DEPLOYMENT,
+            FederateIndex::new(0),
+            FederateBindings::new()
+                .bind_enclave(
+                    EnclaveIndex::new(0),
+                    routed_reaction_bindings(|context, _, _, _| {
+                        context.schedule_shutdown(Some(Duration::ZERO));
+                        Ok(())
+                    }),
+                )
+                .bind_enclave(EnclaveIndex::new(1), sink_bindings())
+                .bind_route(
+                    route_boundary(),
+                    PayloadType::<u32>::new(),
+                    PayloadType::<u32>::new(),
+                ),
+            Config::default()
+                .with_keep_alive(true)
+                .with_fast_forward(false),
+        )
+        .unwrap()
+    });
+
+    assert!(result.enclave(EnclaveIndex::new(0)).is_some());
+    assert!(result.enclave(EnclaveIndex::new(1)).is_some());
+}
+
 #[test]
 fn owned_federate_quiescence_wins_before_logical_horizon() {
     let result = bounded(|| {

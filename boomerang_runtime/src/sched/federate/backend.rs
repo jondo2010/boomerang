@@ -130,12 +130,6 @@ pub enum FederateCoordinationError {
     /// A fixed-point acknowledgement is incompatible with the private current phase.
     #[error("a fixed-point acknowledgement is invalid for the current coordination phase")]
     InvalidObservationTransition,
-    /// A participant reports stop before coordination reaches a terminal phase.
-    #[error("compiled Enclave {enclave:?} stopped before Federate coordination became terminal")]
-    ParticipantStoppedBeforeTerminal {
-        /// Compiled participant that stopped prematurely.
-        enclave: EnclaveIndex,
-    },
     /// The participant-to-coordinator report channel is disconnected.
     #[error(
         "Federate coordinator report channel disconnected (reporting participant: {enclave:?})"

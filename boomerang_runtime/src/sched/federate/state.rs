@@ -73,7 +73,6 @@ pub(crate) enum SchedulerMessage {
         tag: Tag,
     },
     /// Report that a participant has observed terminal stop.
-    #[allow(dead_code)]
     ParticipantStopped {
         /// Compiled participant reporting stop.
         enclave: EnclaveIndex,
@@ -161,12 +160,6 @@ pub(crate) enum CoordinationStateError {
         phase: CoordinationPhase,
         /// Out-of-order acknowledgement that was rejected.
         observation: Observation,
-    },
-    /// A participant reported stop before coordination entered a terminal phase.
-    #[error("compiled Enclave {enclave:?} stopped before Federate coordination became terminal")]
-    ParticipantStoppedBeforeTerminal {
-        /// Compiled participant that stopped prematurely.
-        enclave: EnclaveIndex,
     },
 }
 
@@ -291,11 +284,7 @@ impl FederateCoordinationState {
             SchedulerMessage::CompleteTag { enclave, tag } => self.complete(enclave, tag),
             SchedulerMessage::ParticipantStopped { enclave } => {
                 self.participant(enclave)?;
-                if self.is_stopped() {
-                    Ok(Vec::new())
-                } else {
-                    Err(CoordinationStateError::ParticipantStoppedBeforeTerminal { enclave })
-                }
+                Ok(self.stop())
             }
             SchedulerMessage::Failed { enclave } => self.fail(enclave),
         }
@@ -993,11 +982,16 @@ mod tests {
     /// Verifies stop is terminal and emits its action at most once.
     #[test]
     fn stop_is_terminal_and_idempotent() {
-        // Mutation caught: emit stop twice or process a scheduler message after terminal stop.
+        // Mutation caught: reject a scheduler-observed stop or emit stop more than once.
         let enclave = EnclaveIndex::new(3);
         let mut state =
             FederateCoordinationState::new([enclave], LifecyclePolicy::KeepAlive).unwrap();
-        assert_eq!(state.stop(), vec![CoordinationAction::Stop]);
+        assert_eq!(
+            state
+                .handle_scheduler(SchedulerMessage::ParticipantStopped { enclave })
+                .unwrap(),
+            vec![CoordinationAction::Stop]
+        );
         assert!(state.stop().is_empty());
         assert!(state
             .handle_scheduler(SchedulerMessage::ParticipantStopped { enclave })

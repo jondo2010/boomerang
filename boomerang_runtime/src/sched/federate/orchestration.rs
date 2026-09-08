@@ -92,6 +92,9 @@ pub(crate) trait FederateSchedulerCoordination {
     /// Reports that the legacy shared logical horizon is being processed.
     fn logical_horizon_reached(&mut self, tag: Tag);
 
+    /// Reports that this scheduler processed a terminal event.
+    fn participant_stopped(&mut self);
+
     /// Reports scheduler failure and requests Federate-wide abortion.
     fn fail(&mut self);
 }
@@ -148,9 +151,6 @@ impl From<CoordinationStateError> for FederateCoordinationError {
             CoordinationStateError::UnknownEnclave { enclave } => Self::UnknownEnclave { enclave },
             CoordinationStateError::InvalidObservationTransition { .. } => {
                 Self::InvalidObservationTransition
-            }
-            CoordinationStateError::ParticipantStoppedBeforeTerminal { enclave } => {
-                Self::ParticipantStoppedBeforeTerminal { enclave }
             }
         }
     }
@@ -678,6 +678,19 @@ impl FederateSchedulerCoordination for EnclaveCoordinationPort {
         });
     }
 
+    /// Reports successful terminal processing through the pure coordination state.
+    fn participant_stopped(&mut self) {
+        if self.terminal {
+            return;
+        }
+        self.terminal = true;
+        self.report_infallible(CoordinatorReport::Scheduler(
+            SchedulerMessage::ParticipantStopped {
+                enclave: self.enclave,
+            },
+        ));
+    }
+
     /// Reports a typed participant-origin failure.
     fn fail(&mut self) {
         self.report_infallible(CoordinatorReport::Scheduler(SchedulerMessage::Failed {
@@ -1100,10 +1113,6 @@ mod tests {
                     observation: Observation::Parked,
                 },
                 FederateCoordinationError::InvalidObservationTransition,
-            ),
-            (
-                CoordinationStateError::ParticipantStoppedBeforeTerminal { enclave },
-                FederateCoordinationError::ParticipantStoppedBeforeTerminal { enclave },
             ),
         ] {
             assert_eq!(FederateCoordinationError::from(private), public);

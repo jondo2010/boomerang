@@ -698,6 +698,11 @@ where
             self.stats.increment_processed_tags();
 
             if event.terminal {
+                if logical_horizon != Some(event.tag) {
+                    if let Some(coordination) = self.federate_coordination.as_deref_mut() {
+                        coordination.participant_stopped();
+                    }
+                }
                 // Break out of the event loop;
                 *self.shutdown_tag = Some(*self.current_tag);
                 return Ok(false);

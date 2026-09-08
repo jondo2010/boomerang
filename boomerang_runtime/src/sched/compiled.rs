@@ -316,6 +316,8 @@ mod tests {
         Complete(Tag),
         /// The scheduler reported its shared logical horizon.
         Horizon(Tag),
+        /// The scheduler reported successful terminal processing.
+        Stopped,
         /// The scheduler reported terminal failure.
         Fail,
     }
@@ -383,6 +385,11 @@ mod tests {
         /// Records a shared logical horizon.
         fn logical_horizon_reached(&mut self, tag: Tag) {
             self.calls.lock().unwrap().push(Call::Horizon(tag));
+        }
+
+        /// Records successful terminal processing.
+        fn participant_stopped(&mut self) {
+            self.calls.lock().unwrap().push(Call::Stopped);
         }
 
         /// Records terminal failure.
@@ -646,10 +653,15 @@ mod tests {
             .iter()
             .position(|call| matches!(call, Call::Complete(tag) if *tag == reaction_tag))
             .unwrap();
+        let stopped = observed
+            .iter()
+            .position(|call| matches!(call, Call::Stopped))
+            .unwrap();
         assert!(authorization < control_barrier);
         assert!(acquisition < reaction_barrier);
         assert!(reaction_barrier < reaction);
         assert!(reaction < completion);
+        assert!(completion < stopped);
         assert!(authorized_at.unwrap() < control_target);
         assert!(control_barrier_at.unwrap() < control_target);
         assert!(reaction_barrier_at.unwrap() < target);

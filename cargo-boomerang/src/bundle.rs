@@ -368,6 +368,14 @@ pub(crate) fn publish_bundle(
     match rename_noreplace(staging.path(), &final_directory) {
         Ok(()) => accept_existing(&final_directory, &document),
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            let manifest = "generated/host/Cargo.toml";
+            let final_manifest = fs::read_to_string(final_directory.join(manifest))
+                .unwrap_or_else(|error| format!("<failed to read final manifest: {error}>"));
+            let staging_manifest = fs::read_to_string(staging.path().join(manifest))
+                .unwrap_or_else(|error| format!("<failed to read staging manifest: {error}>"));
+            eprintln!(
+                "final {manifest}:\n{final_manifest}\nstaging {manifest}:\n{staging_manifest}"
+            );
             accept_existing(&final_directory, &document)
         }
         Err(error) => Err(error).with_context(|| {

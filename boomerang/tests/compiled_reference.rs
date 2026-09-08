@@ -1593,9 +1593,10 @@ fn owned_federate_quiescence_wins_before_logical_horizon() {
             .unwrap()
             .state::<CounterState>(StateSlotIndex::new(0))
             .unwrap();
-        assert!(
-            state.tags.is_empty(),
-            "terminal coordination must stop before reaction execution"
+        assert_eq!(
+            state.tags,
+            [Tag::ZERO],
+            "graceful quiescence must run every Enclave's shutdown reaction"
         );
         assert_eq!(result.enclave(enclave).unwrap().final_tag(), Tag::NEVER);
     }
@@ -1620,17 +1621,19 @@ fn owned_federate_logical_horizon_stops_all_enclaves_at_one_tag() {
     });
 
     let expected = Tag::new(horizon, 0);
-    let mut observed = Vec::new();
     for enclave in [EnclaveIndex::new(0), EnclaveIndex::new(1)] {
         let state = result
             .enclave(enclave)
             .unwrap()
             .state::<CounterState>(StateSlotIndex::new(0))
             .unwrap();
-        observed.extend_from_slice(&state.tags);
+        assert_eq!(
+            state.tags,
+            [expected],
+            "every Enclave must run shutdown at the shared logical horizon"
+        );
         assert_eq!(result.enclave(enclave).unwrap().final_tag(), Tag::NEVER);
     }
-    assert_eq!(observed, [expected]);
 }
 
 #[test]

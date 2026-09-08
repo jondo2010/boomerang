@@ -1142,15 +1142,21 @@ pub fn execute_owned<'image>(
 
 #[cfg(test)]
 mod scoped_spawn_tests {
-    use std::{io::ErrorKind, time::Duration};
+    use std::{io::ErrorKind, sync::mpsc, time::Duration};
 
     use tinymap::TinyMapView;
 
     use super::*;
-    use crate::image::{
-        BindingKind, BindingSlotIndex, CoordinationProjection, FederateImage,
-        GlobalFederationImage, IdentityRange, ReactorImage, ReactorIndex, RequiredBindingImage,
-        ScopeImage, ScopeIndex, StorageBounds, TableRange,
+    use crate::{
+        image::{
+            ActionImage, ActionIndex, ActionSlotIndex, ActionTiming, BindingKind, BindingSlotIndex,
+            CoordinationProjection, FederateImage, GlobalFederationImage, IdentityRange,
+            LevelReactionImage, ReactionImage, ReactionIndex, ReactorImage, ReactorIndex,
+            RequiredBindingImage, ScopeImage, ScopeIndex, StorageBounds, TableRange,
+            TimerStartupImage,
+        },
+        keepalive, EnclaveKey, FederateAcquisition, FederateCompletion,
+        FederateCoordinationBackend, FederateCoordinationError, FederatePublication, SendContext,
     };
 
     static REACTORS: [ReactorImage; 1] = [ReactorImage::new(
@@ -1177,6 +1183,36 @@ mod scoped_spawn_tests {
         IdentityRange::new(5, 5),
         BindingKind::StateInitializer,
     )];
+    /// Timer action that drives the coordinator-panic scheduler into a local barrier.
+    static BARRIER_ACTIONS: [ActionImage; 1] = [ActionImage::new(
+        ScopeIndex::new(0),
+        ActionSlotIndex::new(0),
+        ActionTiming::Timer { period_nanos: None },
+        TableRange::new(0, 1),
+        None,
+    )];
+    /// No-op reaction reached only if the blocked scheduler incorrectly advances.
+    static BARRIER_REACTIONS: [ReactionImage; 1] = [ReactionImage::new(
+        ReactorIndex::new(0),
+        ScopeIndex::new(0),
+        0,
+        BindingSlotIndex::new(1),
+        TableRange::new(0, 0),
+        TableRange::new(0, 0),
+        TableRange::new(0, 0),
+        TableRange::new(0, 0),
+    )];
+    /// Timer-to-reaction trigger for the coordinator-panic fixture.
+    static BARRIER_TRIGGERS: [LevelReactionImage; 1] =
+        [LevelReactionImage::new(0, ReactionIndex::new(0))];
+    /// Finite timer startup that produces nonterminal candidate work.
+    static BARRIER_STARTUPS: [TimerStartupImage; 1] =
+        [TimerStartupImage::new(ActionIndex::new(0), 1_000_000_000)];
+    /// State and reaction bindings required by the coordinator-panic fixture.
+    static BARRIER_REQUIRED_BINDINGS: [RequiredBindingImage; 2] = [
+        RequiredBindingImage::new(IdentityRange::new(5, 5), BindingKind::StateInitializer),
+        RequiredBindingImage::new(IdentityRange::new(10, 8), BindingKind::Reaction),
+    ];
 
     const fn state_only_image(identity_data: &'static str) -> EnclaveImage<'static> {
         EnclaveImage {
@@ -1214,6 +1250,17 @@ mod scoped_spawn_tests {
         state_only_image("bravostate"),
         state_only_image("charlstate"),
     ];
+    /// Compiled scheduler fixture with one finite nonterminal candidate.
+    static BARRIER_IMAGE: EnclaveImage<'static> = EnclaveImage {
+        identity_data: "alphastatezreactor",
+        actions: TinyMapView::new(&BARRIER_ACTIONS),
+        reactions: TinyMapView::new(&BARRIER_REACTIONS),
+        reaction_triggers: &BARRIER_TRIGGERS,
+        timer_startup_actions: &BARRIER_STARTUPS,
+        required_bindings: TinyMapView::new(&BARRIER_REQUIRED_BINDINGS),
+        storage_bounds: StorageBounds::new(1, 1, 1, 0, 0, 0),
+        ..state_only_image("alphastatezreactor")
+    };
     static FEDERATES: [FederateImage; 1] = [FederateImage::new(
         IdentityRange::new(0, 4),
         IdentityRange::new(4, 6),
@@ -1264,6 +1311,60 @@ mod scoped_spawn_tests {
                 EnclaveBindings::new().bind_state(BindingSlotIndex::new(0), initialize_state),
             )
         })
+    }
+
+    /// Test backend that grants one candidate, then panics after local-barrier entry.
+    struct PanicAfterGrantBackend {
+        /// Latest finite publication awaiting the one test grant.
+        publication: Option<FederatePublication>,
+        /// Rendezvous proving the scheduler entered its blocking local barrier.
+        barrier_entered: mpsc::Receiver<()>,
+        /// Whether the single test acquisition has already been returned.
+        granted: bool,
+    }
+
+    impl FederateCoordinationBackend for PanicAfterGrantBackend {
+        /// Retains the candidate that the test backend will grant once.
+        fn publish(
+            &mut self,
+            publication: FederatePublication,
+        ) -> Result<(), FederateCoordinationError> {
+            self.publication = Some(publication);
+            Ok(())
+        }
+
+        /// Grants one candidate, then panics only after the scheduler blocks locally.
+        fn progress(
+            &mut self,
+            _timeout: Duration,
+        ) -> Result<Option<FederateAcquisition>, FederateCoordinationError> {
+            if let Some(publication) = self.publication.take() {
+                self.granted = true;
+                return Ok(publication
+                    .next_event()
+                    .map(|granted| FederateAcquisition::new(publication.revision(), granted)));
+            }
+            if self.granted {
+                self.barrier_entered
+                    .recv_timeout(Duration::from_secs(1))
+                    .expect("scheduler must enter the local barrier before coordinator panic");
+                panic!("injected coordinator panic");
+            }
+            Ok(None)
+        }
+
+        /// Accepts completion because the panic test never reaches it.
+        fn complete(
+            &mut self,
+            _completion: FederateCompletion,
+        ) -> Result<(), FederateCoordinationError> {
+            Ok(())
+        }
+
+        /// Accepts cleanup after the injected coordinator panic.
+        fn stop(&mut self) -> Result<(), FederateCoordinationError> {
+            Ok(())
+        }
     }
 
     fn execute_with_spawn_failure(failed_spawn: Option<EnclaveIndex>) -> ExecuteOwnedFederateError {
@@ -1436,6 +1537,132 @@ mod scoped_spawn_tests {
             assert!(matches!(
                 failure,
                 Some(ExecuteOwnedFederateError::ResultChannelClosed)
+            ));
+        });
+    }
+
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "the bounded coordinator-panic regression requires subprocess support"
+    )]
+    /// Verifies coordinator panic wakes and joins a scheduler blocked at a local barrier.
+    fn coordinator_panic_wakes_blocked_scheduler_and_is_observable() {
+        let executable =
+            std::env::current_exe().expect("the runtime unit-test executable is available");
+        let mut child = std::process::Command::new(executable)
+            .args([
+                "--exact",
+                "reference::scoped_spawn_tests::coordinator_panic_wakes_blocked_scheduler_child",
+                "--nocapture",
+            ])
+            .env("BOOMERANG_COORDINATOR_PANIC_CHILD", "1")
+            .spawn()
+            .expect("the coordinator-panic child process starts");
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+
+        loop {
+            if let Some(status) = child
+                .try_wait()
+                .expect("the coordinator-panic child can be polled")
+            {
+                assert!(status.success(), "coordinator-panic child failed: {status}");
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                child
+                    .kill()
+                    .expect("the timed-out coordinator-panic child is killed");
+                child
+                    .wait()
+                    .expect("the killed coordinator-panic child is reaped");
+                panic!("coordinator panic did not wake and join the blocked scheduler");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    /// Runs the injected coordinator panic only inside the bounded child process.
+    fn coordinator_panic_wakes_blocked_scheduler_child() {
+        if std::env::var_os("BOOMERANG_COORDINATOR_PANIC_CHILD").is_none() {
+            return;
+        }
+
+        let mut storage = OwnedStorage::new(
+            EnclaveImageView::new(&BARRIER_IMAGE).unwrap(),
+            EnclaveBindings::new()
+                .bind_state(BindingSlotIndex::new(0), initialize_state)
+                .bind_reaction(BindingSlotIndex::new(1), |_, _, _, _| Ok(())),
+        )
+        .unwrap();
+        let (barrier_entered_tx, barrier_entered_rx) = mpsc::sync_channel(0);
+        let FederateCoordinationParts {
+            coordinator,
+            participants,
+            ..
+        } = FederateCoordinationParts::new(
+            [(
+                EnclaveIndex::new(0),
+                storage.scheduler_event_tx(),
+                storage.scheduler_event_rx(),
+            )],
+            LifecyclePolicy::KeepAlive,
+            PanicAfterGrantBackend {
+                publication: None,
+                barrier_entered: barrier_entered_rx,
+                granted: false,
+            },
+        )
+        .unwrap();
+        let (_, mut participant) = participants.into_iter().next().unwrap();
+        let upstream = EnclaveKey::from(1);
+        let (upstream_tx, upstream_rx) = kanal::unbounded();
+        let (_upstream_shutdown_tx, upstream_shutdown_rx) = keepalive::channel();
+        let mut dependencies = EnclaveDependencies::new(EnclaveKey::default());
+        dependencies.add_upstream(
+            upstream,
+            SendContext {
+                enclave_key: upstream,
+                async_tx: upstream_tx,
+                shutdown_rx: upstream_shutdown_rx,
+            },
+            None,
+        );
+
+        std::thread::scope(|scope| {
+            let coordinator_thread = scope.spawn(move || coordinator.run());
+            let barrier_thread = scope.spawn(move || {
+                upstream_rx
+                    .recv_timeout(Duration::from_secs(1))
+                    .expect("scheduler must request its upstream local barrier");
+                barrier_entered_tx
+                    .send(())
+                    .expect("coordinator must await local-barrier entry");
+            });
+            let scheduler_thread = scope.spawn(move || {
+                let result = run_owned_scheduler_with_coordination(
+                    &mut storage,
+                    &Config::default().with_fast_forward(true),
+                    Instant::now(),
+                    dependencies,
+                    Some(&mut participant),
+                );
+                if result.is_ok() {
+                    participant.finish_success().unwrap();
+                }
+                result
+            });
+
+            let coordinator_result = coordinator_thread.join();
+            barrier_thread.join().unwrap();
+            scheduler_thread.join().unwrap().unwrap();
+            let mut failure = None;
+            latch_coordinator_result(&mut failure, coordinator_result);
+            assert!(matches!(
+                failure,
+                Some(ExecuteOwnedFederateError::CoordinatorThreadPanicked { ref message })
+                    if message == "injected coordinator panic"
             ));
         });
     }

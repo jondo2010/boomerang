@@ -623,6 +623,7 @@ impl Scheduler {
             storage: store,
             event_rx,
             federate_coordination: None,
+            federate_shutdown_tag: None,
             events,
             start_time,
             current_tag,

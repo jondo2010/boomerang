@@ -241,6 +241,7 @@ pub(crate) fn run_owned_scheduler_with_coordination(
         storage,
         event_rx: &event_rx,
         federate_coordination,
+        federate_shutdown_tag: None,
         events: &mut events,
         start_time: &mut start_time,
         current_tag: &mut current_tag,
@@ -285,16 +286,16 @@ mod tests {
     use crate::{
         image::{
             ActionImage, ActionSlotIndex, ActionTiming, BindingKind, BindingSlotIndex,
-            EnclaveImage, EnclaveImageView, IdentityRange, ReactionImage, ReactorImage,
-            RequiredBindingImage, ScopeImage, StateSlotIndex, StorageBounds, TableRange,
-            TimerStartupImage,
+            EnclaveImage, EnclaveImageView, IdentityRange, LifecycleReactionImage, ReactionImage,
+            ReactorImage, RequiredBindingImage, ScopeImage, StateSlotIndex, StorageBounds,
+            TableRange, TimerStartupImage,
         },
         keepalive, AsyncEvent, CompiledModeEffectRef, Context, EnclaveBindings,
         FederateCoordinationError, ReactionBindingError, ReactionRefs, SendContext,
     };
 
     use crate::sched::federate::{
-        FederateControlAuthorization, FederateIdleWait, FederateTagAcquisition,
+        FederateControlAuthorization, FederateIdleWait, FederateTagAcquisition, FederateTermination,
     };
 
     /// One observable scheduler-port or compiled-reaction operation.
@@ -302,12 +303,12 @@ mod tests {
     enum Call {
         /// A candidate was invalidated before publication.
         Active,
-        /// The scheduler requested a tag at the recorded physical instant.
-        Acquire(Tag, std::time::Instant),
-        /// The scheduler authorized control-only advancement at the recorded physical instant.
-        Authorize(Tag, std::time::Instant),
+        /// The scheduler requested a tag.
+        Acquire(Tag),
+        /// The scheduler authorized control-only advancement.
+        Authorize(Tag),
         /// The real local barrier requested release from its upstream Enclave.
-        LocalBarrier(Tag, std::time::Instant),
+        LocalBarrier(Tag),
         /// The compiled reaction executed at the recorded physical instant.
         Reaction(Tag, std::time::Instant),
         /// The scheduler entered the idle wait path.
@@ -332,6 +333,9 @@ mod tests {
         waits: VecDeque<FederateIdleWait>,
         /// Control-authorization results returned in request order.
         authorizations: VecDeque<FederateControlAuthorization>,
+        /// Scripted terminal result consumed after the scheduler event channel closes.
+        terminal_after_close:
+            Option<Result<Option<FederateTermination>, FederateCoordinationError>>,
     }
 
     impl FederateSchedulerCoordination for RecordingCoordination {
@@ -351,10 +355,7 @@ mod tests {
             &mut self,
             tag: Tag,
         ) -> Result<FederateTagAcquisition, FederateCoordinationError> {
-            self.calls
-                .lock()
-                .unwrap()
-                .push(Call::Acquire(tag, std::time::Instant::now()));
+            self.calls.lock().unwrap().push(Call::Acquire(tag));
             Ok(self
                 .acquisitions
                 .pop_front()
@@ -366,14 +367,18 @@ mod tests {
             &mut self,
             tag: Tag,
         ) -> Result<FederateControlAuthorization, FederateCoordinationError> {
-            self.calls
-                .lock()
-                .unwrap()
-                .push(Call::Authorize(tag, std::time::Instant::now()));
+            self.calls.lock().unwrap().push(Call::Authorize(tag));
             Ok(self
                 .authorizations
                 .pop_front()
                 .expect("scripted control authorization outcome"))
+        }
+
+        /// Returns the scripted Federate terminal result after scheduler wake-channel closure.
+        fn terminal_after_event_channel_closed(
+            &mut self,
+        ) -> Result<Option<FederateTermination>, FederateCoordinationError> {
+            self.terminal_after_close.take().unwrap_or(Ok(None))
         }
 
         /// Records logical completion.
@@ -487,9 +492,28 @@ mod tests {
         required_bindings: TinyMapView::new(&REQUIRED_BINDINGS),
         storage_bounds: StorageBounds::new(1, 1, 1, 0, 0, 0),
     };
+    /// Shutdown-reaction table for terminal local-barrier coverage.
+    static SHUTDOWN_REACTIONS: [LifecycleReactionImage; 1] = [LifecycleReactionImage::new(
+        LevelReactionImage::new(0, ReactionIndex::new(0)),
+        ActionIndex::new(0),
+    )];
+    /// Compiled fixture whose reaction runs only as graceful shutdown work.
+    static SHUTDOWN_IMAGE: EnclaveImage<'static> = EnclaveImage {
+        shutdown_reactions: &SHUTDOWN_REACTIONS,
+        ..IMAGE
+    };
 
     /// Builds real owned compiled storage with a configurable reaction result.
     fn build_storage(calls: Arc<Mutex<Vec<Call>>>, fail_reaction: bool) -> OwnedStorage<'static> {
+        build_storage_for_image(&IMAGE, calls, fail_reaction)
+    }
+
+    /// Builds real owned storage for a selected compiled test image.
+    fn build_storage_for_image(
+        image: &'static EnclaveImage<'static>,
+        calls: Arc<Mutex<Vec<Call>>>,
+        fail_reaction: bool,
+    ) -> OwnedStorage<'static> {
         let bindings = EnclaveBindings::new()
             .bind_state(BindingSlotIndex::new(0), initialize_state)
             .bind_reaction(
@@ -509,7 +533,7 @@ mod tests {
                     }
                 },
             );
-        OwnedStorage::new(EnclaveImageView::new(&IMAGE).unwrap(), bindings).unwrap()
+        OwnedStorage::new(EnclaveImageView::new(image).unwrap(), bindings).unwrap()
     }
 
     /// Builds a scripted coordination port over one shared call log.
@@ -524,7 +548,271 @@ mod tests {
             acquisitions: acquisitions.into_iter().collect(),
             waits: waits.into_iter().collect(),
             authorizations: authorizations.into_iter().collect(),
+            terminal_after_close: None,
         }
+    }
+
+    #[test]
+    /// Treats a terminal wake-channel close inside a local barrier as a graceful Federate stop.
+    fn terminal_local_barrier_close_stops_without_local_coordination_error() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut storage = build_storage_for_image(&SHUTDOWN_IMAGE, Arc::clone(&calls), false);
+        let upstream = EnclaveKey::from(1);
+        let (upstream_tx, upstream_rx) = kanal::unbounded();
+        let (_upstream_shutdown_tx, upstream_shutdown_rx) = keepalive::channel();
+        let mut dependencies = EnclaveDependencies::new(EnclaveKey::default());
+        dependencies.add_upstream(
+            upstream,
+            SendContext {
+                enclave_key: upstream,
+                async_tx: upstream_tx,
+                shutdown_rx: upstream_shutdown_rx,
+            },
+            None,
+        );
+        let event_tx = storage.scheduler_event_tx();
+        let closer = std::thread::spawn(move || {
+            upstream_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .expect("scheduler must enter the local barrier");
+            event_tx.close().expect("scheduler event channel closes");
+        });
+        let mut port = coordination(
+            Arc::clone(&calls),
+            [FederateTagAcquisition::Granted],
+            [],
+            [],
+        );
+        port.terminal_after_close = Some(Ok(Some(FederateTermination::Graceful { tag: None })));
+
+        run_owned_scheduler_with_coordination(
+            &mut storage,
+            &Config::default().with_fast_forward(true),
+            std::time::Instant::now(),
+            dependencies,
+            Some(&mut port),
+        )
+        .unwrap();
+        closer.join().unwrap();
+        assert!(calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| matches!(call, Call::Reaction(tag, _) if *tag == Tag::ZERO)));
+    }
+
+    #[test]
+    /// Observes closed-channel terminal coordination before entering an idle wait.
+    fn closed_event_channel_observes_terminal_before_idle_wait() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut storage = build_storage_for_image(&SHUTDOWN_IMAGE, Arc::clone(&calls), false);
+        let event_tx = storage.scheduler_event_tx();
+        event_tx.close().unwrap();
+        let mut port = coordination(Arc::clone(&calls), [], [], []);
+        port.terminal_after_close = Some(Ok(Some(FederateTermination::Graceful { tag: None })));
+
+        run_owned_scheduler_with_coordination(
+            &mut storage,
+            &Config::default().with_fast_forward(true),
+            std::time::Instant::now(),
+            EnclaveDependencies::new(EnclaveKey::default()),
+            Some(&mut port),
+        )
+        .unwrap();
+
+        let calls = calls.lock().unwrap();
+        assert!(!calls
+            .iter()
+            .any(|call| matches!(call, Call::Active | Call::Acquire(_))));
+        assert!(calls
+            .iter()
+            .any(|call| matches!(call, Call::Reaction(tag, _) if *tag == Tag::ZERO)));
+    }
+
+    #[test]
+    /// Preserves an authorized logical-horizon tag through local-barrier channel closure.
+    fn terminal_local_barrier_close_preserves_logical_horizon() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut storage = build_storage_for_image(&SHUTDOWN_IMAGE, Arc::clone(&calls), false);
+        let upstream = EnclaveKey::from(1);
+        let (upstream_tx, upstream_rx) = kanal::unbounded();
+        let (_upstream_shutdown_tx, upstream_shutdown_rx) = keepalive::channel();
+        let mut dependencies = EnclaveDependencies::new(EnclaveKey::default());
+        dependencies.add_upstream(
+            upstream,
+            SendContext {
+                enclave_key: upstream,
+                async_tx: upstream_tx,
+                shutdown_rx: upstream_shutdown_rx,
+            },
+            None,
+        );
+        let event_tx = storage.scheduler_event_tx();
+        let closer = std::thread::spawn(move || {
+            upstream_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .expect("scheduler must enter the local barrier");
+            event_tx.close().expect("scheduler event channel closes");
+        });
+        let horizon = Tag::new(Duration::milliseconds(50), 0);
+        let mut port = coordination(
+            Arc::clone(&calls),
+            [FederateTagAcquisition::Granted],
+            [],
+            [],
+        );
+        port.terminal_after_close = Some(Ok(Some(FederateTermination::Graceful {
+            tag: Some(horizon),
+        })));
+
+        run_owned_scheduler_with_coordination(
+            &mut storage,
+            &Config::default().with_fast_forward(true),
+            std::time::Instant::now(),
+            dependencies,
+            Some(&mut port),
+        )
+        .unwrap();
+        closer.join().unwrap();
+        assert!(calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| matches!(call, Call::Reaction(tag, _) if *tag == horizon)));
+    }
+
+    #[test]
+    /// Preserves a queued logical horizon while authorizing local control-only work.
+    fn control_termination_preserves_logical_horizon() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut storage = build_storage_for_image(&SHUTDOWN_IMAGE, Arc::clone(&calls), false);
+        let horizon = Tag::new(Duration::milliseconds(25), 0);
+        storage
+            .scheduler_event_tx()
+            .send(AsyncEvent::provisional(EnclaveKey::from(1), horizon))
+            .unwrap();
+        let mut port = coordination(
+            Arc::clone(&calls),
+            [],
+            [],
+            [FederateControlAuthorization::LogicalHorizon(horizon)],
+        );
+
+        run_owned_scheduler_with_coordination(
+            &mut storage,
+            &Config::default().with_fast_forward(true),
+            std::time::Instant::now(),
+            EnclaveDependencies::new(EnclaveKey::default()),
+            Some(&mut port),
+        )
+        .unwrap();
+        assert!(calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| matches!(call, Call::Reaction(tag, _) if *tag == horizon)));
+    }
+
+    #[test]
+    /// Bypasses shutdown reactions when abort closes a scheduler blocked in a local barrier.
+    fn aborted_local_barrier_close_bypasses_shutdown_reactions() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut storage = build_storage_for_image(&SHUTDOWN_IMAGE, Arc::clone(&calls), false);
+        let upstream = EnclaveKey::from(1);
+        let (upstream_tx, upstream_rx) = kanal::unbounded();
+        let (_upstream_shutdown_tx, upstream_shutdown_rx) = keepalive::channel();
+        let mut dependencies = EnclaveDependencies::new(EnclaveKey::default());
+        dependencies.add_upstream(
+            upstream,
+            SendContext {
+                enclave_key: upstream,
+                async_tx: upstream_tx,
+                shutdown_rx: upstream_shutdown_rx,
+            },
+            None,
+        );
+        let event_tx = storage.scheduler_event_tx();
+        let closer = std::thread::spawn(move || {
+            upstream_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .expect("scheduler must enter the local barrier");
+            event_tx.close().expect("scheduler event channel closes");
+        });
+        let mut port = coordination(
+            Arc::clone(&calls),
+            [FederateTagAcquisition::Granted],
+            [],
+            [],
+        );
+        port.terminal_after_close = Some(Ok(Some(FederateTermination::Abort)));
+
+        run_owned_scheduler_with_coordination(
+            &mut storage,
+            &Config::default().with_fast_forward(true),
+            std::time::Instant::now(),
+            dependencies,
+            Some(&mut port),
+        )
+        .unwrap();
+        closer.join().unwrap();
+        assert!(!calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| matches!(call, Call::Reaction(..))));
+    }
+
+    #[test]
+    /// Preserves a Federate failure when it closes a scheduler blocked in a local barrier.
+    fn terminal_local_barrier_close_preserves_federate_failure() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut storage = build_storage(Arc::clone(&calls), false);
+        let upstream = EnclaveKey::from(1);
+        let (upstream_tx, upstream_rx) = kanal::unbounded();
+        let (_upstream_shutdown_tx, upstream_shutdown_rx) = keepalive::channel();
+        let mut dependencies = EnclaveDependencies::new(EnclaveKey::default());
+        dependencies.add_upstream(
+            upstream,
+            SendContext {
+                enclave_key: upstream,
+                async_tx: upstream_tx,
+                shutdown_rx: upstream_shutdown_rx,
+            },
+            None,
+        );
+        let event_tx = storage.scheduler_event_tx();
+        let closer = std::thread::spawn(move || {
+            upstream_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .expect("scheduler must enter the local barrier");
+            event_tx.close().expect("scheduler event channel closes");
+        });
+        let mut port = coordination(calls, [FederateTagAcquisition::Granted], [], []);
+        port.terminal_after_close = Some(Err(FederateCoordinationError::BackendPublish {
+            message: "injected coordinator failure".to_owned(),
+        }));
+
+        let error = match run_owned_scheduler_with_coordination(
+            &mut storage,
+            &Config::default().with_fast_forward(true),
+            std::time::Instant::now(),
+            dependencies,
+            Some(&mut port),
+        ) {
+            Ok(_) => panic!("the injected Federate failure must be preserved"),
+            Err(error) => error,
+        };
+        closer.join().unwrap();
+        assert!(matches!(
+            error,
+            SchedulerError::FederateFailureReported { source }
+                if matches!(
+                    *source,
+                    SchedulerError::FederateCoordination(
+                        FederateCoordinationError::BackendPublish { ref message }
+                    ) if message == "injected coordinator failure"
+                )
+        ));
     }
 
     #[test]
@@ -534,7 +822,6 @@ mod tests {
         let origin = std::time::Instant::now();
         let control_tag = Tag::new(Duration::milliseconds(25), 0);
         let reaction_tag = Tag::new(Duration::milliseconds(50), 0);
-        let control_target = control_tag.to_logical_time(origin);
         let target = reaction_tag.to_logical_time(origin);
         let mut storage = build_storage(Arc::clone(&calls), false);
         let upstream = EnclaveKey::from(1);
@@ -577,7 +864,7 @@ mod tests {
                 barrier_calls
                     .lock()
                     .unwrap()
-                    .push(Call::LocalBarrier(requested, std::time::Instant::now()));
+                    .push(Call::LocalBarrier(requested));
                 event_tx
                     .send(AsyncEvent::release(upstream, requested))
                     .unwrap();
@@ -609,41 +896,25 @@ mod tests {
         .unwrap();
         event_thread.join().unwrap();
         let observed = calls.lock().unwrap();
-        let acquired_at = observed.iter().find_map(|call| match call {
-            Call::Acquire(tag, at) if *tag == reaction_tag => Some(*at),
-            _ => None,
-        });
         let reacted_at = observed.iter().find_map(|call| match call {
             Call::Reaction(tag, at) if *tag == reaction_tag => Some(*at),
             _ => None,
         });
-        let authorized_at = observed.iter().find_map(|call| match call {
-            Call::Authorize(tag, at) if *tag == control_tag => Some(*at),
-            _ => None,
-        });
-        let control_barrier_at = observed.iter().find_map(|call| match call {
-            Call::LocalBarrier(tag, at) if *tag == control_tag => Some(*at),
-            _ => None,
-        });
-        let reaction_barrier_at = observed.iter().find_map(|call| match call {
-            Call::LocalBarrier(tag, at) if *tag == reaction_tag => Some(*at),
-            _ => None,
-        });
         let authorization = observed
             .iter()
-            .position(|call| matches!(call, Call::Authorize(tag, _) if *tag == control_tag))
+            .position(|call| matches!(call, Call::Authorize(tag) if *tag == control_tag))
             .unwrap();
         let control_barrier = observed
             .iter()
-            .position(|call| matches!(call, Call::LocalBarrier(tag, _) if *tag == control_tag))
+            .position(|call| matches!(call, Call::LocalBarrier(tag) if *tag == control_tag))
             .unwrap();
         let acquisition = observed
             .iter()
-            .position(|call| matches!(call, Call::Acquire(tag, _) if *tag == reaction_tag))
+            .position(|call| matches!(call, Call::Acquire(tag) if *tag == reaction_tag))
             .unwrap();
         let reaction_barrier = observed
             .iter()
-            .position(|call| matches!(call, Call::LocalBarrier(tag, _) if *tag == reaction_tag))
+            .position(|call| matches!(call, Call::LocalBarrier(tag) if *tag == reaction_tag))
             .unwrap();
         let reaction = observed
             .iter()
@@ -662,13 +933,9 @@ mod tests {
         assert!(reaction_barrier < reaction);
         assert!(reaction < completion);
         assert!(completion < stopped);
-        assert!(authorized_at.unwrap() < control_target);
-        assert!(control_barrier_at.unwrap() < control_target);
-        assert!(reaction_barrier_at.unwrap() < target);
         assert!(!observed
             .iter()
-            .any(|call| matches!(call, Call::Acquire(tag, _) if *tag == control_tag)));
-        assert!(acquired_at.unwrap() < target);
+            .any(|call| matches!(call, Call::Acquire(tag) if *tag == control_tag)));
         assert!(reacted_at.unwrap() >= target);
         assert!(observed.iter().any(|call| matches!(call, Call::Wait)));
         assert!(observed
@@ -698,7 +965,7 @@ mod tests {
             Some(&mut port),
         )
         .unwrap();
-        assert_eq!(outcome.stats.processed_tags(), 1);
+        assert_eq!(outcome.stats.processed_tags(), 2);
         let observed = calls.lock().unwrap();
         assert!(!observed
             .iter()

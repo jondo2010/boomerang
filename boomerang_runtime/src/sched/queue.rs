@@ -199,11 +199,15 @@ impl<K: tinymap::Key, A: Copy + PartialEq> EventQueue<K, A> {
         self.event_queue.peek().map(|event| event.tag)
     }
 
-    /// Returns whether the next event contains only provisional local-barrier control work.
+    /// Returns whether every event at the next tag contains only provisional control work.
     pub(crate) fn peek_is_control_only(&self) -> bool {
+        let Some(tag) = self.peek_tag() else {
+            return false;
+        };
         self.event_queue
-            .peek()
-            .is_some_and(|event| event.control_only)
+            .iter()
+            .filter(|event| event.tag == tag)
+            .all(|event| event.control_only)
     }
 
     /// If the event queue still has events on it, report that.
@@ -355,6 +359,26 @@ mod tests {
         queue.push_control_event(terminal_tag);
         assert!(queue.peek_is_control_only());
         queue.push_event(terminal_tag, std::iter::empty(), true);
+        assert!(!queue.peek_is_control_only());
+    }
+
+    /// Verifies an earlier heap head cannot hide executable work at the next tag.
+    #[test]
+    fn mixed_minimum_tag_entries_require_coordination() {
+        let mut queue = EventQueue::<DefaultKey, u8>::new(ReactionSetLimits {
+            max_level: Level::from(0),
+            num_keys: 1,
+        });
+        let earlier = Tag::new(Duration::seconds(1), 0);
+        let future = earlier.delay(Duration::seconds(1));
+        let reaction = DefaultKey::from(0);
+
+        queue.push_event(earlier, std::iter::empty(), false);
+        queue.push_control_event(future);
+        queue.push_event(future, [(Level::from(0), reaction)], false);
+
+        assert_eq!(queue.pop_next_event(&mut Vec::new()).unwrap().tag, earlier);
+        assert_eq!(queue.peek_tag(), Some(future));
         assert!(!queue.peek_is_control_only());
     }
 }

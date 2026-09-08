@@ -15,6 +15,6 @@ pub(crate) use dependencies::EnclaveDependencies;
 pub(crate) use orchestration::{
     EnclaveCoordinationPort, FederateAbortHandle, FederateControlAuthorization,
     FederateCoordinationParts, FederateCoordinator, FederateIdleWait,
-    FederateSchedulerCoordination, FederateTagAcquisition,
+    FederateSchedulerCoordination, FederateTagAcquisition, FederateTermination,
 };
 pub(crate) use state::LifecyclePolicy;

@@ -25,6 +25,18 @@ fn revises_candidate(event: &AsyncEvent) -> bool {
     )
 }
 
+/// Terminal coordinator reason consumed by a scheduler wake path.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FederateTermination {
+    /// Successful Federate termination permits local shutdown lifecycle work.
+    Graceful {
+        /// Exact logical horizon for shutdown, or the scheduler's next tag for ordinary stop.
+        tag: Option<Tag>,
+    },
+    /// Federate failure requires immediate exit without shutdown lifecycle work.
+    Abort,
+}
+
 /// Result of blocking while a compiled scheduler has no local candidate.
 #[derive(Debug)]
 pub(crate) enum FederateIdleWait {
@@ -34,6 +46,8 @@ pub(crate) enum FederateIdleWait {
     LogicalHorizon(Tag),
     /// Federate coordination terminated without granting scheduler work.
     Stopped,
+    /// Federate coordination aborted after a participant or backend failure.
+    Aborted,
 }
 
 /// Result of requesting permission to process one compiled scheduler tag.
@@ -47,6 +61,8 @@ pub(crate) enum FederateTagAcquisition {
     LogicalHorizon(Tag),
     /// Federate coordination terminated without granting the requested tag.
     Stopped,
+    /// Federate coordination aborted after a participant or backend failure.
+    Aborted,
 }
 
 /// Result of waiting for a Federate horizon that authorizes local control advancement.
@@ -56,8 +72,12 @@ pub(crate) enum FederateControlAuthorization {
     Authorized,
     /// An asynchronous scheduler event must be handled before retrying authorization.
     Interrupted(AsyncEvent),
+    /// Federate coordination ended at the exact shared logical horizon.
+    LogicalHorizon(Tag),
     /// Federate stop or failure forbids further logical advancement.
     Stopped,
+    /// Federate failure requires immediate scheduler exit.
+    Aborted,
 }
 
 /// Scheduler-facing coordination port without a backend or transport type.
@@ -81,8 +101,10 @@ pub(crate) trait FederateSchedulerCoordination {
     ) -> Result<FederateControlAuthorization, FederateCoordinationError>;
 
     /// Consumes a queued terminal command after the coordinator closes the scheduler event queue.
-    fn terminal_after_event_channel_closed(&mut self) -> Result<bool, FederateCoordinationError> {
-        Ok(false)
+    fn terminal_after_event_channel_closed(
+        &mut self,
+    ) -> Result<Option<FederateTermination>, FederateCoordinationError> {
+        Ok(None)
     }
 
     /// Reports completion of one processed logical tag.
@@ -241,9 +263,8 @@ impl<B: FederateCoordinationBackend> FederateCoordinator<B> {
             CoordinatorReport::LogicalHorizon { enclave, tag } => {
                 self.require_participant(enclave)?;
                 let _ = self.state.stop();
-                let backend_result = self.backend.stop();
+                self.backend.stop()?;
                 self.send_available(ParticipantCommand::LogicalHorizon(tag));
-                backend_result?;
                 Ok(true)
             }
         }
@@ -289,9 +310,8 @@ impl<B: FederateCoordinationBackend> FederateCoordinator<B> {
                     self.send_available(ParticipantCommand::Action(action));
                 }
                 action @ (CoordinationAction::Stop | CoordinationAction::Abort) => {
-                    let backend_result = self.backend.stop();
+                    self.backend.stop()?;
                     self.terminate_available(ParticipantCommand::Action(action));
-                    backend_result?;
                     return Ok(true);
                 }
             }
@@ -363,6 +383,25 @@ impl<B: FederateCoordinationBackend> FederateCoordinator<B> {
     }
 }
 
+/// Wakes every still-live scheduler if coordinator ownership ends, including during unwinding.
+///
+/// A terminal command queued by the normal run path remains first in each FIFO; this fallback Abort
+/// is observed only when coordinator ownership ends before a graceful command is available.
+impl<B: FederateCoordinationBackend> Drop for FederateCoordinator<B> {
+    fn drop(&mut self) {
+        for (enclave, sender) in self.commands.iter() {
+            if sender
+                .send(ParticipantCommand::Action(CoordinationAction::Abort))
+                .is_ok()
+            {
+                if let Some(event) = self.events.get(enclave) {
+                    let _ = event.close();
+                }
+            }
+        }
+    }
+}
+
 /// Per-scheduler channel adapter moved into exactly one scheduler thread.
 ///
 /// The stored compiled Enclave identity keeps its channel traffic associated with that scheduler.
@@ -383,8 +422,10 @@ pub(crate) struct EnclaveCoordinationPort {
     grant_horizon: Option<Tag>,
     /// First report-channel error produced by an infallible compatibility method.
     deferred_error: Option<FederateCoordinationError>,
-    /// Whether this participant observed terminal coordinator release.
-    terminal: bool,
+    /// Whether successful terminal processing awaits coordinator acknowledgement.
+    stop_reported: bool,
+    /// Terminal coordinator reason observed by this participant, if any.
+    termination: Option<FederateTermination>,
 }
 
 impl EnclaveCoordinationPort {
@@ -402,37 +443,58 @@ impl EnclaveCoordinationPort {
             }
             ParticipantCommand::LogicalHorizon(tag) => {
                 self.logical_horizon = Some(tag);
-                self.terminal = true;
+                self.termination = Some(FederateTermination::Graceful { tag: Some(tag) });
                 true
             }
-            ParticipantCommand::Action(CoordinationAction::Stop | CoordinationAction::Abort) => {
-                self.terminal = true;
+            ParticipantCommand::Action(CoordinationAction::Stop) => {
+                self.termination = Some(FederateTermination::Graceful { tag: None });
+                true
+            }
+            ParticipantCommand::Action(CoordinationAction::Abort) => {
+                self.termination = Some(FederateTermination::Abort);
                 true
             }
             ParticipantCommand::Action(_) => false,
         }
     }
 
+    /// Maps the retained terminal reason into the control-authorization outcome.
+    fn terminal_authorization(&self) -> FederateControlAuthorization {
+        match self.termination {
+            Some(FederateTermination::Graceful { tag: Some(tag) }) => {
+                FederateControlAuthorization::LogicalHorizon(tag)
+            }
+            Some(FederateTermination::Graceful { tag: None }) => {
+                FederateControlAuthorization::Stopped
+            }
+            Some(FederateTermination::Abort) => FederateControlAuthorization::Aborted,
+            None => unreachable!("terminal authorization requires a terminal reason"),
+        }
+    }
+
     /// Publishes successful terminal idleness and remains available for fixed-point commands.
     pub(crate) fn finish_success(&mut self) -> Result<(), FederateCoordinationError> {
         self.take_deferred_error()?;
-        while !self.terminal {
+        while self.termination.is_none() {
             match FederateSchedulerCoordination::wait(self)? {
                 FederateIdleWait::Interrupted(_) => {}
                 FederateIdleWait::LogicalHorizon(_) => {}
-                FederateIdleWait::Stopped => break,
+                FederateIdleWait::Stopped | FederateIdleWait::Aborted => break,
             }
         }
         Ok(())
     }
 
-    /// Sends one participant report or returns a typed channel error.
+    /// Sends one report, accepting disconnect only after the terminal wake channel closes.
     fn report(&self, report: CoordinatorReport) -> Result<(), FederateCoordinationError> {
-        self.report_tx.send(report).map_err(|_| {
+        if self.report_tx.send(report).is_ok() || self.event_rx.is_closed() {
+            return Ok(());
+        }
+        Err(
             FederateCoordinationError::CoordinatorReportChannelDisconnected {
                 enclave: Some(self.enclave),
-            }
-        })
+            },
+        )
     }
 
     /// Retains a channel error produced by a trait method whose approved signature is infallible.
@@ -484,10 +546,12 @@ impl FederateSchedulerCoordination for EnclaveCoordinationPort {
     fn wait(&mut self) -> Result<FederateIdleWait, FederateCoordinationError> {
         self.take_deferred_error()?;
         self.parked_revision = None;
-        self.report(CoordinatorReport::Scheduler(SchedulerMessage::Publish {
-            enclave: self.enclave,
-            next_event: None,
-        }))?;
+        if !self.stop_reported {
+            self.report(CoordinatorReport::Scheduler(SchedulerMessage::Publish {
+                enclave: self.enclave,
+                next_event: None,
+            }))?;
+        }
 
         loop {
             if let Some(event) = self.take_active_event()? {
@@ -523,14 +587,16 @@ impl FederateSchedulerCoordination for EnclaveCoordinationPort {
                 }
                 Ok(ParticipantCommand::LogicalHorizon(tag)) => {
                     self.logical_horizon = Some(tag);
-                    self.terminal = true;
+                    self.termination = Some(FederateTermination::Graceful { tag: Some(tag) });
                     return Ok(FederateIdleWait::LogicalHorizon(tag));
                 }
-                Ok(ParticipantCommand::Action(
-                    CoordinationAction::Stop | CoordinationAction::Abort,
-                )) => {
-                    self.terminal = true;
+                Ok(ParticipantCommand::Action(CoordinationAction::Stop)) => {
+                    self.termination = Some(FederateTermination::Graceful { tag: None });
                     return Ok(FederateIdleWait::Stopped);
+                }
+                Ok(ParticipantCommand::Action(CoordinationAction::Abort)) => {
+                    self.termination = Some(FederateTermination::Abort);
+                    return Ok(FederateIdleWait::Aborted);
                 }
                 Ok(ParticipantCommand::Action(_)) => {}
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -571,14 +637,16 @@ impl FederateSchedulerCoordination for EnclaveCoordinationPort {
                 }
                 Ok(ParticipantCommand::LogicalHorizon(tag)) => {
                     self.logical_horizon = Some(tag);
-                    self.terminal = true;
+                    self.termination = Some(FederateTermination::Graceful { tag: Some(tag) });
                     return Ok(FederateTagAcquisition::LogicalHorizon(tag));
                 }
-                Ok(ParticipantCommand::Action(
-                    CoordinationAction::Stop | CoordinationAction::Abort,
-                )) => {
-                    self.terminal = true;
+                Ok(ParticipantCommand::Action(CoordinationAction::Stop)) => {
+                    self.termination = Some(FederateTermination::Graceful { tag: None });
                     return Ok(FederateTagAcquisition::Stopped);
+                }
+                Ok(ParticipantCommand::Action(CoordinationAction::Abort)) => {
+                    self.termination = Some(FederateTermination::Abort);
+                    return Ok(FederateTagAcquisition::Aborted);
                 }
                 Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -598,20 +666,20 @@ impl FederateSchedulerCoordination for EnclaveCoordinationPort {
         tag: Tag,
     ) -> Result<FederateControlAuthorization, FederateCoordinationError> {
         self.take_deferred_error()?;
-        if self.terminal {
-            return Ok(FederateControlAuthorization::Stopped);
+        if self.termination.is_some() {
+            return Ok(self.terminal_authorization());
         }
 
         loop {
             loop {
                 match self.command_rx.try_recv() {
                     Ok(command) if self.apply_control_command(command) => {
-                        return Ok(FederateControlAuthorization::Stopped);
+                        return Ok(self.terminal_authorization());
                     }
                     Ok(_) => {}
                     Err(mpsc::TryRecvError::Empty) => break,
                     Err(mpsc::TryRecvError::Disconnected) => {
-                        self.terminal = true;
+                        self.termination = Some(FederateTermination::Graceful { tag: None });
                         return Ok(FederateControlAuthorization::Stopped);
                     }
                 }
@@ -624,11 +692,11 @@ impl FederateSchedulerCoordination for EnclaveCoordinationPort {
             }
             match self.command_rx.recv_timeout(StdDuration::from_millis(1)) {
                 Ok(command) if self.apply_control_command(command) => {
-                    return Ok(FederateControlAuthorization::Stopped);
+                    return Ok(self.terminal_authorization());
                 }
                 Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    self.terminal = true;
+                    self.termination = Some(FederateTermination::Graceful { tag: None });
                     return Ok(FederateControlAuthorization::Stopped);
                 }
             }
@@ -636,13 +704,15 @@ impl FederateSchedulerCoordination for EnclaveCoordinationPort {
     }
 
     /// Drains already-queued commands until the terminal command that precedes event closure.
-    fn terminal_after_event_channel_closed(&mut self) -> Result<bool, FederateCoordinationError> {
+    fn terminal_after_event_channel_closed(
+        &mut self,
+    ) -> Result<Option<FederateTermination>, FederateCoordinationError> {
         self.take_deferred_error()?;
         loop {
             match self.command_rx.try_recv() {
-                Ok(command) if self.apply_control_command(command) => return Ok(true),
+                Ok(command) if self.apply_control_command(command) => return Ok(self.termination),
                 Ok(_) => {}
-                Err(mpsc::TryRecvError::Empty) => return Ok(false),
+                Err(mpsc::TryRecvError::Empty) => return Ok(None),
                 Err(mpsc::TryRecvError::Disconnected) => {
                     return Err(
                         FederateCoordinationError::ParticipantCommandChannelDisconnected {
@@ -671,7 +741,7 @@ impl FederateSchedulerCoordination for EnclaveCoordinationPort {
             return;
         }
         self.logical_horizon = Some(tag);
-        self.terminal = true;
+        self.termination = Some(FederateTermination::Graceful { tag: Some(tag) });
         self.report_infallible(CoordinatorReport::LogicalHorizon {
             enclave: self.enclave,
             tag,
@@ -680,10 +750,10 @@ impl FederateSchedulerCoordination for EnclaveCoordinationPort {
 
     /// Reports successful terminal processing through the pure coordination state.
     fn participant_stopped(&mut self) {
-        if self.terminal {
+        if self.termination.is_some() || self.stop_reported {
             return;
         }
-        self.terminal = true;
+        self.stop_reported = true;
         self.report_infallible(CoordinatorReport::Scheduler(
             SchedulerMessage::ParticipantStopped {
                 enclave: self.enclave,
@@ -764,7 +834,8 @@ impl<B: FederateCoordinationBackend> FederateCoordinationParts<B> {
                     logical_horizon: None,
                     grant_horizon: None,
                     deferred_error: None,
-                    terminal: false,
+                    stop_reported: false,
+                    termination: None,
                 },
             );
         }
@@ -796,8 +867,8 @@ mod tests {
     use super::{
         CoordinationAction, CoordinationStateError, CoordinatorReport, EnclaveCoordinationPort,
         FederateControlAuthorization, FederateCoordinationParts, FederateIdleWait,
-        FederateSchedulerCoordination, FederateTagAcquisition, Observation, ParticipantCommand,
-        SchedulerMessage,
+        FederateSchedulerCoordination, FederateTagAcquisition, FederateTermination, Observation,
+        ParticipantCommand, SchedulerMessage,
     };
     use crate::{
         image::EnclaveIndex,
@@ -950,6 +1021,42 @@ mod tests {
         }
     }
 
+    /// Backend that accepts coordination until terminal cleanup fails.
+    struct StopFailingBackend;
+
+    impl FederateCoordinationBackend for StopFailingBackend {
+        /// Accepts the aggregate publication that drives terminal coordination.
+        fn publish(
+            &mut self,
+            _publication: FederatePublication,
+        ) -> Result<(), FederateCoordinationError> {
+            Ok(())
+        }
+
+        /// Supplies no acquisition because terminal tests publish no finite candidate.
+        fn progress(
+            &mut self,
+            _timeout: StdDuration,
+        ) -> Result<Option<FederateAcquisition>, FederateCoordinationError> {
+            Ok(None)
+        }
+
+        /// Accepts completion because terminal tests do not process logical work.
+        fn complete(
+            &mut self,
+            _completion: FederateCompletion,
+        ) -> Result<(), FederateCoordinationError> {
+            Ok(())
+        }
+
+        /// Rejects terminal cleanup so participants must observe abortion, not graceful stop.
+        fn stop(&mut self) -> Result<(), FederateCoordinationError> {
+            Err(FederateCoordinationError::BackendStop {
+                message: "terminal cleanup rejected".to_owned(),
+            })
+        }
+    }
+
     /// Builds one participant directly for deterministic channel-disconnection tests.
     fn participant(
         enclave: EnclaveIndex,
@@ -975,7 +1082,8 @@ mod tests {
             logical_horizon: None,
             grant_horizon: None,
             deferred_error: None,
-            terminal: false,
+            stop_reported: false,
+            termination: None,
         };
         (participant, event_tx)
     }
@@ -1046,6 +1154,12 @@ mod tests {
             ParticipantCommand::Action(CoordinationAction::Abort),
             ParticipantCommand::LogicalHorizon(requested),
         ] {
+            let expects_abort = matches!(
+                terminal,
+                ParticipantCommand::Action(CoordinationAction::Abort)
+            );
+            let expects_horizon =
+                matches!(terminal, ParticipantCommand::LogicalHorizon(tag) if tag == requested);
             let (report_tx, _report_rx) = mpsc::channel();
             let (command_tx, command_rx) = mpsc::channel();
             let mut participant = participant(enclave, report_tx, command_rx);
@@ -1065,10 +1179,17 @@ mod tests {
                 ))
                 .unwrap();
             command_tx.send(terminal).unwrap();
-            assert!(matches!(
-                participant.authorize_control(requested).unwrap(),
-                FederateControlAuthorization::Stopped
-            ));
+            let authorization = participant.authorize_control(requested).unwrap();
+            let matches_terminal = match authorization {
+                FederateControlAuthorization::Aborted => expects_abort,
+                FederateControlAuthorization::LogicalHorizon(tag) => {
+                    expects_horizon && tag == requested
+                }
+                FederateControlAuthorization::Stopped => !expects_abort && !expects_horizon,
+                FederateControlAuthorization::Authorized
+                | FederateControlAuthorization::Interrupted(_) => false,
+            };
+            assert!(matches_terminal);
         }
     }
 
@@ -1126,7 +1247,7 @@ mod tests {
         let (report_tx, report_rx) = mpsc::channel();
         let (_command_tx, command_rx) = mpsc::channel();
         drop(report_rx);
-        let participant = participant(enclave, report_tx, command_rx);
+        let (participant, _event_tx) = participant_with_events(enclave, report_tx, command_rx);
 
         assert_eq!(
             participant
@@ -1177,7 +1298,7 @@ mod tests {
             let coordinator = scope.spawn(move || coordinator.run());
             assert!(matches!(
                 participant.wait().unwrap(),
-                FederateIdleWait::Stopped
+                FederateIdleWait::Aborted
             ));
             assert_eq!(
                 coordinator.join().unwrap().unwrap_err(),
@@ -1186,6 +1307,70 @@ mod tests {
                 }
             );
         });
+    }
+
+    /// Verifies failed backend cleanup aborts an otherwise graceful idle stop.
+    #[test]
+    fn backend_stop_failure_precedes_graceful_idle_stop() {
+        let enclave = EnclaveIndex::new(3);
+        let (event_tx, event_rx) = kanal::unbounded();
+        let FederateCoordinationParts {
+            coordinator,
+            participants,
+            ..
+        } = FederateCoordinationParts::new(
+            [(enclave, event_tx, event_rx)],
+            LifecyclePolicy::TerminateWhenIdle,
+            StopFailingBackend,
+        )
+        .unwrap();
+        let (_, mut participant) = participants.into_iter().next().unwrap();
+
+        std::thread::scope(|scope| {
+            let coordinator = scope.spawn(move || coordinator.run());
+            assert!(matches!(
+                participant.wait().unwrap(),
+                FederateIdleWait::Aborted
+            ));
+            assert_eq!(
+                coordinator.join().unwrap().unwrap_err(),
+                FederateCoordinationError::BackendStop {
+                    message: "terminal cleanup rejected".to_owned(),
+                }
+            );
+        });
+    }
+
+    /// Verifies failed backend cleanup aborts before a logical-horizon command is exposed.
+    #[test]
+    fn backend_stop_failure_precedes_graceful_logical_horizon() {
+        let enclave = EnclaveIndex::new(3);
+        let (event_tx, event_rx) = kanal::unbounded();
+        let FederateCoordinationParts {
+            coordinator,
+            participants,
+            ..
+        } = FederateCoordinationParts::new(
+            [(enclave, event_tx, event_rx)],
+            LifecyclePolicy::KeepAlive,
+            StopFailingBackend,
+        )
+        .unwrap();
+        let (_, mut participant) = participants.into_iter().next().unwrap();
+        let horizon = Tag::new(Duration::seconds(1), 0);
+
+        participant.logical_horizon_reached(horizon);
+        let coordinator_error = coordinator.run().unwrap_err();
+        assert_eq!(
+            coordinator_error,
+            FederateCoordinationError::BackendStop {
+                message: "terminal cleanup rejected".to_owned(),
+            }
+        );
+        assert_eq!(
+            participant.terminal_after_event_channel_closed().unwrap(),
+            Some(FederateTermination::Abort)
+        );
     }
 
     /// Verifies successful scheduler finalization remains present for fixed-point commands.
@@ -1206,18 +1391,31 @@ mod tests {
         .unwrap();
         let (participant_enclave, mut participant) = participants.into_iter().next().unwrap();
         assert_eq!(participant_enclave, enclave);
+        participant.participant_stopped();
+        assert!(participant.termination.is_none());
 
-        std::thread::scope(|scope| {
-            let coordinator = scope.spawn(move || coordinator.run());
-            let participant = scope.spawn(move || participant.finish_success());
-            participant.join().unwrap().unwrap();
-            coordinator.join().unwrap().unwrap();
-        });
+        coordinator.run().unwrap();
+        participant.finish_success().unwrap();
 
-        assert_eq!(
-            call_rx.into_iter().collect::<Vec<_>>(),
-            [BackendCall::Publish { next_event: None }, BackendCall::Stop,]
-        );
+        assert_eq!(call_rx.into_iter().collect::<Vec<_>>(), [BackendCall::Stop]);
+    }
+
+    /// Verifies a queued terminal acknowledgement wins a late report disconnection.
+    #[test]
+    fn queued_stop_acknowledgement_wins_late_report_disconnection() {
+        let enclave = EnclaveIndex::new(3);
+        let (report_tx, report_rx) = mpsc::channel();
+        let (command_tx, command_rx) = mpsc::channel();
+        let (mut participant, event_tx) = participant_with_events(enclave, report_tx, command_rx);
+        command_tx
+            .send(ParticipantCommand::Action(CoordinationAction::Stop))
+            .unwrap();
+        event_tx.close().unwrap();
+        drop(report_rx);
+
+        participant.participant_stopped();
+
+        participant.finish_success().unwrap();
     }
 
     /// Verifies failed participant cleanup never publishes successful terminal idleness.
@@ -1404,7 +1602,7 @@ mod tests {
             eventful_thread.join().unwrap();
             assert!(matches!(
                 peer_thread.join().unwrap().unwrap(),
-                FederateIdleWait::Stopped
+                FederateIdleWait::Aborted
             ));
             coordinator.join().unwrap().unwrap();
             assert!(

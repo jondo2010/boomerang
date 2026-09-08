@@ -285,6 +285,116 @@ impl<'a> FederateImageView<'a> {
     }
 }
 
+/// A validated borrowed view of one immutable Federate slice.
+#[derive(Debug)]
+pub struct FederateSliceView<'a> {
+    /// Validated immutable slice backing this view.
+    image: FederateSliceImage<'a>,
+}
+
+impl<'a> FederateSliceView<'a> {
+    /// Validates `image` and borrows its selected Federate hierarchy.
+    pub fn new(image: &FederateSliceImage<'a>) -> Result<Self, ImageValidationError<'a>> {
+        let federate = image.image();
+        let index = image.federate().as_u32();
+        if federate.enclaves().len() as usize != image.enclaves().len() {
+            return Err(ImageValidationError::OwnershipMismatch {
+                table: "federates",
+                index,
+                field: "enclaves",
+            });
+        }
+        let id = identity_slice(
+            image.identity_data(),
+            "federates",
+            index,
+            "id",
+            federate.id(),
+        )?;
+        if !valid_id(id) {
+            return Err(ImageValidationError::InvalidStableId {
+                kind: "federate",
+                index,
+                id,
+            });
+        }
+        for (field, range) in [
+            ("target", federate.target()),
+            ("runtime", federate.runtime()),
+        ] {
+            let value = identity_slice(image.identity_data(), "federates", index, field, range)?;
+            if !valid_id(value) {
+                return Err(ImageValidationError::InvalidStableId {
+                    kind: field,
+                    index,
+                    id: value,
+                });
+            }
+        }
+        for enclave in image.enclaves() {
+            EnclaveImageView::new(enclave)?;
+        }
+        Ok(Self { image: *image })
+    }
+
+    /// Returns the selected deployment-wide Federate index.
+    #[must_use]
+    pub const fn federate(&self) -> FederateIndex {
+        self.image.federate()
+    }
+
+    /// Returns the stable Federate identity.
+    #[must_use]
+    pub fn id(&self) -> FederateId<'a> {
+        FederateId::new(identity_slice_unchecked(
+            self.image.identity_data(),
+            self.image.image().id(),
+        ))
+    }
+
+    /// Returns the configured compilation target.
+    #[must_use]
+    pub fn target(&self) -> TargetId<'a> {
+        TargetId::new(identity_slice_unchecked(
+            self.image.identity_data(),
+            self.image.image().target(),
+        ))
+    }
+
+    /// Returns the configured runtime backend.
+    #[must_use]
+    pub fn runtime(&self) -> RuntimeBackendId<'a> {
+        RuntimeBackendId::new(identity_slice_unchecked(
+            self.image.identity_data(),
+            self.image.image().runtime(),
+        ))
+    }
+
+    /// Returns the preserved deployment-wide Enclave ownership range.
+    #[must_use]
+    pub const fn enclaves(&self) -> TableRange<EnclaveIndex> {
+        self.image.image().enclaves()
+    }
+
+    /// Iterates validated local Enclave views with their deployment-wide keys.
+    pub fn enclave_views(
+        &self,
+    ) -> impl ExactSizeIterator<Item = (EnclaveIndex, EnclaveImageView<'a>)> + 'a {
+        let start = self.enclaves().start();
+        self.image
+            .enclaves()
+            .iter()
+            .enumerate()
+            .map(move |(offset, image)| {
+                let offset = u32::try_from(offset).expect("slice length is bounded by TableRange");
+                (
+                    EnclaveIndex::new(start + offset),
+                    EnclaveImageView::validated(image),
+                )
+            })
+    }
+}
+
 /// A validated, allocation-free borrowed view of one Enclave image.
 #[derive(Debug)]
 pub struct EnclaveImageView<'a> {
@@ -2167,6 +2277,51 @@ mod tests {
         assert_eq!(federate.id().as_str(), "host");
         assert_eq!(federate.enclaves(), TableRange::new(0, 2));
         assert_eq!(federate.enclave_views().count(), 2);
+    }
+
+    /// Preserves external Enclave keys while validating local slice ownership.
+    #[test]
+    fn federate_slice_preserves_deployment_enclave_keys_and_rejects_wrong_length() {
+        let federate = FederateImage::new(
+            IdentityRange::new(0, 4),
+            IdentityRange::new(4, 25),
+            IdentityRange::new(29, 6),
+            TableRange::new(2, 2),
+        );
+        let slice = FederateSliceImage::new(
+            FederateIndex::new(1),
+            DEPLOYMENT_IDENTITIES,
+            federate,
+            &ENCLAVES,
+        );
+
+        let view = FederateSliceView::new(&slice).unwrap();
+        assert_eq!(view.federate(), FederateIndex::new(1));
+        assert_eq!(view.enclaves(), TableRange::new(2, 2));
+        assert_eq!(
+            view.enclave_views().map(|(key, _)| key).collect::<Vec<_>>(),
+            vec![EnclaveIndex::new(2), EnclaveIndex::new(3)]
+        );
+
+        let wrong_length = FederateSliceImage::new(
+            FederateIndex::new(1),
+            DEPLOYMENT_IDENTITIES,
+            FederateImage::new(
+                IdentityRange::new(0, 4),
+                IdentityRange::new(4, 25),
+                IdentityRange::new(29, 6),
+                TableRange::new(2, 1),
+            ),
+            &ENCLAVES,
+        );
+        assert!(matches!(
+            FederateSliceView::new(&wrong_length),
+            Err(ImageValidationError::OwnershipMismatch {
+                table: "federates",
+                index: 1,
+                field: "enclaves",
+            })
+        ));
     }
 
     #[test]

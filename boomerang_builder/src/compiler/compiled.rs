@@ -5,11 +5,11 @@ use super::{
 use crate::descriptor::{ActionSlotId, PortSlotId, ReactionSlotId, ReactorSlotId};
 use crate::runtime::image::{
     ActionImage, ActionIndex, BindingKind, BindingSlotIndex, EnclaveImage, EnclaveImageView,
-    FederateImage, FederateIndex, GlobalFederationImage as BorrowedGlobalFederationImage,
-    IdentityRange, ImageValidationError, LevelReactionImage, LifecycleReactionImage, ModeImage,
-    ModeIndex, PortImage, PortIndex, ReactionImage, ReactionIndex, ReactorImage, ReactorIndex,
-    RequiredBindingImage, RouteImage, RouteIndex, ScopeImage, ScopeIndex, StorageBounds,
-    TimerStartupImage,
+    FederateImage, FederateIndex, FederateSliceImage, FederateSliceView,
+    GlobalFederationImage as BorrowedGlobalFederationImage, IdentityRange, ImageValidationError,
+    LevelReactionImage, LifecycleReactionImage, ModeImage, ModeIndex, PortImage, PortIndex,
+    ReactionImage, ReactionIndex, ReactorImage, ReactorIndex, RequiredBindingImage, RouteImage,
+    RouteIndex, ScopeImage, ScopeIndex, StorageBounds, TimerStartupImage,
 };
 use tinymap::{TableRange, TinyMap, TinyMapView};
 
@@ -293,6 +293,80 @@ pub struct OwnedCompiledDeployment {
     pub(crate) coordination: OwnedCoordinationProjection,
 }
 
+/// An owned immutable image projection for one deployment-wide Federate.
+#[derive(Debug)]
+pub struct OwnedFederateSlice {
+    /// Deployment-wide dense identity of the selected Federate.
+    federate: FederateIndex,
+    /// Root-format UTF-8 storage that preserves the selected record's identity ranges.
+    identity_data: Box<str>,
+    /// Unchanged Federate ownership record reconstructed from the complete root image.
+    image: FederateImage,
+    /// Selected Enclave images copied from the complete root image.
+    enclaves: Box<[OwnedEnclaveImage]>,
+}
+
+/// A failure while projecting one Federate from an owned compiled deployment.
+#[derive(Debug, Eq, PartialEq, thiserror::Error)]
+pub enum FederateSliceError {
+    /// The requested dense Federate key is outside the complete deployment image.
+    #[error("compiled Federate {federate:?} does not exist")]
+    FederateNotFound {
+        /// Requested deployment-wide Federate identity.
+        federate: FederateIndex,
+    },
+    /// Root-format slice metadata exceeds the runtime image's representable domain.
+    #[error(transparent)]
+    ImageValidation(#[from] ImageValidationError<'static>),
+}
+
+impl OwnedFederateSlice {
+    /// Returns the selected deployment-wide Federate index.
+    #[must_use]
+    pub const fn federate(&self) -> FederateIndex {
+        self.federate
+    }
+
+    /// Returns selected owned Enclave images in canonical identity order.
+    #[must_use]
+    pub fn enclaves(&self) -> &[OwnedEnclaveImage] {
+        &self.enclaves
+    }
+
+    /// Materializes the target-facing borrowed image during `f`.
+    ///
+    /// The callback keeps temporary borrowed Enclave rows alive without requiring a
+    /// self-referential owned cache.
+    pub fn with_image<T>(&self, f: impl FnOnce(FederateSliceImage<'_>) -> T) -> T {
+        let enclaves = self
+            .enclaves
+            .iter()
+            .map(OwnedEnclaveImage::image)
+            .collect::<Box<[_]>>();
+        f(FederateSliceImage::new(
+            self.federate,
+            &self.identity_data,
+            self.image,
+            &enclaves,
+        ))
+    }
+
+    /// Validates and exposes the target-facing borrowed view during `f`.
+    pub fn with_view<T>(
+        &self,
+        f: impl FnOnce(FederateSliceView<'_>) -> T,
+    ) -> Result<T, ImageValidationError<'_>> {
+        for enclave in &self.enclaves {
+            enclave.view()?;
+        }
+        Ok(self.with_image(|image| {
+            let view = FederateSliceView::new(&image)
+                .expect("owned Federate slice preserves validated root metadata");
+            f(view)
+        }))
+    }
+}
+
 /// An owned validation failure for a host-backed compiled deployment.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 #[error("invalid compiled deployment image: {message}")]
@@ -323,6 +397,60 @@ impl OwnedCompiledDeployment {
     /// Returns the selected coordination projection.
     pub fn coordination(&self) -> crate::runtime::image::CoordinationProjection<'_> {
         self.coordination.image()
+    }
+
+    /// Copies one Federate's Enclaves into an immutable deployment-slice projection.
+    ///
+    /// The selected [`FederateImage`] retains its complete-root Enclave range so generated
+    /// launchers preserve deployment-wide [`EnclaveIndex`] values.
+    pub fn federate_slice(
+        &self,
+        federate: FederateIndex,
+    ) -> Result<OwnedFederateSlice, FederateSliceError> {
+        if self.federates.get(federate.as_u32() as usize).is_none() {
+            return Err(FederateSliceError::FederateNotFound { federate });
+        }
+
+        let checked_len = |table: &'static str, len: usize| {
+            u32::try_from(len).map_err(|_| ImageValidationError::TableTooLarge { table })
+        };
+        let mut identity_data = String::new();
+        let mut append_identity = |value: &str| {
+            let start = checked_len("identity_data", identity_data.len())?;
+            let len = checked_len("identity_data", value.len())?;
+            identity_data.push_str(value);
+            checked_len("identity_data", identity_data.len())?;
+            Ok::<_, ImageValidationError<'static>>(IdentityRange::new(start, len))
+        };
+        let mut enclave_start = 0;
+        let mut selected = None;
+        for (index, candidate) in self.federates.iter().enumerate() {
+            let id = append_identity(candidate.id.as_str())?;
+            let target = append_identity(candidate.target.as_str())?;
+            let runtime = append_identity(candidate.runtime.as_str())?;
+            let enclave_len = checked_len("enclaves", candidate.enclaves.len())?;
+            let image = FederateImage::new(
+                id,
+                target,
+                runtime,
+                TableRange::new(enclave_start, enclave_len),
+            );
+            if index == federate.as_u32() as usize {
+                selected = Some((image, candidate.enclaves.to_vec().into_boxed_slice()));
+            }
+            let enclave_end = (enclave_start as usize)
+                .checked_add(candidate.enclaves.len())
+                .ok_or(ImageValidationError::TableTooLarge { table: "enclaves" })?;
+            enclave_start = checked_len("enclaves", enclave_end)?;
+        }
+        let (image, enclaves) = selected.expect("selected Federate was bounds checked");
+
+        Ok(OwnedFederateSlice {
+            federate,
+            identity_data: identity_data.into_boxed_str(),
+            image,
+            enclaves,
+        })
     }
 
     /// Validates the complete target-facing deployment hierarchy.
@@ -440,7 +568,7 @@ mod tests {
     use super::*;
     use crate::compiler::{ComponentInstanceId, ImplementationId, StablePath};
     use crate::descriptor::{ReactionSlotId, ReactorSlotId};
-    use crate::runtime::image::{IdentityRange, StateSlotIndex, TableRange};
+    use crate::runtime::image::{EnclaveIndex, IdentityRange, StateSlotIndex, TableRange};
 
     #[test]
     fn direct_binding_symbols_reversibly_escape_descriptor_slots() {
@@ -592,6 +720,77 @@ mod tests {
             },
             storage_bounds: StorageBounds::new(1, 0, 0, 0, 0, 0),
         }
+    }
+
+    /// Builds one valid Enclave fixture with a distinct same-width identity.
+    fn enclave(id: &str) -> OwnedEnclaveImage {
+        let mut enclave = empty_enclave();
+        enclave.id = StableEnclaveId::new(id).unwrap();
+        enclave.identity_data = format!("{id}state/vehicle/main").into();
+        enclave
+    }
+
+    /// Projects only the requested Federate's Enclaves and bindings from a complete deployment.
+    #[test]
+    fn federate_slice_retains_only_selected_federate_rows() {
+        let deployment = OwnedCompiledDeployment {
+            federation: GlobalFederationImage {
+                members: vec![
+                    FederateId::new("edge").unwrap(),
+                    FederateId::new("host").unwrap(),
+                ]
+                .into_boxed_slice(),
+                edges: Box::default(),
+            },
+            federates: vec![
+                OwnedFederateImage {
+                    id: FederateId::new("edge").unwrap(),
+                    target: TargetTriple::new("aarch64-unknown-linux-gnu").unwrap(),
+                    runtime: RuntimeBackendId::new("native").unwrap(),
+                    enclaves: vec![enclave("vehicle/edge")].into_boxed_slice(),
+                },
+                OwnedFederateImage {
+                    id: FederateId::new("host").unwrap(),
+                    target: TargetTriple::new("x86_64-unknown-linux-gnu").unwrap(),
+                    runtime: RuntimeBackendId::new("native").unwrap(),
+                    enclaves: vec![enclave("vehicle/main"), enclave("vehicle/aux_")]
+                        .into_boxed_slice(),
+                },
+            ]
+            .into_boxed_slice(),
+            coordination: OwnedCoordinationProjection::Local,
+        };
+        let slice = deployment.federate_slice(FederateIndex::new(1)).unwrap();
+        assert_eq!(slice.federate(), FederateIndex::new(1));
+        slice.with_image(|image| {
+            assert_eq!(image.image().enclaves(), TableRange::new(1, 2));
+        });
+        assert_eq!(
+            slice
+                .with_view(|view| {
+                    view.enclave_views()
+                        .map(|(key, enclave)| (key, enclave.enclave_id().as_str().to_owned()))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap(),
+            vec![
+                (EnclaveIndex::new(1), "vehicle/main".to_owned()),
+                (EnclaveIndex::new(2), "vehicle/aux_".to_owned()),
+            ]
+        );
+        assert_eq!(slice.enclaves().len(), 2);
+        assert!(slice.enclaves().iter().all(|enclave| {
+            enclave
+                .required_bindings()
+                .iter()
+                .all(|binding| binding.kind() == BindingKind::StateInitializer)
+        }));
+        assert!(matches!(
+            deployment.federate_slice(FederateIndex::new(2)),
+            Err(FederateSliceError::FederateNotFound {
+                federate,
+            }) if federate == FederateIndex::new(2)
+        ));
     }
 
     #[test]

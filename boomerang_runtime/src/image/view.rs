@@ -304,10 +304,8 @@ impl<'a> FederateSliceView<'a> {
                 field: "enclaves",
             });
         }
-        if !matches!(
-            federate.enclaves().checked_end().and_then(|end| u64::try_from(end).ok()),
-            Some(end) if end <= u64::from(u32::MAX) + 1
-        ) {
+        if !enclave_range_fits_index_domain(federate.enclaves().start(), federate.enclaves().len())
+        {
             return Err(ImageValidationError::RangeOutOfBounds {
                 table: "federates",
                 index,
@@ -591,6 +589,11 @@ fn check_len<K: Key>(table: &'static str, len: usize) -> Result<(), ImageValidat
     } else {
         Ok(())
     }
+}
+
+/// Returns whether an Enclave ownership range fits the complete `u32` key domain.
+fn enclave_range_fits_index_domain(start: u32, len: u32) -> bool {
+    u64::from(start) + u64::from(len) <= u64::from(u32::MAX) + 1
 }
 
 fn check_ref<'a, K: Key, V>(
@@ -1946,6 +1949,7 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
 #[cfg(test)]
 mod tests {
     use super::super::*;
+    use super::enclave_range_fits_index_domain;
 
     #[test]
     fn table_ranges_address_their_flattened_value_table() {
@@ -2358,6 +2362,13 @@ mod tests {
                 len: 2,
             })
         ));
+    }
+
+    /// Preserves the last representable Enclave key across all pointer widths.
+    #[test]
+    fn federate_slice_range_arithmetic_preserves_terminal_enclave_key() {
+        assert!(enclave_range_fits_index_domain(u32::MAX, 1));
+        assert!(!enclave_range_fits_index_domain(u32::MAX, 2));
     }
 
     #[test]

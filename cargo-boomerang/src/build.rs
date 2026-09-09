@@ -42,7 +42,7 @@ pub(crate) fn build_analyzed(
     let compiled_federates = analyzed.compiled.federates();
     let mut launcher_builds = Vec::with_capacity(compiled_federates.len());
     let mut federates = Vec::with_capacity(compiled_federates.len());
-    for compiled_federate in compiled_federates {
+    for compiled_federate in compiled_federates.values() {
         let federate_id = compiled_federate.id().as_str();
         let configuration = analyzed
             .resolved
@@ -171,7 +171,7 @@ pub(crate) fn build_analyzed(
         format_args!("deployment '{deployment_name}'"),
     )?;
     let sources = compiled_federates
-        .iter()
+        .values()
         .zip(&launcher_builds)
         .map(|(federate, (generated, built))| BundleSource {
             federate: federate.id().as_str(),

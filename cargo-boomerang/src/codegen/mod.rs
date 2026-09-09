@@ -372,9 +372,8 @@ pub(crate) fn generate_analyzed_launcher(
     output: &crate::CommandOutput,
 ) -> Result<GeneratedLauncher> {
     let federates = analyzed.compiled.federates();
-    let (federate_position, federate) = federates
+    let (federate_index, federate) = federates
         .iter()
-        .enumerate()
         .find(|(_, federate)| federate.id().as_str() == federate_id)
         .ok_or_else(|| {
             anyhow!(
@@ -382,8 +381,6 @@ pub(crate) fn generate_analyzed_launcher(
                 analyzed.resolved.deployment_name()
             )
         })?;
-    let federate_index =
-        boomerang_runtime::image::FederateIndex::new(u32::try_from(federate_position)?);
     if federate.runtime().as_str() != "std" {
         bail!(
             "Federate '{federate_id}' selects unsupported runtime '{}'",

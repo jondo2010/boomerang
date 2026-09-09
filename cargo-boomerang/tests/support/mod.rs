@@ -161,7 +161,7 @@ pub fn owned_reference_summary(deployment_name: &str) -> Value {
     let mut identity_data = String::new();
     let mut federate_images = Vec::new();
     let mut enclave_images = Vec::<EnclaveImage<'_>>::new();
-    for federate in compiled.federates() {
+    for federate in compiled.federates().values() {
         let enclave_start = u32::try_from(enclave_images.len()).unwrap();
         enclave_images.extend(federate.enclaves().iter().map(|enclave| enclave.image()));
         let enclave_len = u32::try_from(federate.enclaves().len()).unwrap();
@@ -190,9 +190,9 @@ pub fn owned_reference_summary(deployment_name: &str) -> Value {
             let index = compiled
                 .federates()
                 .iter()
-                .position(|federate| federate.id() == member)
+                .find_map(|(index, federate)| (federate.id() == member).then_some(index))
                 .unwrap();
-            FederateIndex::new(u32::try_from(index).unwrap())
+            index
         })
         .collect::<Vec<_>>();
     let image = CompiledDeploymentImage {

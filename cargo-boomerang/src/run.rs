@@ -121,7 +121,7 @@ pub fn run_with_output(
     if analyzed.resolved.deployment().coordination.is_some() {
         bail!("generated execution does not support coordination selection");
     }
-    let federate = &federates[0];
+    let federate = &federates[boomerang_runtime::image::FederateIndex::new(0)];
     let federate_id = federate.id().as_str();
     let configuration = analyzed
         .resolved

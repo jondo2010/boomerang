@@ -12,7 +12,7 @@ use crate::runtime::image::{
     ReactionImage, ReactionIndex, ReactorImage, ReactorIndex, RequiredBindingImage, RouteImage,
     RouteIndex, ScopeImage, ScopeIndex, StorageBounds, TimerStartupImage,
 };
-use tinymap::{Key, TableRange, TinyMap, TinyMapView};
+use tinymap::{TableRange, TinyMap, TinyMapView};
 
 /// Canonical required payload binding identities for one Enclave.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -288,8 +288,8 @@ impl GlobalFederationImage {
 pub struct OwnedCompiledDeployment {
     /// Backend-neutral global federation structure.
     pub(crate) federation: GlobalFederationImage,
-    /// Federate-owned compiled image slices.
-    pub(crate) federates: Box<[OwnedFederateImage]>,
+    /// Complete compiled Federate table keyed by deployment-wide dense identity.
+    pub(crate) federates: TinyMap<FederateIndex, OwnedFederateImage>,
     /// Selected coordination projection.
     pub(crate) coordination: OwnedCoordinationProjection,
 }
@@ -401,8 +401,8 @@ impl OwnedCompiledDeployment {
         &self.federation
     }
 
-    /// Returns Federate images in canonical identity order.
-    pub fn federates(&self) -> &[OwnedFederateImage] {
+    /// Returns the complete Federate table in canonical dense-key order.
+    pub fn federates(&self) -> &TinyMap<FederateIndex, OwnedFederateImage> {
         &self.federates
     }
 
@@ -421,7 +421,7 @@ impl OwnedCompiledDeployment {
     ) -> Result<OwnedFederateSlice, FederateSliceError> {
         let candidate = self
             .federates
-            .get(federate.index())
+            .get(federate)
             .ok_or(FederateSliceError::FederateNotFound { federate })?;
 
         let checked_len = |table: &'static str, len: usize| {
@@ -435,8 +435,11 @@ impl OwnedCompiledDeployment {
             checked_len("identity_data", identity_data.len())?;
             Ok::<_, ImageValidationError<'static>>(IdentityRange::new(start, len))
         };
-        let enclave_start = self.federates[..federate.index()]
+        let enclave_start = self
+            .federates
             .iter()
+            .take_while(|(key, _)| *key != federate)
+            .map(|(_, preceding)| preceding)
             .try_fold(0_usize, |start, preceding| {
                 start.checked_add(preceding.enclaves.len())
             })
@@ -488,7 +491,7 @@ impl OwnedCompiledDeployment {
         if let Err(error) = checked_len("federates", self.federates.len()) {
             return Err(CompiledDeploymentValidationError::from_image(error));
         }
-        for federate in &self.federates {
+        for federate in self.federates.values() {
             let enclave_start = match checked_len("enclaves", enclaves.len()) {
                 Ok(start) => start,
                 Err(error) => return Err(CompiledDeploymentValidationError::from_image(error)),
@@ -519,13 +522,19 @@ impl OwnedCompiledDeployment {
             let index = self
                 .federates
                 .iter()
-                .position(|federate| federate.id == *member)
-                .unwrap_or(self.federates.len());
-            let index = match checked_len("federation.members", index) {
-                Ok(index) => index,
-                Err(error) => return Err(CompiledDeploymentValidationError::from_image(error)),
+                .find_map(|(index, federate)| (federate.id == *member).then_some(index));
+            let index = match index {
+                Some(index) => index,
+                None => FederateIndex::new(
+                    match checked_len("federation.members", self.federates.len()) {
+                        Ok(index) => index,
+                        Err(error) => {
+                            return Err(CompiledDeploymentValidationError::from_image(error));
+                        }
+                    },
+                ),
             };
-            members.push(FederateIndex::new(index));
+            members.push(index);
         }
         for edge in &self.federation.edges {
             let boundary = match append_identity(&mut identity_data, edge.id()) {
@@ -744,7 +753,8 @@ mod tests {
                 runtime: RuntimeBackendId::new("native").unwrap(),
                 enclaves: vec![empty_enclave()].into_boxed_slice(),
             }]
-            .into_boxed_slice(),
+            .into_iter()
+            .collect(),
             coordination: OwnedCoordinationProjection::Local,
         };
 
@@ -757,7 +767,12 @@ mod tests {
             ..deployment.clone()
         };
         assert!(invalid.validate().is_err());
-        let enclave = &deployment.federates()[0].enclaves()[0];
+        let federates: &TinyMap<FederateIndex, OwnedFederateImage> = deployment.federates();
+        assert_eq!(
+            federates.keys().collect::<Vec<_>>(),
+            vec![FederateIndex::new(0)]
+        );
+        let enclave = &federates[FederateIndex::new(0)].enclaves()[0];
         let reactor = enclave.reactors.get(ReactorIndex::new(0)).unwrap();
         assert_eq!(reactor.state_binding(), BindingSlotIndex::new(0));
         let view = enclave.view().unwrap();

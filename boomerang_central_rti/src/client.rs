@@ -14,84 +14,125 @@ use futures_util::{Sink, SinkExt, TryStream, TryStreamExt};
 use tokio::task::JoinHandle;
 
 #[derive(Debug, thiserror::Error)]
+/// Failure while connecting a federate or driving its RTI coordination.
 pub enum FederateClientError {
+    /// The transport could not carry a protocol frame.
     #[error("transport error: {0}")]
     Transport(#[from] TransportError),
+    /// A runtime value could not be represented by the wire protocol.
     #[error("runtime bridge error: {0}")]
     RuntimeBridge(#[from] RuntimeBridgeError),
+    /// The runtime rejected a federated endpoint operation.
     #[error("runtime endpoint error: {0}")]
     RuntimeEndpoint(#[from] boomerang_runtime::FederatedEndpointError),
 
+    /// A peer violated the protocol sequencing or topology contract.
     #[error("protocol error: {0}")]
     Protocol(String),
 
+    /// The RTI explicitly rejected a federate operation.
     #[error("RTI error: {message}")]
-    RtiError { message: String },
+    RtiError {
+        /// Error text supplied by the RTI.
+        message: String,
+    },
 
+    /// The RTI ended this federate's session.
     #[error("RTI stopped the federate session")]
     RtiStopped,
+    /// An earlier failure made later barrier progress unsafe.
     #[error(
         "federated scheduler barrier is terminal after an earlier protocol or admission failure"
     )]
     BarrierFailed,
 
+    /// The protocol client's background tasks are no longer connected.
     #[error("federate protocol client is closed")]
     ClientClosed,
+    /// Scheduling an inbound payload lost the scheduler event receiver.
     #[error("scheduler event channel closed after scheduling inbound endpoint `{endpoint}`")]
-    SchedulerEventChannelClosed { endpoint: crate::EndpointId },
+    SchedulerEventChannelClosed {
+        /// Stable endpoint whose scheduling event could not be observed.
+        endpoint: crate::EndpointId,
+    },
+    /// Two lowered routes use the same stable endpoint identity.
     #[error("duplicate federated client route for endpoint `{0}`")]
     DuplicateRoute(crate::EndpointId),
+    /// No lowered route owns the referenced stable endpoint identity.
     #[error("unknown federated client route for endpoint `{0}`")]
     UnknownRoute(crate::EndpointId),
+    /// A received payload has no runtime endpoint binding.
     #[error("federated client route for endpoint `{0}` has no inbound runtime binding")]
     UnboundInboundRoute(crate::EndpointId),
+    /// Lowering attempted to bind an inbound endpoint more than once.
     #[error("federated client route for endpoint `{0}` already has an inbound runtime binding")]
     DuplicateInboundBinding(crate::EndpointId),
+    /// A route is used by a federate other than its declared source.
     #[error(
         "route for endpoint `{endpoint}` has source `{route_source}`, expected `{federate_id}`"
     )]
     RouteSourceMismatch {
+        /// Stable endpoint carried by the mismatched route.
         endpoint: crate::EndpointId,
+        /// Source federate recorded in lowered route metadata.
         route_source: FederateId,
+        /// Federate attempting to use the route.
         federate_id: FederateId,
     },
+    /// A route is used by a federate other than its declared target.
     #[error(
         "route for endpoint `{endpoint}` has target `{route_target}`, expected `{federate_id}`"
     )]
     RouteTargetMismatch {
+        /// Stable endpoint carried by the mismatched route.
         endpoint: crate::EndpointId,
+        /// Target federate recorded in lowered route metadata.
         route_target: FederateId,
+        /// Federate receiving the route payload.
         federate_id: FederateId,
     },
+    /// An inbound payload declares a source different from its route metadata.
     #[error(
         "inbound MSG for endpoint `{endpoint}` came from `{observed_source}`, but route source is `{route_source}`"
     )]
     InboundSourceMismatch {
+        /// Stable endpoint carried by the payload.
         endpoint: crate::EndpointId,
+        /// Source federate declared in the payload frame.
         observed_source: FederateId,
+        /// Source federate recorded in lowered route metadata.
         route_source: FederateId,
     },
+    /// An RTI grant did not satisfy the outstanding request.
     #[error("received TAG {received} while waiting for {requested}")]
     UnexpectedTag {
+        /// Wire tag requested from the RTI.
         requested: WireTag,
+        /// Wire tag received from the RTI.
         received: WireTag,
     },
 }
 
 enum ClientInput {
+    /// A protocol message sent by the RTI.
     Message(RtiToFederate),
+    /// A transport failure from a background task.
     Transport(TransportError),
+    /// A frame with an invalid direction or phase.
     Protocol(String),
+    /// The RTI-side stream ended cleanly.
     Closed,
 }
 
 /// Cloneable sender for a federate's single ordered protocol-outbound queue.
 #[derive(Debug, Clone)]
 pub struct FederateProtocolSender {
+    /// Queue consumed by the protocol writer task.
     outgoing: tokio::sync::mpsc::UnboundedSender<FederateToRti>,
 }
 
 impl FederateProtocolSender {
+    /// Queue a frame while preserving this federate's outbound ordering.
     pub fn send(&self, message: FederateToRti) -> Result<(), FederateClientError> {
         self.outgoing
             .send(message)
@@ -102,11 +143,14 @@ impl FederateProtocolSender {
 /// A prebuildable protocol mailbox whose receiver is connected to a transport at execution time.
 #[derive(Debug)]
 pub struct FederateClientMailbox {
+    /// Cloneable handle for producers created during lowering.
     sender: FederateProtocolSender,
+    /// Unconnected frame queue later consumed by a protocol writer.
     receiver: tokio::sync::mpsc::UnboundedReceiver<FederateToRti>,
 }
 
 impl FederateClientMailbox {
+    /// Create an unconnected, ordered federate-to-RTI mailbox.
     pub fn new() -> Self {
         let (outgoing, receiver) = tokio::sync::mpsc::unbounded_channel();
         Self {
@@ -115,10 +159,12 @@ impl FederateClientMailbox {
         }
     }
 
+    /// Clone the producer handle for this mailbox.
     pub fn sender(&self) -> FederateProtocolSender {
         self.sender.clone()
     }
 
+    /// Receive one queued frame without waiting for a producer.
     pub fn try_recv(&mut self) -> Result<Option<FederateToRti>, FederateClientError> {
         match self.receiver.try_recv() {
             Ok(message) => Ok(Some(message)),
@@ -148,10 +194,15 @@ impl Default for FederateClientMailbox {
 /// A connected protocol client for one persistent federate.
 #[derive(Debug)]
 pub struct FederateProtocolClient {
+    /// Ordered producer for federate-to-RTI frames.
     outgoing: FederateProtocolSender,
+    /// Messages and failures forwarded by background transport tasks.
     incoming: mpsc::Receiver<ClientInput>,
+    /// Common physical start epoch announced by the RTI.
     start_unix_epoch_ns: i128,
+    /// Task reading RTI-to-federate frames.
     reader: JoinHandle<()>,
+    /// Task writing queued federate-to-RTI frames.
     writer: JoinHandle<()>,
 }
 
@@ -272,6 +323,7 @@ impl Drop for FederateProtocolClient {
     }
 }
 
+/// Spawn the task that converts RTI-to-federate frames into local client inputs.
 fn spawn_reader<R>(mut stream: R, incoming: mpsc::Sender<ClientInput>) -> JoinHandle<()>
 where
     R: TryStream<Ok = ProtocolFrame> + Send + Unpin + 'static,
@@ -298,6 +350,7 @@ where
     })
 }
 
+/// Spawn the task that serializes this federate's queued outbound frames.
 fn spawn_writer<S>(
     mut sink: S,
     mut outgoing: tokio::sync::mpsc::UnboundedReceiver<FederateToRti>,
@@ -316,11 +369,16 @@ where
         }
     })
 }
+/// Lowered routing metadata for one cross-federate runtime endpoint.
 #[derive(Debug)]
 pub struct FederateClientRoute {
+    /// Stable protocol endpoint identity for this route.
     pub endpoint: crate::EndpointId,
+    /// Federate that emits payloads through this endpoint.
     pub source: FederateId,
+    /// Federate that receives payloads through this endpoint.
     pub target: FederateId,
+    /// Runtime delivery endpoint attached while lowering the target enclave.
     inbound: Option<boomerang_runtime::FederatedInboundEndpoint>,
 }
 impl FederateClientRoute {

@@ -1,6 +1,7 @@
 #![doc=include_str!("../README.md")]
 #![deny(unsafe_code)]
 #![deny(clippy::all)]
+#![warn(missing_docs)]
 
 /// Federate-side protocol clients and their scheduler bridge.
 pub mod client;

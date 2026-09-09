@@ -8,40 +8,77 @@ use crate::{
 };
 
 #[derive(Debug, thiserror::Error)]
+/// Failure converting a runtime value or lowered route to protocol state.
 pub enum RuntimeBridgeError {
+    /// A finite runtime tag used a negative time offset.
     #[error(
         "finite runtime tag {tag} has negative offset {offset_ns}ns; use Tag::NEVER for negative infinity"
     )]
     NegativeRuntimeTag {
+        /// Runtime tag that cannot be sent as a finite wire tag.
         tag: boomerang_runtime::Tag,
+        /// Negative nanosecond offset in the runtime tag.
         offset_ns: i128,
     },
 
+    /// A runtime tag's microstep exceeds the wire representation.
     #[error("runtime tag {tag} microstep {microstep} does not fit wire u64")]
     RuntimeMicrostepOutOfRange {
+        /// Runtime tag with the unrepresentable microstep.
         tag: boomerang_runtime::Tag,
+        /// Microstep that cannot fit in `u64`.
         microstep: usize,
     },
 
+    /// A finite wire tag used a negative time offset.
     #[error(
         "finite wire tag {tag} has negative offset {offset_ns}ns; use WireTag::NEVER for negative infinity"
     )]
-    NegativeWireTag { tag: WireTag, offset_ns: i128 },
+    NegativeWireTag {
+        /// Wire tag that cannot become a runtime tag.
+        tag: WireTag,
+        /// Negative nanosecond offset in the wire tag.
+        offset_ns: i128,
+    },
 
+    /// A wire offset exceeds the runtime duration range.
     #[error("finite wire tag {tag} offset {offset_ns}ns does not fit runtime Duration")]
-    WireTagOffsetOutOfRange { tag: WireTag, offset_ns: i128 },
+    WireTagOffsetOutOfRange {
+        /// Wire tag with the unrepresentable offset.
+        tag: WireTag,
+        /// Nanosecond offset that cannot fit the runtime duration.
+        offset_ns: i128,
+    },
 
+    /// A wire microstep exceeds the runtime index representation.
     #[error("finite wire tag {tag} microstep {microstep} does not fit runtime usize")]
-    WireMicrostepOutOfRange { tag: WireTag, microstep: u64 },
+    WireMicrostepOutOfRange {
+        /// Wire tag with the unrepresentable microstep.
+        tag: WireTag,
+        /// Microstep that cannot fit in `usize`.
+        microstep: u64,
+    },
 
+    /// A finite wire tag aliases the runtime's positive-infinity sentinel.
     #[error("finite wire tag {tag} collides with runtime Tag::FOREVER")]
-    WireTagCollidesWithRuntimeForever { tag: WireTag },
+    WireTagCollidesWithRuntimeForever {
+        /// Finite wire tag that maps to `Tag::FOREVER`.
+        tag: WireTag,
+    },
 
+    /// A cross-federate runtime delay is negative.
     #[error("cross-federate delay {delay} is negative; wire delays must be nonnegative")]
-    NegativeRuntimeDelay { delay: boomerang_runtime::Duration },
+    NegativeRuntimeDelay {
+        /// Runtime delay that cannot be serialized on the wire.
+        delay: boomerang_runtime::Duration,
+    },
 
+    /// A runtime delay exceeds the wire nanosecond range.
     #[error("cross-federate delay {delay} does not fit wire u64 nanoseconds")]
-    RuntimeDelayOutOfRange { delay: boomerang_runtime::Duration },
+    RuntimeDelayOutOfRange {
+        /// Runtime delay that cannot fit in `u64` nanoseconds.
+        delay: boomerang_runtime::Duration,
+    },
 }
 
 /// Convert a runtime tag into its checked federated wire representation.
@@ -121,8 +158,11 @@ pub fn wire_delay_from_runtime(
 /// Complete lowered connection state for one federate.
 #[derive(Debug)]
 pub(crate) struct FederatedRuntimeConnection {
+    /// Ordered outbound protocol queue for this federate.
     mailbox: FederateClientMailbox,
+    /// Stable endpoint routes targeting this federate.
     routes: BTreeMap<crate::EndpointId, FederateClientRoute>,
+    /// Shared first-failure state for runtime endpoint workers.
     faults: boomerang_runtime::FederatedFaultState,
 }
 
@@ -160,10 +200,12 @@ impl FederatedRuntimeConnection {
 /// Complete per-federate connection bundles created during runtime lowering.
 #[derive(Debug, Default)]
 pub struct FederatedRuntimeConnections {
+    /// Connection state keyed by stable federate identity.
     federates: BTreeMap<FederateId, FederatedRuntimeConnection>,
 }
 
 impl FederatedRuntimeConnections {
+    /// Build complete federate connections and assign each route to its target.
     pub fn new(
         federates: impl IntoIterator<Item = FederateId>,
         routes: impl IntoIterator<Item = FederateClientRoute>,
@@ -207,6 +249,7 @@ impl FederatedRuntimeConnections {
         })
     }
 
+    /// Build the runtime sink and shared fault state for an outbound endpoint.
     pub fn outbound_endpoint(
         &self,
         endpoint: &crate::EndpointId,
@@ -237,6 +280,7 @@ impl FederatedRuntimeConnections {
         ))
     }
 
+    /// Attach a typed runtime receiver to one lowered inbound route.
     pub fn register_inbound<T>(
         &mut self,
         federate: &FederateId,
@@ -292,29 +336,38 @@ impl FederatedRuntimeConnections {
             .inbound()
     }
 
+    /// Iterate over every lowered route in deterministic federate order.
     pub fn routes(&self) -> impl Iterator<Item = &FederateClientRoute> {
         self.federates
             .values()
             .flat_map(|connection| connection.routes.values())
     }
 
+    /// Report whether lowering created a connection for `federate`.
     pub fn contains_federate(&self, federate: &FederateId) -> bool {
         self.federates.contains_key(federate)
     }
 
+    /// Return the number of federates with prebuilt connection state.
     pub fn len(&self) -> usize {
         self.federates.len()
     }
 
+    /// Report whether no federate connection state was created.
     pub fn is_empty(&self) -> bool {
         self.federates.is_empty()
     }
 }
 
+/// Runtime-facing outbound sink that emits one protocol `MSG` route.
 struct ProtocolFederatedOutboundSink {
+    /// Stable endpoint selected during lowering.
     endpoint: crate::EndpointId,
+    /// Federate that owns the outbound runtime endpoint.
     source: FederateId,
+    /// Federate selected as the protocol message target.
     target: FederateId,
+    /// Ordered federate-to-RTI protocol queue.
     sender: FederateProtocolSender,
 }
 

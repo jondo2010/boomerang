@@ -12,12 +12,16 @@ use crate::{
 /// One federate's RTI-side transport halves.
 #[derive(Debug)]
 pub struct RtiSessionEndpoint<S, R> {
+    /// Outbound RTI-to-federate frame sink.
     sink: S,
+    /// Inbound federate-to-RTI frame stream.
     stream: R,
+    /// Hello frame consumed while accepting a transport peer, if any.
     initial_frame: Option<ProtocolFrame>,
 }
 
 impl<S, R> RtiSessionEndpoint<S, R> {
+    /// Pair RTI-side transport halves before any peer-identification read.
     pub fn new(sink: S, stream: R) -> Self {
         Self {
             sink,
@@ -39,42 +43,63 @@ impl<S, R> RtiSessionEndpoint<S, R> {
 /// A static in-memory RTI session for persistent federates.
 #[derive(Debug)]
 pub struct StaticRtiSession<S, R> {
+    /// Pure RTI state driving topology-aware grants and deliveries.
     rti: RtiState,
+    /// Transport halves keyed by their authenticated federate identity.
     endpoints: BTreeMap<FederateId, RtiSessionEndpoint<S, R>>,
+    /// Physical epoch included in every Start frame.
     start_unix_epoch_ns: i128,
 }
 
 #[derive(Debug, thiserror::Error)]
+/// Failure while authenticating or coordinating an RTI transport session.
 pub enum SessionError {
+    /// A federate transport failed during the session.
     #[error("transport error for federate `{federate_id}`: {source}")]
     Transport {
+        /// Federate whose transport produced the error.
         federate_id: FederateId,
+        /// Underlying frame transport failure.
         source: TransportError,
     },
 
+    /// Pure RTI state rejected an authenticated federate message.
     #[error("RTI error: {0}")]
     Rti(#[from] RtiError),
 
+    /// A federate sent a frame invalid for its session phase.
     #[error("protocol error for federate `{federate_id}`: {message}")]
     Protocol {
+        /// Federate that sent the invalid frame.
         federate_id: FederateId,
+        /// Description of the violated protocol contract.
         message: String,
     },
 
+    /// The session could no longer coordinate all declared federates.
     #[error("session shutdown error: {0}")]
     Shutdown(String),
 }
 
+/// Input received from a federate reader task.
 enum SessionInput {
+    /// A complete protocol frame from an authenticated federate.
     Frame {
+        /// Federate that owns the reader task.
         federate_id: FederateId,
+        /// Frame yielded by that federate's stream.
         frame: ProtocolFrame,
     },
+    /// A federate stream ended before the session completed.
     Closed {
+        /// Federate whose stream ended.
         federate_id: FederateId,
     },
+    /// A federate reader observed a transport error.
     TransportError {
+        /// Federate whose stream failed.
         federate_id: FederateId,
+        /// Failure returned by the transport adapter.
         error: TransportError,
     },
 }
@@ -86,6 +111,7 @@ where
     R: TryStream<Ok = ProtocolFrame> + Send + Unpin + 'static,
     R::Error: Into<TransportError>,
 {
+    /// Validate a source topology and create a session over its named endpoints.
     pub fn new(
         topology: FederatedTopology,
         endpoints: BTreeMap<FederateId, RtiSessionEndpoint<S, R>>,
@@ -96,6 +122,7 @@ where
         ))
     }
 
+    /// Create a session from already-validated topology metadata.
     pub fn from_compiled(
         topology: CompiledTopology,
         endpoints: BTreeMap<FederateId, RtiSessionEndpoint<S, R>>,
@@ -107,11 +134,13 @@ where
         }
     }
 
+    /// Set the physical epoch announced to every federate after Hello validation.
     pub fn with_start_unix_epoch_ns(mut self, start_unix_epoch_ns: i128) -> Self {
         self.start_unix_epoch_ns = start_unix_epoch_ns;
         self
     }
 
+    /// Authenticate peers, announce Start, then process frames until coordinated shutdown.
     pub async fn run(mut self) -> Result<(), SessionError> {
         let expected = expected_federates(self.rti.topology());
         self.validate_endpoint_set(&expected)?;
@@ -340,10 +369,12 @@ where
     }
 }
 
+/// Collect the topology's authenticated federate identities for set comparisons.
 fn expected_federates(topology: &FederatedTopology) -> BTreeSet<FederateId> {
     topology.federates.iter().cloned().collect()
 }
 
+/// Spawn a reader that tags each received frame with its authenticated federate.
 fn spawn_stream_reader<R>(
     federate_id: FederateId,
     mut stream: R,
@@ -380,6 +411,7 @@ where
     })
 }
 
+/// Receive the next reader result or report that every input stream has ended.
 async fn receive_session_input(
     input_rx: &mut mpsc::UnboundedReceiver<SessionInput>,
 ) -> Result<SessionInput, SessionError> {
@@ -390,6 +422,7 @@ async fn receive_session_input(
     })
 }
 
+/// Forward RTI deliveries to the transport sink selected by each federate identity.
 async fn send_deliveries<S>(
     sinks: &mut BTreeMap<FederateId, S>,
     deliveries: Vec<RtiDelivery>,
@@ -410,6 +443,7 @@ where
     Ok(())
 }
 
+/// Send one RTI-to-federate frame while associating transport failures with that federate.
 async fn send_frame<S>(
     sinks: &mut BTreeMap<FederateId, S>,
     federate_id: &FederateId,
@@ -430,6 +464,7 @@ where
         })
 }
 
+/// Best-effort notify a peer of a protocol violation, then return that violation locally.
 async fn protocol_error<S>(
     sinks: &mut BTreeMap<FederateId, S>,
     federate_id: &FederateId,

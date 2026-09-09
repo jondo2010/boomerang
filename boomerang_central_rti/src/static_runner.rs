@@ -38,6 +38,7 @@ pub struct FederatePlacementError {
     second: FederateId,
 }
 
+/// Bidirectional placement index preserving one federate per runtime enclave.
 struct FederateEnclaveMap {
     /// Runtime enclave assigned to each protocol federate identity.
     by_federate: BTreeMap<FederateId, boomerang_runtime::EnclaveKey>,
@@ -131,85 +132,130 @@ impl Default for TcpStaticFederationConfig {
 }
 
 #[derive(Debug, thiserror::Error)]
+/// Failure preparing or executing a static federated runtime.
 pub enum StaticFederationRunnerError {
+    /// The lowered topology cannot be executed by the static runner.
     #[error("unsupported static federation topology: {what}")]
-    UnsupportedTopology { what: String },
+    UnsupportedTopology {
+        /// Detail of the unsupported topology feature or shape.
+        what: String,
+    },
 
+    /// The runtime configuration requests unsupported execution semantics.
     #[error("unsupported static federation configuration: {what}")]
-    UnsupportedConfiguration { what: String },
+    UnsupportedConfiguration {
+        /// Detail of the unsupported configuration setting.
+        what: String,
+    },
 
+    /// Lowered runtime and protocol metadata disagree.
     #[error("static federation runner error: {what}")]
-    Bridge { what: String },
+    Bridge {
+        /// Detail of the invalid runtime-to-protocol bridge state.
+        what: String,
+    },
 
+    /// A federate protocol client failed during execution.
     #[error("federate client error: {0}")]
     FederateClient(#[from] FederateClientError),
 
+    /// The shared RTI session failed during execution.
     #[error("RTI session error: {0}")]
     Session(#[from] SessionError),
 
+    /// The runtime rejected a federated endpoint operation.
     #[error("runtime endpoint error: {0}")]
     RuntimeEndpoint(#[from] boomerang_runtime::FederatedEndpointError),
 
+    /// Tokio could not construct the runner-owned runtime.
     #[error("failed to build the static federation Tokio runtime: {source}")]
     RuntimeBuild {
+        /// I/O error reported while constructing Tokio resources.
         #[source]
         source: std::io::Error,
     },
 
+    /// The RTI listener could not bind its requested address.
     #[error("failed to bind the static federation TCP listener at {addr}: {source}")]
     TcpBind {
+        /// Address requested for the listener.
         addr: SocketAddr,
+        /// I/O error reported by the operating system.
         #[source]
         source: std::io::Error,
     },
 
+    /// The bound listener did not expose its local address.
     #[error("failed to read the static federation TCP listener address: {source}")]
     TcpLocalAddress {
+        /// I/O error reported by the operating system.
         #[source]
         source: std::io::Error,
     },
 
+    /// A federate could not connect to the runner-owned RTI listener.
     #[error("failed to connect federate `{federate_id}` to {addr}: {source}")]
     TcpConnect {
+        /// Federate whose TCP client could not connect.
         federate_id: FederateId,
+        /// Listener address used for the attempted connection.
         addr: SocketAddr,
+        /// I/O error reported by the operating system.
         #[source]
         source: std::io::Error,
     },
 
+    /// A task establishing a federate protocol client did not complete successfully.
     #[error("federate `{federate_id}` client task failed: {source}")]
     ClientTask {
+        /// Federate owned by the failed client task.
         federate_id: FederateId,
+        /// Join failure reported by Tokio.
         #[source]
         source: tokio::task::JoinError,
     },
 
+    /// A federate client rejected its transport handshake or startup frame.
     #[error("federate `{federate_id}` client connection failed: {source}")]
     ClientConnect {
+        /// Federate whose client connection failed.
         federate_id: FederateId,
+        /// Connection failure returned by the federate client.
         #[source]
         source: FederateClientError,
     },
 
+    /// The shared RTI session task did not complete successfully.
     #[error("RTI session task failed: {source}")]
     SessionTask {
+        /// Join failure reported by Tokio.
         #[source]
         source: tokio::task::JoinError,
     },
 
+    /// The runner could not start a scheduler thread for a federate.
     #[error("failed to spawn scheduler thread for federate `{federate_id}`: {source}")]
     SchedulerThreadSpawn {
+        /// Federate assigned to the thread that could not start.
         federate_id: FederateId,
+        /// I/O error reported while creating the thread.
         #[source]
         source: std::io::Error,
     },
 
+    /// A scheduler thread unwound unexpectedly.
     #[error("federate scheduler thread panicked: {what}")]
-    SchedulerThreadPanic { what: String },
+    SchedulerThreadPanic {
+        /// Panic payload formatted for diagnostic reporting.
+        what: String,
+    },
 
+    /// A federate scheduler returned a runtime execution error.
     #[error("federate `{federate_id}` scheduler failed: {source}")]
     SchedulerRuntime {
+        /// Federate whose scheduler returned the error.
         federate_id: FederateId,
+        /// Runtime error reported by that scheduler.
         #[source]
         source: boomerang_runtime::RuntimeError,
     },
@@ -218,7 +264,9 @@ pub enum StaticFederationRunnerError {
 /// Final runtime environments returned for each executed enclave.
 pub type FederationEnvs =
     tinymap::TinySecondaryMap<boomerang_runtime::EnclaveKey, boomerang_runtime::Env>;
+/// Handle for the runner-owned asynchronous RTI session.
 type SessionHandle = tokio::task::JoinHandle<Result<(), SessionError>>;
+/// Result returned by one scheduler thread with its federate and enclave identities.
 type SchedulerThreadResult = (
     FederateId,
     boomerang_runtime::EnclaveKey,
@@ -226,8 +274,10 @@ type SchedulerThreadResult = (
     Result<(), boomerang_runtime::RuntimeError>,
     Result<(), FederateClientError>,
 );
+/// Join handle for a scheduler thread.
 type SchedulerThreadHandle = std::thread::JoinHandle<SchedulerThreadResult>;
 
+/// Validated runner inputs separated from protocol connection resources.
 struct PreparedStaticFederation {
     /// Validated RTI topology shared with the runner-owned session.
     topology: CompiledTopology,
@@ -237,6 +287,7 @@ struct PreparedStaticFederation {
     enclaves: tinymap::TinyMap<boomerang_runtime::EnclaveKey, boomerang_runtime::Enclave>,
 }
 
+/// A federate client connected to a concrete transport.
 struct ConnectedFederate {
     /// Connected protocol client used by the federate's time barrier.
     client: FederateProtocolClient,
@@ -338,6 +389,7 @@ pub fn run_over_tcp(
     execute_connected_static_federation(prepared, config, &tokio_runtime, session_handle, clients)
 }
 
+/// Validate runner inputs and separate execution state from unconsumed connections.
 fn prepare_static_federation(
     runtime: StaticFederationRuntime,
     enclaves: tinymap::TinyMap<boomerang_runtime::EnclaveKey, boomerang_runtime::Enclave>,
@@ -373,6 +425,7 @@ fn prepare_static_federation(
     ))
 }
 
+/// Build a Tokio runtime sized for the RTI session and federate connection tasks.
 fn build_tokio_runtime(
     federate_count: usize,
 ) -> Result<tokio::runtime::Runtime, StaticFederationRunnerError> {
@@ -383,6 +436,7 @@ fn build_tokio_runtime(
         .map_err(|source| StaticFederationRunnerError::RuntimeBuild { source })
 }
 
+/// Attach every prebuilt federate mailbox and route set to a live transport pair.
 fn connect_clients<S, R>(
     tokio_runtime: &tokio::runtime::Runtime,
     topology: &CompiledTopology,
@@ -459,6 +513,7 @@ where
     Ok(clients)
 }
 
+/// Run enclave schedulers against connected clients and collect their final environments.
 fn execute_connected_static_federation(
     prepared: PreparedStaticFederation,
     config: boomerang_runtime::Config,
@@ -603,6 +658,7 @@ fn execute_connected_static_federation(
 
     Ok(envs)
 }
+/// Convert wildcard listener addresses into reachable loopback client addresses.
 fn listener_connect_addr(listener_addr: SocketAddr) -> SocketAddr {
     match listener_addr.ip() {
         IpAddr::V4(ip) if ip.is_unspecified() => {
@@ -616,6 +672,7 @@ fn listener_connect_addr(listener_addr: SocketAddr) -> SocketAddr {
 }
 
 #[derive(Clone)]
+/// Thread-safe adapter around one federate's serial protocol time barrier.
 struct SharedFederatedTimeBarrier {
     /// Shared barrier implementation serialized across scheduler calls.
     inner: Arc<Mutex<RtiFederatedTimeBarrier>>,
@@ -660,6 +717,7 @@ impl boomerang_runtime::FederatedTimeBarrier for SharedFederatedTimeBarrier {
     }
 }
 
+/// Check that lowered topology, placement, routes, and connections agree before execution.
 fn validate_static_runner_runtime(
     runtime: &StaticFederationRuntime,
 ) -> Result<(), StaticFederationRunnerError> {
@@ -784,6 +842,7 @@ fn validate_static_runner_runtime(
     Ok(())
 }
 
+/// Reject runtime options whose physical-time semantics are not implemented by this runner.
 fn validate_static_runner_config(
     config: &boomerang_runtime::Config,
 ) -> Result<(), StaticFederationRunnerError> {
@@ -796,6 +855,7 @@ fn validate_static_runner_config(
     }
 }
 
+/// Report whether an enclave can terminate without entering a federated scheduler loop.
 fn federate_has_no_initial_work(
     enclave: &boomerang_runtime::Enclave,
     topology: &FederatedTopology,
@@ -806,10 +866,12 @@ fn federate_has_no_initial_work(
             && topology.incoming_edges(federate_id).next().is_none())
 }
 
+/// Construct a topology-rejection error with a caller-provided explanation.
 fn unsupported_topology(what: impl Into<String>) -> StaticFederationRunnerError {
     StaticFederationRunnerError::UnsupportedTopology { what: what.into() }
 }
 
+/// Construct an error for inconsistent lowered runtime and protocol metadata.
 fn bridge_error(what: impl Into<String>) -> StaticFederationRunnerError {
     StaticFederationRunnerError::Bridge { what: what.into() }
 }

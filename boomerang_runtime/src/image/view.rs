@@ -343,8 +343,18 @@ impl<'a> FederateSliceView<'a> {
                 });
             }
         }
-        for enclave in image.enclaves() {
-            EnclaveImageView::new(enclave)?;
+        let mut previous_enclave = None;
+        for (offset, enclave) in image.enclaves().iter().enumerate() {
+            let enclave_index = federate.enclaves().start() + offset as u32;
+            validate(enclave)?;
+            let enclave_id = identity_slice(
+                enclave.identity_data,
+                "enclaves",
+                enclave_index,
+                "enclave_id",
+                enclave.enclave_id,
+            )?;
+            validate_id("enclave", enclave_index, enclave_id, &mut previous_enclave)?;
         }
         Ok(Self { image: *image })
     }
@@ -2320,6 +2330,38 @@ mod tests {
             view.enclave_views().map(|(key, _)| key).collect::<Vec<_>>(),
             vec![EnclaveIndex::new(2), EnclaveIndex::new(3)]
         );
+
+        let reordered_enclaves = [SECOND_IMAGE, IMAGE];
+        let reordered = FederateSliceImage::new(
+            FederateIndex::new(1),
+            DEPLOYMENT_IDENTITIES,
+            federate,
+            &reordered_enclaves,
+        );
+        assert!(matches!(
+            FederateSliceView::new(&reordered),
+            Err(ImageValidationError::StableIdsNotSorted {
+                kind: "enclave",
+                index: 3,
+                id: "plant/control",
+            })
+        ));
+
+        let duplicate_enclaves = [IMAGE, IMAGE];
+        let duplicate = FederateSliceImage::new(
+            FederateIndex::new(1),
+            DEPLOYMENT_IDENTITIES,
+            federate,
+            &duplicate_enclaves,
+        );
+        assert!(matches!(
+            FederateSliceView::new(&duplicate),
+            Err(ImageValidationError::DuplicateStableId {
+                kind: "enclave",
+                index: 3,
+                id: "plant/control",
+            })
+        ));
 
         let wrong_length = FederateSliceImage::new(
             FederateIndex::new(1),

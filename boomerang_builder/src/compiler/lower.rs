@@ -343,7 +343,7 @@ pub fn lower(deployment: &ResolvedDeployment) -> Result<OwnedCompiledDeployment,
                 enclaves,
             })
         })
-        .collect::<Result<Box<[_]>, CompileError>>()?;
+        .collect::<Result<tinymap::TinyMap<FederateIndex, _>, CompileError>>()?;
     let compiled = OwnedCompiledDeployment {
         federation: GlobalFederationImage {
             members,
@@ -1550,7 +1550,7 @@ fn validate_root_image(compiled: &OwnedCompiledDeployment) -> Result<(), Compile
     let mut federates = Vec::new();
     let mut enclave_images = Vec::new();
     let mut federation_edges = Vec::new();
-    for federate in &compiled.federates {
+    for federate in compiled.federates.values() {
         let id = push_root_identity(federate.id.as_str())?;
         let target = push_root_identity(federate.target.as_str())?;
         let runtime = push_root_identity(federate.runtime.as_str())?;
@@ -1566,9 +1566,7 @@ fn validate_root_image(compiled: &OwnedCompiledDeployment) -> Result<(), Compile
             ),
         ));
     }
-    let members = (0..federates.len())
-        .map(|index| checked_root(index).map(FederateIndex::new))
-        .collect::<Result<Vec<_>, CompileError>>()?;
+    let members = compiled.federates.keys().collect::<Vec<_>>();
     checked_root(enclave_images.len())?;
     for edge in compiled.federation.edges() {
         let boundary = push_root_identity(&edge.id().to_string())?;
@@ -1605,6 +1603,7 @@ fn validate_root_image(compiled: &OwnedCompiledDeployment) -> Result<(), Compile
 #[cfg(test)]
 mod tests {
     use super::{checked_u32, lower, CompileError};
+    use crate::compiler::compiled::FederateSliceError;
     use crate::{
         compiler::{
             ActionId, ActionKind, ApplicationTopology, ApplicationTopologyBuilder, BankMember,
@@ -1624,9 +1623,9 @@ mod tests {
         },
         runtime::image::{
             ActionIndex, ActionTiming, BindingKind, BoundaryFailurePolicy, CodecPolicy,
-            CoordinationProjection, FederateIndex, ModeIndex, ReactionIndex, ReactorIndex,
-            RecoveryPolicy, RouteDirection, RouteIndex, RtiImage, RtiRouteIndex, ScopeIndex,
-            SecurityPolicy, TimingDomain, TimingPolicy, TransportPolicy,
+            CoordinationProjection, EnclaveIndex, FederateIndex, ModeIndex, ReactionIndex,
+            ReactorIndex, RecoveryPolicy, RouteDirection, RouteIndex, RtiImage, RtiRouteIndex,
+            ScopeIndex, SecurityPolicy, TableRange, TimingDomain, TimingPolicy, TransportPolicy,
         },
     };
     fn descriptor(contract: &str, bounds: DescriptorBounds) -> ComponentDescriptor {
@@ -2342,7 +2341,7 @@ mod tests {
         let reverse = lower(&shared_implementation_deployment(true)).unwrap();
         assert_eq!(forward, reverse);
 
-        let enclave = &forward.federates()[0].enclaves()[0];
+        let enclave = &forward.federates()[FederateIndex::new(0)].enclaves()[0];
         assert_eq!(
             enclave
                 .required_bindings()
@@ -2449,8 +2448,11 @@ mod tests {
         let forward = lower(&deployment(false, false)).unwrap();
         let reverse = lower(&deployment(true, false)).unwrap();
         assert_eq!(forward, reverse);
-        assert_eq!(forward.federates()[0].id().as_str(), "host");
-        let enclaves = forward.federates()[0].enclaves();
+        assert_eq!(
+            forward.federates()[FederateIndex::new(0)].id().as_str(),
+            "host"
+        );
+        let enclaves = forward.federates()[FederateIndex::new(0)].enclaves();
         assert_eq!(enclaves.len(), 2);
         assert_eq!(enclaves[0].id().to_string(), "vehicle/controller");
         assert_eq!(enclaves[1].id().to_string(), "vehicle/sensor");
@@ -2472,6 +2474,140 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["edge", "host"]
         );
+    }
+
+    /// Projects a real lowered Federate without retaining sibling Enclaves or bindings.
+    #[test]
+    fn federate_slice_from_lowered_deployment_preserves_selected_root_rows() {
+        let compiled = lower(&deployment(false, true)).unwrap();
+        let federate = FederateIndex::new(1);
+        let selected = &compiled.federates()[federate];
+        let enclave_start = compiled
+            .federates()
+            .iter()
+            .take_while(|(key, _)| *key != federate)
+            .map(|(_, federate)| federate.enclaves().len())
+            .sum::<usize>();
+        let enclave_start = u32::try_from(enclave_start).unwrap();
+        let expected_range = TableRange::new(enclave_start, selected.enclaves().len() as u32);
+
+        let slice = compiled.federate_slice(federate).unwrap();
+        assert_eq!(slice.federate(), federate);
+        slice.with_image(|image| {
+            assert_eq!(image.federate(), federate);
+            assert_eq!(image.image().enclaves(), expected_range);
+        });
+        assert_eq!(
+            slice
+                .with_view(|view| {
+                    view.enclave_views()
+                        .map(|(key, enclave)| (key, enclave.enclave_id().as_str().to_owned()))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap(),
+            vec![(EnclaveIndex::new(1), "vehicle/controller".to_owned())]
+        );
+        assert_eq!(
+            slice
+                .enclaves()
+                .iter()
+                .flat_map(|enclave| enclave.required_bindings().iter())
+                .map(|binding| match binding {
+                    RequiredBinding::State {
+                        component,
+                        implementation,
+                        ..
+                    }
+                    | RequiredBinding::Reaction {
+                        component,
+                        implementation,
+                        ..
+                    }
+                    | RequiredBinding::Port {
+                        component,
+                        implementation,
+                        ..
+                    }
+                    | RequiredBinding::Action {
+                        component,
+                        implementation,
+                        ..
+                    } => (
+                        component.to_string(),
+                        implementation.to_string(),
+                        binding.symbol(),
+                    ),
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "vehicle/controller".to_owned(),
+                    "controller-host".to_owned(),
+                    "action_Controller_2fpulse".to_owned(),
+                ),
+                (
+                    "vehicle/controller".to_owned(),
+                    "controller-host".to_owned(),
+                    "port_Controller_2farray_5fin".to_owned(),
+                ),
+                (
+                    "vehicle/controller".to_owned(),
+                    "controller-host".to_owned(),
+                    "port_Controller_2farray_5fin".to_owned(),
+                ),
+                (
+                    "vehicle/controller".to_owned(),
+                    "controller-host".to_owned(),
+                    "port_Controller_2fbank_5fin".to_owned(),
+                ),
+                (
+                    "vehicle/controller".to_owned(),
+                    "controller-host".to_owned(),
+                    "port_Controller_2fbank_5fin".to_owned(),
+                ),
+                (
+                    "vehicle/controller".to_owned(),
+                    "controller-host".to_owned(),
+                    "port_Controller_2foutput".to_owned(),
+                ),
+                (
+                    "vehicle/controller".to_owned(),
+                    "controller-host".to_owned(),
+                    "reaction_Controller_2femit".to_owned(),
+                ),
+                (
+                    "vehicle/controller".to_owned(),
+                    "controller-host".to_owned(),
+                    "reaction_Controller_2freset_5factive".to_owned(),
+                ),
+                (
+                    "vehicle/controller".to_owned(),
+                    "controller-host".to_owned(),
+                    "reaction_Controller_2fshutdown".to_owned(),
+                ),
+                (
+                    "vehicle/controller".to_owned(),
+                    "controller-host".to_owned(),
+                    "reaction_Controller_2fstart".to_owned(),
+                ),
+                (
+                    "vehicle/controller".to_owned(),
+                    "controller-host".to_owned(),
+                    "reaction_Controller_2ftimer_5ffired".to_owned(),
+                ),
+                (
+                    "vehicle/controller".to_owned(),
+                    "controller-host".to_owned(),
+                    "state_Controller".to_owned(),
+                ),
+            ]
+        );
+        assert!(matches!(
+            compiled.federate_slice(FederateIndex::new(2)),
+            Err(FederateSliceError::FederateNotFound {
+                federate: missing,
+            }) if missing == FederateIndex::new(2)
+        ));
     }
 
     #[test]
@@ -2623,7 +2759,9 @@ mod tests {
             DependencyCase::ModeTransition,
         ))
         .unwrap();
-        let enclave = compiled.federates()[0].enclaves()[0].view().unwrap();
+        let enclave = compiled.federates()[FederateIndex::new(0)].enclaves()[0]
+            .view()
+            .unwrap();
 
         assert_eq!(
             enclave.reactions()[ReactionIndex::new(1)].mode_effect(),
@@ -2714,8 +2852,12 @@ mod tests {
     #[test]
     fn cross_enclave_connection_lowers_to_paired_scheduler_routes() {
         let compiled = lower(&deployment(false, false)).unwrap();
-        let source = compiled.federates()[0].enclaves()[0].view().unwrap();
-        let target = compiled.federates()[0].enclaves()[1].view().unwrap();
+        let source = compiled.federates()[FederateIndex::new(0)].enclaves()[0]
+            .view()
+            .unwrap();
+        let target = compiled.federates()[FederateIndex::new(0)].enclaves()[1]
+            .view()
+            .unwrap();
         assert_eq!(source.routes().len(), 1);
         assert_eq!(
             source.routes()[RouteIndex::new(0)].direction(),
@@ -2740,7 +2882,9 @@ mod tests {
                 DependencyCase::None,
             ))
             .unwrap();
-            let enclave = compiled.federates()[0].enclaves()[0].view().unwrap();
+            let enclave = compiled.federates()[FederateIndex::new(0)].enclaves()[0]
+                .view()
+                .unwrap();
             assert_eq!(enclave.ports().len(), 5);
             assert!(enclave.routes().is_empty());
         }
@@ -2769,7 +2913,9 @@ mod tests {
         )
         .unwrap();
         let compiled = lower(&deployment).unwrap();
-        assert!(compiled.federates()[0].enclaves().is_empty());
+        assert!(compiled.federates()[FederateIndex::new(0)]
+            .enclaves()
+            .is_empty());
         compiled.validate().unwrap();
     }
     #[test]
@@ -2782,7 +2928,9 @@ mod tests {
             DependencyCase::None,
         ))
         .unwrap();
-        let enclave = compiled.federates()[0].enclaves()[0].view().unwrap();
+        let enclave = compiled.federates()[FederateIndex::new(0)].enclaves()[0]
+            .view()
+            .unwrap();
         assert_eq!(enclave.routes().len(), 2);
         for route in enclave.routes().values() {
             assert_eq!(route.timing_domain(), TimingDomain::Logical);
@@ -2797,7 +2945,9 @@ mod tests {
             DependencyCase::None,
         ))
         .unwrap();
-        let enclave = compiled.federates()[0].enclaves()[0].view().unwrap();
+        let enclave = compiled.federates()[FederateIndex::new(0)].enclaves()[0]
+            .view()
+            .unwrap();
         assert_eq!(enclave.routes().len(), 2);
         assert!(enclave
             .routes()
@@ -2816,7 +2966,9 @@ mod tests {
             DependencyCase::None,
         ))
         .unwrap();
-        let enclave = compiled.federates()[0].enclaves()[0].view().unwrap();
+        let enclave = compiled.federates()[FederateIndex::new(0)].enclaves()[0]
+            .view()
+            .unwrap();
         assert_eq!(enclave.reactions().len(), 6);
         assert_eq!(
             enclave.reactions()[ReactionIndex::new(0)].dependency_level(),
@@ -2835,7 +2987,9 @@ mod tests {
     #[test]
     fn modes_actions_lifecycle_and_scopes_are_fully_lowered() {
         let compiled = lower(&deployment(false, false)).unwrap();
-        let enclave = compiled.federates()[0].enclaves()[0].view().unwrap();
+        let enclave = compiled.federates()[FederateIndex::new(0)].enclaves()[0]
+            .view()
+            .unwrap();
         assert_eq!(enclave.actions().len(), 4);
         assert_eq!(enclave.modes().len(), 2);
         assert_eq!(enclave.scopes().len(), 3);
@@ -2922,7 +3076,9 @@ mod tests {
             DependencyCase::MutuallyExclusiveModes,
         ))
         .unwrap();
-        let enclave = compiled.federates()[0].enclaves()[0].view().unwrap();
+        let enclave = compiled.federates()[FederateIndex::new(0)].enclaves()[0]
+            .view()
+            .unwrap();
         assert_eq!(
             enclave.reactions()[ReactionIndex::new(4)].dependency_level(),
             0
@@ -2936,7 +3092,9 @@ mod tests {
             DependencyCase::EncodedOrdering,
         ))
         .unwrap();
-        let enclave = compiled.federates()[0].enclaves()[0].view().unwrap();
+        let enclave = compiled.federates()[FederateIndex::new(0)].enclaves()[0]
+            .view()
+            .unwrap();
         assert!(enclave
             .reactions()
             .values()

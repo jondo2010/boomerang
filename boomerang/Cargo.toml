@@ -35,8 +35,8 @@ federated = [
     "hosted",
     "boomerang_runtime/federated",
     "boomerang_builder/federated",
-    "boomerang_federated/runtime",
     "dep:boomerang_federated",
+    "dep:boomerang_central_rti",
 ]
 
 [dependencies]
@@ -46,6 +46,7 @@ thiserror.workspace = true
 # repo dependencies
 boomerang_builder = { workspace = true, optional = true }
 boomerang_federated = { workspace = true, optional = true }
+boomerang_central_rti = { workspace = true, optional = true }
 boomerang_runtime = { workspace = true }
 boomerang_macros = { workspace = true }
 

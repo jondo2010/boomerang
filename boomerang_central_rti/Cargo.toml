@@ -1,0 +1,27 @@
+[package]
+name = "boomerang_central_rti"
+description = "Tokio-backed central RTI execution for Boomerang federations."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+exclude.workspace = true
+
+[dependencies]
+boomerang_federated.workspace = true
+boomerang_runtime = { workspace = true, features = ["federated"] }
+tinymap.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+futures-channel = { version = "0.3", features = ["sink"] }
+futures-util = { version = "0.3", features = ["sink"] }
+tokio = { version = "1.52", features = ["io-util", "macros", "net", "rt-multi-thread", "sync"] }
+tokio-serde = { version = "0.9", features = ["json"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+
+[dev-dependencies]
+boomerang_util = { workspace = true, features = ["test-tracing"] }

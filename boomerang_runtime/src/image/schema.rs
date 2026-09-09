@@ -1,3 +1,4 @@
+//! Immutable dense image records consumed by compiled runtime execution.
 pub use tinymap::{TableRange, TinyMapView};
 
 tinymap::key_type!(pub ReactorIndex);
@@ -127,6 +128,64 @@ impl FederateImage {
 
     /// Returns the range of owned Enclave images.
     pub const fn enclaves(self) -> TableRange<EnclaveIndex> {
+        self.enclaves
+    }
+}
+
+/// An unchecked immutable image slice for one deployment-wide Federate.
+///
+/// The retained Enclave rows are local to this slice, while [`Self::image`]'s range preserves
+/// their deployment-wide [`EnclaveIndex`] values.
+#[derive(Clone, Copy, Debug)]
+pub struct FederateSliceImage<'a> {
+    /// Deployment-wide dense identity of the selected Federate.
+    federate: FederateIndex,
+    /// UTF-8 storage for the selected Federate identity records.
+    identity_data: &'a str,
+    /// Selected ownership record with its deployment-global Enclave range.
+    image: FederateImage,
+    /// Locally stored Enclave rows owned by the selected Federate.
+    enclaves: &'a [EnclaveImage<'a>],
+}
+
+impl<'a> FederateSliceImage<'a> {
+    /// Creates an unchecked immutable slice for one deployment-wide Federate.
+    #[must_use]
+    pub const fn new(
+        federate: FederateIndex,
+        identity_data: &'a str,
+        image: FederateImage,
+        enclaves: &'a [EnclaveImage<'a>],
+    ) -> Self {
+        Self {
+            federate,
+            identity_data,
+            image,
+            enclaves,
+        }
+    }
+
+    /// Returns the selected deployment-wide Federate index.
+    #[must_use]
+    pub const fn federate(self) -> FederateIndex {
+        self.federate
+    }
+
+    /// Returns the UTF-8 storage used by the Federate identity records.
+    #[must_use]
+    pub const fn identity_data(self) -> &'a str {
+        self.identity_data
+    }
+
+    /// Returns the unchanged Federate record from the complete deployment image.
+    #[must_use]
+    pub const fn image(self) -> FederateImage {
+        self.image
+    }
+
+    /// Returns the locally stored Enclave rows for this Federate.
+    #[must_use]
+    pub const fn enclaves(self) -> &'a [EnclaveImage<'a>] {
         self.enclaves
     }
 }

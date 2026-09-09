@@ -374,7 +374,6 @@ pub(crate) fn generate_analyzed_launcher(
     let federates = analyzed.compiled.federates();
     let (federate_index, federate) = federates
         .iter()
-        .enumerate()
         .find(|(_, federate)| federate.id().as_str() == federate_id)
         .ok_or_else(|| {
             anyhow!(
@@ -382,9 +381,6 @@ pub(crate) fn generate_analyzed_launcher(
                 analyzed.resolved.deployment_name()
             )
         })?;
-    if federates.len() != 1 {
-        bail!("static launcher generation currently supports one local Federate");
-    }
     if federate.runtime().as_str() != "std" {
         bail!(
             "Federate '{federate_id}' selects unsupported runtime '{}'",
@@ -403,22 +399,27 @@ pub(crate) fn generate_analyzed_launcher(
     let configured_files = ConfiguredFiles::new(&configuration)?;
     configured_files.apply_canonical_paths(&mut configuration);
 
-    let aliases = payload_aliases(&analyzed.resolved, &analyzed.driver, federate)?;
-    let manifest = render_manifest(&analyzed.resolved, &aliases)?;
+    let slice = analyzed.compiled.federate_slice(federate_index)?;
+    let distributed = federates.len() > 1;
+    let aliases = payload_aliases(&analyzed.resolved, &analyzed.driver, slice.enclaves())?;
+    let manifest = render_manifest(&analyzed.resolved, &aliases, distributed)?;
     let execution = analyzed
         .resolved
         .deployment()
         .execution
         .clone()
         .unwrap_or_default();
-    let source = rust::render_launcher(
-        &analyzed.driver,
-        &analyzed.compiled,
-        federate_index,
-        &aliases,
-        &execution,
-    )?;
-    let compile_inputs = payload_compile_inputs(&analyzed.resolved, &analyzed.driver)?;
+    let source = slice.with_image(|image| {
+        rust::render_launcher(
+            &analyzed.driver,
+            image,
+            slice.enclaves(),
+            &aliases,
+            &execution,
+            distributed,
+        )
+    })?;
+    let compile_inputs = payload_compile_inputs(&analyzed.resolved, &analyzed.driver, &aliases)?;
     let application_workspace = analyzed
         .resolved
         .lockfile()
@@ -462,8 +463,8 @@ pub(crate) fn generate_analyzed_launcher(
                 directory,
                 &configuration,
                 &compile_inputs,
+                &aliases,
                 &analyzed.resolved,
-                &application_workspace,
                 &cargo_program,
                 output,
             )
@@ -577,11 +578,16 @@ fn validate_launcher_graph(
     directory: &Path,
     federate: &ResolvedFederate,
     compile_inputs: &[(String, String)],
+    aliases: &BTreeMap<String, String>,
     resolved: &ResolvedWorkspace,
-    application_workspace: &Path,
     cargo_program: &OsStr,
     progress: &crate::CommandOutput,
 ) -> Result<PackageId> {
+    let application_workspace = resolved
+        .lockfile()
+        .path
+        .parent()
+        .expect("canonical workspace lockfile has a parent");
     let mut arguments = configured_metadata_arguments(federate, &directory.join("Cargo.toml"));
     arguments.push(OsString::from("--locked"));
     let mut command = launcher_command(
@@ -610,21 +616,27 @@ fn validate_launcher_graph(
         .iter()
         .find(|node| node.id == root.id)
         .expect("Cargo resolve graph contains its root");
-    let tracing_package = root_node
-        .deps
-        .iter()
-        .map(|dependency| &dependency.pkg)
-        .find(|package| {
-            metadata.packages.iter().any(|candidate| {
-                candidate.id == **package && candidate.name == "tracing-subscriber"
+    let direct_package = |name: &str| {
+        root_node
+            .deps
+            .iter()
+            .map(|dependency| &dependency.pkg)
+            .find(|package| {
+                metadata
+                    .packages
+                    .iter()
+                    .any(|candidate| candidate.id == **package && candidate.name == name)
             })
-        })
-        .ok_or_else(|| {
-            anyhow!("generated launcher does not depend directly on tracing-subscriber")
-        })?;
-    // The generated manifest owns this one direct dependency and therefore its complete closure.
+    };
+    let tracing_package = direct_package("tracing-subscriber").ok_or_else(|| {
+        anyhow!("generated launcher does not depend directly on tracing-subscriber")
+    })?;
+    // The generated manifest owns these direct dependencies and therefore their complete closures.
     let mut launcher_dependencies = BTreeSet::new();
     let mut pending = vec![tracing_package.clone()];
+    if let Some(backend) = direct_package("boomerang_central_rti") {
+        pending.push(backend.clone());
+    }
     while let Some(package) = pending.pop() {
         if !launcher_dependencies.insert(package.clone()) {
             continue;
@@ -636,8 +648,37 @@ fn validate_launcher_graph(
             .expect("Cargo resolve graph contains every dependency");
         pending.extend(node.deps.iter().map(|dependency| dependency.pkg.clone()));
     }
+    let implementation_ids = resolved
+        .deployment()
+        .bindings
+        .values()
+        .map(|binding| {
+            &resolved
+                .package(&binding.package)
+                .expect("resolved implementation package is retained")
+                .id
+        })
+        .collect::<BTreeSet<_>>();
+    let selected_ids = aliases
+        .keys()
+        .map(|implementation| {
+            &resolved
+                .package(implementation)
+                .expect("selected implementation package is retained")
+                .id
+        })
+        .collect::<BTreeSet<_>>();
     for node in graph.nodes.iter().filter(|node| node.id != root.id) {
         let id = node.id.to_string();
+        if node
+            .features
+            .iter()
+            .any(|feature| *feature == "__boomerang_payload")
+            && implementation_ids.contains(&node.id)
+            && !selected_ids.contains(&node.id)
+        {
+            bail!("unselected implementation package {id} activates reserved payload facet");
+        }
         if !resolved.locked_package_ids().contains(&id) && !launcher_dependencies.contains(&node.id)
         {
             bail!("generated launcher package {id} was absent from source metadata");
@@ -650,10 +691,9 @@ fn validate_launcher_graph(
 fn payload_aliases(
     resolved: &ResolvedWorkspace,
     driver: &DriverOutput,
-    federate: &boomerang_builder::compiler::OwnedFederateImage,
+    enclaves: &[boomerang_builder::compiler::OwnedEnclaveImage],
 ) -> Result<BTreeMap<String, String>> {
-    let required = federate
-        .enclaves()
+    let required = enclaves
         .iter()
         .flat_map(|enclave| enclave.required_bindings().iter())
         .map(binding_implementation)
@@ -690,6 +730,7 @@ fn binding_implementation(binding: &boomerang_builder::compiler::RequiredBinding
 fn render_manifest(
     resolved: &ResolvedWorkspace,
     aliases: &BTreeMap<String, String>,
+    distributed: bool,
 ) -> Result<String> {
     let mut dependencies = BTreeMap::new();
     dependencies.insert(
@@ -700,6 +741,29 @@ fn render_manifest(
         String::from("tinymap"),
         dependency(resolved.table_store(), false, Vec::new())?,
     );
+    if distributed {
+        let mut backend = dependency(resolved.runtime(), false, Vec::new())?;
+        let backend = backend
+            .as_table_mut()
+            .expect("rendered dependency is a TOML table");
+        backend.insert("package".into(), "boomerang_central_rti".into());
+        if backend.contains_key("path") {
+            let runtime = resolved
+                .runtime()
+                .manifest_path
+                .parent()
+                .expect("runtime manifest has a parent");
+            let path = runtime
+                .parent()
+                .expect("local runtime package has a workspace parent")
+                .join("boomerang_central_rti");
+            backend.insert("path".into(), path.to_string_lossy().into_owned().into());
+        }
+        dependencies.insert(
+            String::from("boomerang_central_rti"),
+            backend.clone().into(),
+        );
+    }
     dependencies.insert(
         String::from("tracing-subscriber"),
         toml::Table::from_iter([
@@ -753,12 +817,17 @@ fn render_manifest(
 fn payload_compile_inputs(
     resolved: &ResolvedWorkspace,
     driver: &DriverOutput,
+    aliases: &BTreeMap<String, String>,
 ) -> Result<Vec<(String, String)>> {
     let mut inputs = vec![(
         PAYLOAD_MACRO_ABI_COMPILE_INPUT.to_owned(),
         boomerang_runtime::binding::COMPONENT_DESCRIPTOR_MACRO_ABI.to_string(),
     )];
-    for binding in driver.bindings() {
+    for binding in driver
+        .bindings()
+        .iter()
+        .filter(|binding| aliases.contains_key(binding.implementation().as_str()))
+    {
         let package = resolved
             .package(binding.implementation().as_str())
             .expect("descriptor implementation package is resolved");

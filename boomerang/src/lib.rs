@@ -54,6 +54,9 @@ pub use static_federation::{execute_federation_in_memory, execute_federation_ove
 // Re-exports
 #[cfg(feature = "hosted")]
 pub use boomerang_builder as builder;
+/// Tokio-backed central RTI execution interfaces for hosted static federations.
+#[cfg(feature = "federated")]
+pub use boomerang_central_rti as central_rti;
 #[cfg(feature = "federated")]
 pub use boomerang_federated as federated;
 pub use boomerang_runtime as runtime;
@@ -80,9 +83,10 @@ pub mod prelude {
     pub use super::{execute_federation_in_memory, execute_federation_over_tcp};
 
     #[cfg(feature = "federated")]
-    pub use super::federated::{
-        EndpointId, FederateId, RuntimeBridgeError, TcpStaticFederationConfig, WireDelay, WireTag,
-    };
+    pub use super::federated::{EndpointId, FederateId, WireDelay, WireTag};
+
+    #[cfg(feature = "federated")]
+    pub use super::central_rti::{RuntimeBridgeError, TcpStaticFederationConfig};
 
     pub use super::runtime::{self, action::ActionCommon, CommonContext, Duration, FromRefs, Tag};
 
@@ -103,7 +107,7 @@ pub enum BoomerangError {
 
     #[cfg(feature = "federated")]
     #[error(transparent)]
-    StaticFederation(#[from] federated::StaticFederationRunnerError),
+    StaticFederation(#[from] central_rti::StaticFederationRunnerError),
 
     #[cfg(feature = "federated")]
     #[error("static federation execution requires a lowered federation")]

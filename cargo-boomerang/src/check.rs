@@ -266,7 +266,7 @@ fn build_report<'a>(
 pub(crate) fn resource_report(compiled: &OwnedCompiledDeployment) -> ResourceReport {
     let federates = compiled
         .federates()
-        .iter()
+        .values()
         .map(|federate| FederateResourceReport {
             id: federate.id().to_string(),
             target: federate.target().to_string(),

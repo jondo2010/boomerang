@@ -2,7 +2,8 @@
 //!
 //! Host compilation preserves declared Federate and boundary identities, parallel routes, and
 //! delays, then computes direct dependencies, minimum non-empty incoming paths, downstream impact
-//! sets, and zero-delay-cycle validity once. The resulting [`AnalyzedFederationGraph`] remains the
+//! sets, and zero-delay-cycle validity once. The resulting
+//! [`crate::compiler::federation::AnalyzedFederationGraph`] remains the
 //! semantic authority after a coordination backend is selected. Central RTI projection consumes
 //! these precomputed facts mechanically and must not repeat reachability, SCC, shortest-path, or
 //! equivalent graph work.

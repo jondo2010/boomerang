@@ -179,3 +179,16 @@ features = ["simulated"]
 groups = ["placement/backup", "placement/controller", "placement/sensor"]
 runtime = "std"
 recovery = "fail-stop"
+
+[deployments.sensor-slice]
+bindings = { sensor = { package = "sensor-host", features = ["simulated"] }, controller = { package = "vehicle-control" }, backup = { package = "vehicle-control" } }
+federates = { host = { groups = ["placement/backup", "placement/controller"], runtime = "std", recovery = "fail-stop" }, sensor = { groups = ["placement/sensor"], runtime = "std", recovery = "fail-stop", cargo-config = ".cargo/sensor-slice.toml" } }
+coordination = { backend = "central-rti" }
+rti = { target = "aarch64-unknown-linux-gnu" }
+boundaries."boundary/controller%2Fcommand/sensor%2Fcommand/c0" = { flow = "sensor-control", codec = "serde-json", transport = "tcp", failure-policy = "propagate-stop", transport-policy = "reliable-ordered-framed", codec-policy = "canonical-bounded", timing-policy = "best-effort", security-policy = "none" }
+[deployments.transitive-peer]
+bindings = { sensor = { package = "transitive-host" }, controller = { package = "vehicle-control" }, backup = { package = "vehicle-control" } }
+federates = { host = { groups = ["placement/backup", "placement/controller"], runtime = "std", recovery = "fail-stop" }, sensor = { groups = ["placement/sensor"], runtime = "std", recovery = "fail-stop" } }
+coordination = { backend = "central-rti" }
+rti = { target = "aarch64-unknown-linux-gnu" }
+boundaries."boundary/controller%2Fcommand/sensor%2Fcommand/c0" = { flow = "sensor-control", codec = "serde-json", transport = "tcp", failure-policy = "propagate-stop", transport-policy = "reliable-ordered-framed", codec-policy = "canonical-bounded", timing-policy = "best-effort", security-policy = "none" }

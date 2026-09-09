@@ -126,7 +126,7 @@ pub enum AssemblyError {
 
     #[cfg(feature = "federated")]
     #[error("Invalid federate placement: {0}")]
-    FederatePlacement(#[from] boomerang_federated::FederatePlacementError),
+    FederatePlacement(#[from] boomerang_central_rti::FederatePlacementError),
 
     #[error("Error declaring Reaction: {0}")]
     ReactionDeclarationError(String),
@@ -151,8 +151,8 @@ impl From<std::convert::Infallible> for AssemblyError {
 }
 
 #[cfg(feature = "federated")]
-impl From<boomerang_federated::RuntimeBridgeError> for AssemblyError {
-    fn from(error: boomerang_federated::RuntimeBridgeError) -> Self {
+impl From<boomerang_central_rti::RuntimeBridgeError> for AssemblyError {
+    fn from(error: boomerang_central_rti::RuntimeBridgeError) -> Self {
         Self::FederationBridgeError {
             what: error.to_string(),
         }
@@ -160,8 +160,8 @@ impl From<boomerang_federated::RuntimeBridgeError> for AssemblyError {
 }
 
 #[cfg(feature = "federated")]
-impl From<boomerang_federated::FederateClientError> for AssemblyError {
-    fn from(error: boomerang_federated::FederateClientError) -> Self {
+impl From<boomerang_central_rti::FederateClientError> for AssemblyError {
+    fn from(error: boomerang_central_rti::FederateClientError) -> Self {
         Self::FederationBridgeError {
             what: error.to_string(),
         }

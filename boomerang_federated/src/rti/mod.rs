@@ -534,7 +534,8 @@ impl RtiState {
         self.topology.topology()
     }
 
-    pub(crate) fn neighbors_for(&self, federate_id: &FederateId) -> Option<&NeighborStructure> {
+    /// Return the topology-derived neighbors admitted for a federate.
+    pub fn neighbors_for(&self, federate_id: &FederateId) -> Option<&NeighborStructure> {
         self.topology.neighbors_for(federate_id)
     }
 

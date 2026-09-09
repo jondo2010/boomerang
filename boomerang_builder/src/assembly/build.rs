@@ -66,7 +66,7 @@ pub struct LoweredFederation {
     /// Assembly-visible federate, edge, and endpoint metadata.
     pub plan: FederationPlan,
     /// Federation-specific runtime state consumed after lowering.
-    pub runtime: boomerang_federated::StaticFederationRuntime,
+    pub runtime: boomerang_central_rti::StaticFederationRuntime,
 }
 
 /// Federation artifacts created before runtime enclave keys have been allocated.
@@ -77,7 +77,7 @@ struct PendingFederation {
     /// Validated RTI topology and its precomputed coordination indexes.
     topology: boomerang_federated::CompiledTopology,
     /// Prebuilt protocol mailboxes, routes, inbound handlers, and fault state.
-    connections: boomerang_federated::FederatedRuntimeConnections,
+    connections: boomerang_central_rti::FederatedRuntimeConnections,
 }
 
 #[derive(Default)]
@@ -124,7 +124,7 @@ impl RuntimeAssembly {
         let federation = federation
             .map(|federation| -> Result<LoweredFederation, AssemblyError> {
                 Ok(LoweredFederation {
-                    runtime: boomerang_federated::StaticFederationRuntime::new(
+                    runtime: boomerang_central_rti::StaticFederationRuntime::new(
                         federation.topology,
                         lower_federate_enclaves(&federation.plan, &aliases.enclave_aliases)?,
                         federation.connections,
@@ -1047,7 +1047,7 @@ impl Assembly {
             )?)
         };
         #[cfg(feature = "federated")]
-        let federated_connections = boomerang_federated::FederatedRuntimeConnections::new(
+        let federated_connections = boomerang_central_rti::FederatedRuntimeConnections::new(
             federation_plan
                 .federates
                 .iter()
@@ -1055,7 +1055,7 @@ impl Assembly {
             federated_routes_from_plan(&federation_plan)?
                 .into_iter()
                 .map(|route| {
-                    boomerang_federated::FederateClientRoute::new(
+                    boomerang_central_rti::FederateClientRoute::new(
                         route.endpoint,
                         route.source,
                         route.target,

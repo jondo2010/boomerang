@@ -251,7 +251,7 @@ pub(crate) fn load_published_artifact(manifest: &Path) -> Result<PublishedArtifa
         bail!("published artifact directory name does not match deployment fingerprint");
     }
     if document.federates.len() != 1 {
-        bail!("published artifact requires exactly one local Federate");
+        bail!("distributed deployment execution is unsupported until issue #131");
     }
     let federate = &document.federates[0];
     if document.artifacts.len() != 1 {
@@ -290,17 +290,25 @@ pub(crate) fn open_published_artifact(path: &Path) -> Result<File> {
 pub(crate) fn publish_bundle(
     target_directory: &Path,
     mut document: DeploymentDocument,
-    source: BundleSource<'_>,
+    sources: &[BundleSource<'_>],
 ) -> Result<PathBuf> {
     validate_segment(&document.deployment, "deployment")?;
     validate_fingerprint(&document.fingerprint)?;
-    validate_segment(source.federate, "Federate")?;
-    let executable_name = source
-        .executable
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| anyhow!("generated executable name is not valid UTF-8"))?;
-    validate_segment(executable_name, "executable")?;
+    if sources.len() != document.federates.len() {
+        bail!("bundle source count does not match compiled Federate count");
+    }
+    for (federate, source) in document.federates.iter().zip(sources) {
+        if federate.id != source.federate {
+            bail!("bundle sources are not in canonical Federate order");
+        }
+        validate_segment(source.federate, "Federate")?;
+        let executable_name = source
+            .executable
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| anyhow!("generated executable name is not valid UTF-8"))?;
+        validate_segment(executable_name, "executable")?;
+    }
 
     let parent = target_directory
         .join("boomerang")
@@ -312,34 +320,42 @@ pub(crate) fn publish_bundle(
         .tempdir_in(&parent)
         .with_context(|| format!("failed to prepare {}", parent.display()))?;
 
-    let generated = format!("generated/{}", source.federate);
-    document.generated = vec![
-        stage_file(
+    document.generated.clear();
+    document.artifacts.clear();
+    for source in sources {
+        let generated = format!("generated/{}", source.federate);
+        document.generated.extend([
+            stage_file(
+                staging.path(),
+                source.federate,
+                source.manifest,
+                &format!("{generated}/Cargo.toml"),
+            )?,
+            stage_file(
+                staging.path(),
+                source.federate,
+                source.lockfile,
+                &format!("{generated}/Cargo.lock"),
+            )?,
+            stage_file(
+                staging.path(),
+                source.federate,
+                source.source,
+                &format!("{generated}/src/main.rs"),
+            )?,
+        ]);
+        let executable_name = source
+            .executable
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("validated executable name remains UTF-8");
+        document.artifacts.push(stage_file(
             staging.path(),
             source.federate,
-            source.manifest,
-            &format!("{generated}/Cargo.toml"),
-        )?,
-        stage_file(
-            staging.path(),
-            source.federate,
-            source.lockfile,
-            &format!("{generated}/Cargo.lock"),
-        )?,
-        stage_file(
-            staging.path(),
-            source.federate,
-            source.source,
-            &format!("{generated}/src/main.rs"),
-        )?,
-    ];
-
-    document.artifacts = vec![stage_file(
-        staging.path(),
-        source.federate,
-        source.executable,
-        &format!("artifacts/{}/{executable_name}", source.federate),
-    )?];
+            source.executable,
+            &format!("artifacts/{}/{executable_name}", source.federate),
+        )?);
+    }
 
     write_document(staging.path(), &document)?;
     let decoded = read_document(staging.path())?;
@@ -432,8 +448,6 @@ fn platform_rename_noreplace(source: &Path, destination: &Path) -> io::Result<()
 /// Calls Windows `MoveFileExW` without replacement and maps `GetLastError` via `last_os_error`.
 #[cfg(windows)]
 fn platform_rename_noreplace(source: &Path, destination: &Path) -> io::Result<()> {
-    use std::os::windows::ffi::OsStrExt as _;
-
     #[link(name = "kernel32")]
     extern "system" {
         #[link_name = "MoveFileExW"]
@@ -578,6 +592,16 @@ fn validate_bundle(bundle: &Path, document: &DeploymentDocument) -> Result<()> {
     }
     validate_fingerprint(&document.fingerprint)?;
     validate_segment(&document.deployment, "deployment")?;
+    let mut federates = BTreeSet::new();
+    for federate in &document.federates {
+        validate_segment(&federate.id, "Federate")?;
+        if !federates.insert(federate.id.as_str()) {
+            bail!("duplicate Federate record {}", federate.id);
+        }
+    }
+    if federates.is_empty() {
+        bail!("deployment document has no Federate records");
+    }
     let metadata = fs::symlink_metadata(bundle)
         .with_context(|| format!("failed to inspect {}", bundle.display()))?;
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
@@ -586,6 +610,7 @@ fn validate_bundle(bundle: &Path, document: &DeploymentDocument) -> Result<()> {
     let canonical_bundle = fs::canonicalize(bundle)
         .with_context(|| format!("failed to canonicalize {}", bundle.display()))?;
     let mut paths = BTreeSet::new();
+    let mut artifact_owners = BTreeSet::new();
     let mut expected_files = BTreeSet::new();
     expected_files.insert(PathBuf::from("deployment.json"));
     let mut expected_directories = BTreeSet::new();
@@ -598,6 +623,18 @@ fn validate_bundle(bundle: &Path, document: &DeploymentDocument) -> Result<()> {
         }
         for record in records {
             validate_record(category, record)?;
+            if !federates.contains(record.federate.as_str()) {
+                bail!(
+                    "{category} file is owned by unknown Federate {}",
+                    record.federate
+                );
+            }
+            if category == "artifacts" && !artifact_owners.insert(record.federate.as_str()) {
+                bail!(
+                    "Federate {} owns multiple artifact records",
+                    record.federate
+                );
+            }
             if !paths.insert(record.path.as_str()) {
                 bail!("duplicate bundle path {}", record.path);
             }
@@ -626,6 +663,17 @@ fn validate_bundle(bundle: &Path, document: &DeploymentDocument) -> Result<()> {
             let actual = hash_file(&path)?;
             if actual != record.blake3 {
                 bail!("bundle hash mismatch for {}", record.path);
+            }
+        }
+    }
+    if artifact_owners != federates {
+        bail!("each compiled Federate must own exactly one artifact record");
+    }
+    for federate in federates {
+        for relative in ["Cargo.toml", "Cargo.lock", "src/main.rs"] {
+            let path = format!("generated/{federate}/{relative}");
+            if !paths.contains(path.as_str()) {
+                bail!("Federate {federate} is missing generated workspace record {path}");
             }
         }
     }
@@ -954,13 +1002,13 @@ mod tests {
         let error = publish_bundle(
             target.path(),
             document,
-            BundleSource {
+            &[BundleSource {
                 federate: "host",
                 manifest: &manifest,
                 lockfile: &lockfile,
                 source: &source,
                 executable: &executable,
-            },
+            }],
         )
         .unwrap_err();
 
@@ -979,13 +1027,13 @@ mod tests {
         let first = publish_bundle(
             target.path(),
             document.clone(),
-            BundleSource {
+            &[BundleSource {
                 federate: "host",
                 manifest: &manifest,
                 lockfile: &lockfile,
                 source: &source,
                 executable: &executable,
-            },
+            }],
         )
         .unwrap();
         let bundle = first.parent().unwrap();
@@ -996,13 +1044,13 @@ mod tests {
         let second = publish_bundle(
             target.path(),
             document,
-            BundleSource {
+            &[BundleSource {
                 federate: "host",
                 manifest: &manifest,
                 lockfile: &lockfile,
                 source: &source,
                 executable: &executable,
-            },
+            }],
         )
         .unwrap();
 
@@ -1130,5 +1178,136 @@ mod tests {
         let error = load_published_artifact(&bundle.join("deployment.json")).unwrap_err();
 
         assert!(error.to_string().contains("directory name"), "{error:#}");
+    }
+
+    /// Rejects distributed execution until the compiled central RTI runner lands.
+    #[test]
+    fn published_loader_rejects_distributed_execution_until_issue_131() {
+        let parent = tempfile::tempdir().unwrap();
+        let mut document = sample_document();
+        let mut sensor = document.federates[0].clone();
+        sensor.id = String::from("sensor");
+        document.federates.push(sensor);
+        document.fingerprint = deployment_fingerprint(&document).unwrap();
+        let bundle = parent.path().join(&document.fingerprint);
+        fs::create_dir(&bundle).unwrap();
+        let contents = b"fixture";
+        let digest = blake3::hash(contents).to_hex().to_string();
+        document.generated = ["host", "sensor"]
+            .into_iter()
+            .flat_map(|federate| {
+                let digest = digest.clone();
+                ["Cargo.toml", "Cargo.lock", "src/main.rs"]
+                    .into_iter()
+                    .map(move |path| FileRecord {
+                        federate: federate.to_owned(),
+                        path: format!("generated/{federate}/{path}"),
+                        blake3: digest.clone(),
+                    })
+            })
+            .collect();
+        document.artifacts = ["host", "sensor"]
+            .into_iter()
+            .map(|federate| FileRecord {
+                federate: federate.to_owned(),
+                path: format!("artifacts/{federate}/launcher"),
+                blake3: digest.clone(),
+            })
+            .collect();
+        for record in document.generated.iter().chain(&document.artifacts) {
+            let path = join_normalized(&bundle, &record.path).unwrap();
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, contents).unwrap();
+        }
+        write_document(&bundle, &document).unwrap();
+
+        let error = load_published_artifact(&bundle.join("deployment.json")).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "distributed deployment execution is unsupported until issue #131"
+        );
+    }
+
+    /// Rejects invalid ownership, ordering, and multiplicity at collection publication.
+    #[test]
+    fn collection_boundary_rejects_invalid_ownership_and_collisions() {
+        let cases = [
+            ("source count", "source count"),
+            ("source order", "canonical Federate order"),
+            ("unknown owner", "unknown Federate"),
+            ("duplicate path", "duplicate bundle path"),
+            ("missing generated workspace", "generated workspace record"),
+            ("missing artifact", "exactly one artifact record"),
+            ("multiple artifacts", "multiple artifact records"),
+        ];
+        let mut outcomes = Vec::new();
+        for (case, expected) in cases {
+            let result = if case.starts_with("source") {
+                let target = tempfile::tempdir().unwrap();
+                let inputs = tempfile::tempdir().unwrap();
+                let [manifest, lockfile, source, executable] =
+                    write_sample_source_files(inputs.path());
+                let source = BundleSource {
+                    federate: "sensor",
+                    manifest: &manifest,
+                    lockfile: &lockfile,
+                    source: &source,
+                    executable: &executable,
+                };
+                let sources = if case == "source count" {
+                    &[][..]
+                } else {
+                    &[source]
+                };
+                publish_bundle(target.path(), sample_document(), sources).map(|_| ())
+            } else {
+                let bundle = tempfile::tempdir().unwrap();
+                let mut document = write_sample_bundle(bundle.path());
+                match case {
+                    "unknown owner" => {
+                        let path = "generated/sensor/Cargo.toml";
+                        fs::create_dir_all(bundle.path().join("generated/sensor")).unwrap();
+                        fs::rename(
+                            bundle.path().join(&document.generated[0].path),
+                            bundle.path().join(path),
+                        )
+                        .unwrap();
+                        document.generated[0].federate = "sensor".into();
+                        document.generated[0].path = path.into();
+                    }
+                    "duplicate path" => {
+                        document.generated[1].path = document.generated[0].path.clone();
+                    }
+                    "missing generated workspace" => {
+                        let missing = document.generated.remove(1);
+                        fs::remove_file(bundle.path().join(missing.path)).unwrap();
+                    }
+                    "missing artifact" => {
+                        let mut sensor = document.federates[0].clone();
+                        sensor.id = "sensor".into();
+                        document.federates.push(sensor);
+                    }
+                    "multiple artifacts" => {
+                        let path = "artifacts/host/second";
+                        fs::write(bundle.path().join(path), b"fixture").unwrap();
+                        document.artifacts.push(FileRecord {
+                            federate: "host".into(),
+                            path: path.into(),
+                            blake3: blake3::hash(b"fixture").to_hex().to_string(),
+                        });
+                    }
+                    _ => unreachable!(),
+                }
+                validate_bundle(bundle.path(), &document)
+            };
+            outcomes.push((case, result.err().map(|error| error.to_string()), expected));
+        }
+        assert!(
+            outcomes.iter().all(|(_, error, expected)| error
+                .as_deref()
+                .is_some_and(|error| error.contains(expected))),
+            "{outcomes:#?}"
+        );
     }
 }

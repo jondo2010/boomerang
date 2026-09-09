@@ -1,43 +1,39 @@
-#[cfg(feature = "serde-json-codec")]
+//! In-memory and TCP transport adapters for the central RTI wire protocol.
 use std::collections::{BTreeMap, BTreeSet};
 
-use futures_channel::mpsc::{self, UnboundedReceiver, UnboundedSender};
-#[cfg(feature = "serde-json-codec")]
-use futures_util::stream::FuturesUnordered;
-use futures_util::{stream::Map, StreamExt};
-#[cfg(feature = "serde-json-codec")]
-use tokio::net::{TcpListener, TcpStream};
-#[cfg(feature = "serde-json-codec")]
-use tokio_util::codec::{Framed, LengthDelimitedCodec};
-
-#[cfg(feature = "serde-json-codec")]
 use crate::{
     FederateId, FederatedTopology, ProtocolFrame, RtiSessionEndpoint, SessionError,
     StaticRtiSession,
 };
-
-#[cfg(feature = "serde-json-codec")]
+use futures_channel::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use futures_util::stream::FuturesUnordered;
+use futures_util::{stream::Map, StreamExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio_util::codec::{Framed, LengthDelimitedCodec};
+/// TCP framing adapter that serializes protocol frames as length-delimited JSON.
 pub type JsonProtocolFrameTransport = tokio_serde::SymmetricallyFramed<
     Framed<TcpStream, LengthDelimitedCodec>,
     ProtocolFrame,
     tokio_serde::formats::SymmetricalJson<ProtocolFrame>,
 >;
-
-#[cfg(feature = "serde-json-codec")]
+/// Sending half of a JSON protocol TCP transport.
 pub type JsonProtocolFrameSink =
     futures_util::stream::SplitSink<JsonProtocolFrameTransport, ProtocolFrame>;
-
-#[cfg(feature = "serde-json-codec")]
+/// Receiving half of a JSON protocol TCP transport.
 pub type JsonProtocolFrameStream = futures_util::stream::SplitStream<JsonProtocolFrameTransport>;
 
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
+/// Failure reported by an in-memory or TCP protocol transport.
 pub enum TransportError {
+    /// The peer or its outbound queue is closed.
     #[error("transport peer is closed")]
     Closed,
 
+    /// The operating system reported a transport I/O failure.
     #[error("transport I/O error: {0}")]
     Io(String),
 
+    /// Frame serialization or decoding failed.
     #[error("transport frame codec error: {0}")]
     Codec(String),
 }
@@ -64,6 +60,7 @@ pub type InMemoryFrameStream<M> = Map<UnboundedReceiver<M>, fn(M) -> Result<M, T
 pub type InMemoryTransport<Outgoing, Incoming> =
     (InMemoryFrameSink<Outgoing>, InMemoryFrameStream<Incoming>);
 
+/// Create opposite halves of an ordered, bidirectional in-memory transport.
 pub fn in_memory_transport_pair<A, B>() -> (InMemoryTransport<A, B>, InMemoryTransport<B, A>) {
     let (a_sender, a_receiver) = mpsc::unbounded();
     let (b_sender, b_receiver) = mpsc::unbounded();
@@ -80,6 +77,7 @@ pub fn in_memory_transport_pair<A, B>() -> (InMemoryTransport<A, B>, InMemoryTra
     )
 }
 
+/// Adapt an in-memory queue item to the fallible stream item expected by clients.
 fn ok_frame<M>(frame: M) -> Result<M, TransportError> {
     Ok(frame)
 }
@@ -88,7 +86,6 @@ fn ok_frame<M>(frame: M) -> Result<M, TransportError> {
 ///
 /// Each frame is encoded as a big-endian `u32` byte length followed by that many JSON bytes. The
 /// transport is reliable and ordered because it is backed by a single TCP stream.
-#[cfg(feature = "serde-json-codec")]
 pub fn json_protocol_frame_transport(stream: TcpStream) -> JsonProtocolFrameTransport {
     tokio_serde::SymmetricallyFramed::new(
         Framed::new(stream, LengthDelimitedCodec::new()),
@@ -100,15 +97,13 @@ pub fn json_protocol_frame_transport(stream: TcpStream) -> JsonProtocolFrameTran
 ///
 /// Accepted sockets are identified by their first `Hello` frame, independently of arrival order,
 /// and then driven by [`StaticRtiSession`].
-#[cfg(feature = "serde-json-codec")]
 pub async fn run_tcp_static_rti_session(
     listener: TcpListener,
     topology: FederatedTopology,
 ) -> Result<(), SessionError> {
     run_tcp_static_rti_session_compiled(listener, crate::CompiledTopology::new(topology)?).await
 }
-
-#[cfg(feature = "serde-json-codec")]
+/// Run the TCP accept loop using topology metadata validated during lowering.
 pub(crate) async fn run_tcp_static_rti_session_compiled(
     listener: TcpListener,
     topology: crate::CompiledTopology,
@@ -301,10 +296,8 @@ mod tests {
 
         assert_eq!(block_on(rti_stream.next()), None);
     }
-
-    #[cfg(feature = "serde-json-codec")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    #[ignore = "localhost TCP smoke test; run with `cargo test -p boomerang_federated tcp_smoke -- --ignored`"]
+    #[ignore = "localhost TCP smoke test; run with `cargo test -p boomerang_central_rti tcp_smoke -- --ignored`"]
     async fn tcp_smoke_identifies_reverse_order_peers_by_hello() {
         use std::time::Duration as StdDuration;
         use tokio::net::{TcpListener, TcpStream};
@@ -435,8 +428,6 @@ mod tests {
         drop(sink_client);
         rti.await.unwrap().unwrap();
     }
-
-    #[cfg(feature = "serde-json-codec")]
     async fn connect_tcp_client(
         federate_id: FederateId,
         topology: NeighborStructure,
@@ -447,8 +438,6 @@ mod tests {
             .await
             .unwrap()
     }
-
-    #[cfg(feature = "serde-json-codec")]
     fn recv_rti_message(
         client: &FederateProtocolClient,
         timeout: std::time::Duration,

@@ -78,6 +78,71 @@ fn generated_single_federate_launcher_executes_typed_local_route_without_builder
     assert!(package_names.contains(&"vehicle-control"));
 }
 
+/// Proves a generated distributed slice preserves canonical keys and excludes sibling payloads.
+#[test]
+fn generated_sensor_federate_slice_excludes_host_payload_and_preserves_canonical_keys() {
+    let _guard = support::toolchain_lock();
+    let target = tempfile::tempdir().unwrap();
+    let launcher = support::with_target_directory(target.path(), || {
+        cargo_boomerang::generate_launcher(fixture_workspace(), "sensor-slice", "sensor")
+    })
+    .unwrap();
+
+    let source = std::fs::read_to_string(launcher.source_path()).unwrap();
+    assert!(
+        source.contains("FederateSliceImage::new(FederateIndex::new(1)"),
+        "{source}"
+    );
+    assert!(source.contains("TableRange::new(2, 1)"), "{source}");
+    assert!(
+        source.contains(".bind_enclave(EnclaveIndex::new(2)"),
+        "{source}"
+    );
+    assert!(
+        source.contains("boundary/controller%2Fcommand/sensor%2Fcommand/c0"),
+        "{source}"
+    );
+    let metadata = MetadataCommand::new()
+        .manifest_path(launcher.manifest_path())
+        .other_options(vec![String::from("--locked"), String::from("--offline")])
+        .exec()
+        .unwrap();
+    let package_names = metadata
+        .packages
+        .iter()
+        .map(|package| package.name.as_str())
+        .collect::<Vec<_>>();
+    assert!(package_names.contains(&"sensor-host"));
+    assert!(package_names.contains(&"boomerang_central_rti"));
+    assert!(!package_names.contains(&"vehicle-control"));
+    assert!(!package_names.contains(&"vehicle-topology"));
+    assert!(!package_names.contains(&"boomerang_builder"));
+
+    launcher.build_locked_offline().unwrap();
+    let error = launcher.run_locked_offline().unwrap_err().to_string();
+    assert!(
+        error.contains("distributed generated launcher execution requires backend injection"),
+        "{error}"
+    );
+}
+
+/// Rejects reserved payload activation through an unselected transitive dependency.
+#[test]
+fn generated_launcher_rejects_transitive_payload_for_unselected_implementation() {
+    let _guard = support::toolchain_lock();
+    let target = tempfile::tempdir().unwrap();
+    let result = support::with_target_directory(target.path(), || {
+        cargo_boomerang::generate_launcher(fixture_workspace(), "transitive-peer", "sensor")
+    });
+    let error = result.err().expect("peer payload must fail").to_string();
+
+    assert!(
+        error.contains("unselected implementation package")
+            && error.contains("activates reserved payload facet"),
+        "{error}"
+    );
+}
+
 #[test]
 fn generated_launcher_check_and_run_apply_federate_cargo_configuration() {
     let _guard = support::toolchain_lock();

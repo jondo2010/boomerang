@@ -8,127 +8,161 @@ use crate::{
 };
 
 #[derive(Debug, thiserror::Error)]
+/// Failure converting a runtime value or lowered route to protocol state.
 pub enum RuntimeBridgeError {
+    /// A finite runtime tag used a negative time offset.
     #[error(
         "finite runtime tag {tag} has negative offset {offset_ns}ns; use Tag::NEVER for negative infinity"
     )]
     NegativeRuntimeTag {
+        /// Runtime tag that cannot be sent as a finite wire tag.
         tag: boomerang_runtime::Tag,
+        /// Negative nanosecond offset in the runtime tag.
         offset_ns: i128,
     },
 
+    /// A runtime tag's microstep exceeds the wire representation.
     #[error("runtime tag {tag} microstep {microstep} does not fit wire u64")]
     RuntimeMicrostepOutOfRange {
+        /// Runtime tag with the unrepresentable microstep.
         tag: boomerang_runtime::Tag,
+        /// Microstep that cannot fit in `u64`.
         microstep: usize,
     },
 
+    /// A finite wire tag used a negative time offset.
     #[error(
         "finite wire tag {tag} has negative offset {offset_ns}ns; use WireTag::NEVER for negative infinity"
     )]
-    NegativeWireTag { tag: WireTag, offset_ns: i128 },
+    NegativeWireTag {
+        /// Wire tag that cannot become a runtime tag.
+        tag: WireTag,
+        /// Negative nanosecond offset in the wire tag.
+        offset_ns: i128,
+    },
 
+    /// A wire offset exceeds the runtime duration range.
     #[error("finite wire tag {tag} offset {offset_ns}ns does not fit runtime Duration")]
-    WireTagOffsetOutOfRange { tag: WireTag, offset_ns: i128 },
+    WireTagOffsetOutOfRange {
+        /// Wire tag with the unrepresentable offset.
+        tag: WireTag,
+        /// Nanosecond offset that cannot fit the runtime duration.
+        offset_ns: i128,
+    },
 
+    /// A wire microstep exceeds the runtime index representation.
     #[error("finite wire tag {tag} microstep {microstep} does not fit runtime usize")]
-    WireMicrostepOutOfRange { tag: WireTag, microstep: u64 },
+    WireMicrostepOutOfRange {
+        /// Wire tag with the unrepresentable microstep.
+        tag: WireTag,
+        /// Microstep that cannot fit in `usize`.
+        microstep: u64,
+    },
 
+    /// A finite wire tag aliases the runtime's positive-infinity sentinel.
     #[error("finite wire tag {tag} collides with runtime Tag::FOREVER")]
-    WireTagCollidesWithRuntimeForever { tag: WireTag },
+    WireTagCollidesWithRuntimeForever {
+        /// Finite wire tag that maps to `Tag::FOREVER`.
+        tag: WireTag,
+    },
 
+    /// A cross-federate runtime delay is negative.
     #[error("cross-federate delay {delay} is negative; wire delays must be nonnegative")]
-    NegativeRuntimeDelay { delay: boomerang_runtime::Duration },
+    NegativeRuntimeDelay {
+        /// Runtime delay that cannot be serialized on the wire.
+        delay: boomerang_runtime::Duration,
+    },
 
+    /// A runtime delay exceeds the wire nanosecond range.
     #[error("cross-federate delay {delay} does not fit wire u64 nanoseconds")]
-    RuntimeDelayOutOfRange { delay: boomerang_runtime::Duration },
+    RuntimeDelayOutOfRange {
+        /// Runtime delay that cannot fit in `u64` nanoseconds.
+        delay: boomerang_runtime::Duration,
+    },
 }
 
-impl TryFrom<boomerang_runtime::Tag> for WireTag {
-    type Error = RuntimeBridgeError;
+/// Convert a runtime tag into its checked federated wire representation.
+pub fn wire_tag_from_runtime(tag: boomerang_runtime::Tag) -> Result<WireTag, RuntimeBridgeError> {
+    if tag == boomerang_runtime::Tag::NEVER {
+        return Ok(WireTag::NEVER);
+    }
+    if tag == boomerang_runtime::Tag::FOREVER {
+        return Ok(WireTag::FOREVER);
+    }
 
-    fn try_from(tag: boomerang_runtime::Tag) -> Result<Self, Self::Error> {
-        if tag == boomerang_runtime::Tag::NEVER {
-            return Ok(Self::NEVER);
-        }
-        if tag == boomerang_runtime::Tag::FOREVER {
-            return Ok(Self::FOREVER);
-        }
+    let offset_ns = tag.offset().whole_nanoseconds();
+    if offset_ns < 0 {
+        return Err(RuntimeBridgeError::NegativeRuntimeTag { tag, offset_ns });
+    }
 
-        let offset_ns = tag.offset().whole_nanoseconds();
-        if offset_ns < 0 {
-            return Err(RuntimeBridgeError::NegativeRuntimeTag { tag, offset_ns });
-        }
-
-        let microstep = tag.microstep().try_into().map_err(|_| {
-            RuntimeBridgeError::RuntimeMicrostepOutOfRange {
+    let microstep =
+        tag.microstep()
+            .try_into()
+            .map_err(|_| RuntimeBridgeError::RuntimeMicrostepOutOfRange {
                 tag,
                 microstep: tag.microstep(),
-            }
-        })?;
+            })?;
 
-        Ok(Self::finite(offset_ns, microstep))
-    }
+    Ok(WireTag::finite(offset_ns, microstep))
 }
 
-impl TryFrom<WireTag> for boomerang_runtime::Tag {
-    type Error = RuntimeBridgeError;
+/// Convert a federated wire tag into its checked runtime representation.
+pub fn runtime_tag_from_wire(tag: WireTag) -> Result<boomerang_runtime::Tag, RuntimeBridgeError> {
+    match tag {
+        WireTag::Never => Ok(boomerang_runtime::Tag::NEVER),
+        WireTag::Forever => Ok(boomerang_runtime::Tag::FOREVER),
+        WireTag::Finite {
+            offset_ns,
+            microstep,
+        } => {
+            if offset_ns < 0 {
+                return Err(RuntimeBridgeError::NegativeWireTag { tag, offset_ns });
+            }
 
-    fn try_from(tag: WireTag) -> Result<Self, Self::Error> {
-        match tag {
-            WireTag::Never => Ok(Self::NEVER),
-            WireTag::Forever => Ok(Self::FOREVER),
-            WireTag::Finite {
-                offset_ns,
+            let max_runtime_offset_ns = boomerang_runtime::Duration::MAX.whole_nanoseconds();
+            if offset_ns > max_runtime_offset_ns {
+                return Err(RuntimeBridgeError::WireTagOffsetOutOfRange { tag, offset_ns });
+            }
+
+            let microstep = microstep
+                .try_into()
+                .map_err(|_| RuntimeBridgeError::WireMicrostepOutOfRange { tag, microstep })?;
+            let runtime_tag = boomerang_runtime::Tag::new(
+                boomerang_runtime::Duration::nanoseconds_i128(offset_ns),
                 microstep,
-            } => {
-                if offset_ns < 0 {
-                    return Err(RuntimeBridgeError::NegativeWireTag { tag, offset_ns });
-                }
-
-                let max_runtime_offset_ns = boomerang_runtime::Duration::MAX.whole_nanoseconds();
-                if offset_ns > max_runtime_offset_ns {
-                    return Err(RuntimeBridgeError::WireTagOffsetOutOfRange { tag, offset_ns });
-                }
-
-                let microstep = microstep
-                    .try_into()
-                    .map_err(|_| RuntimeBridgeError::WireMicrostepOutOfRange { tag, microstep })?;
-                let runtime_tag = Self::new(
-                    boomerang_runtime::Duration::nanoseconds_i128(offset_ns),
-                    microstep,
-                );
-                if runtime_tag == Self::FOREVER {
-                    return Err(RuntimeBridgeError::WireTagCollidesWithRuntimeForever { tag });
-                }
-
-                Ok(runtime_tag)
+            );
+            if runtime_tag == boomerang_runtime::Tag::FOREVER {
+                return Err(RuntimeBridgeError::WireTagCollidesWithRuntimeForever { tag });
             }
+
+            Ok(runtime_tag)
         }
     }
 }
 
-impl TryFrom<boomerang_runtime::Duration> for WireDelay {
-    type Error = RuntimeBridgeError;
-
-    fn try_from(delay: boomerang_runtime::Duration) -> Result<Self, Self::Error> {
-        let nanos = delay.whole_nanoseconds();
-        if nanos < 0 {
-            return Err(RuntimeBridgeError::NegativeRuntimeDelay { delay });
-        }
-
-        let nanos = u64::try_from(nanos)
-            .map_err(|_| RuntimeBridgeError::RuntimeDelayOutOfRange { delay })?;
-
-        Ok(Self::from_nanos(nanos))
+/// Convert a nonnegative runtime delay into its checked wire representation.
+pub fn wire_delay_from_runtime(
+    delay: boomerang_runtime::Duration,
+) -> Result<WireDelay, RuntimeBridgeError> {
+    let nanos = delay.whole_nanoseconds();
+    if nanos < 0 {
+        return Err(RuntimeBridgeError::NegativeRuntimeDelay { delay });
     }
+
+    let nanos =
+        u64::try_from(nanos).map_err(|_| RuntimeBridgeError::RuntimeDelayOutOfRange { delay })?;
+
+    Ok(WireDelay::from_nanos(nanos))
 }
 
 /// Complete lowered connection state for one federate.
 #[derive(Debug)]
 pub(crate) struct FederatedRuntimeConnection {
+    /// Ordered outbound protocol queue for this federate.
     mailbox: FederateClientMailbox,
+    /// Stable endpoint routes targeting this federate.
     routes: BTreeMap<crate::EndpointId, FederateClientRoute>,
+    /// Shared first-failure state for runtime endpoint workers.
     faults: boomerang_runtime::FederatedFaultState,
 }
 
@@ -166,10 +200,12 @@ impl FederatedRuntimeConnection {
 /// Complete per-federate connection bundles created during runtime lowering.
 #[derive(Debug, Default)]
 pub struct FederatedRuntimeConnections {
+    /// Connection state keyed by stable federate identity.
     federates: BTreeMap<FederateId, FederatedRuntimeConnection>,
 }
 
 impl FederatedRuntimeConnections {
+    /// Build complete federate connections and assign each route to its target.
     pub fn new(
         federates: impl IntoIterator<Item = FederateId>,
         routes: impl IntoIterator<Item = FederateClientRoute>,
@@ -213,6 +249,7 @@ impl FederatedRuntimeConnections {
         })
     }
 
+    /// Build the runtime sink and shared fault state for an outbound endpoint.
     pub fn outbound_endpoint(
         &self,
         endpoint: &crate::EndpointId,
@@ -243,6 +280,7 @@ impl FederatedRuntimeConnections {
         ))
     }
 
+    /// Attach a typed runtime receiver to one lowered inbound route.
     pub fn register_inbound<T>(
         &mut self,
         federate: &FederateId,
@@ -298,29 +336,38 @@ impl FederatedRuntimeConnections {
             .inbound()
     }
 
+    /// Iterate over every lowered route in deterministic federate order.
     pub fn routes(&self) -> impl Iterator<Item = &FederateClientRoute> {
         self.federates
             .values()
             .flat_map(|connection| connection.routes.values())
     }
 
+    /// Report whether lowering created a connection for `federate`.
     pub fn contains_federate(&self, federate: &FederateId) -> bool {
         self.federates.contains_key(federate)
     }
 
+    /// Return the number of federates with prebuilt connection state.
     pub fn len(&self) -> usize {
         self.federates.len()
     }
 
+    /// Report whether no federate connection state was created.
     pub fn is_empty(&self) -> bool {
         self.federates.is_empty()
     }
 }
 
+/// Runtime-facing outbound sink that emits one protocol `MSG` route.
 struct ProtocolFederatedOutboundSink {
+    /// Stable endpoint selected during lowering.
     endpoint: crate::EndpointId,
+    /// Federate that owns the outbound runtime endpoint.
     source: FederateId,
+    /// Federate selected as the protocol message target.
     target: FederateId,
+    /// Ordered federate-to-RTI protocol queue.
     sender: FederateProtocolSender,
 }
 
@@ -330,7 +377,7 @@ impl boomerang_runtime::FederatedOutboundSink for ProtocolFederatedOutboundSink 
         command: boomerang_runtime::FederatedOutboundCommand,
     ) -> Result<(), boomerang_runtime::FederatedEndpointError> {
         let boomerang_runtime::FederatedOutboundCommand::Msg(message) = command;
-        let tag = WireTag::try_from(message.tag)
+        let tag = wire_tag_from_runtime(message.tag)
             .map_err(|error| boomerang_runtime::FederatedEndpointError::send(error.to_string()))?;
         self.sender
             .send(FederateToRti::Msg {
@@ -360,26 +407,26 @@ mod tests {
             boomerang_runtime::Tag::new(boomerang_runtime::Duration::nanoseconds(42), 7),
             boomerang_runtime::Tag::FOREVER,
         ] {
-            let wire_tag = WireTag::try_from(tag).unwrap();
-            assert_eq!(boomerang_runtime::Tag::try_from(wire_tag).unwrap(), tag);
+            let wire_tag = wire_tag_from_runtime(tag).unwrap();
+            assert_eq!(runtime_tag_from_wire(wire_tag).unwrap(), tag);
         }
     }
 
     #[test]
     fn tag_bridge_rejects_negative_finite_tags() {
         assert_eq!(
-            WireTag::try_from(boomerang_runtime::Tag::NEVER).unwrap(),
+            wire_tag_from_runtime(boomerang_runtime::Tag::NEVER).unwrap(),
             WireTag::NEVER
         );
         assert_runtime_bridge_error(
-            WireTag::try_from(boomerang_runtime::Tag::new(
+            wire_tag_from_runtime(boomerang_runtime::Tag::new(
                 boomerang_runtime::Duration::nanoseconds(-1),
                 0,
             )),
             "negative offset",
         );
         assert_runtime_bridge_error(
-            boomerang_runtime::Tag::try_from(WireTag::finite(-1, 0)),
+            runtime_tag_from_wire(WireTag::finite(-1, 0)),
             "negative offset",
         );
     }
@@ -388,13 +435,13 @@ mod tests {
     fn tag_bridge_rejects_wire_values_outside_runtime_representation() {
         let too_large = boomerang_runtime::Duration::MAX.whole_nanoseconds() + 1;
         assert_runtime_bridge_error(
-            boomerang_runtime::Tag::try_from(WireTag::finite(too_large, 0)),
+            runtime_tag_from_wire(WireTag::finite(too_large, 0)),
             "does not fit runtime Duration",
         );
 
         #[cfg(target_pointer_width = "64")]
         assert_runtime_bridge_error(
-            boomerang_runtime::Tag::try_from(WireTag::finite(
+            runtime_tag_from_wire(WireTag::finite(
                 boomerang_runtime::Duration::MAX.whole_nanoseconds(),
                 u64::MAX,
             )),
@@ -405,21 +452,21 @@ mod tests {
     #[test]
     fn delay_bridge_rejects_invalid_wire_delays() {
         assert_eq!(
-            WireDelay::try_from(boomerang_runtime::Duration::ZERO).unwrap(),
+            wire_delay_from_runtime(boomerang_runtime::Duration::ZERO).unwrap(),
             WireDelay::ZERO
         );
         assert_eq!(
-            WireDelay::try_from(boomerang_runtime::Duration::nanoseconds(5))
+            wire_delay_from_runtime(boomerang_runtime::Duration::nanoseconds(5))
                 .unwrap()
                 .as_nanos(),
             5
         );
         assert_runtime_bridge_error(
-            WireDelay::try_from(boomerang_runtime::Duration::nanoseconds(-1)),
+            wire_delay_from_runtime(boomerang_runtime::Duration::nanoseconds(-1)),
             "negative",
         );
         assert_runtime_bridge_error(
-            WireDelay::try_from(boomerang_runtime::Duration::nanoseconds_i128(
+            wire_delay_from_runtime(boomerang_runtime::Duration::nanoseconds_i128(
                 i128::from(u64::MAX) + 1,
             )),
             "does not fit wire u64",

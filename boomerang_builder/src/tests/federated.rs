@@ -11,13 +11,13 @@ fn run_lowered_federation_for_test(
     parts: RuntimeAssembly,
     config: runtime::Config,
 ) -> Result<
-    boomerang_federated::static_runner::FederationEnvs,
-    boomerang_federated::StaticFederationRunnerError,
+    boomerang_central_rti::static_runner::FederationEnvs,
+    boomerang_central_rti::StaticFederationRunnerError,
 > {
     let federation = parts
         .federation
         .expect("test federation must contain lowered runtime state");
-    boomerang_federated::static_runner::run_in_memory(federation.runtime, parts.enclaves, config)
+    boomerang_central_rti::static_runner::run_in_memory(federation.runtime, parts.enclaves, config)
 }
 
 #[derive(Clone, Copy)]
@@ -35,7 +35,7 @@ struct LocalOnlyPayload {
 struct IntentionalFailingCodec;
 
 struct FederatedOutboundCapture {
-    mailbox: boomerang_federated::FederateClientMailbox,
+    mailbox: boomerang_central_rti::FederateClientMailbox,
 }
 
 impl FederatedOutboundCapture {
@@ -364,7 +364,7 @@ fn register_u32_federated_codec(assembly: &mut Assembly) -> Result<(), AssemblyE
 fn route_outbound_commands_through_rti(
     plan: &FederationPlan,
     commands: Vec<boomerang_federated::FederateToRti>,
-    connections: &boomerang_federated::FederatedRuntimeConnections,
+    connections: &boomerang_central_rti::FederatedRuntimeConnections,
 ) -> Vec<runtime::Tag> {
     let topology = federation_topology_from_plan(plan).unwrap();
     let mut rti = boomerang_federated::RtiState::new(topology.clone()).unwrap();
@@ -417,7 +417,8 @@ fn route_outbound_commands_through_rti(
             } => {
                 assert_eq!(delivered_source, &source);
                 assert_eq!(delivered_endpoint, &endpoint);
-                let runtime_tag = runtime::Tag::try_from(*delivered_tag).unwrap();
+                let runtime_tag =
+                    boomerang_central_rti::runtime_tag_from_wire(*delivered_tag).unwrap();
                 connections
                     .inbound_endpoint(&target, &endpoint)
                     .expect("lowered inbound endpoint")
@@ -1220,7 +1221,7 @@ fn test_federated_sender_emits_serialized_msg_command() {
     assert_eq!(endpoint.as_str(), "main/source/out->main/sink/in");
     assert_eq!(
         *tag,
-        boomerang_federated::WireTag::try_from(runtime::Tag::new(delay, 0)).unwrap()
+        boomerang_central_rti::wire_tag_from_runtime(runtime::Tag::new(delay, 0)).unwrap()
     );
     assert_eq!(payload, b"7");
 }

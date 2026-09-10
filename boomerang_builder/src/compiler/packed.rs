@@ -38,6 +38,14 @@ impl<T> PackedSliceBuilder<T> {
         Ok(SliceRange::new(start, len))
     }
 
+    /// Collects and appends a segment whose iterator does not expose its exact length.
+    pub(crate) fn try_extend<I>(&mut self, values: I) -> Result<SliceRange<T>, PackedSliceOverflow>
+    where
+        I: IntoIterator<Item = T>,
+    {
+        self.try_extend_exact(values.into_iter().collect::<Vec<_>>())
+    }
+
     /// Finishes the packed owner as immutable backing storage.
     pub(crate) fn into_boxed_slice(self) -> Box<[T]> {
         self.values.into_boxed_slice()

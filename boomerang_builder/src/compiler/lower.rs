@@ -1,6 +1,7 @@
 use super::compiled::{OwnedBindingImage, OwnedRouteImage};
 use super::coordination::project_central_rti;
 use super::identity::canonical_identity_text;
+use super::packed::{PackedSliceBuilder, PackedSliceOverflow};
 use super::{
     federation::{
         analyze_federation_graph, AnalyzedFederationGraph, FederationDelay, FederationEdge,
@@ -15,8 +16,8 @@ use crate::{
         BoundaryFailurePolicy, EnclaveIndex, FederateIndex, IndexSpan, LevelReactionImage,
         LifecycleReactionImage, ModeImage, ModeIndex, PortImage, PortIndex, ReactionImage,
         ReactionIndex, ReactorImage, ReactorIndex, RecoveryPolicy, RouteDirection, ScopeImage,
-        ScopeIndex, SecurityPolicy, SliceRange, StateSlotIndex, StorageBounds, TimerStartupImage,
-        TimingDomain, TimingPolicy,
+        ScopeIndex, SecurityPolicy, StateSlotIndex, StorageBounds, TimerStartupImage, TimingDomain,
+        TimingPolicy,
     },
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -145,6 +146,20 @@ struct GlobalAnalysis {
     port_representatives: BTreeMap<super::PortId, super::PortId>,
     /// Longest-predecessor dependency level for every reaction.
     reaction_levels: BTreeMap<super::ReactionId, u32>,
+}
+
+#[derive(Clone)]
+enum ScopeOwner {
+    Reactor(super::ReactorId),
+    Mode(super::ModeId),
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum BindingOwner {
+    State(super::ReactorId),
+    Reaction(super::ReactionId),
+    Port(super::PortId),
+    Action(super::ActionId),
 }
 
 /// Resolves descriptor-local slots for one selected implementation.
@@ -484,101 +499,194 @@ fn federation_edge(
     )))
 }
 
-/// Lowers one canonically ordered Enclave slice using deployment-wide analysis.
-fn lower_enclave(
+fn dense_indices<K, I>(
+    values: impl IntoIterator<Item = I>,
+    enclave: &super::StableEnclaveId,
+    resource: &'static str,
+) -> Result<BTreeMap<I, K>, CompileError>
+where
+    K: tinymap::Key,
+    I: Clone + Ord,
+{
+    let values = tinymap::TinyMap::<K, I>::try_from_iter(values).map_err(|_| {
+        CompileError::ResourceOverflow {
+            enclave: enclave.clone(),
+            resource,
+        }
+    })?;
+    Ok(values
+        .iter()
+        .map(|(key, identity)| (identity.clone(), key))
+        .collect())
+}
+
+fn packed_overflow(
+    enclave: &super::StableEnclaveId,
+) -> impl FnOnce(PackedSliceOverflow) -> CompileError + '_ {
+    |error| CompileError::ResourceOverflow {
+        enclave: enclave.clone(),
+        resource: error.table(),
+    }
+}
+
+struct EnclaveDomains<'a> {
+    reactors: Vec<(&'a super::ReactorId, &'a super::Reactor)>,
+    actions: Vec<(&'a super::ActionId, &'a super::Action)>,
+    modes: Vec<(&'a super::ModeId, &'a super::Mode)>,
+    representatives: Vec<super::PortId>,
+    reactions: Vec<(&'a super::ReactionId, &'a super::Reaction)>,
+    reactor_indices: BTreeMap<super::ReactorId, ReactorIndex>,
+    action_indices: BTreeMap<super::ActionId, ActionIndex>,
+    mode_indices: BTreeMap<super::ModeId, ModeIndex>,
+    reactor_mode_spans: BTreeMap<super::ReactorId, IndexSpan<ModeIndex>>,
+    root_scopes: BTreeMap<super::ReactorId, ScopeIndex>,
+    mode_scopes: BTreeMap<super::ModeId, ScopeIndex>,
+    port_indices: BTreeMap<super::PortId, PortIndex>,
+    reaction_indices: BTreeMap<super::ReactionId, ReactionIndex>,
+}
+
+impl<'a> EnclaveDomains<'a> {
+    fn lower(
+        topology: &'a super::ApplicationTopology,
+        enclave_id: &super::StableEnclaveId,
+        analysis: &GlobalAnalysis,
+    ) -> Result<Self, CompileError> {
+        let mut reactors = topology
+            .reactors()
+            .filter(|(_, reactor)| reactor.enclave() == enclave_id)
+            .collect::<Vec<_>>();
+        sort_by_encoded_identity(&mut reactors);
+        let reactor_indices = dense_indices::<ReactorIndex, _>(
+            reactors.iter().map(|(id, _)| (*id).clone()),
+            enclave_id,
+            "reactors",
+        )?;
+        let mut actions = topology
+            .actions()
+            .filter(|(_, action)| reactor_indices.contains_key(action.reactor()))
+            .collect::<Vec<_>>();
+        sort_by_encoded_identity(&mut actions);
+        let action_indices = dense_indices::<ActionIndex, _>(
+            actions.iter().map(|(id, _)| (*id).clone()),
+            enclave_id,
+            "actions",
+        )?;
+        let modes = reactors
+            .iter()
+            .flat_map(|(reactor_id, _)| {
+                let mut values = topology
+                    .modes()
+                    .filter(move |(_, mode)| mode.reactor() == *reactor_id)
+                    .collect::<Vec<_>>();
+                sort_by_encoded_identity(&mut values);
+                values
+            })
+            .collect::<Vec<_>>();
+        let mut mode_domain = tinymap::TinyMap::<ModeIndex, super::ModeId>::new();
+        let mut reactor_mode_spans = BTreeMap::new();
+        for (reactor_id, _) in &reactors {
+            let reactor_modes = modes
+                .iter()
+                .filter(|(_, mode)| mode.reactor() == *reactor_id)
+                .map(|(id, _)| (*id).clone())
+                .collect::<Vec<_>>();
+            let span = mode_domain.try_extend_exact(reactor_modes).map_err(|_| {
+                CompileError::ResourceOverflow {
+                    enclave: enclave_id.clone(),
+                    resource: "modes",
+                }
+            })?;
+            reactor_mode_spans.insert((*reactor_id).clone(), span);
+        }
+        let mode_indices = mode_domain
+            .iter()
+            .map(|(key, identity)| (identity.clone(), key))
+            .collect::<BTreeMap<_, _>>();
+        let scope_domain = tinymap::TinyMap::<ScopeIndex, ScopeOwner>::try_from_iter(
+            reactors
+                .iter()
+                .map(|(id, _)| ScopeOwner::Reactor((*id).clone()))
+                .chain(modes.iter().map(|(id, _)| ScopeOwner::Mode((*id).clone()))),
+        )
+        .map_err(|_| CompileError::ResourceOverflow {
+            enclave: enclave_id.clone(),
+            resource: "scopes",
+        })?;
+        let mut root_scopes = BTreeMap::new();
+        let mut mode_scopes = BTreeMap::new();
+        for (scope, owner) in scope_domain.iter() {
+            match owner {
+                ScopeOwner::Reactor(id) => root_scopes.insert(id.clone(), scope),
+                ScopeOwner::Mode(id) => mode_scopes.insert(id.clone(), scope),
+            };
+        }
+        let mut local_ports = topology
+            .ports()
+            .filter(|(_, port)| reactor_indices.contains_key(port.reactor()))
+            .collect::<Vec<_>>();
+        sort_by_encoded_identity(&mut local_ports);
+        let port_representatives = local_ports
+            .iter()
+            .map(|(id, _)| ((*id).clone(), analysis.port_representatives[*id].clone()))
+            .collect::<BTreeMap<_, _>>();
+        let mut representatives = port_representatives.values().cloned().collect::<Vec<_>>();
+        representatives.sort_by_cached_key(canonical_identity_text);
+        representatives.dedup();
+        let representative_indices =
+            dense_indices::<PortIndex, _>(representatives.iter().cloned(), enclave_id, "ports")?;
+        let port_indices = port_representatives
+            .iter()
+            .map(|(id, representative)| (id.clone(), representative_indices[representative]))
+            .collect::<BTreeMap<_, _>>();
+        let mut reactions = topology
+            .reactions()
+            .filter(|(_, reaction)| reactor_indices.contains_key(reaction.reactor()))
+            .collect::<Vec<_>>();
+        sort_by_encoded_identity(&mut reactions);
+        let reaction_indices = dense_indices::<ReactionIndex, _>(
+            reactions.iter().map(|(id, _)| (*id).clone()),
+            enclave_id,
+            "reactions",
+        )?;
+        Ok(Self {
+            reactors,
+            actions,
+            modes,
+            representatives,
+            reactions,
+            reactor_indices,
+            action_indices,
+            mode_indices,
+            reactor_mode_spans,
+            root_scopes,
+            mode_scopes,
+            port_indices,
+            reaction_indices,
+        })
+    }
+}
+
+struct LoweredBindings {
+    entries: Box<[RequiredBinding]>,
+    indices: BTreeMap<BindingOwner, BindingSlotIndex>,
+    images: tinymap::TinyMap<BindingSlotIndex, OwnedBindingImage>,
+}
+
+fn lower_bindings(
     deployment: &ResolvedDeployment,
     enclave_id: &super::StableEnclaveId,
-    analysis: &GlobalAnalysis,
-) -> Result<OwnedEnclaveImage, CompileError> {
+    reactors: &[(&super::ReactorId, &super::Reactor)],
+    reactions: &[(&super::ReactionId, &super::Reaction)],
+    representatives: &[super::PortId],
+    actions: &[(&super::ActionId, &super::Action)],
+) -> Result<LoweredBindings, CompileError> {
     let topology = deployment.topology();
-    let mut reactors = topology
-        .reactors()
-        .filter(|(_, reactor)| reactor.enclave() == enclave_id)
-        .collect::<Vec<_>>();
-    sort_by_encoded_identity(&mut reactors);
-    checked_u32(reactors.len(), enclave_id, "reactors")?;
-    let reactor_indices = reactors
-        .iter()
-        .zip(0u32..)
-        .map(|((id, _), index)| ((*id).clone(), ReactorIndex::new(index)))
-        .collect::<BTreeMap<_, _>>();
-    let mut actions = topology
-        .actions()
-        .filter(|(_, action)| reactor_indices.contains_key(action.reactor()))
-        .collect::<Vec<_>>();
-    sort_by_encoded_identity(&mut actions);
-    checked_u32(actions.len(), enclave_id, "actions")?;
-    let action_indices = actions
-        .iter()
-        .zip(0u32..)
-        .map(|((id, _), index)| ((*id).clone(), ActionIndex::new(index)))
-        .collect::<BTreeMap<_, _>>();
-    let modes = reactors
-        .iter()
-        .flat_map(|(reactor_id, _)| {
-            let mut modes = topology
-                .modes()
-                .filter(move |(_, mode)| mode.reactor() == *reactor_id)
-                .collect::<Vec<_>>();
-            sort_by_encoded_identity(&mut modes);
-            modes
-        })
-        .collect::<Vec<_>>();
-    let reactor_count = checked_u32(reactors.len(), enclave_id, "scopes")?;
-    checked_u32(reactors.len() + modes.len(), enclave_id, "scopes")?;
-    let mode_indices = modes
-        .iter()
-        .zip(0u32..)
-        .map(|((id, _), index)| ((*id).clone(), ModeIndex::new(index)))
-        .collect::<BTreeMap<_, _>>();
-    let root_scopes = reactors
-        .iter()
-        .zip(0u32..)
-        .map(|((id, _), index)| ((*id).clone(), ScopeIndex::new(index)))
-        .collect::<BTreeMap<_, _>>();
-    let mode_scopes = modes
-        .iter()
-        .zip(reactor_count..)
-        .map(|((id, _), index)| ((*id).clone(), ScopeIndex::new(index)))
-        .collect::<BTreeMap<_, _>>();
-    let mut local_ports = topology
-        .ports()
-        .filter(|(_, port)| reactor_indices.contains_key(port.reactor()))
-        .collect::<Vec<_>>();
-    sort_by_encoded_identity(&mut local_ports);
-    let port_representatives = local_ports
-        .iter()
-        .map(|(id, _)| ((*id).clone(), analysis.port_representatives[*id].clone()))
-        .collect::<BTreeMap<_, _>>();
-    let mut representatives = port_representatives.values().cloned().collect::<Vec<_>>();
-    representatives.sort_by_cached_key(canonical_identity_text);
-    representatives.dedup();
-    checked_u32(representatives.len(), enclave_id, "ports")?;
-    let representative_indices = representatives
-        .iter()
-        .zip(0u32..)
-        .map(|(id, index)| (id.clone(), PortIndex::new(index)))
-        .collect::<BTreeMap<_, _>>();
-    let port_indices = port_representatives
-        .iter()
-        .map(|(id, representative)| (id.clone(), representative_indices[representative]))
-        .collect::<BTreeMap<_, _>>();
-    let mut reactions = topology
-        .reactions()
-        .filter(|(_, reaction)| reactor_indices.contains_key(reaction.reactor()))
-        .collect::<Vec<_>>();
-    sort_by_encoded_identity(&mut reactions);
-    checked_u32(reactions.len(), enclave_id, "reactions")?;
-    let reaction_indices = reactions
-        .iter()
-        .zip(0u32..)
-        .map(|((id, _), index)| ((*id).clone(), ReactionIndex::new(index)))
-        .collect::<BTreeMap<_, _>>();
-    let mut named_bindings = reactors
+    let mut named = reactors
         .iter()
         .map(|(id, reactor)| {
             let slots = DescriptorSlots::for_component(deployment, reactor.component())?;
             Ok((
+                BindingOwner::State((*id).clone()),
                 format!("state/{id}"),
                 RequiredBinding::State {
                     component: reactor.component().clone(),
@@ -588,7 +696,7 @@ fn lower_enclave(
             ))
         })
         .collect::<Result<Vec<_>, CompileError>>()?;
-    named_bindings.extend(
+    named.extend(
         reactions
             .iter()
             .map(|(id, reaction)| {
@@ -598,6 +706,7 @@ fn lower_enclave(
                     .component();
                 let slots = DescriptorSlots::for_component(deployment, component)?;
                 Ok((
+                    BindingOwner::Reaction((*id).clone()),
                     format!("reaction/{id}"),
                     RequiredBinding::Reaction {
                         component: component.clone(),
@@ -608,7 +717,7 @@ fn lower_enclave(
             })
             .collect::<Result<Vec<_>, CompileError>>()?,
     );
-    named_bindings.extend(
+    named.extend(
         representatives
             .iter()
             .map(|id| {
@@ -619,6 +728,7 @@ fn lower_enclave(
                     .component();
                 let slots = DescriptorSlots::for_component(deployment, component)?;
                 Ok((
+                    BindingOwner::Port(id.clone()),
                     format!("port/{id}"),
                     RequiredBinding::Port {
                         component: component.clone(),
@@ -629,7 +739,7 @@ fn lower_enclave(
             })
             .collect::<Result<Vec<_>, CompileError>>()?,
     );
-    named_bindings.extend(
+    named.extend(
         actions
             .iter()
             .filter(|(_, action)| {
@@ -645,6 +755,7 @@ fn lower_enclave(
                     .component();
                 let slots = DescriptorSlots::for_component(deployment, component)?;
                 Ok((
+                    BindingOwner::Action((*id).clone()),
                     format!("action/{id}"),
                     RequiredBinding::Action {
                         component: component.clone(),
@@ -655,52 +766,180 @@ fn lower_enclave(
             })
             .collect::<Result<Vec<_>, CompileError>>()?,
     );
-    named_bindings.sort_by(|left, right| left.0.cmp(&right.0));
-    let binding_entries = named_bindings
+    named.sort_by(|left, right| left.1.cmp(&right.1));
+    let entries = named
         .iter()
-        .map(|(_, binding)| binding.clone())
-        .collect::<Vec<_>>();
-    checked_u32(binding_entries.len(), enclave_id, "bindings")?;
-    let binding_indices = named_bindings
-        .iter()
-        .zip(0u32..)
-        .map(|((id, _), index)| (id.clone(), BindingSlotIndex::new(index)))
-        .collect::<BTreeMap<_, _>>();
-    let binding_images = named_bindings
-        .iter()
-        .map(|(id, binding)| OwnedBindingImage::new(id, binding.kind()))
-        .collect::<tinymap::TinyMap<BindingSlotIndex, _>>();
+        .map(|(_, _, binding)| binding.clone())
+        .collect::<Vec<_>>()
+        .into_boxed_slice();
+    let mut indices = BTreeMap::new();
+    let mut images = tinymap::TinyMap::<BindingSlotIndex, _>::new();
+    for (owner, id, binding) in &named {
+        let key = images
+            .try_insert(OwnedBindingImage::new(id, binding.kind()))
+            .map_err(|_| CompileError::ResourceOverflow {
+                enclave: enclave_id.clone(),
+                resource: "bindings",
+            })?;
+        indices.insert(owner.clone(), key);
+    }
+    Ok(LoweredBindings {
+        entries,
+        indices,
+        images,
+    })
+}
+
+fn lower_routes(
+    topology: &super::ApplicationTopology,
+    enclave_id: &super::StableEnclaveId,
+    port_indices: &BTreeMap<super::PortId, PortIndex>,
+) -> Result<tinymap::TinyMap<crate::runtime::image::RouteIndex, OwnedRouteImage>, CompileError> {
+    let mut routes = Vec::new();
+    for (boundary, connection) in topology.connections() {
+        let source_reactor = topology
+            .port(connection.source())
+            .expect("validated connection source exists")
+            .reactor();
+        let target_reactor = topology
+            .port(connection.target())
+            .expect("validated connection target exists")
+            .reactor();
+        let source_enclave = topology
+            .reactor(source_reactor)
+            .expect("validated source reactor exists")
+            .enclave();
+        let target_enclave = topology
+            .reactor(target_reactor)
+            .expect("validated target reactor exists")
+            .enclave();
+        let (timing_domain, delay_nanos, scheduled) = match connection.semantics() {
+            super::ConnectionSemantics::Logical { after } => (
+                TimingDomain::Logical,
+                duration_nanos(after, enclave_id)?,
+                after.is_some_and(|delay| delay > crate::runtime::Duration::ZERO)
+                    || source_enclave != target_enclave,
+            ),
+            super::ConnectionSemantics::Physical { after } => (
+                TimingDomain::Physical,
+                duration_nanos(after, enclave_id)?,
+                true,
+            ),
+        };
+        if !scheduled {
+            continue;
+        }
+        if let Some(&local_port) = port_indices.get(connection.source()) {
+            routes.push((
+                boundary.clone(),
+                local_port,
+                RouteDirection::Outbound,
+                timing_domain,
+                delay_nanos,
+            ));
+        }
+        if let Some(&local_port) = port_indices.get(connection.target()) {
+            routes.push((
+                boundary.clone(),
+                local_port,
+                RouteDirection::Inbound,
+                timing_domain,
+                delay_nanos,
+            ));
+        }
+    }
+    routes.sort_by_cached_key(|route| {
+        (
+            canonical_identity_text(&route.0),
+            route_direction_rank(route.2),
+        )
+    });
+    tinymap::TinyMap::try_from_iter(routes.into_iter().map(
+        |(boundary, local_port, direction, timing_domain, delay_nanos)| OwnedRouteImage {
+            boundary,
+            local_port,
+            direction,
+            timing_domain,
+            delay_nanos,
+        },
+    ))
+    .map_err(|_| CompileError::ResourceOverflow {
+        enclave: enclave_id.clone(),
+        resource: "routes",
+    })
+}
+
+/// Lowers one canonically ordered Enclave slice using deployment-wide analysis.
+fn lower_enclave(
+    deployment: &ResolvedDeployment,
+    enclave_id: &super::StableEnclaveId,
+    analysis: &GlobalAnalysis,
+) -> Result<OwnedEnclaveImage, CompileError> {
+    let topology = deployment.topology();
+    let EnclaveDomains {
+        reactors,
+        actions,
+        modes,
+        representatives,
+        reactions,
+        reactor_indices,
+        action_indices,
+        mode_indices,
+        reactor_mode_spans,
+        root_scopes,
+        mode_scopes,
+        port_indices,
+        reaction_indices,
+    } = EnclaveDomains::lower(topology, enclave_id, analysis)?;
+    let LoweredBindings {
+        entries: binding_entries,
+        indices: binding_indices,
+        images: binding_images,
+    } = lower_bindings(
+        deployment,
+        enclave_id,
+        &reactors,
+        &reactions,
+        &representatives,
+        &actions,
+    )?;
     let scope_for = |reactor: &super::ReactorId, mode: Option<&super::ModeId>| {
         mode.map_or(root_scopes[reactor], |mode| mode_scopes[mode])
     };
-    let mut mode_cursor = 0u32;
+    let state_slots = tinymap::TinyMap::<StateSlotIndex, ()>::try_from_iter(std::iter::repeat_n(
+        (),
+        reactors.len(),
+    ))
+    .map_err(|_| CompileError::ResourceOverflow {
+        enclave: enclave_id.clone(),
+        resource: "state-slots",
+    })?;
     let reactor_images = reactors
         .iter()
-        .zip(0u32..)
-        .map(|((id, reactor), index)| {
-            let reactor_modes = modes
-                .iter()
-                .filter(|(_, mode)| mode.reactor() == *id)
-                .collect::<Vec<_>>();
-            let mode_count = checked_u32(reactor_modes.len(), enclave_id, "modes")?;
-            let image = ReactorImage::new(
-                binding_indices[&format!("state/{id}")],
-                StateSlotIndex::new(index),
+        .zip(state_slots.keys())
+        .map(|((id, reactor), state_slot)| {
+            ReactorImage::new(
+                binding_indices[&BindingOwner::State((*id).clone())],
+                state_slot,
                 root_scopes[*id],
-                IndexSpan::new(mode_cursor as usize, mode_count as usize),
-                reactor_modes
+                reactor_mode_spans[*id],
+                modes
                     .iter()
+                    .filter(|(_, mode)| mode.reactor() == *id)
                     .find(|(_, mode)| mode.parent().is_none() && mode.is_initial())
                     .map(|(id, _)| mode_indices[*id]),
                 reactor.bank().map(|bank| {
                     crate::runtime::image::BankInfoImage::new(bank.index(), bank.total())
                 }),
-            );
-            mode_cursor += mode_count;
-            Ok(image)
+            )
         })
-        .collect::<Result<tinymap::TinyMap<ReactorIndex, _>, CompileError>>()?;
-    let mut flattened_triggers = Vec::new();
+        .collect::<Vec<_>>();
+    let reactor_images = tinymap::TinyMap::<ReactorIndex, _>::try_from_iter(reactor_images)
+        .map_err(|_| CompileError::ResourceOverflow {
+            enclave: enclave_id.clone(),
+            resource: "reactors",
+        })?;
+    let mut flattened_triggers = PackedSliceBuilder::new("reaction-triggers");
     let mut action_triggers = (0..actions.len())
         .map(|_| Vec::new())
         .collect::<tinymap::TinyMap<ActionIndex, Vec<LevelReactionImage>>>();
@@ -721,14 +960,22 @@ fn lower_enclave(
         triggers.sort_unstable();
         triggers.dedup();
     }
+    let action_slots = tinymap::TinyMap::<ActionSlotIndex, ()>::try_from_iter(std::iter::repeat_n(
+        (),
+        actions.len(),
+    ))
+    .map_err(|_| CompileError::ResourceOverflow {
+        enclave: enclave_id.clone(),
+        resource: "action-slots",
+    })?;
     let action_images = actions
         .iter()
         .zip(action_triggers.values())
-        .enumerate()
-        .map(|(index, ((id, action), triggers))| {
-            let start = checked_u32(flattened_triggers.len(), enclave_id, "reaction-triggers")?;
-            flattened_triggers.extend_from_slice(triggers);
-            let len = checked_u32(triggers.len(), enclave_id, "reaction-triggers")?;
+        .zip(action_slots.keys())
+        .map(|(((id, action), triggers), action_slot)| {
+            let triggers = flattened_triggers
+                .try_extend_exact(triggers.iter().copied())
+                .map_err(packed_overflow(enclave_id))?;
             let timing = match action.kind() {
                 super::ActionKind::Logical { minimum_delay } => ActionTiming::Standard {
                     domain: TimingDomain::Logical,
@@ -748,14 +995,14 @@ fn lower_enclave(
             };
             Ok(ActionImage::new(
                 scope_for(action.reactor(), action.mode()),
-                ActionSlotIndex::new(checked_u32(index, enclave_id, "actions")?),
+                action_slot,
                 timing,
-                SliceRange::new(start, len),
+                triggers,
                 matches!(
                     action.kind(),
                     super::ActionKind::Logical { .. } | super::ActionKind::Physical { .. }
                 )
-                .then(|| binding_indices[&format!("action/{id}")]),
+                .then(|| binding_indices[&BindingOwner::Action((*id).clone())]),
             ))
         })
         .collect::<Result<tinymap::TinyMap<ActionIndex, _>, CompileError>>()?;
@@ -783,79 +1030,72 @@ fn lower_enclave(
         .zip(port_triggers.values())
         .map(|(id, triggers)| {
             let port = topology.port(id).expect("port representative exists");
-            let start = checked_u32(flattened_triggers.len(), enclave_id, "reaction-triggers")?;
-            flattened_triggers.extend_from_slice(triggers);
-            let len = checked_u32(triggers.len(), enclave_id, "reaction-triggers")?;
+            let triggers = flattened_triggers
+                .try_extend_exact(triggers.iter().copied())
+                .map_err(packed_overflow(enclave_id))?;
             Ok(PortImage::new(
                 scope_for(port.reactor(), port.mode()),
-                SliceRange::new(start, len),
-                binding_indices[&format!("port/{id}")],
+                triggers,
+                binding_indices[&BindingOwner::Port(id.clone())],
             ))
         })
         .collect::<Result<tinymap::TinyMap<PortIndex, _>, CompileError>>()?;
-    let mut use_ports = Vec::new();
-    let mut effect_ports = Vec::new();
-    let mut reaction_actions = Vec::new();
-    let mut reaction_modes = Vec::new();
+    let mut use_ports = PackedSliceBuilder::new("reaction-use-ports");
+    let mut effect_ports = PackedSliceBuilder::new("reaction-effect-ports");
+    let mut reaction_actions = PackedSliceBuilder::new("reaction-actions");
+    let mut reaction_modes = PackedSliceBuilder::new("reaction-modes");
     let reaction_images = reactions
         .iter()
         .map(|(id, reaction)| {
-            let use_start = use_ports.len();
-            let effect_start = effect_ports.len();
-            let action_start = reaction_actions.len();
-            let mode_start = reaction_modes.len();
+            let mut use_values = Vec::new();
+            let mut effect_values = Vec::new();
+            let mut action_values = Vec::new();
             for relation in reaction.relations() {
                 match relation.target() {
                     super::ReactionRelationTarget::Port(port) => {
-                        if relation.flags().is_use()
-                            && !use_ports[use_start..].contains(&port_indices[port])
-                        {
-                            use_ports.push(port_indices[port]);
+                        if relation.flags().is_use() && !use_values.contains(&port_indices[port]) {
+                            use_values.push(port_indices[port]);
                         }
                         if relation.flags().is_effect()
-                            && !effect_ports[effect_start..].contains(&port_indices[port])
+                            && !effect_values.contains(&port_indices[port])
                         {
-                            effect_ports.push(port_indices[port]);
+                            effect_values.push(port_indices[port]);
                         }
                     }
                     super::ReactionRelationTarget::Action(action) => {
                         if relation.flags().is_use() || relation.flags().is_effect() {
-                            reaction_actions.push(action_indices[action]);
+                            action_values.push(action_indices[action]);
                         }
                     }
                 }
             }
-            reaction_modes.extend(
-                reaction
-                    .options()
-                    .enabled_modes()
-                    .iter()
-                    .map(|mode| mode_indices[mode]),
-            );
+            let use_range = use_ports
+                .try_extend_exact(use_values)
+                .map_err(packed_overflow(enclave_id))?;
+            let effect_range = effect_ports
+                .try_extend_exact(effect_values)
+                .map_err(packed_overflow(enclave_id))?;
+            let action_range = reaction_actions
+                .try_extend_exact(action_values)
+                .map_err(packed_overflow(enclave_id))?;
+            let mode_range = reaction_modes
+                .try_extend_exact(
+                    reaction
+                        .options()
+                        .enabled_modes()
+                        .iter()
+                        .map(|mode| mode_indices[mode]),
+                )
+                .map_err(packed_overflow(enclave_id))?;
             let image = ReactionImage::new(
                 reactor_indices[reaction.reactor()],
                 scope_for(reaction.reactor(), reaction.options().mode()),
                 analysis.reaction_levels[*id],
-                binding_indices[&format!("reaction/{id}")],
-                checked_range(use_start, use_ports.len(), enclave_id, "reaction-use-ports")?,
-                checked_range(
-                    effect_start,
-                    effect_ports.len(),
-                    enclave_id,
-                    "reaction-effect-ports",
-                )?,
-                checked_range(
-                    action_start,
-                    reaction_actions.len(),
-                    enclave_id,
-                    "reaction-actions",
-                )?,
-                checked_range(
-                    mode_start,
-                    reaction_modes.len(),
-                    enclave_id,
-                    "reaction-modes",
-                )?,
+                binding_indices[&BindingOwner::Reaction((*id).clone())],
+                use_range,
+                effect_range,
+                action_range,
+                mode_range,
             );
             Ok(reaction.options().transition().map_or(image, |transition| {
                 image.with_mode_effect(crate::runtime::CompiledModeEffectRef {
@@ -972,49 +1212,45 @@ fn lower_enclave(
         };
         candidate = parent;
     };
-    let mut scope_descendants = Vec::new();
-    let mut scope_logical_actions = Vec::new();
-    let mut scope_timer_startups = Vec::new();
-    let mut scope_reset_reactions = Vec::new();
-    let mut scope_startup_reactions = Vec::new();
-    let mut scope_shutdown_reactions = Vec::new();
+    let mut scope_descendants = PackedSliceBuilder::new("scope-descendants");
+    let mut scope_logical_actions = PackedSliceBuilder::new("scope-logical-actions");
+    let mut scope_timer_startups = PackedSliceBuilder::new("scope-timer-startups");
+    let mut scope_reset_reactions = PackedSliceBuilder::new("scope-reset-reactions");
+    let mut scope_startup_reactions = PackedSliceBuilder::new("scope-startup-reactions");
+    let mut scope_shutdown_reactions = PackedSliceBuilder::new("scope-shutdown-reactions");
     let scope_images = scope_parents
         .iter()
         .enumerate()
         .map(|(position, (scope, parent))| {
-            let descendants = push_range(
-                &mut scope_descendants,
-                scope_parents
-                    .keys()
-                    .filter(|candidate| is_descendant(*candidate, scope)),
-                enclave_id,
-                "scope-descendants",
-            )?;
-            let logical_actions = push_range(
-                &mut scope_logical_actions,
-                actions
-                    .iter()
-                    .zip(action_scopes.values().copied())
-                    .filter(|((_, action), action_scope)| {
-                        !matches!(action.kind(), super::ActionKind::Physical { .. })
-                            && is_descendant(*action_scope, scope)
-                    })
-                    .map(|((id, _), _)| action_indices[*id]),
-                enclave_id,
-                "scope-logical-actions",
-            )?;
-            let timer_startups = push_range(
-                &mut scope_timer_startups,
-                timer_startup_actions
-                    .iter()
-                    .copied()
-                    .filter(|entry| is_descendant(action_scopes[entry.action()], scope)),
-                enclave_id,
-                "scope-timer-startups",
-            )?;
-            let reset_reactions = push_range(
-                &mut scope_reset_reactions,
-                {
+            let descendants = scope_descendants
+                .try_extend(
+                    scope_parents
+                        .keys()
+                        .filter(|candidate| is_descendant(*candidate, scope)),
+                )
+                .map_err(packed_overflow(enclave_id))?;
+            let logical_actions = scope_logical_actions
+                .try_extend(
+                    actions
+                        .iter()
+                        .zip(action_scopes.values().copied())
+                        .filter(|((_, action), action_scope)| {
+                            !matches!(action.kind(), super::ActionKind::Physical { .. })
+                                && is_descendant(*action_scope, scope)
+                        })
+                        .map(|((id, _), _)| action_indices[*id]),
+                )
+                .map_err(packed_overflow(enclave_id))?;
+            let timer_startups = scope_timer_startups
+                .try_extend(
+                    timer_startup_actions
+                        .iter()
+                        .copied()
+                        .filter(|entry| is_descendant(action_scopes[entry.action()], scope)),
+                )
+                .map_err(packed_overflow(enclave_id))?;
+            let reset_reactions = scope_reset_reactions
+                .try_extend({
                     let mut values = reset_by_scope
                         .iter()
                         .filter(|(candidate, _)| is_descendant(*candidate, scope))
@@ -1023,22 +1259,14 @@ fn lower_enclave(
                     values.sort_unstable();
                     values.dedup();
                     values
-                },
-                enclave_id,
-                "scope-reset-reactions",
-            )?;
-            let startup_reactions = push_range(
-                &mut scope_startup_reactions,
-                startup_by_scope[scope].iter().copied(),
-                enclave_id,
-                "scope-startup-reactions",
-            )?;
-            let shutdown_reactions = push_range(
-                &mut scope_shutdown_reactions,
-                shutdown_by_scope[scope].iter().copied(),
-                enclave_id,
-                "scope-shutdown-reactions",
-            )?;
+                })
+                .map_err(packed_overflow(enclave_id))?;
+            let startup_reactions = scope_startup_reactions
+                .try_extend_exact(startup_by_scope[scope].iter().copied())
+                .map_err(packed_overflow(enclave_id))?;
+            let shutdown_reactions = scope_shutdown_reactions
+                .try_extend_exact(shutdown_by_scope[scope].iter().copied())
+                .map_err(packed_overflow(enclave_id))?;
             let (reactor, mode) = if position < reactors.len() {
                 (reactor_indices[reactors[position].0], None)
             } else {
@@ -1070,78 +1298,7 @@ fn lower_enclave(
         .collect::<Vec<_>>();
     shutdown_actions.sort_unstable();
     shutdown_actions.dedup();
-    let mut routes = Vec::new();
-    for (boundary, connection) in topology.connections() {
-        let source_reactor = topology
-            .port(connection.source())
-            .expect("validated connection source exists")
-            .reactor();
-        let target_reactor = topology
-            .port(connection.target())
-            .expect("validated connection target exists")
-            .reactor();
-        let source_enclave = topology
-            .reactor(source_reactor)
-            .expect("validated source reactor exists")
-            .enclave();
-        let target_enclave = topology
-            .reactor(target_reactor)
-            .expect("validated target reactor exists")
-            .enclave();
-        let (timing_domain, delay_nanos, scheduled) = match connection.semantics() {
-            super::ConnectionSemantics::Logical { after } => (
-                TimingDomain::Logical,
-                duration_nanos(after, enclave_id)?,
-                after.is_some_and(|delay| delay > crate::runtime::Duration::ZERO)
-                    || source_enclave != target_enclave,
-            ),
-            super::ConnectionSemantics::Physical { after } => (
-                TimingDomain::Physical,
-                duration_nanos(after, enclave_id)?,
-                true,
-            ),
-        };
-        if !scheduled {
-            continue;
-        }
-        if let Some(&local_port) = port_indices.get(connection.source()) {
-            routes.push((
-                boundary.clone(),
-                local_port,
-                RouteDirection::Outbound,
-                timing_domain,
-                delay_nanos,
-            ));
-        }
-        if let Some(&local_port) = port_indices.get(connection.target()) {
-            routes.push((
-                boundary.clone(),
-                local_port,
-                RouteDirection::Inbound,
-                timing_domain,
-                delay_nanos,
-            ));
-        }
-    }
-    routes.sort_by_cached_key(|route| {
-        (
-            canonical_identity_text(&route.0),
-            route_direction_rank(route.2),
-        )
-    });
-    checked_u32(routes.len(), enclave_id, "routes")?;
-    let route_images = routes
-        .into_iter()
-        .map(
-            |(boundary, local_port, direction, timing_domain, delay_nanos)| OwnedRouteImage {
-                boundary,
-                local_port,
-                direction,
-                timing_domain,
-                delay_nanos,
-            },
-        )
-        .collect::<tinymap::TinyMap<crate::runtime::image::RouteIndex, _>>();
+    let route_images = lower_routes(topology, enclave_id, &port_indices)?;
     let storage_bounds = storage_bounds(deployment, enclave_id, &reactors, actions.len())?;
     let owned = OwnedEnclaveImage {
         id: enclave_id.clone(),
@@ -1169,7 +1326,7 @@ fn lower_enclave(
         routes: route_images,
         binding_images,
         required_bindings: RequiredBindings {
-            entries: binding_entries.into_boxed_slice(),
+            entries: binding_entries,
         },
         storage_bounds,
     };
@@ -1465,49 +1622,9 @@ fn checked_bound(
         })
 }
 
-/// Converts one dense table cardinality without truncation.
-fn checked_u32(
-    value: usize,
-    enclave: &super::StableEnclaveId,
-    resource: &'static str,
-) -> Result<u32, CompileError> {
-    u32::try_from(value).map_err(|_| CompileError::ResourceOverflow {
-        enclave: enclave.clone(),
-        resource,
-    })
-}
-
-/// Builds a typed dense range from checked platform-sized offsets.
-fn checked_range<T>(
-    start: usize,
-    end: usize,
-    enclave: &super::StableEnclaveId,
-    resource: &'static str,
-) -> Result<SliceRange<T>, CompileError> {
-    Ok(SliceRange::new(
-        checked_u32(start, enclave, resource)?,
-        checked_u32(end - start, enclave, resource)?,
-    ))
-}
-
 /// Orders stable-identity records by their canonical encoded text.
 fn sort_by_encoded_identity<I: std::fmt::Display, T>(values: &mut [(&I, &T)]) {
     values.sort_by_cached_key(|(identity, _)| canonical_identity_text(*identity));
-}
-
-/// Appends a deterministic flattened table segment and returns its checked range.
-fn push_range<T>(
-    target: &mut Vec<T>,
-    values: impl IntoIterator<Item = T>,
-    enclave: &super::StableEnclaveId,
-    resource: &'static str,
-) -> Result<SliceRange<T>, CompileError> {
-    let start = target.len();
-    target.extend(values);
-    Ok(SliceRange::new(
-        checked_u32(start, enclave, resource)?,
-        checked_u32(target.len() - start, enclave, resource)?,
-    ))
 }
 
 /// Returns the canonical secondary ordering for a route pair.
@@ -1528,7 +1645,7 @@ fn validate_root_image(compiled: &OwnedCompiledDeployment) -> Result<(), Compile
 }
 #[cfg(test)]
 mod tests {
-    use super::{checked_u32, lower, CompileError};
+    use super::{dense_indices, lower, CompileError};
     use crate::compiler::compiled::FederateSliceError;
     use crate::{
         compiler::{
@@ -3064,9 +3181,24 @@ mod tests {
     }
     #[test]
     fn dense_cardinality_overflow_is_reported_before_conversion() {
+        #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
+        struct SmallKey(usize);
+        impl From<usize> for SmallKey {
+            fn from(value: usize) -> Self {
+                Self(value)
+            }
+        }
+        impl tinymap::Key for SmallKey {
+            const MAX_LEN: usize = 1;
+
+            fn index(&self) -> usize {
+                self.0
+            }
+        }
+
         let enclave = StableEnclaveId::new("vehicle/controller").unwrap();
         assert!(matches!(
-            checked_u32(usize::MAX, &enclave, "reactions"),
+            dense_indices::<SmallKey, _>(["first", "second"], &enclave, "reactions"),
             Err(CompileError::ResourceOverflow {
                 resource: "reactions",
                 ..

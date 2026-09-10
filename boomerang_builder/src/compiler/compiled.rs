@@ -1,16 +1,16 @@
 //! Owned compiled-image storage and immutable Federate slice projections.
 use super::{
-    identity::canonical_identity_text, ComponentInstanceId, FederateId, ImplementationId,
+    BindingSlotId, BoundaryId, ComponentInstanceId, FederateId, ImplementationId,
     OwnedCoordinationProjection, RuntimeBackendId, StableEnclaveId, StablePath, TargetTriple,
 };
 use crate::descriptor::{ActionSlotId, PortSlotId, ReactionSlotId, ReactorSlotId};
 use crate::runtime::image::{
-    ActionImage, ActionIndex, BindingKind, BindingSlotIndex, EnclaveImage, EnclaveImageView,
-    FederateImage, FederateIndex, FederateSliceImage, FederateSliceView,
-    GlobalFederationImage as BorrowedGlobalFederationImage, IdentityRange, ImageValidationError,
-    LevelReactionImage, LifecycleReactionImage, ModeImage, ModeIndex, PortImage, PortIndex,
-    ReactionImage, ReactionIndex, ReactorImage, ReactorIndex, RequiredBindingImage, RouteImage,
-    RouteIndex, ScopeImage, ScopeIndex, StorageBounds, TimerStartupImage,
+    self as runtime_image, ActionImage, ActionIndex, BindingKind, BindingSlotIndex, EnclaveImage,
+    EnclaveImageView, FederateImage, FederateIndex, FederateSliceImage, FederateSliceView,
+    ImageValidationError, LevelReactionImage, LifecycleReactionImage, ModeImage, ModeIndex,
+    PortImage, PortIndex, ReactionImage, ReactionIndex, ReactorImage, ReactorIndex,
+    RequiredBindingImage, RouteImage, RouteIndex, ScopeImage, ScopeIndex, StorageBounds,
+    TimerStartupImage,
 };
 use tinymap::{TableRange, TinyMap, TinyMapView};
 
@@ -122,10 +122,6 @@ pub fn direct_binding_symbol(kind: BindingKind, slot: &StablePath) -> String {
 pub struct OwnedEnclaveImage {
     /// Stable Enclave identity.
     pub(crate) id: StableEnclaveId,
-    /// UTF-8 storage for image-local stable identities.
-    pub(crate) identity_data: Box<str>,
-    /// Enclave identity range in `identity_data`.
-    pub(crate) enclave_id: crate::runtime::image::IdentityRange,
     /// Dense reactor rows.
     pub(crate) reactors: TinyMap<ReactorIndex, ReactorImage>,
     /// Dense action rows.
@@ -169,13 +165,59 @@ pub struct OwnedEnclaveImage {
     /// Actions populated before shutdown.
     pub(crate) shutdown_actions: Box<[ActionIndex]>,
     /// Scheduler-boundary routes.
-    pub(crate) routes: TinyMap<RouteIndex, RouteImage>,
+    pub(crate) routes: TinyMap<RouteIndex, OwnedRouteImage>,
     /// Dense runtime binding rows.
-    pub(crate) binding_images: TinyMap<BindingSlotIndex, RequiredBindingImage>,
+    pub(crate) binding_images: TinyMap<BindingSlotIndex, OwnedBindingImage>,
     /// Stable required binding descriptions.
     pub(crate) required_bindings: RequiredBindings,
     /// Mutable storage and workspace bounds.
     pub(crate) storage_bounds: StorageBounds,
+}
+
+/// Host-owned scheduler route retaining its typed stable boundary identity.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct OwnedRouteImage {
+    pub(crate) boundary: BoundaryId,
+    pub(crate) local_port: PortIndex,
+    pub(crate) direction: crate::runtime::image::RouteDirection,
+    pub(crate) timing_domain: crate::runtime::image::TimingDomain,
+    pub(crate) delay_nanos: u64,
+}
+
+impl OwnedRouteImage {
+    fn image<'a>(&self, boundary: &'a str) -> RouteImage<'a> {
+        RouteImage::new(
+            runtime_image::BoundaryId::new(boundary),
+            self.local_port,
+            self.direction,
+            self.timing_domain,
+            self.delay_nanos,
+        )
+    }
+}
+
+/// Host-owned canonical implementation-binding identity and its required kind.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct OwnedBindingImage {
+    id: BindingSlotId<OwnedBindingSlotMarker>,
+    kind: BindingKind,
+}
+
+#[derive(Debug)]
+struct OwnedBindingSlotMarker;
+
+impl OwnedBindingImage {
+    pub(crate) fn new(id: impl AsRef<str>, kind: BindingKind) -> Self {
+        Self {
+            id: BindingSlotId::new(id)
+                .expect("binding image identities are built from canonical stable paths"),
+            kind,
+        }
+    }
+
+    fn image<'a>(&self, id: &'a str) -> RequiredBindingImage<'a> {
+        RequiredBindingImage::new(runtime_image::BindingSlotId::new(id), self.kind)
+    }
 }
 
 impl OwnedEnclaveImage {
@@ -189,11 +231,47 @@ impl OwnedEnclaveImage {
         &self.required_bindings
     }
 
-    /// Constructs the borrowed target-facing image aggregate.
-    pub fn image(&self) -> EnclaveImage<'_> {
+    fn route_identity_text(&self) -> Vec<String> {
+        self.routes
+            .values()
+            .map(|route| route.boundary.to_canonical_string())
+            .collect()
+    }
+
+    fn route_images<'a>(&self, identities: &'a [String]) -> TinyMap<RouteIndex, RouteImage<'a>> {
+        self.routes
+            .values()
+            .zip(identities)
+            .map(|(route, boundary)| route.image(boundary))
+            .collect()
+    }
+
+    fn binding_identity_text(&self) -> Vec<String> {
+        self.binding_images
+            .values()
+            .map(|binding| binding.id.path().to_string())
+            .collect()
+    }
+
+    fn binding_rows<'a>(
+        &self,
+        identities: &'a [String],
+    ) -> TinyMap<BindingSlotIndex, RequiredBindingImage<'a>> {
+        self.binding_images
+            .values()
+            .zip(identities)
+            .map(|(binding, id)| binding.image(id))
+            .collect()
+    }
+
+    fn image_with_rows<'a>(
+        &'a self,
+        enclave_id: &'a str,
+        routes: &'a TinyMap<RouteIndex, RouteImage<'a>>,
+        bindings: &'a TinyMap<BindingSlotIndex, RequiredBindingImage<'a>>,
+    ) -> EnclaveImage<'a> {
         EnclaveImage {
-            identity_data: &self.identity_data,
-            enclave_id: self.enclave_id,
+            enclave_id: runtime_image::EnclaveId::new(enclave_id),
             reactors: self.reactors.as_view(),
             actions: self.actions.as_view(),
             ports: self.ports.as_view(),
@@ -215,15 +293,37 @@ impl OwnedEnclaveImage {
             timer_startup_actions: &self.timer_startup_actions,
             shutdown_reactions: &self.shutdown_reactions,
             shutdown_actions: &self.shutdown_actions,
-            routes: self.routes.as_view(),
-            required_bindings: self.binding_images.as_view(),
+            routes: routes.as_view(),
+            required_bindings: bindings.as_view(),
             storage_bounds: self.storage_bounds,
         }
     }
 
-    /// Validates and returns a borrowed scheduler image view.
-    pub fn view(&self) -> Result<EnclaveImageView<'_>, ImageValidationError<'_>> {
-        EnclaveImageView::new(&self.image())
+    /// Materializes the target-facing borrowed image during `f`.
+    pub fn with_image<T>(&self, f: impl FnOnce(EnclaveImage<'_>) -> T) -> T {
+        let enclave_id = self.id.to_canonical_string();
+        let route_identities = self.route_identity_text();
+        let routes = self.route_images(&route_identities);
+        let binding_identities = self.binding_identity_text();
+        let bindings = self.binding_rows(&binding_identities);
+        f(self.image_with_rows(&enclave_id, &routes, &bindings))
+    }
+
+    /// Validates and exposes the borrowed scheduler image view during `f`.
+    pub fn with_view<T>(
+        &self,
+        f: impl FnOnce(EnclaveImageView<'_>) -> T,
+    ) -> Result<T, CompiledDeploymentValidationError> {
+        self.with_image(|image| {
+            EnclaveImageView::new(&image)
+                .map(f)
+                .map_err(CompiledDeploymentValidationError::from_image)
+        })
+    }
+
+    /// Returns this Enclave's declared storage bounds without materializing image rows.
+    pub const fn storage_bounds(&self) -> StorageBounds {
+        self.storage_bounds
     }
 }
 
@@ -294,17 +394,13 @@ pub struct OwnedCompiledDeployment {
     pub(crate) coordination: OwnedCoordinationProjection,
 }
 
-/// An owned immutable image projection for one deployment-wide Federate.
+/// A borrowed host-side projection for one deployment-wide Federate.
 #[derive(Debug)]
-pub struct OwnedFederateSlice {
+pub struct FederateSlice<'a> {
     /// Deployment-wide dense identity of the selected Federate.
     federate: FederateIndex,
-    /// Locally packed UTF-8 storage for the selected record's identity ranges.
-    identity_data: Box<str>,
-    /// Selected ownership record with its deployment-global Enclave range.
-    image: FederateImage,
-    /// Selected Enclave images copied from the complete root image.
-    enclaves: Box<[OwnedEnclaveImage]>,
+    image: &'a OwnedFederateImage,
+    enclave_range: TableRange<crate::runtime::image::EnclaveIndex>,
 }
 
 /// A failure while projecting one Federate from an owned compiled deployment.
@@ -325,34 +421,95 @@ pub enum FederateSliceError {
     ),
 }
 
-impl OwnedFederateSlice {
+impl FederateSlice<'_> {
     /// Returns the selected deployment-wide Federate index.
     #[must_use]
     pub const fn federate(&self) -> FederateIndex {
         self.federate
     }
 
-    /// Returns selected owned Enclave images in canonical identity order.
+    /// Returns the selected Federate's stable identity.
     #[must_use]
-    pub fn enclaves(&self) -> &[OwnedEnclaveImage] {
-        &self.enclaves
+    pub fn id(&self) -> &FederateId {
+        &self.image.id
     }
 
-    /// Materializes the target-facing borrowed image during `f`.
+    /// Returns the selected Federate's target triple.
+    #[must_use]
+    pub fn target(&self) -> &TargetTriple {
+        &self.image.target
+    }
+
+    /// Returns the selected Federate's runtime backend identity.
+    #[must_use]
+    pub fn runtime(&self) -> &RuntimeBackendId {
+        &self.image.runtime
+    }
+
+    /// Returns the selected Federate's deployment-global Enclave range.
+    #[must_use]
+    pub const fn enclave_range(&self) -> TableRange<crate::runtime::image::EnclaveIndex> {
+        self.enclave_range
+    }
+
+    /// Returns selected Enclave images in canonical identity order.
+    #[must_use]
+    pub fn enclaves(&self) -> &[OwnedEnclaveImage] {
+        &self.image.enclaves
+    }
+
+    /// Materializes the target-facing runtime image during `f`.
     ///
     /// The callback keeps temporary borrowed Enclave rows alive without requiring a
     /// self-referential owned cache.
-    pub fn with_image<T>(&self, f: impl FnOnce(FederateSliceImage<'_>) -> T) -> T {
-        let enclaves = self
-            .enclaves
+    pub fn with_runtime_image<T>(&self, f: impl FnOnce(FederateSliceImage<'_>) -> T) -> T {
+        let enclave_ids = self
+            .enclaves()
             .iter()
-            .map(OwnedEnclaveImage::image)
-            .collect::<Box<[_]>>();
+            .map(|enclave| enclave.id.to_canonical_string())
+            .collect::<Vec<_>>();
+        let route_identities = self
+            .enclaves()
+            .iter()
+            .map(OwnedEnclaveImage::route_identity_text)
+            .collect::<Vec<_>>();
+        let route_rows = self
+            .enclaves()
+            .iter()
+            .zip(&route_identities)
+            .map(|(enclave, identities)| enclave.route_images(identities))
+            .collect::<Vec<_>>();
+        let binding_identities = self
+            .enclaves()
+            .iter()
+            .map(OwnedEnclaveImage::binding_identity_text)
+            .collect::<Vec<_>>();
+        let bindings = self
+            .enclaves()
+            .iter()
+            .zip(&binding_identities)
+            .map(|(enclave, identities)| enclave.binding_rows(identities))
+            .collect::<Vec<_>>();
+        let enclave_images = self
+            .enclaves()
+            .iter()
+            .zip(&route_rows)
+            .zip(&bindings)
+            .zip(&enclave_ids)
+            .map(|(((enclave, routes), bindings), id)| {
+                enclave.image_with_rows(id, routes, bindings)
+            })
+            .collect::<Vec<_>>();
+        let image = FederateImage::new(
+            runtime_image::FederateId::new(self.id().as_str()),
+            runtime_image::TargetId::new(self.target().as_str()),
+            runtime_image::RuntimeBackendId::new(self.runtime().as_str()),
+            self.enclave_range,
+        );
         f(FederateSliceImage::new(
             self.federate,
-            &self.identity_data,
-            self.image,
-            &enclaves,
+            image,
+            &enclave_images,
         ))
     }
 
@@ -360,13 +517,13 @@ impl OwnedFederateSlice {
     pub fn with_view<T>(
         &self,
         f: impl FnOnce(FederateSliceView<'_>) -> T,
-    ) -> Result<T, ImageValidationError<'_>> {
-        for enclave in &self.enclaves {
-            enclave.view()?;
+    ) -> Result<T, CompiledDeploymentValidationError> {
+        for enclave in self.enclaves() {
+            enclave.with_view(|_| ())?;
         }
-        Ok(self.with_image(|image| {
+        Ok(self.with_runtime_image(|image| {
             let view = FederateSliceView::new(&image)
-                .expect("owned Federate slice preserves validated root metadata");
+                .expect("host Federate slice preserves validated root metadata");
             f(view)
         }))
     }
@@ -407,34 +564,26 @@ impl OwnedCompiledDeployment {
     }
 
     /// Returns the selected coordination projection.
-    pub fn coordination(&self) -> crate::runtime::image::CoordinationProjection<'_> {
-        self.coordination.image()
+    pub fn with_coordination<T>(
+        &self,
+        f: impl FnOnce(crate::runtime::image::CoordinationProjection<'_>) -> T,
+    ) -> T {
+        self.coordination.with_image(f)
     }
 
-    /// Copies one Federate's Enclaves into an immutable deployment-slice projection.
+    /// Borrows one Federate and its Enclaves as an immutable deployment-slice projection.
     ///
     /// The selected [`FederateImage`] retains its complete-root Enclave range so generated
     /// launchers preserve deployment-wide [`crate::runtime::image::EnclaveIndex`] values.
     pub fn federate_slice(
         &self,
         federate: FederateIndex,
-    ) -> Result<OwnedFederateSlice, FederateSliceError> {
+    ) -> Result<FederateSlice<'_>, FederateSliceError> {
         let candidate = self
             .federates
             .get(federate)
             .ok_or(FederateSliceError::FederateNotFound { federate })?;
 
-        let checked_len = |table: &'static str, len: usize| {
-            u32::try_from(len).map_err(|_| ImageValidationError::TableTooLarge { table })
-        };
-        let mut identity_data = String::new();
-        let mut append_identity = |value: &str| {
-            let start = checked_len("identity_data", identity_data.len())?;
-            let len = checked_len("identity_data", value.len())?;
-            identity_data.push_str(value);
-            checked_len("identity_data", identity_data.len())?;
-            Ok::<_, ImageValidationError<'static>>(IdentityRange::new(start, len))
-        };
         let enclave_start = self
             .federates
             .iter()
@@ -447,18 +596,10 @@ impl OwnedCompiledDeployment {
         let (enclave_start, enclave_len) =
             checked_enclave_bounds(enclave_start, candidate.enclaves.len())
                 .ok_or(ImageValidationError::TableTooLarge { table: "enclaves" })?;
-        let image = FederateImage::new(
-            append_identity(candidate.id.as_str())?,
-            append_identity(candidate.target.as_str())?,
-            append_identity(candidate.runtime.as_str())?,
-            TableRange::new(enclave_start, enclave_len),
-        );
-
-        Ok(OwnedFederateSlice {
+        Ok(FederateSlice {
             federate,
-            identity_data: identity_data.into_boxed_str(),
-            image,
-            enclaves: candidate.enclaves.to_vec().into_boxed_slice(),
+            image: candidate,
+            enclave_range: TableRange::new(enclave_start, enclave_len),
         })
     }
 
@@ -471,52 +612,65 @@ impl OwnedCompiledDeployment {
             u32::try_from(len).map_err(|_| ImageValidationError::TableTooLarge { table })
         }
 
-        fn append_identity(
-            data: &mut String,
-            value: &impl std::fmt::Display,
-        ) -> Result<IdentityRange, ImageValidationError<'static>> {
-            let start = checked_len("identity_data", data.len())?;
-            let value = canonical_identity_text(value);
-            let len = checked_len("identity_data", value.len())?;
-            data.push_str(&value);
-            checked_len("identity_data", data.len())?;
-            Ok(IdentityRange::new(start, len))
-        }
-
-        let mut identity_data = String::new();
         let mut federates = Vec::with_capacity(self.federates.len());
-        let mut enclaves = Vec::new();
+        let owned_enclaves = self
+            .federates
+            .values()
+            .flat_map(|federate| federate.enclaves.iter())
+            .collect::<Vec<_>>();
+        let enclave_ids = owned_enclaves
+            .iter()
+            .map(|enclave| enclave.id.to_canonical_string())
+            .collect::<Vec<_>>();
+        let route_identities = owned_enclaves
+            .iter()
+            .map(|enclave| enclave.route_identity_text())
+            .collect::<Vec<_>>();
+        let route_rows = owned_enclaves
+            .iter()
+            .zip(&route_identities)
+            .map(|(enclave, identities)| enclave.route_images(identities))
+            .collect::<Vec<_>>();
+        let binding_identities = owned_enclaves
+            .iter()
+            .map(|enclave| enclave.binding_identity_text())
+            .collect::<Vec<_>>();
+        let binding_rows = owned_enclaves
+            .iter()
+            .zip(&binding_identities)
+            .map(|(enclave, identities)| enclave.binding_rows(identities))
+            .collect::<Vec<_>>();
+        let enclaves = owned_enclaves
+            .iter()
+            .zip(&route_rows)
+            .zip(&binding_rows)
+            .zip(&enclave_ids)
+            .map(|(((enclave, routes), bindings), id)| {
+                enclave.image_with_rows(id, routes, bindings)
+            })
+            .collect::<Vec<_>>();
         let mut members = Vec::with_capacity(self.federates.len());
         let mut edges = Vec::with_capacity(self.federation.edges.len());
         if let Err(error) = checked_len("federates", self.federates.len()) {
             return Err(CompiledDeploymentValidationError::from_image(error));
         }
+        let mut enclave_start = 0_usize;
         for federate in self.federates.values() {
-            let enclave_start = match checked_len("enclaves", enclaves.len()) {
+            let checked_start = match checked_len("enclaves", enclave_start) {
                 Ok(start) => start,
                 Err(error) => return Err(CompiledDeploymentValidationError::from_image(error)),
             };
-            enclaves.extend(federate.enclaves.iter().map(OwnedEnclaveImage::image));
             let enclave_len = match checked_len("enclaves", federate.enclaves.len()) {
                 Ok(len) => len,
                 Err(error) => return Err(CompiledDeploymentValidationError::from_image(error)),
             };
-            let (id, target, runtime) = match (
-                append_identity(&mut identity_data, &federate.id),
-                append_identity(&mut identity_data, &federate.target),
-                append_identity(&mut identity_data, &federate.runtime),
-            ) {
-                (Ok(id), Ok(target), Ok(runtime)) => (id, target, runtime),
-                (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => {
-                    return Err(CompiledDeploymentValidationError::from_image(error));
-                }
-            };
             federates.push(FederateImage::new(
-                id,
-                target,
-                runtime,
-                TableRange::new(enclave_start, enclave_len),
+                runtime_image::FederateId::new(federate.id.as_str()),
+                runtime_image::TargetId::new(federate.target.as_str()),
+                runtime_image::RuntimeBackendId::new(federate.runtime.as_str()),
+                TableRange::new(checked_start, enclave_len),
             ));
+            enclave_start += federate.enclaves.len();
         }
         for member in &self.federation.members {
             let index = self
@@ -536,11 +690,13 @@ impl OwnedCompiledDeployment {
             };
             members.push(index);
         }
-        for edge in &self.federation.edges {
-            let boundary = match append_identity(&mut identity_data, edge.id()) {
-                Ok(boundary) => boundary,
-                Err(error) => return Err(CompiledDeploymentValidationError::from_image(error)),
-            };
+        let edge_ids = self
+            .federation
+            .edges
+            .iter()
+            .map(|edge| edge.id().to_canonical_string())
+            .collect::<Vec<_>>();
+        for (edge, boundary) in self.federation.edges.iter().zip(&edge_ids) {
             let source = self
                 .federation
                 .members
@@ -552,7 +708,7 @@ impl OwnedCompiledDeployment {
                 .binary_search(edge.target())
                 .unwrap_or(self.federation.members.len());
             edges.push(crate::runtime::image::FederationEdgeImage::new(
-                boundary,
+                runtime_image::BoundaryId::new(boundary),
                 FederateIndex::new(match checked_len("federation.edges", source) {
                     Ok(source) => source,
                     Err(error) => return Err(CompiledDeploymentValidationError::from_image(error)),
@@ -565,16 +721,17 @@ impl OwnedCompiledDeployment {
             ));
         }
 
-        let image = crate::runtime::image::CompiledDeploymentImage {
-            identity_data: &identity_data,
-            federation: BorrowedGlobalFederationImage::new(&members, &edges),
-            federates: TinyMapView::new(&federates),
-            enclaves: TinyMapView::new(&enclaves),
-            coordination: self.coordination.image(),
-        };
-        crate::runtime::image::CompiledDeploymentView::new(&image)
-            .map(|_| ())
-            .map_err(CompiledDeploymentValidationError::from_image)
+        self.coordination.with_image(|coordination| {
+            let image = crate::runtime::image::CompiledDeploymentImage {
+                federation: runtime_image::GlobalFederationImage::new(&members, &edges),
+                federates: TinyMapView::new(&federates),
+                enclaves: TinyMapView::new(&enclaves),
+                coordination,
+            };
+            crate::runtime::image::CompiledDeploymentView::new(&image)
+                .map(|_| ())
+                .map_err(CompiledDeploymentValidationError::from_image)
+        })
     }
 }
 
@@ -583,7 +740,7 @@ mod tests {
     use super::*;
     use crate::compiler::{ComponentInstanceId, ImplementationId, StablePath};
     use crate::descriptor::{ReactionSlotId, ReactorSlotId};
-    use crate::runtime::image::{IdentityRange, StateSlotIndex, TableRange};
+    use crate::runtime::image::{StateSlotIndex, TableRange};
 
     #[test]
     fn direct_binding_symbols_reversibly_escape_descriptor_slots() {
@@ -675,8 +832,6 @@ mod tests {
     fn empty_enclave() -> OwnedEnclaveImage {
         OwnedEnclaveImage {
             id: StableEnclaveId::new("vehicle/main").unwrap(),
-            identity_data: "vehicle/mainstate/vehicle/main".into(),
-            enclave_id: IdentityRange::new(0, 12),
             reactors: [ReactorImage::new(
                 BindingSlotIndex::new(0),
                 StateSlotIndex::new(0),
@@ -720,8 +875,8 @@ mod tests {
             shutdown_reactions: Box::default(),
             shutdown_actions: Box::default(),
             routes: TinyMap::default(),
-            binding_images: [RequiredBindingImage::new(
-                IdentityRange::new(12, 18),
+            binding_images: [OwnedBindingImage::new(
+                "state/vehicle/main",
                 BindingKind::StateInitializer,
             )]
             .into_iter()
@@ -735,6 +890,14 @@ mod tests {
             },
             storage_bounds: StorageBounds::new(1, 0, 0, 0, 0, 0),
         }
+    }
+
+    #[test]
+    fn owned_binding_images_retain_typed_stable_paths() {
+        let enclave = empty_enclave();
+        let binding = &enclave.binding_images[BindingSlotIndex::new(0)];
+
+        assert_eq!(binding.id.path().to_string(), "state/vehicle/main");
     }
 
     #[test]
@@ -775,11 +938,18 @@ mod tests {
         let enclave = &federates[FederateIndex::new(0)].enclaves()[0];
         let reactor = enclave.reactors.get(ReactorIndex::new(0)).unwrap();
         assert_eq!(reactor.state_binding(), BindingSlotIndex::new(0));
-        let view = enclave.view().unwrap();
-        assert_eq!(view.enclave_id().as_str(), "vehicle/main");
-        assert_eq!(
-            view.reactors()[ReactorIndex::new(0)].state_binding(),
-            BindingSlotIndex::new(0)
-        );
+        enclave
+            .with_view(|view| {
+                assert_eq!(view.enclave_id().as_str(), "vehicle/main");
+                assert_eq!(
+                    view.reactors()[ReactorIndex::new(0)].state_binding(),
+                    BindingSlotIndex::new(0)
+                );
+                assert_eq!(
+                    view.required_binding_id(BindingSlotIndex::new(0)).as_str(),
+                    "state/vehicle/main"
+                );
+            })
+            .unwrap();
     }
 }

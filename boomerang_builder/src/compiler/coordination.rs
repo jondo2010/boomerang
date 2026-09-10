@@ -12,11 +12,14 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::federation::AnalyzedFederationGraph;
 use super::identity::canonical_identity_text;
-use super::{FederateId, ResolvedDeployment};
+use super::{
+    BoundaryId, CodecCapabilityId, FederateId, FlowId, PhysicalBoundaryId, ResolvedDeployment,
+    TransportCapabilityId,
+};
 use crate::runtime::image::{
-    CodecCapabilityIndex, CoordinationProjection, FederateIndex, FlowIndex, IdentityRange,
-    IdentityTable, PhysicalBoundaryIndex, RtiDependencyImage, RtiImage, RtiMemberImage,
-    RtiRouteImage, RtiRouteIndex, TransportCapabilityIndex,
+    self as runtime_image, CodecCapabilityIndex, CoordinationProjection, FederateIndex, FlowIndex,
+    PhysicalBoundaryIndex, RtiDependencyImage, RtiImage, RtiMemberImage, RtiRouteImage,
+    RtiRouteIndex, TransportCapabilityIndex,
 };
 use tinymap::{TableRange, TinyMap};
 
@@ -37,8 +40,6 @@ pub enum CoordinationProjectionError {
 /// render the equivalent immutable slices directly into the RTI binary.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OwnedRtiImage {
-    /// Concatenated stable identities referenced by RTI records.
-    identity_data: Box<str>,
     /// Per-Federate coordination ranges in canonical dense-key order.
     members: TinyMap<FederateIndex, RtiMemberImage>,
     /// Packed range backing storage for members' direct and transitive dependencies.
@@ -52,32 +53,97 @@ pub struct OwnedRtiImage {
     /// its affected-downstream range rather than through a synthetic per-entry key.
     affected_downstream: Box<[FederateIndex]>,
     /// Complete deployment-wide RTI route hops keyed independently of local scheduler route halves.
-    routes: TinyMap<RtiRouteIndex, RtiRouteImage>,
+    routes: TinyMap<RtiRouteIndex, OwnedRtiRouteImage>,
     /// Distinct end-to-end flow identities shared by one or more routes.
-    flows: TinyMap<FlowIndex, IdentityRange>,
+    flows: TinyMap<FlowIndex, FlowId>,
     /// Canonically ordered stable physical input/output identities.
-    physical_boundaries: TinyMap<PhysicalBoundaryIndex, IdentityRange>,
+    physical_boundaries: TinyMap<PhysicalBoundaryIndex, PhysicalBoundaryId>,
     /// Canonically ordered transport capability identities.
-    transport_capabilities: TinyMap<TransportCapabilityIndex, IdentityRange>,
+    transport_capabilities: TinyMap<TransportCapabilityIndex, TransportCapabilityId>,
     /// Canonically ordered codec capability identities.
-    codec_capabilities: TinyMap<CodecCapabilityIndex, IdentityRange>,
+    codec_capabilities: TinyMap<CodecCapabilityIndex, CodecCapabilityId>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct OwnedRtiRouteImage {
+    boundary: BoundaryId,
+    flow: FlowIndex,
+    physical_input: Option<PhysicalBoundaryIndex>,
+    physical_output: Option<PhysicalBoundaryIndex>,
+    failure_policy: crate::runtime::image::BoundaryFailurePolicy,
+    transport_policy: crate::runtime::image::TransportPolicy,
+    codec_policy: crate::runtime::image::CodecPolicy,
+    timing_policy: crate::runtime::image::TimingPolicy,
+    security_policy: crate::runtime::image::SecurityPolicy,
+    transport_capability: TransportCapabilityIndex,
+    codec_capability: CodecCapabilityIndex,
+    source: FederateIndex,
+    target: FederateIndex,
+    delay_nanos: u64,
+}
+
+impl OwnedRtiRouteImage {
+    fn image<'a>(&self, boundary: &'a str) -> RtiRouteImage<'a> {
+        RtiRouteImage::new(
+            runtime_image::BoundaryId::new(boundary),
+            self.flow,
+            self.physical_input,
+            self.physical_output,
+            self.failure_policy,
+            self.transport_policy,
+            self.codec_policy,
+            self.timing_policy,
+            self.security_policy,
+            self.transport_capability,
+            self.codec_capability,
+            self.source,
+            self.target,
+            self.delay_nanos,
+        )
+    }
+}
+
+fn identity_text<I: std::fmt::Display, K: tinymap::Key>(values: &TinyMap<K, I>) -> Vec<String> {
+    values.values().map(canonical_identity_text).collect()
+}
+
+fn borrowed_identities<K: tinymap::Key>(values: &[String]) -> TinyMap<K, &str> {
+    values.iter().map(String::as_str).collect()
 }
 
 impl OwnedRtiImage {
     /// Borrows this owner as the target-facing immutable RTI image.
     #[must_use]
-    pub fn image(&self) -> RtiImage<'_> {
-        RtiImage::new(
-            &self.identity_data,
+    pub fn with_image<T>(&self, f: impl FnOnce(RtiImage<'_>) -> T) -> T {
+        let route_text = self
+            .routes
+            .values()
+            .map(|route| route.boundary.to_canonical_string())
+            .collect::<Vec<_>>();
+        let routes = self
+            .routes
+            .values()
+            .zip(&route_text)
+            .map(|(route, boundary)| route.image(boundary))
+            .collect::<TinyMap<RtiRouteIndex, _>>();
+        let flow_text = identity_text(&self.flows);
+        let physical_text = identity_text(&self.physical_boundaries);
+        let transport_text = identity_text(&self.transport_capabilities);
+        let codec_text = identity_text(&self.codec_capabilities);
+        let flows = borrowed_identities::<FlowIndex>(&flow_text);
+        let physical = borrowed_identities::<PhysicalBoundaryIndex>(&physical_text);
+        let transports = borrowed_identities::<TransportCapabilityIndex>(&transport_text);
+        let codecs = borrowed_identities::<CodecCapabilityIndex>(&codec_text);
+        f(RtiImage::new(
             self.members.as_view(),
             &self.dependencies,
             &self.affected_downstream,
-            self.routes.as_view(),
-            IdentityTable::new(&self.identity_data, self.flows.as_view()),
-            IdentityTable::new(&self.identity_data, self.physical_boundaries.as_view()),
-            IdentityTable::new(&self.identity_data, self.transport_capabilities.as_view()),
-            IdentityTable::new(&self.identity_data, self.codec_capabilities.as_view()),
-        )
+            routes.as_view(),
+            flows.as_view(),
+            physical.as_view(),
+            transports.as_view(),
+            codecs.as_view(),
+        ))
     }
 }
 
@@ -93,10 +159,12 @@ pub enum OwnedCoordinationProjection {
 impl OwnedCoordinationProjection {
     /// Borrows the selected projection in the target-facing representation.
     #[must_use]
-    pub fn image(&self) -> CoordinationProjection<'_> {
+    pub fn with_image<T>(&self, f: impl FnOnce(CoordinationProjection<'_>) -> T) -> T {
         match self {
-            Self::Local => CoordinationProjection::Local,
-            Self::CentralRti(image) => CoordinationProjection::CentralRti(image.image()),
+            Self::Local => f(CoordinationProjection::Local),
+            Self::CentralRti(image) => {
+                image.with_image(|image| f(CoordinationProjection::CentralRti(image)))
+            }
         }
     }
 }
@@ -117,10 +185,9 @@ pub(crate) fn project_central_rti(
     let mut members = Vec::with_capacity(analysis.members().len());
     let mut dependencies = Vec::new();
     let mut affected_downstream = Vec::new();
-    let mut identity_data = String::new();
     macro_rules! dense {
         ($key:ty, $values:expr) => {
-            dense_identities::<_, $key>(&mut identity_data, ($values).collect())?
+            dense_identities::<_, $key>(($values).collect())?
         };
     }
     let route_bindings = analysis
@@ -152,23 +219,22 @@ pub(crate) fn project_central_rti(
         .iter()
         .zip(route_bindings)
         .map(|(edge, binding)| {
-            let boundary = append_identity(&mut identity_data, &edge.id().to_string())?;
-            Ok(RtiRouteImage::new(
-                boundary,
-                flow_indices[binding.flow()],
-                binding.physical().input().map(|id| physical_indices[id]),
-                binding.physical().output().map(|id| physical_indices[id]),
-                binding.policies().failure(),
-                binding.policies().transport(),
-                binding.policies().codec(),
-                binding.policies().timing(),
-                binding.policies().security(),
-                transport_capability_indices[binding.transport()],
-                codec_capability_indices[binding.codec()],
-                indices[edge.source()],
-                indices[edge.target()],
-                edge.delay().as_nanos(),
-            ))
+            Ok(OwnedRtiRouteImage {
+                boundary: edge.id().clone(),
+                flow: flow_indices[binding.flow()],
+                physical_input: binding.physical().input().map(|id| physical_indices[id]),
+                physical_output: binding.physical().output().map(|id| physical_indices[id]),
+                failure_policy: binding.policies().failure(),
+                transport_policy: binding.policies().transport(),
+                codec_policy: binding.policies().codec(),
+                timing_policy: binding.policies().timing(),
+                security_policy: binding.policies().security(),
+                transport_capability: transport_capability_indices[binding.transport()],
+                codec_capability: codec_capability_indices[binding.codec()],
+                source: indices[edge.source()],
+                target: indices[edge.target()],
+                delay_nanos: edge.delay().as_nanos(),
+            })
         })
         .collect::<Result<TinyMap<RtiRouteIndex, _>, CoordinationProjectionError>>()?;
     for member in analysis.members() {
@@ -206,7 +272,6 @@ pub(crate) fn project_central_rti(
     }
 
     Ok(OwnedRtiImage {
-        identity_data: identity_data.into_boxed_str(),
         members: members.into_iter().collect(),
         dependencies: dependencies.into_boxed_slice(),
         affected_downstream: affected_downstream.into_boxed_slice(),
@@ -219,14 +284,13 @@ pub(crate) fn project_central_rti(
 }
 
 /// Converts a canonical stable-identity set into a dense table and lookup map.
-type DenseIdentities<'a, I, K> = (TinyMap<K, IdentityRange>, BTreeMap<&'a I, K>);
+type DenseIdentities<'a, I, K> = (TinyMap<K, I>, BTreeMap<&'a I, K>);
 
 fn dense_identities<'a, I, K>(
-    identity_data: &mut String,
     identities: BTreeSet<&'a I>,
 ) -> Result<DenseIdentities<'a, I, K>, CoordinationProjectionError>
 where
-    I: Ord + std::fmt::Display,
+    I: Clone + Ord + std::fmt::Display,
     K: tinymap::Key,
 {
     let mut values = Vec::with_capacity(identities.len());
@@ -234,24 +298,13 @@ where
     let mut identities = identities.into_iter().collect::<Vec<_>>();
     identities.sort_by_cached_key(|identity| canonical_identity_text(*identity));
     for (position, identity) in identities.into_iter().enumerate() {
-        values.push(append_identity(identity_data, &identity.to_string())?);
+        values.push(identity.clone());
         indices.insert(
             identity,
             K::from(usize::try_from(checked_len("identities", position)?).expect("u32 fits usize")),
         );
     }
     Ok((values.into_iter().collect(), indices))
-}
-
-/// Appends one stable identity and returns its checked byte range.
-fn append_identity(
-    target: &mut String,
-    value: &str,
-) -> Result<IdentityRange, CoordinationProjectionError> {
-    let start = checked_len("identity_data", target.len())?;
-    let len = checked_len("identity_data", value.len())?;
-    target.push_str(value);
-    Ok(IdentityRange::new(start, len))
 }
 
 /// Appends one member's dependencies and returns their flattened range.
@@ -285,13 +338,15 @@ mod tests {
     fn owned_rti_image_keeps_every_dense_domain_typed() {
         fn assert_field_types(image: &OwnedRtiImage) {
             assert_tiny_map::<FederateIndex, RtiMemberImage>(&image.members);
-            assert_tiny_map::<RtiRouteIndex, RtiRouteImage>(&image.routes);
-            assert_tiny_map::<FlowIndex, IdentityRange>(&image.flows);
-            assert_tiny_map::<PhysicalBoundaryIndex, IdentityRange>(&image.physical_boundaries);
-            assert_tiny_map::<TransportCapabilityIndex, IdentityRange>(
+            assert_tiny_map::<RtiRouteIndex, OwnedRtiRouteImage>(&image.routes);
+            assert_tiny_map::<FlowIndex, FlowId>(&image.flows);
+            assert_tiny_map::<PhysicalBoundaryIndex, PhysicalBoundaryId>(
+                &image.physical_boundaries,
+            );
+            assert_tiny_map::<TransportCapabilityIndex, TransportCapabilityId>(
                 &image.transport_capabilities,
             );
-            assert_tiny_map::<CodecCapabilityIndex, IdentityRange>(&image.codec_capabilities);
+            assert_tiny_map::<CodecCapabilityIndex, CodecCapabilityId>(&image.codec_capabilities);
         }
 
         let _ = assert_field_types;

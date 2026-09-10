@@ -286,9 +286,9 @@ mod tests {
     use crate::{
         image::{
             ActionImage, ActionSlotIndex, ActionTiming, BindingKind, BindingSlotIndex,
-            EnclaveImage, EnclaveImageView, IdentityRange, LifecycleReactionImage, ReactionImage,
-            ReactorImage, RequiredBindingImage, ScopeImage, StateSlotIndex, StorageBounds,
-            TableRange, TimerStartupImage,
+            EnclaveImage, EnclaveImageView, LifecycleReactionImage, ReactionImage, ReactorImage,
+            RequiredBindingImage, ScopeImage, StateSlotIndex, StorageBounds, TableRange,
+            TimerStartupImage,
         },
         keepalive, AsyncEvent, CompiledModeEffectRef, Context, EnclaveBindings,
         FederateCoordinationError, ReactionBindingError, ReactionRefs, SendContext,
@@ -460,13 +460,18 @@ mod tests {
         [TimerStartupImage::new(ActionIndex::new(0), 50_000_000)];
     /// Required-binding table for the compiled scheduler fixture.
     static REQUIRED_BINDINGS: [RequiredBindingImage; 2] = [
-        RequiredBindingImage::new(IdentityRange::new(7, 6), BindingKind::StateInitializer),
-        RequiredBindingImage::new(IdentityRange::new(13, 9), BindingKind::Reaction),
+        RequiredBindingImage::new(
+            crate::image::BindingSlotId::new("astate"),
+            BindingKind::StateInitializer,
+        ),
+        RequiredBindingImage::new(
+            crate::image::BindingSlotId::new("breaction"),
+            BindingKind::Reaction,
+        ),
     ];
     /// Enclave image assembled from the compiled scheduler fixture tables.
     static IMAGE: EnclaveImage<'static> = EnclaveImage {
-        identity_data: "enclaveastatebreaction",
-        enclave_id: IdentityRange::new(0, 7),
+        enclave_id: crate::image::EnclaveId::new("enclave"),
         reactors: TinyMapView::new(&REACTORS),
         actions: TinyMapView::new(&ACTIONS),
         ports: TinyMapView::new(&[]),

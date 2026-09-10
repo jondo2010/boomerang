@@ -16,7 +16,7 @@ mod model;
 mod resolved;
 
 pub use compiled::{
-    direct_binding_symbol, CompiledDeploymentValidationError, GlobalFederationImage,
+    direct_binding_symbol, CompiledDeploymentValidationError, FederateSlice, GlobalFederationImage,
     OwnedCompiledDeployment, OwnedEnclaveImage, OwnedFederateImage, RequiredBinding,
     RequiredBindings,
 };

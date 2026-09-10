@@ -3,15 +3,14 @@ use std::{collections::BTreeMap, fmt::Write as _};
 
 use anyhow::{anyhow, bail, Result};
 use boomerang_builder::{
-    compiler::{OwnedEnclaveImage, RequiredBinding},
+    compiler::{FederateSlice, OwnedEnclaveImage, RequiredBinding},
     ComponentDescriptor, DescriptorLifecycle, DescriptorRelationshipKind,
     DescriptorRelationshipTarget, ReactionSlot, ReactionSlotId, ReactorSlotId,
 };
 use boomerang_runtime::{
     image::{
-        ActionTiming, BankInfoImage, BindingKind, EnclaveImage, FederateSliceImage, IdentityRange,
-        LevelReactionImage, LifecycleReactionImage, RouteDirection, StorageBounds,
-        TimerStartupImage, TimingDomain,
+        ActionTiming, BankInfoImage, BindingKind, EnclaveImage, LevelReactionImage,
+        LifecycleReactionImage, RouteDirection, StorageBounds, TimerStartupImage, TimingDomain,
     },
     TransitionKind,
 };
@@ -22,8 +21,7 @@ use crate::{manifest::ExecutionPolicy, DriverOutput};
 /// Renders one complete static launcher source file from validated compiler output.
 pub(super) fn render_launcher(
     driver: &DriverOutput,
-    slice: FederateSliceImage<'_>,
-    enclaves: &[OwnedEnclaveImage],
+    slice: &FederateSlice<'_>,
     aliases: &BTreeMap<String, String>,
     execution: &ExecutionPolicy,
     distributed: bool,
@@ -91,13 +89,21 @@ pub(super) fn render_launcher(
          }\n\n",
     );
 
+    let enclaves = slice.enclaves();
+    let mut route_bindings = BTreeMap::new();
     render_compatibility_checks(&mut source, driver, aliases)?;
     for (index, enclave) in enclaves.iter().enumerate() {
-        render_enclave(&mut source, index, enclave)?;
+        render_enclave(&mut source, index, enclave, aliases, &mut route_bindings)?;
     }
     render_deployment(&mut source, slice, !distributed)?;
-    let enclave_start = slice.image().enclaves().start();
-    render_bindings(&mut source, driver, enclaves, enclave_start, aliases)?;
+    render_bindings(
+        &mut source,
+        driver,
+        enclaves,
+        slice.enclave_range().start(),
+        aliases,
+        route_bindings,
+    )?;
     let timeout = execution
         .logical_horizon
         .map(|nanos| format!("Some(boomerang_runtime::Duration::nanoseconds_i128({nanos}))"))
@@ -155,15 +161,27 @@ fn render_compatibility_checks(
 }
 
 /// Emits every immutable scheduler table for one compiled Enclave.
-fn render_enclave(source: &mut String, index: usize, owned: &OwnedEnclaveImage) -> Result<()> {
-    let image = owned.image();
+fn render_enclave(
+    source: &mut String,
+    index: usize,
+    owned: &OwnedEnclaveImage,
+    aliases: &BTreeMap<String, String>,
+    route_bindings: &mut RouteBindings,
+) -> Result<()> {
+    owned.with_image(|image| {
+        render_enclave_image(source, index, &image)?;
+        collect_route_bindings(route_bindings, owned, &image, aliases)
+    })
+}
+
+fn render_enclave_image(source: &mut String, index: usize, image: &EnclaveImage<'_>) -> Result<()> {
     let prefix = format!("E{index}");
-    render_reactors(source, &prefix, &image)?;
-    render_actions(source, &prefix, &image)?;
-    render_ports(source, &prefix, &image)?;
-    render_reactions(source, &prefix, &image)?;
-    render_modes(source, &prefix, &image)?;
-    render_scopes(source, &prefix, &image)?;
+    render_reactors(source, &prefix, image)?;
+    render_actions(source, &prefix, image)?;
+    render_ports(source, &prefix, image)?;
+    render_reactions(source, &prefix, image)?;
+    render_modes(source, &prefix, image)?;
+    render_scopes(source, &prefix, image)?;
     render_level_reactions(
         source,
         &format!("{prefix}_REACTION_TRIGGERS"),
@@ -252,23 +270,17 @@ fn render_enclave(source: &mut String, index: usize, owned: &OwnedEnclaveImage) 
         "ActionIndex",
         image.shutdown_actions.iter().map(|value| value.as_u32()),
     )?;
-    render_routes(source, &prefix, &image)?;
-    render_required_bindings(source, &prefix, &image)?;
+    render_routes(source, &prefix, image)?;
+    render_required_bindings(source, &prefix, image)?;
     let bounds = image.storage_bounds;
-    writeln!(
-        source,
-        "static {prefix}_IDENTITIES: &str = {:?};",
-        image.identity_data
-    )?;
     writeln!(
         source,
         "static {prefix}_IMAGE: EnclaveImage<'static> = EnclaveImage {{"
     )?;
-    writeln!(source, "    identity_data: {prefix}_IDENTITIES,")?;
     writeln!(
         source,
-        "    enclave_id: {},",
-        identity_range(image.enclave_id)
+        "    enclave_id: EnclaveId::new({:?}),",
+        image.enclave_id.as_str()
     )?;
     for (field, table) in [
         ("reactors", "REACTORS"),
@@ -312,15 +324,9 @@ fn render_enclave(source: &mut String, index: usize, owned: &OwnedEnclaveImage) 
 /// Emits the deployment root tables around the selected Federate's Enclave images.
 fn render_deployment(
     source: &mut String,
-    slice: FederateSliceImage<'_>,
+    slice: &FederateSlice<'_>,
     include_local_deployment: bool,
 ) -> Result<()> {
-    let federate = slice.image();
-    writeln!(
-        source,
-        "static DEPLOYMENT_IDENTITIES: &str = {:?};",
-        slice.identity_data()
-    )?;
     write!(
         source,
         "static ENCLAVES: [EnclaveImage<'static>; {}] = [",
@@ -332,19 +338,19 @@ fn render_deployment(
     source.push_str("];\n");
     writeln!(
         source,
-        "/// Selected immutable Federate slice with deployment-wide dense keys.\nstatic FEDERATE_SLICE: FederateSliceImage<'static> = FederateSliceImage::new(FederateIndex::new({}), DEPLOYMENT_IDENTITIES, FederateImage::new({}, {}, {}, {}), &ENCLAVES);",
+        "/// Selected immutable Federate slice with deployment-wide dense keys.\nstatic FEDERATE_SLICE: FederateSliceImage<'static> = FederateSliceImage::new(FederateIndex::new({}), FederateImage::new(FederateId::new({:?}), TargetId::new({:?}), RuntimeBackendId::new({:?}), {}), &ENCLAVES);",
         slice.federate().as_u32(),
-        identity_range(federate.id()),
-        identity_range(federate.target()),
-        identity_range(federate.runtime()),
-        table_range(federate.enclaves()),
+        slice.id().as_str(),
+        slice.target().as_str(),
+        slice.runtime().as_str(),
+        table_range(slice.enclave_range()),
     )?;
     if include_local_deployment {
         source.push_str("static FEDERATES: [FederateImage; 1] = [FEDERATE_SLICE.image()];\n");
         source.push_str(
             "static FEDERATION_MEMBERS: [FederateIndex; 1] = [FEDERATE_SLICE.federate()];\n",
         );
-        source.push_str("static DEPLOYMENT: CompiledDeploymentImage<'static> = CompiledDeploymentImage {\n    identity_data: DEPLOYMENT_IDENTITIES,\n    federation: GlobalFederationImage::new(&FEDERATION_MEMBERS, &[]),\n    federates: TinyMapView::new(&FEDERATES),\n    enclaves: TinyMapView::new(&ENCLAVES),\n    coordination: CoordinationProjection::Local,\n};\n");
+        source.push_str("static DEPLOYMENT: CompiledDeploymentImage<'static> = CompiledDeploymentImage {\n    federation: GlobalFederationImage::new(&FEDERATION_MEMBERS, &[]),\n    federates: TinyMapView::new(&FEDERATES),\n    enclaves: TinyMapView::new(&ENCLAVES),\n    coordination: CoordinationProjection::Local,\n};\n");
     }
     source.push('\n');
     Ok(())
@@ -357,6 +363,7 @@ fn render_bindings(
     enclaves: &[OwnedEnclaveImage],
     enclave_start: u32,
     aliases: &BTreeMap<String, String>,
+    route_bindings: RouteBindings,
 ) -> Result<()> {
     source.push_str(
         "fn generated_bindings() -> FederateBindings<'static> {\n    FederateBindings::new()\n",
@@ -374,52 +381,52 @@ fn render_bindings(
         }
         source.push_str("        )\n");
     }
-    render_route_bindings(source, enclaves, aliases)?;
+    render_route_bindings(source, route_bindings)?;
     source.push_str("}\n\n");
     Ok(())
 }
 
-/// Emits one typed route binding for each paired local scheduler boundary.
-fn render_route_bindings(
-    source: &mut String,
-    enclaves: &[OwnedEnclaveImage],
+/// Accumulated generated payload types for each local scheduler boundary.
+type RouteBindings = BTreeMap<String, (Option<String>, Option<String>)>;
+
+fn collect_route_bindings(
+    routes: &mut RouteBindings,
+    enclave: &OwnedEnclaveImage,
+    image: &EnclaveImage<'_>,
     aliases: &BTreeMap<String, String>,
 ) -> Result<()> {
-    let mut routes = BTreeMap::<String, (Option<String>, Option<String>)>::new();
-    for enclave in enclaves {
-        let image = enclave.image();
-        for route in image.routes.values().copied() {
-            let boundary = route
-                .boundary()
-                .get(image.identity_data)
-                .expect("compiled route identities are validated")
-                .to_owned();
-            let port = image.ports[route.local_port()];
-            let binding = enclave
-                .required_bindings()
-                .iter()
-                .nth(usize::try_from(port.binding().as_u32())?)
-                .expect("compiled port binding index is validated");
-            let RequiredBinding::Port { implementation, .. } = binding else {
-                bail!("route '{boundary}' local port does not have a port binding");
-            };
-            let alias = aliases.get(implementation.as_str()).ok_or_else(|| {
-                anyhow!("missing generated alias for implementation '{implementation}'")
-            })?;
-            let payload = format!("{alias}::__boomerang::{}", binding.symbol());
-            let pair = routes.entry(boundary.clone()).or_default();
-            let slot = match route.direction() {
-                RouteDirection::Outbound => &mut pair.0,
-                RouteDirection::Inbound => &mut pair.1,
-            };
-            if slot.replace(payload).is_some() {
-                bail!(
-                    "route '{boundary}' has duplicate {:?} halves",
-                    route.direction()
-                );
-            }
+    for route in image.routes.values().copied() {
+        let boundary = route.boundary().as_str().to_owned();
+        let port = image.ports[route.local_port()];
+        let binding = enclave
+            .required_bindings()
+            .iter()
+            .nth(usize::try_from(port.binding().as_u32())?)
+            .expect("compiled port binding index is validated");
+        let RequiredBinding::Port { implementation, .. } = binding else {
+            bail!("route '{boundary}' local port does not have a port binding");
+        };
+        let alias = aliases.get(implementation.as_str()).ok_or_else(|| {
+            anyhow!("missing generated alias for implementation '{implementation}'")
+        })?;
+        let payload = format!("{alias}::__boomerang::{}", binding.symbol());
+        let pair = routes.entry(boundary.clone()).or_default();
+        let slot = match route.direction() {
+            RouteDirection::Outbound => &mut pair.0,
+            RouteDirection::Inbound => &mut pair.1,
+        };
+        if slot.replace(payload).is_some() {
+            bail!(
+                "route '{boundary}' has duplicate {:?} halves",
+                route.direction()
+            );
         }
     }
+    Ok(())
+}
+
+/// Emits one typed route binding for each paired local scheduler boundary.
+fn render_route_bindings(source: &mut String, routes: RouteBindings) -> Result<()> {
     for (boundary, (source_payload, destination_payload)) in routes {
         let (Some(source_payload), Some(destination_payload)) =
             (source_payload, destination_payload)
@@ -724,7 +731,7 @@ fn render_routes(source: &mut String, prefix: &str, image: &EnclaveImage<'_>) ->
         image.routes.len()
     )?;
     for value in image.routes.values() {
-        writeln!(source, "    RouteImage::new({}, PortIndex::new({}), RouteDirection::{}, TimingDomain::{}, {}),", identity_range(value.boundary()), value.local_port().as_u32(), route_direction(value.direction()), timing_domain(value.timing_domain()), value.delay_nanos())?;
+        writeln!(source, "    RouteImage::new(BoundaryId::new({:?}), PortIndex::new({}), RouteDirection::{}, TimingDomain::{}, {}),", value.boundary().as_str(), value.local_port().as_u32(), route_direction(value.direction()), timing_domain(value.timing_domain()), value.delay_nanos())?;
     }
     source.push_str("];\n");
     Ok(())
@@ -743,8 +750,8 @@ fn render_required_bindings(
     for value in image.required_bindings.values() {
         writeln!(
             source,
-            "    RequiredBindingImage::new({}, BindingKind::{}),",
-            identity_range(value.id()),
+            "    RequiredBindingImage::new(BindingSlotId::new({:?}), BindingKind::{}),",
+            value.id().as_str(),
             binding_kind(value.kind())
         )?;
     }
@@ -830,10 +837,6 @@ fn render_indices(
 
 fn table_range<T>(value: TableRange<T>) -> String {
     format!("TableRange::new({}, {})", value.start(), value.len())
-}
-
-fn identity_range(value: IdentityRange) -> String {
-    format!("IdentityRange::new({}, {})", value.start(), value.len())
 }
 
 fn optional_index(ty: &str, value: Option<u32>) -> String {

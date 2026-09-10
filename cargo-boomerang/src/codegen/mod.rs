@@ -409,16 +409,8 @@ pub(crate) fn generate_analyzed_launcher(
         .execution
         .clone()
         .unwrap_or_default();
-    let source = slice.with_image(|image| {
-        rust::render_launcher(
-            &analyzed.driver,
-            image,
-            slice.enclaves(),
-            &aliases,
-            &execution,
-            distributed,
-        )
-    })?;
+    let source =
+        rust::render_launcher(&analyzed.driver, &slice, &aliases, &execution, distributed)?;
     let compile_inputs = payload_compile_inputs(&analyzed.resolved, &analyzed.driver, &aliases)?;
     let application_workspace = analyzed
         .resolved

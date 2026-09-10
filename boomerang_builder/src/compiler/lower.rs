@@ -1,3 +1,4 @@
+use super::compiled::{OwnedBindingImage, OwnedRouteImage};
 use super::coordination::project_central_rti;
 use super::identity::canonical_identity_text;
 use super::{
@@ -11,12 +12,10 @@ use crate::{
     descriptor::{ActionSlotId, DescriptorBound, PortSlotId, ReactionSlotId, ReactorSlotId},
     runtime::image::{
         ActionImage, ActionIndex, ActionSlotIndex, ActionTiming, BindingSlotIndex,
-        BoundaryFailurePolicy, CompiledDeploymentImage, CompiledDeploymentView, EnclaveIndex,
-        FederateImage, FederateIndex, IdentityRange, LevelReactionImage, LifecycleReactionImage,
+        BoundaryFailurePolicy, FederateIndex, LevelReactionImage, LifecycleReactionImage,
         ModeImage, ModeIndex, PortImage, PortIndex, ReactionImage, ReactionIndex, ReactorImage,
-        ReactorIndex, RecoveryPolicy, RequiredBindingImage, RouteDirection, RouteImage, ScopeImage,
-        ScopeIndex, SecurityPolicy, StateSlotIndex, StorageBounds, TableRange, TimerStartupImage,
-        TimingDomain, TimingPolicy,
+        ReactorIndex, RecoveryPolicy, RouteDirection, ScopeImage, ScopeIndex, SecurityPolicy,
+        StateSlotIndex, StorageBounds, TableRange, TimerStartupImage, TimingDomain, TimingPolicy,
     },
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -554,8 +553,6 @@ fn lower_enclave(
         .iter()
         .map(|(id, representative)| (id.clone(), representative_indices[representative]))
         .collect::<BTreeMap<_, _>>();
-    let mut identity_data = String::new();
-    let enclave_range = push_identity(&mut identity_data, &enclave_id.to_string(), enclave_id)?;
     let mut reactions = topology
         .reactions()
         .filter(|(_, reaction)| reactor_indices.contains_key(reaction.reactor()))
@@ -661,11 +658,8 @@ fn lower_enclave(
         .collect::<BTreeMap<_, _>>();
     let binding_images = named_bindings
         .iter()
-        .map(|(id, binding)| {
-            let range = push_identity(&mut identity_data, id, enclave_id)?;
-            Ok(RequiredBindingImage::new(range, binding.kind()))
-        })
-        .collect::<Result<tinymap::TinyMap<BindingSlotIndex, _>, CompileError>>()?;
+        .map(|(id, binding)| OwnedBindingImage::new(id, binding.kind()))
+        .collect::<tinymap::TinyMap<BindingSlotIndex, _>>();
     let scope_for = |reactor: &super::ReactorId, mode: Option<&super::ModeId>| {
         mode.map_or(root_scopes[reactor], |mode| mode_scopes[mode])
     };
@@ -1128,17 +1122,19 @@ fn lower_enclave(
     checked_u32(routes.len(), enclave_id, "routes")?;
     let route_images = routes
         .into_iter()
-        .map(|(boundary, local_port, direction, timing, delay)| {
-            let range = push_identity(&mut identity_data, &boundary.to_string(), enclave_id)?;
-            Ok(RouteImage::new(range, local_port, direction, timing, delay))
-        })
-        .collect::<Result<tinymap::TinyMap<crate::runtime::image::RouteIndex, _>, CompileError>>(
-        )?;
+        .map(
+            |(boundary, local_port, direction, timing_domain, delay_nanos)| OwnedRouteImage {
+                boundary,
+                local_port,
+                direction,
+                timing_domain,
+                delay_nanos,
+            },
+        )
+        .collect::<tinymap::TinyMap<crate::runtime::image::RouteIndex, _>>();
     let storage_bounds = storage_bounds(deployment, enclave_id, &reactors, actions.len())?;
     let owned = OwnedEnclaveImage {
         id: enclave_id.clone(),
-        identity_data: identity_data.into_boxed_str(),
-        enclave_id: enclave_range,
         reactors: reactor_images,
         actions: action_images,
         ports: port_images,
@@ -1167,10 +1163,12 @@ fn lower_enclave(
         },
         storage_bounds,
     };
-    owned.view().map_err(|error| CompileError::InvalidImage {
-        enclave: enclave_id.clone(),
-        message: error.to_string(),
-    })?;
+    owned
+        .with_view(|_| ())
+        .map_err(|error| CompileError::InvalidImage {
+            enclave: enclave_id.clone(),
+            message: error.to_string(),
+        })?;
     Ok(owned)
 }
 
@@ -1487,24 +1485,6 @@ fn sort_by_encoded_identity<I: std::fmt::Display, T>(values: &mut [(&I, &T)]) {
     values.sort_by_cached_key(|(identity, _)| canonical_identity_text(*identity));
 }
 
-/// Appends a stable identity to the image blob and returns its checked byte range.
-fn push_identity(
-    data: &mut String,
-    value: &str,
-    enclave: &super::StableEnclaveId,
-) -> Result<IdentityRange, CompileError> {
-    let start = u32::try_from(data.len()).map_err(|_| CompileError::ResourceOverflow {
-        enclave: enclave.clone(),
-        resource: "identity-bytes",
-    })?;
-    let len = u32::try_from(value.len()).map_err(|_| CompileError::ResourceOverflow {
-        enclave: enclave.clone(),
-        resource: "identity-bytes",
-    })?;
-    data.push_str(value);
-    Ok(IdentityRange::new(start, len))
-}
-
 /// Appends a deterministic flattened table segment and returns its checked range.
 fn push_range<T>(
     target: &mut Vec<T>,
@@ -1530,75 +1510,11 @@ const fn route_direction_rank(direction: RouteDirection) -> u8 {
 
 /// Constructs and validates the borrowed root deployment image before success escapes.
 fn validate_root_image(compiled: &OwnedCompiledDeployment) -> Result<(), CompileError> {
-    let mut identity_data = String::new();
-    let checked_root = |value| {
-        u32::try_from(value).map_err(|_| CompileError::InvalidDeployment {
-            message: "dense deployment table exceeds u32".to_owned(),
+    compiled
+        .validate()
+        .map_err(|error| CompileError::InvalidDeployment {
+            message: error.to_string(),
         })
-    };
-    let mut push_root_identity = |value: &str| {
-        let start =
-            u32::try_from(identity_data.len()).map_err(|_| CompileError::InvalidDeployment {
-                message: "identity bytes exceed u32".to_owned(),
-            })?;
-        let len = u32::try_from(value.len()).map_err(|_| CompileError::InvalidDeployment {
-            message: "identity bytes exceed u32".to_owned(),
-        })?;
-        identity_data.push_str(value);
-        Ok::<_, CompileError>(IdentityRange::new(start, len))
-    };
-    let mut federates = Vec::new();
-    let mut enclave_images = Vec::new();
-    let mut federation_edges = Vec::new();
-    for federate in compiled.federates.values() {
-        let id = push_root_identity(federate.id.as_str())?;
-        let target = push_root_identity(federate.target.as_str())?;
-        let runtime = push_root_identity(federate.runtime.as_str())?;
-        let start = enclave_images.len();
-        enclave_images.extend(federate.enclaves.iter().map(OwnedEnclaveImage::image));
-        federates.push(FederateImage::new(
-            id,
-            target,
-            runtime,
-            TableRange::<EnclaveIndex>::new(
-                checked_root(start)?,
-                checked_root(enclave_images.len() - start)?,
-            ),
-        ));
-    }
-    let members = compiled.federates.keys().collect::<Vec<_>>();
-    checked_root(enclave_images.len())?;
-    for edge in compiled.federation.edges() {
-        let boundary = push_root_identity(&edge.id().to_string())?;
-        let source = compiled
-            .federation
-            .members()
-            .binary_search(edge.source())
-            .expect("analyzed edge source is a member");
-        let target = compiled
-            .federation
-            .members()
-            .binary_search(edge.target())
-            .expect("analyzed edge target is a member");
-        federation_edges.push(crate::runtime::image::FederationEdgeImage::new(
-            boundary,
-            FederateIndex::new(checked_root(source)?),
-            FederateIndex::new(checked_root(target)?),
-            edge.delay().as_nanos(),
-        ));
-    }
-    let federation = crate::runtime::image::GlobalFederationImage::new(&members, &federation_edges);
-    let image = CompiledDeploymentImage {
-        identity_data: &identity_data,
-        federation,
-        federates: tinymap::TinyMapView::new(&federates),
-        enclaves: tinymap::TinyMapView::new(&enclave_images),
-        coordination: compiled.coordination.image(),
-    };
-    CompiledDeploymentView::new(&image).map_err(|error| CompileError::InvalidDeployment {
-        message: error.to_string(),
-    })?;
-    Ok(())
 }
 #[cfg(test)]
 mod tests {
@@ -2211,11 +2127,16 @@ mod tests {
             parallel,
         )
     }
-    fn central_rti(compiled: &OwnedCompiledDeployment) -> RtiImage<'_> {
-        let CoordinationProjection::CentralRti(rti) = compiled.coordination() else {
-            panic!("distributed deployment must select the central RTI projection");
-        };
-        rti
+    fn with_central_rti<T>(
+        compiled: &OwnedCompiledDeployment,
+        f: impl FnOnce(RtiImage<'_>) -> T,
+    ) -> T {
+        compiled.with_coordination(|coordination| {
+            let CoordinationProjection::CentralRti(rti) = coordination else {
+                panic!("distributed deployment must select the central RTI projection");
+            };
+            f(rti)
+        })
     }
 
     fn shared_implementation_deployment(reverse: bool) -> ResolvedDeployment {
@@ -2400,21 +2321,24 @@ mod tests {
             ]
         );
 
-        let image = enclave.view().unwrap();
-        assert_eq!(
-            image
-                .ports()
-                .values()
-                .map(|port| port.binding())
-                .collect::<std::collections::BTreeSet<_>>()
-                .len(),
-            5
-        );
-        assert_ne!(
-            image.reactors()[ReactorIndex::new(0)].state_binding(),
-            image.reactors()[ReactorIndex::new(1)].state_binding()
-        );
-        assert_eq!(image.storage_bounds().state_slots(), 2);
+        enclave
+            .with_view(|image| {
+                assert_eq!(
+                    image
+                        .ports()
+                        .values()
+                        .map(|port| port.binding())
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .len(),
+                    5
+                );
+                assert_ne!(
+                    image.reactors()[ReactorIndex::new(0)].state_binding(),
+                    image.reactors()[ReactorIndex::new(1)].state_binding()
+                );
+                assert_eq!(image.storage_bounds().state_slots(), 2);
+            })
+            .unwrap();
     }
 
     #[test]
@@ -2457,7 +2381,7 @@ mod tests {
         assert_eq!(enclaves[0].id().to_string(), "vehicle/controller");
         assert_eq!(enclaves[1].id().to_string(), "vehicle/sensor");
         for enclave in enclaves {
-            enclave.view().unwrap();
+            enclave.with_view(|_| ()).unwrap();
         }
     }
     #[test]
@@ -2493,7 +2417,8 @@ mod tests {
 
         let slice = compiled.federate_slice(federate).unwrap();
         assert_eq!(slice.federate(), federate);
-        slice.with_image(|image| {
+        assert!(std::ptr::eq(slice.enclaves(), selected.enclaves()));
+        slice.with_runtime_image(|image| {
             assert_eq!(image.federate(), federate);
             assert_eq!(image.image().enclaves(), expected_range);
         });
@@ -2613,24 +2538,25 @@ mod tests {
     #[test]
     fn central_rti_projection_uses_precomputed_dense_dependencies() {
         let compiled = lower(&deployment(false, true)).unwrap();
-        let rti = central_rti(&compiled);
-        let edge = FederateIndex::new(0);
-        let host = FederateIndex::new(1);
-        assert_eq!(
-            rti.direct_incoming(edge)
-                .iter()
-                .map(|dependency| (dependency.source(), dependency.delay_nanos()))
-                .collect::<Vec<_>>(),
-            [(host, 0)]
-        );
-        assert_eq!(
-            rti.transitive_incoming(edge)
-                .iter()
-                .map(|dependency| (dependency.source(), dependency.delay_nanos()))
-                .collect::<Vec<_>>(),
-            [(host, 0)]
-        );
-        assert_eq!(rti.affected_downstream(host), [edge]);
+        with_central_rti(&compiled, |rti| {
+            let edge = FederateIndex::new(0);
+            let host = FederateIndex::new(1);
+            assert_eq!(
+                rti.direct_incoming(edge)
+                    .iter()
+                    .map(|dependency| (dependency.source(), dependency.delay_nanos()))
+                    .collect::<Vec<_>>(),
+                [(host, 0)]
+            );
+            assert_eq!(
+                rti.transitive_incoming(edge)
+                    .iter()
+                    .map(|dependency| (dependency.source(), dependency.delay_nanos()))
+                    .collect::<Vec<_>>(),
+                [(host, 0)]
+            );
+            assert_eq!(rti.affected_downstream(host), [edge]);
+        });
     }
 
     #[test]
@@ -2643,13 +2569,17 @@ mod tests {
             false,
         ))
         .unwrap();
-        let rti = central_rti(&compiled);
-        let route_index = RtiRouteIndex::new(0);
-        let route = rti.routes()[route_index];
-        assert_eq!(rti.route_boundary(route_index), "controller-to-sensor");
-        assert_eq!(route.source(), FederateIndex::new(1));
-        assert_eq!(route.target(), FederateIndex::new(0));
-        assert_eq!(route.delay_nanos(), 5_000_000);
+        with_central_rti(&compiled, |rti| {
+            let route_index = RtiRouteIndex::new(0);
+            let route = rti.routes()[route_index];
+            assert_eq!(
+                rti.route_boundary(route_index).as_str(),
+                "controller-to-sensor"
+            );
+            assert_eq!(route.source(), FederateIndex::new(1));
+            assert_eq!(route.target(), FederateIndex::new(0));
+            assert_eq!(route.delay_nanos(), 5_000_000);
+        });
     }
 
     #[test]
@@ -2670,11 +2600,12 @@ mod tests {
             false,
         ))
         .unwrap();
-        let rti = central_rti(&compiled);
-        let route = RtiRouteIndex::new(0);
-        assert_eq!(rti.route_flow(route), "sensor-control");
-        assert_eq!(rti.route_physical_input(route), Some("plant/z"));
-        assert_eq!(rti.route_physical_output(route), Some("plant/#g1"));
+        with_central_rti(&compiled, |rti| {
+            let route = RtiRouteIndex::new(0);
+            assert_eq!(rti.route_flow(route), "sensor-control");
+            assert_eq!(rti.route_physical_input(route), Some("plant/z"));
+            assert_eq!(rti.route_physical_output(route), Some("plant/#g1"));
+        });
     }
 
     #[test]
@@ -2699,42 +2630,44 @@ mod tests {
             true,
         ))
         .unwrap();
-        let rti = central_rti(&compiled);
-        assert_eq!(rti.flow_count(), 1);
-        assert_eq!(
-            rti.routes()
-                .keys()
-                .map(|route| (rti.route_boundary(route), rti.route_flow(route)))
-                .collect::<Vec<_>>(),
-            [
-                ("route/%2F", "sensor-control"),
-                ("route/-", "sensor-control"),
-            ]
-        );
+        with_central_rti(&compiled, |rti| {
+            assert_eq!(rti.flow_count(), 1);
+            assert_eq!(
+                rti.routes()
+                    .keys()
+                    .map(|route| (rti.route_boundary(route).as_str(), rti.route_flow(route)))
+                    .collect::<Vec<_>>(),
+                [
+                    ("route/%2F", "sensor-control"),
+                    ("route/-", "sensor-control"),
+                ]
+            );
+        });
     }
 
     #[test]
     fn central_rti_projection_preserves_typed_policies_and_dense_capability_references() {
         let compiled = lower(&deployment(false, true)).unwrap();
-        let rti = central_rti(&compiled);
-        let route = RtiRouteIndex::new(0);
-        assert_eq!(
-            rti.member_recovery_policy(FederateIndex::new(1)),
-            RecoveryPolicy::FailStop
-        );
-        assert_eq!(
-            rti.route_failure_policy(route),
-            BoundaryFailurePolicy::PropagateStop
-        );
-        assert_eq!(
-            rti.route_transport_policy(route),
-            TransportPolicy::ReliableOrderedFramed
-        );
-        assert_eq!(rti.route_codec_policy(route), CodecPolicy::CanonicalBounded);
-        assert_eq!(rti.route_timing_policy(route), TimingPolicy::BestEffort);
-        assert_eq!(rti.route_security_policy(route), SecurityPolicy::None);
-        assert_eq!(rti.route_transport_capability(route), "udp");
-        assert_eq!(rti.route_codec_capability(route), "postcard");
+        with_central_rti(&compiled, |rti| {
+            let route = RtiRouteIndex::new(0);
+            assert_eq!(
+                rti.member_recovery_policy(FederateIndex::new(1)),
+                RecoveryPolicy::FailStop
+            );
+            assert_eq!(
+                rti.route_failure_policy(route),
+                BoundaryFailurePolicy::PropagateStop
+            );
+            assert_eq!(
+                rti.route_transport_policy(route),
+                TransportPolicy::ReliableOrderedFramed
+            );
+            assert_eq!(rti.route_codec_policy(route), CodecPolicy::CanonicalBounded);
+            assert_eq!(rti.route_timing_policy(route), TimingPolicy::BestEffort);
+            assert_eq!(rti.route_security_policy(route), SecurityPolicy::None);
+            assert_eq!(rti.route_transport_capability(route), "udp");
+            assert_eq!(rti.route_codec_capability(route), "postcard");
+        });
     }
 
     #[test]
@@ -2759,17 +2692,17 @@ mod tests {
             DependencyCase::ModeTransition,
         ))
         .unwrap();
-        let enclave = compiled.federates()[FederateIndex::new(0)].enclaves()[0]
-            .view()
-            .unwrap();
-
-        assert_eq!(
-            enclave.reactions()[ReactionIndex::new(1)].mode_effect(),
-            Some(crate::runtime::CompiledModeEffectRef {
-                target: ModeIndex::new(1),
-                transition: crate::runtime::TransitionKind::Reset,
+        compiled.federates()[FederateIndex::new(0)].enclaves()[0]
+            .with_view(|enclave| {
+                assert_eq!(
+                    enclave.reactions()[ReactionIndex::new(1)].mode_effect(),
+                    Some(crate::runtime::CompiledModeEffectRef {
+                        target: ModeIndex::new(1),
+                        transition: crate::runtime::TransitionKind::Reset,
+                    })
+                );
             })
-        );
+            .unwrap();
     }
     #[test]
     fn bounded_lowering_rejects_unbounded_resources() {
@@ -2852,26 +2785,29 @@ mod tests {
     #[test]
     fn cross_enclave_connection_lowers_to_paired_scheduler_routes() {
         let compiled = lower(&deployment(false, false)).unwrap();
-        let source = compiled.federates()[FederateIndex::new(0)].enclaves()[0]
-            .view()
+        let enclaves = compiled.federates()[FederateIndex::new(0)].enclaves();
+        enclaves[0]
+            .with_view(|source| {
+                assert_eq!(source.routes().len(), 1);
+                assert_eq!(
+                    source.routes()[RouteIndex::new(0)].direction(),
+                    RouteDirection::Outbound
+                );
+                assert_eq!(
+                    source.route_boundary_id(RouteIndex::new(0)).as_str(),
+                    "controller-to-sensor"
+                );
+            })
             .unwrap();
-        let target = compiled.federates()[FederateIndex::new(0)].enclaves()[1]
-            .view()
+        enclaves[1]
+            .with_view(|target| {
+                assert_eq!(target.routes().len(), 1);
+                assert_eq!(
+                    target.routes()[RouteIndex::new(0)].direction(),
+                    RouteDirection::Inbound
+                );
+            })
             .unwrap();
-        assert_eq!(source.routes().len(), 1);
-        assert_eq!(
-            source.routes()[RouteIndex::new(0)].direction(),
-            RouteDirection::Outbound
-        );
-        assert_eq!(
-            source.route_boundary_id(RouteIndex::new(0)).as_str(),
-            "controller-to-sensor"
-        );
-        assert_eq!(target.routes().len(), 1);
-        assert_eq!(
-            target.routes()[RouteIndex::new(0)].direction(),
-            RouteDirection::Inbound
-        );
     }
     #[test]
     fn same_enclave_zero_delay_connection_collapses_to_one_port_slot() {
@@ -2882,11 +2818,12 @@ mod tests {
                 DependencyCase::None,
             ))
             .unwrap();
-            let enclave = compiled.federates()[FederateIndex::new(0)].enclaves()[0]
-                .view()
+            compiled.federates()[FederateIndex::new(0)].enclaves()[0]
+                .with_view(|enclave| {
+                    assert_eq!(enclave.ports().len(), 5);
+                    assert!(enclave.routes().is_empty());
+                })
                 .unwrap();
-            assert_eq!(enclave.ports().len(), 5);
-            assert!(enclave.routes().is_empty());
         }
     }
     #[test]
@@ -2928,14 +2865,15 @@ mod tests {
             DependencyCase::None,
         ))
         .unwrap();
-        let enclave = compiled.federates()[FederateIndex::new(0)].enclaves()[0]
-            .view()
+        compiled.federates()[FederateIndex::new(0)].enclaves()[0]
+            .with_view(|enclave| {
+                assert_eq!(enclave.routes().len(), 2);
+                for route in enclave.routes().values() {
+                    assert_eq!(route.timing_domain(), TimingDomain::Logical);
+                    assert_eq!(route.delay_nanos(), 2);
+                }
+            })
             .unwrap();
-        assert_eq!(enclave.routes().len(), 2);
-        for route in enclave.routes().values() {
-            assert_eq!(route.timing_domain(), TimingDomain::Logical);
-            assert_eq!(route.delay_nanos(), 2);
-        }
     }
     #[test]
     fn physical_connection_is_routed_and_breaks_same_tag_dependency() {
@@ -2945,18 +2883,19 @@ mod tests {
             DependencyCase::None,
         ))
         .unwrap();
-        let enclave = compiled.federates()[FederateIndex::new(0)].enclaves()[0]
-            .view()
+        compiled.federates()[FederateIndex::new(0)].enclaves()[0]
+            .with_view(|enclave| {
+                assert_eq!(enclave.routes().len(), 2);
+                assert!(enclave
+                    .routes()
+                    .values()
+                    .all(|route| route.timing_domain() == TimingDomain::Physical));
+                assert_eq!(
+                    enclave.reactions()[ReactionIndex::new(5)].dependency_level(),
+                    0
+                );
+            })
             .unwrap();
-        assert_eq!(enclave.routes().len(), 2);
-        assert!(enclave
-            .routes()
-            .values()
-            .all(|route| route.timing_domain() == TimingDomain::Physical));
-        assert_eq!(
-            enclave.reactions()[ReactionIndex::new(5)].dependency_level(),
-            0
-        );
     }
     #[test]
     fn same_tag_reaction_dependencies_are_precomputed_before_slicing() {
@@ -2966,78 +2905,81 @@ mod tests {
             DependencyCase::None,
         ))
         .unwrap();
-        let enclave = compiled.federates()[FederateIndex::new(0)].enclaves()[0]
-            .view()
+        compiled.federates()[FederateIndex::new(0)].enclaves()[0]
+            .with_view(|enclave| {
+                assert_eq!(enclave.reactions().len(), 6);
+                assert_eq!(
+                    enclave.reactions()[ReactionIndex::new(0)].dependency_level(),
+                    1
+                );
+                assert_eq!(
+                    enclave.reactions()[ReactionIndex::new(3)].dependency_level(),
+                    0
+                );
+                assert_eq!(
+                    enclave.reactions()[ReactionIndex::new(5)].dependency_level(),
+                    2
+                );
+                assert_eq!(enclave.required_bindings().len(), 15);
+            })
             .unwrap();
-        assert_eq!(enclave.reactions().len(), 6);
-        assert_eq!(
-            enclave.reactions()[ReactionIndex::new(0)].dependency_level(),
-            1
-        );
-        assert_eq!(
-            enclave.reactions()[ReactionIndex::new(3)].dependency_level(),
-            0
-        );
-        assert_eq!(
-            enclave.reactions()[ReactionIndex::new(5)].dependency_level(),
-            2
-        );
-        assert_eq!(enclave.required_bindings().len(), 15);
     }
     #[test]
     fn modes_actions_lifecycle_and_scopes_are_fully_lowered() {
         let compiled = lower(&deployment(false, false)).unwrap();
-        let enclave = compiled.federates()[FederateIndex::new(0)].enclaves()[0]
-            .view()
+        compiled.federates()[FederateIndex::new(0)].enclaves()[0]
+            .with_view(|enclave| {
+                assert_eq!(enclave.actions().len(), 4);
+                assert_eq!(enclave.modes().len(), 2);
+                assert_eq!(enclave.scopes().len(), 3);
+                assert_eq!(
+                    enclave.reactors()[crate::runtime::image::ReactorIndex::new(0)].initial_mode(),
+                    Some(ModeIndex::new(1))
+                );
+                assert_eq!(
+                    enclave.actions()[ActionIndex::new(0)].timing(),
+                    ActionTiming::Standard {
+                        domain: TimingDomain::Logical,
+                        min_delay_nanos: 3,
+                    }
+                );
+                let standard_action = enclave.actions()[ActionIndex::new(0)];
+                assert_eq!(
+                    enclave.required_bindings()[standard_action.binding().unwrap()].kind(),
+                    BindingKind::Action
+                );
+                assert_eq!(enclave.actions()[ActionIndex::new(3)].binding(), None);
+                let port_binding =
+                    enclave.ports()[crate::runtime::image::PortIndex::new(0)].binding();
+                assert_eq!(
+                    enclave.required_bindings()[port_binding].kind(),
+                    BindingKind::Port
+                );
+                assert_eq!(
+                    enclave.actions()[ActionIndex::new(3)].timing(),
+                    ActionTiming::Timer {
+                        period_nanos: Some(7)
+                    }
+                );
+                assert_eq!(enclave.scope_descendants(ScopeIndex::new(0)).len(), 3);
+                assert_eq!(
+                    enclave.scope_reset_reactions(ScopeIndex::new(1))[0].reaction(),
+                    ReactionIndex::new(1)
+                );
+                assert_eq!(enclave.startup_actions()[0].action(), ActionIndex::new(2));
+                assert_eq!(
+                    enclave.timer_startup_actions()[0].action(),
+                    ActionIndex::new(3)
+                );
+                assert_eq!(enclave.timer_startup_actions()[0].logical_delay_nanos(), 5);
+                assert_eq!(
+                    enclave.shutdown_reactions()[0].action(),
+                    ActionIndex::new(1)
+                );
+                assert_eq!(enclave.shutdown_actions(), &[ActionIndex::new(1)]);
+                assert_eq!(enclave.storage_bounds().action_slots(), 4);
+            })
             .unwrap();
-        assert_eq!(enclave.actions().len(), 4);
-        assert_eq!(enclave.modes().len(), 2);
-        assert_eq!(enclave.scopes().len(), 3);
-        assert_eq!(
-            enclave.reactors()[crate::runtime::image::ReactorIndex::new(0)].initial_mode(),
-            Some(ModeIndex::new(1))
-        );
-        assert_eq!(
-            enclave.actions()[ActionIndex::new(0)].timing(),
-            ActionTiming::Standard {
-                domain: TimingDomain::Logical,
-                min_delay_nanos: 3,
-            }
-        );
-        let standard_action = enclave.actions()[ActionIndex::new(0)];
-        assert_eq!(
-            enclave.required_bindings()[standard_action.binding().unwrap()].kind(),
-            BindingKind::Action
-        );
-        assert_eq!(enclave.actions()[ActionIndex::new(3)].binding(), None);
-        let port_binding = enclave.ports()[crate::runtime::image::PortIndex::new(0)].binding();
-        assert_eq!(
-            enclave.required_bindings()[port_binding].kind(),
-            BindingKind::Port
-        );
-        assert_eq!(
-            enclave.actions()[ActionIndex::new(3)].timing(),
-            ActionTiming::Timer {
-                period_nanos: Some(7)
-            }
-        );
-        assert_eq!(enclave.scope_descendants(ScopeIndex::new(0)).len(), 3);
-        assert_eq!(
-            enclave.scope_reset_reactions(ScopeIndex::new(1))[0].reaction(),
-            ReactionIndex::new(1)
-        );
-        assert_eq!(enclave.startup_actions()[0].action(), ActionIndex::new(2));
-        assert_eq!(
-            enclave.timer_startup_actions()[0].action(),
-            ActionIndex::new(3)
-        );
-        assert_eq!(enclave.timer_startup_actions()[0].logical_delay_nanos(), 5);
-        assert_eq!(
-            enclave.shutdown_reactions()[0].action(),
-            ActionIndex::new(1)
-        );
-        assert_eq!(enclave.shutdown_actions(), &[ActionIndex::new(1)]);
-        assert_eq!(enclave.storage_bounds().action_slots(), 4);
     }
     #[test]
     fn reaction_cycles_report_stable_reaction_identities() {
@@ -3076,13 +3018,14 @@ mod tests {
             DependencyCase::MutuallyExclusiveModes,
         ))
         .unwrap();
-        let enclave = compiled.federates()[FederateIndex::new(0)].enclaves()[0]
-            .view()
+        compiled.federates()[FederateIndex::new(0)].enclaves()[0]
+            .with_view(|enclave| {
+                assert_eq!(
+                    enclave.reactions()[ReactionIndex::new(4)].dependency_level(),
+                    0
+                );
+            })
             .unwrap();
-        assert_eq!(
-            enclave.reactions()[ReactionIndex::new(4)].dependency_level(),
-            0
-        );
     }
     #[test]
     fn dense_reaction_order_uses_encoded_stable_identity_text() {
@@ -3092,16 +3035,17 @@ mod tests {
             DependencyCase::EncodedOrdering,
         ))
         .unwrap();
-        let enclave = compiled.federates()[FederateIndex::new(0)].enclaves()[0]
-            .view()
+        compiled.federates()[FederateIndex::new(0)].enclaves()[0]
+            .with_view(|enclave| {
+                assert!(enclave
+                    .reactions()
+                    .values()
+                    .enumerate()
+                    .all(|(index, reaction)| {
+                        reaction.binding().as_u32() == u32::try_from(index).unwrap() + 7
+                    }));
+            })
             .unwrap();
-        assert!(enclave
-            .reactions()
-            .values()
-            .enumerate()
-            .all(|(index, reaction)| {
-                reaction.binding().as_u32() == u32::try_from(index).unwrap() + 7
-            }));
     }
     #[test]
     fn dense_cardinality_overflow_is_reported_before_conversion() {

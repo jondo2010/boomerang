@@ -12,14 +12,11 @@ use boomerang_builder::compiler::{
 };
 use boomerang_runtime::{
     execute_owned_federate,
-    image::{
-        CompiledDeploymentImage, EnclaveImage, FederateImage, FederateIndex, GlobalFederationImage,
-        IdentityRange,
-    },
+    image::{CompiledDeploymentImage, FederateIndex, GlobalFederationImage},
     Config,
 };
 use serde_json::{json, Value};
-use tinymap::{TableRange, TinyMapView};
+use tinymap::TinyMapView;
 
 pub fn fixture_workspace() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/workspace")
@@ -158,57 +155,25 @@ pub fn owned_reference_summary(deployment_name: &str) -> Value {
     .unwrap();
     compiled.validate().unwrap();
 
-    let mut identity_data = String::new();
-    let mut federate_images = Vec::new();
-    let mut enclave_images = Vec::<EnclaveImage<'_>>::new();
-    for federate in compiled.federates().values() {
-        let enclave_start = u32::try_from(enclave_images.len()).unwrap();
-        enclave_images.extend(federate.enclaves().iter().map(|enclave| enclave.image()));
-        let enclave_len = u32::try_from(federate.enclaves().len()).unwrap();
-        let mut append_identity = |value: &dyn std::fmt::Display| {
-            let start = u32::try_from(identity_data.len()).unwrap();
-            let value = value.to_string();
-            let len = u32::try_from(value.len()).unwrap();
-            identity_data.push_str(&value);
-            IdentityRange::new(start, len)
+    let selected = FederateIndex::new(0);
+    let slice = compiled.federate_slice(selected).unwrap();
+    let execution = slice.with_runtime_image(|slice| {
+        let federates = [slice.image()];
+        let members = [selected];
+        let image = CompiledDeploymentImage {
+            federation: GlobalFederationImage::new(&members, &[]),
+            federates: TinyMapView::new(&federates),
+            enclaves: TinyMapView::new(slice.enclaves()),
+            coordination: boomerang_runtime::image::CoordinationProjection::Local,
         };
-        let id = append_identity(federate.id());
-        let target = append_identity(federate.target());
-        let runtime = append_identity(federate.runtime());
-        federate_images.push(FederateImage::new(
-            id,
-            target,
-            runtime,
-            TableRange::new(enclave_start, enclave_len),
-        ));
-    }
-    let members = compiled
-        .federation()
-        .members()
-        .iter()
-        .map(|member| {
-            let index = compiled
-                .federates()
-                .iter()
-                .find_map(|(index, federate)| (federate.id() == member).then_some(index))
-                .unwrap();
-            index
-        })
-        .collect::<Vec<_>>();
-    let image = CompiledDeploymentImage {
-        identity_data: &identity_data,
-        federation: GlobalFederationImage::new(&members, &[]),
-        federates: TinyMapView::new(&federate_images),
-        enclaves: TinyMapView::new(&enclave_images),
-        coordination: compiled.coordination(),
-    };
-    let execution = execute_owned_federate(
-        &image,
-        FederateIndex::new(0),
-        owned_reference_payloads::bindings(),
-        Config::default(),
-    )
-    .unwrap();
+        execute_owned_federate(
+            &image,
+            selected,
+            owned_reference_payloads::bindings(),
+            Config::default(),
+        )
+        .unwrap()
+    });
     let stats = execution.stats();
     json!({
         "schema": 1,

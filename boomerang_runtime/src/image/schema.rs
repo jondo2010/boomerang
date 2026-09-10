@@ -55,52 +55,21 @@ borrowed_id!(
     "A stable borrowed implementation-binding identity."
 );
 
-/// A byte range into an Enclave image's UTF-8 identity blob.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct IdentityRange {
-    start: u32,
-    len: u32,
-}
-
-impl IdentityRange {
-    /// Creates an unchecked identity range.
-    pub const fn new(start: u32, len: u32) -> Self {
-        Self { start, len }
-    }
-
-    /// Returns the first byte offset.
-    pub const fn start(self) -> u32 {
-        self.start
-    }
-
-    /// Returns the byte length.
-    #[allow(clippy::len_without_is_empty)]
-    pub const fn len(self) -> u32 {
-        self.len
-    }
-
-    /// Returns the referenced UTF-8 substring when the byte range is valid.
-    pub fn get(self, value: &str) -> Option<&str> {
-        let end = self.start.checked_add(self.len)?;
-        value.get(self.start as usize..end as usize)
-    }
-}
-
 /// A Federate and the contiguous Enclave images it owns.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct FederateImage {
-    id: IdentityRange,
-    target: IdentityRange,
-    runtime: IdentityRange,
+pub struct FederateImage<'a> {
+    id: FederateId<'a>,
+    target: TargetId<'a>,
+    runtime: RuntimeBackendId<'a>,
     enclaves: TableRange<EnclaveIndex>,
 }
 
-impl FederateImage {
+impl<'a> FederateImage<'a> {
     /// Creates an unchecked Federate record.
     pub const fn new(
-        id: IdentityRange,
-        target: IdentityRange,
-        runtime: IdentityRange,
+        id: FederateId<'a>,
+        target: TargetId<'a>,
+        runtime: RuntimeBackendId<'a>,
         enclaves: TableRange<EnclaveIndex>,
     ) -> Self {
         Self {
@@ -111,18 +80,18 @@ impl FederateImage {
         }
     }
 
-    /// Returns the stable Federate identity range.
-    pub const fn id(self) -> IdentityRange {
+    /// Returns the stable Federate identity.
+    pub const fn id(self) -> FederateId<'a> {
         self.id
     }
 
-    /// Returns the compilation-target identity range.
-    pub const fn target(self) -> IdentityRange {
+    /// Returns the compilation-target identity.
+    pub const fn target(self) -> TargetId<'a> {
         self.target
     }
 
-    /// Returns the runtime-backend identity range.
-    pub const fn runtime(self) -> IdentityRange {
+    /// Returns the runtime-backend identity.
+    pub const fn runtime(self) -> RuntimeBackendId<'a> {
         self.runtime
     }
 
@@ -140,10 +109,8 @@ impl FederateImage {
 pub struct FederateSliceImage<'a> {
     /// Deployment-wide dense identity of the selected Federate.
     federate: FederateIndex,
-    /// UTF-8 storage for the selected Federate identity records.
-    identity_data: &'a str,
     /// Selected ownership record with its deployment-global Enclave range.
-    image: FederateImage,
+    image: FederateImage<'a>,
     /// Locally stored Enclave rows owned by the selected Federate.
     enclaves: &'a [EnclaveImage<'a>],
 }
@@ -153,13 +120,11 @@ impl<'a> FederateSliceImage<'a> {
     #[must_use]
     pub const fn new(
         federate: FederateIndex,
-        identity_data: &'a str,
-        image: FederateImage,
+        image: FederateImage<'a>,
         enclaves: &'a [EnclaveImage<'a>],
     ) -> Self {
         Self {
             federate,
-            identity_data,
             image,
             enclaves,
         }
@@ -171,15 +136,9 @@ impl<'a> FederateSliceImage<'a> {
         self.federate
     }
 
-    /// Returns the UTF-8 storage used by the Federate identity records.
-    #[must_use]
-    pub const fn identity_data(self) -> &'a str {
-        self.identity_data
-    }
-
     /// Returns the unchanged Federate record from the complete deployment image.
     #[must_use]
-    pub const fn image(self) -> FederateImage {
+    pub const fn image(self) -> FederateImage<'a> {
         self.image
     }
 
@@ -192,17 +151,17 @@ impl<'a> FederateSliceImage<'a> {
 
 /// A backend-neutral cross-Federate boundary edge.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct FederationEdgeImage {
-    boundary: IdentityRange,
+pub struct FederationEdgeImage<'a> {
+    boundary: BoundaryId<'a>,
     source: FederateIndex,
     target: FederateIndex,
     delay_nanos: u64,
 }
 
-impl FederationEdgeImage {
+impl<'a> FederationEdgeImage<'a> {
     /// Creates an unchecked federation edge.
     pub const fn new(
-        boundary: IdentityRange,
+        boundary: BoundaryId<'a>,
         source: FederateIndex,
         target: FederateIndex,
         delay_nanos: u64,
@@ -215,8 +174,8 @@ impl FederationEdgeImage {
         }
     }
 
-    /// Returns the stable boundary identity range.
-    pub const fn boundary(self) -> IdentityRange {
+    /// Returns the stable boundary identity.
+    pub const fn boundary(self) -> BoundaryId<'a> {
         self.boundary
     }
 
@@ -242,12 +201,12 @@ pub struct GlobalFederationImage<'a> {
     /// Federates participating in canonical stable-identity order.
     pub members: &'a [FederateIndex],
     /// Canonically ordered cross-Federate boundary edges.
-    pub edges: &'a [FederationEdgeImage],
+    pub edges: &'a [FederationEdgeImage<'a>],
 }
 
 impl<'a> GlobalFederationImage<'a> {
     /// Creates an unchecked global federation image.
-    pub const fn new(members: &'a [FederateIndex], edges: &'a [FederationEdgeImage]) -> Self {
+    pub const fn new(members: &'a [FederateIndex], edges: &'a [FederationEdgeImage<'a>]) -> Self {
         Self { members, edges }
     }
 }
@@ -268,12 +227,10 @@ pub enum CoordinationProjection<'a> {
 /// An unchecked aggregate of one complete compiled deployment.
 #[derive(Clone, Copy, Debug)]
 pub struct CompiledDeploymentImage<'a> {
-    /// UTF-8 storage for deployment-level stable identities.
-    pub identity_data: &'a str,
     /// Backend-neutral global federation structure.
     pub federation: GlobalFederationImage<'a>,
     /// Dense Federate ownership records.
-    pub federates: TinyMapView<'a, FederateIndex, FederateImage>,
+    pub federates: TinyMapView<'a, FederateIndex, FederateImage<'a>>,
     /// Federate-grouped Enclave scheduler images.
     pub enclaves: TinyMapView<'a, EnclaveIndex, EnclaveImage<'a>>,
     /// Selected backend-specific coordination projection.
@@ -778,18 +735,18 @@ pub enum RouteDirection {
 
 /// An immutable scheduler-boundary route without transport state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct RouteImage {
-    boundary: IdentityRange,
+pub struct RouteImage<'a> {
+    boundary: BoundaryId<'a>,
     local_port: PortIndex,
     direction: RouteDirection,
     timing_domain: TimingDomain,
     delay_nanos: u64,
 }
 
-impl RouteImage {
+impl<'a> RouteImage<'a> {
     /// Creates an unchecked route record.
     pub const fn new(
-        boundary: IdentityRange,
+        boundary: BoundaryId<'a>,
         local_port: PortIndex,
         direction: RouteDirection,
         timing_domain: TimingDomain,
@@ -804,8 +761,8 @@ impl RouteImage {
         }
     }
 
-    /// Returns the boundary identity's blob range.
-    pub const fn boundary(self) -> IdentityRange {
+    /// Returns the boundary identity.
+    pub const fn boundary(self) -> BoundaryId<'a> {
         self.boundary
     }
 
@@ -845,19 +802,19 @@ pub enum BindingKind {
 
 /// A required stable implementation-binding slot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct RequiredBindingImage {
-    id: IdentityRange,
+pub struct RequiredBindingImage<'a> {
+    id: BindingSlotId<'a>,
     kind: BindingKind,
 }
 
-impl RequiredBindingImage {
+impl<'a> RequiredBindingImage<'a> {
     /// Creates an unchecked required-binding record.
-    pub const fn new(id: IdentityRange, kind: BindingKind) -> Self {
+    pub const fn new(id: BindingSlotId<'a>, kind: BindingKind) -> Self {
         Self { id, kind }
     }
 
-    /// Returns the binding identity's blob range.
-    pub const fn id(self) -> IdentityRange {
+    /// Returns the binding identity.
+    pub const fn id(self) -> BindingSlotId<'a> {
         self.id
     }
 
@@ -932,10 +889,8 @@ impl StorageBounds {
 /// An unchecked aggregate of borrowed immutable scheduler tables.
 #[derive(Clone, Copy, Debug)]
 pub struct EnclaveImage<'a> {
-    /// UTF-8 storage for all stable identities referenced by this image.
-    pub identity_data: &'a str,
-    /// Stable Enclave identity range.
-    pub enclave_id: IdentityRange,
+    /// Stable Enclave identity.
+    pub enclave_id: EnclaveId<'a>,
     /// Dense reactor records.
     pub reactors: TinyMapView<'a, ReactorIndex, ReactorImage>,
     /// Dense action records.
@@ -979,9 +934,9 @@ pub struct EnclaveImage<'a> {
     /// Unique actions populated before global shutdown reactions execute.
     pub shutdown_actions: &'a [ActionIndex],
     /// Dense scheduler-boundary routes.
-    pub routes: TinyMapView<'a, RouteIndex, RouteImage>,
+    pub routes: TinyMapView<'a, RouteIndex, RouteImage<'a>>,
     /// Dense required implementation bindings.
-    pub required_bindings: TinyMapView<'a, BindingSlotIndex, RequiredBindingImage>,
+    pub required_bindings: TinyMapView<'a, BindingSlotIndex, RequiredBindingImage<'a>>,
     /// Fixed mutable-storage and workspace bounds.
     pub storage_bounds: StorageBounds,
 }

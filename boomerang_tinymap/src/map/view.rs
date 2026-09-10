@@ -1,6 +1,6 @@
 use core::{marker::PhantomData, ops::Index};
 
-use crate::{Key, TableRange};
+use crate::{IndexSpan, Key, TableRange};
 
 /// An allocation-free borrowed view of a densely keyed value table.
 #[derive(Clone, Copy, Debug)]
@@ -41,6 +41,11 @@ impl<'a, K: Key, V> TinyMapView<'a, K, V> {
         self.data.get(range.indices()?)
     }
 
+    /// Returns the values in an owner-allocated key span.
+    pub fn get_span(&self, span: IndexSpan<K>) -> Option<&'a [V]> {
+        self.data.get(span.indices()?)
+    }
+
     /// Iterates over the values in dense key order.
     pub fn values(&self) -> impl Iterator<Item = &V> {
         self.data.iter()
@@ -70,7 +75,7 @@ impl<K: Key, V> Index<K> for TinyMapView<'_, K, V> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{map::TinyMapView, Key, TableRange};
+    use crate::{map::TinyMapView, IndexSpan, Key, TableRange};
 
     crate::key_type!(TestKey);
 
@@ -128,6 +133,12 @@ mod tests {
         let terminal = TableRange::<TestKey>::new(u32::MAX, 1);
         assert!(terminal.contains(TestKey::new(u32::MAX)));
         assert!(!terminal.contains(TestKey::new(u32::MAX - 1)));
+    }
+
+    #[test]
+    fn borrowed_view_resolves_an_owner_allocated_index_span() {
+        assert_eq!(VIEW.get_span(IndexSpan::new(1, 2)), Some(&VALUES[1..3]));
+        assert_eq!(VIEW.get_span(IndexSpan::new(2, 2)), None);
     }
 
     #[test]

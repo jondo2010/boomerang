@@ -9,8 +9,8 @@ mod range;
 pub mod secondary_map;
 
 pub use key_set::KeySet;
-pub use map::{TinyMap, TinyMapView};
-pub use range::TableRange;
+pub use map::{CapacityError, TinyMap, TinyMapView};
+pub use range::{IndexSpan, SliceRange, TableRange};
 pub use secondary_map::TinySecondaryMap;
 
 /// A key that identifies a value by its dense table index.

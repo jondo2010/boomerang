@@ -12,6 +12,7 @@ mod from_assembly;
 mod identity;
 mod lower;
 mod model;
+mod packed;
 /// Canonical implementation and placement resolution.
 mod resolved;
 

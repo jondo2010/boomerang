@@ -6,9 +6,9 @@ use super::{
 use crate::descriptor::{ActionSlotId, PortSlotId, ReactionSlotId, ReactorSlotId};
 use crate::runtime::image::{
     self as runtime_image, ActionImage, ActionIndex, BindingKind, BindingSlotIndex, EnclaveImage,
-    EnclaveImageView, FederateImage, FederateIndex, FederateSliceImage, FederateSliceView,
-    ImageValidationError, LevelReactionImage, LifecycleReactionImage, ModeImage, ModeIndex,
-    PortImage, PortIndex, ReactionImage, ReactionIndex, ReactorImage, ReactorIndex,
+    EnclaveImageView, EnclaveIndex, FederateImage, FederateIndex, FederateSliceImage,
+    FederateSliceView, ImageValidationError, LevelReactionImage, LifecycleReactionImage, ModeImage,
+    ModeIndex, PortImage, PortIndex, ReactionImage, ReactionIndex, ReactorImage, ReactorIndex,
     RequiredBindingImage, RouteImage, RouteIndex, ScopeImage, ScopeIndex, StorageBounds,
     TimerStartupImage,
 };
@@ -336,8 +336,8 @@ pub struct OwnedFederateImage {
     pub(crate) target: TargetTriple,
     /// Selected runtime backend.
     pub(crate) runtime: RuntimeBackendId,
-    /// Canonically ordered owned Enclaves.
-    pub(crate) enclaves: Box<[OwnedEnclaveImage]>,
+    /// Deployment-wide span of canonically ordered owned Enclaves.
+    pub(crate) enclaves: IndexSpan<EnclaveIndex>,
 }
 
 impl OwnedFederateImage {
@@ -356,9 +356,9 @@ impl OwnedFederateImage {
         &self.runtime
     }
 
-    /// Returns owned Enclaves in canonical identity order.
-    pub fn enclaves(&self) -> &[OwnedEnclaveImage] {
-        &self.enclaves
+    /// Returns the deployment-wide span of owned Enclaves.
+    pub const fn enclaves(&self) -> IndexSpan<EnclaveIndex> {
+        self.enclaves
     }
 }
 
@@ -390,6 +390,8 @@ pub struct OwnedCompiledDeployment {
     pub(crate) federation: GlobalFederationImage,
     /// Complete compiled Federate table keyed by deployment-wide dense identity.
     pub(crate) federates: TinyMap<FederateIndex, OwnedFederateImage>,
+    /// Complete compiled Enclave table keyed by deployment-wide dense identity.
+    pub(crate) enclaves: TinyMap<EnclaveIndex, OwnedEnclaveImage>,
     /// Selected coordination projection.
     pub(crate) coordination: OwnedCoordinationProjection,
 }
@@ -400,7 +402,7 @@ pub struct FederateSlice<'a> {
     /// Deployment-wide dense identity of the selected Federate.
     federate: FederateIndex,
     image: &'a OwnedFederateImage,
-    enclave_range: IndexSpan<crate::runtime::image::EnclaveIndex>,
+    enclaves: &'a [OwnedEnclaveImage],
 }
 
 /// A failure while projecting one Federate from an owned compiled deployment.
@@ -449,13 +451,13 @@ impl FederateSlice<'_> {
     /// Returns the selected Federate's deployment-global Enclave range.
     #[must_use]
     pub const fn enclave_range(&self) -> IndexSpan<crate::runtime::image::EnclaveIndex> {
-        self.enclave_range
+        self.image.enclaves
     }
 
     /// Returns selected Enclave images in canonical identity order.
     #[must_use]
     pub fn enclaves(&self) -> &[OwnedEnclaveImage] {
-        &self.image.enclaves
+        self.enclaves
     }
 
     /// Materializes the target-facing runtime image during `f`.
@@ -504,7 +506,7 @@ impl FederateSlice<'_> {
             runtime_image::FederateId::new(self.id().as_str()),
             runtime_image::TargetId::new(self.target().as_str()),
             runtime_image::RuntimeBackendId::new(self.runtime().as_str()),
-            self.enclave_range,
+            self.image.enclaves,
         );
         f(FederateSliceImage::new(
             self.federate,
@@ -545,13 +547,6 @@ impl CompiledDeploymentValidationError {
     }
 }
 
-/// Converts an Enclave table range into the complete dense key domain.
-fn checked_enclave_bounds(start: usize, len: usize) -> Option<(u32, u32)> {
-    let start = u32::try_from(start).ok()?;
-    let len = u32::try_from(len).ok()?;
-    (u64::from(start) + u64::from(len) <= u64::from(u32::MAX) + 1).then_some((start, len))
-}
-
 impl OwnedCompiledDeployment {
     /// Returns the backend-neutral federation structure.
     pub fn federation(&self) -> &GlobalFederationImage {
@@ -561,6 +556,11 @@ impl OwnedCompiledDeployment {
     /// Returns the complete Federate table in canonical dense-key order.
     pub fn federates(&self) -> &TinyMap<FederateIndex, OwnedFederateImage> {
         &self.federates
+    }
+
+    /// Returns the complete Enclave table in canonical dense-key order.
+    pub fn enclaves(&self) -> &TinyMap<EnclaveIndex, OwnedEnclaveImage> {
+        &self.enclaves
     }
 
     /// Returns the selected coordination projection.
@@ -584,22 +584,17 @@ impl OwnedCompiledDeployment {
             .get(federate)
             .ok_or(FederateSliceError::FederateNotFound { federate })?;
 
-        let enclave_start = self
-            .federates
-            .iter()
-            .take_while(|(key, _)| *key != federate)
-            .map(|(_, preceding)| preceding)
-            .try_fold(0_usize, |start, preceding| {
-                start.checked_add(preceding.enclaves.len())
-            })
-            .ok_or(ImageValidationError::TableTooLarge { table: "enclaves" })?;
-        let (enclave_start, enclave_len) =
-            checked_enclave_bounds(enclave_start, candidate.enclaves.len())
-                .ok_or(ImageValidationError::TableTooLarge { table: "enclaves" })?;
+        let enclaves = self.enclaves.get_span(candidate.enclaves).ok_or(
+            ImageValidationError::OwnershipMismatch {
+                table: "federates",
+                index: federate.as_u32(),
+                field: "enclaves",
+            },
+        )?;
         Ok(FederateSlice {
             federate,
             image: candidate,
-            enclave_range: IndexSpan::new(enclave_start as usize, enclave_len as usize),
+            enclaves,
         })
     }
 
@@ -613,11 +608,7 @@ impl OwnedCompiledDeployment {
         }
 
         let mut federates = Vec::with_capacity(self.federates.len());
-        let owned_enclaves = self
-            .federates
-            .values()
-            .flat_map(|federate| federate.enclaves.iter())
-            .collect::<Vec<_>>();
+        let owned_enclaves = self.enclaves.values().collect::<Vec<_>>();
         let enclave_ids = owned_enclaves
             .iter()
             .map(|enclave| enclave.id.to_canonical_string())
@@ -654,23 +645,13 @@ impl OwnedCompiledDeployment {
         if let Err(error) = checked_len("federates", self.federates.len()) {
             return Err(CompiledDeploymentValidationError::from_image(error));
         }
-        let mut enclave_start = 0_usize;
         for federate in self.federates.values() {
-            let checked_start = match checked_len("enclaves", enclave_start) {
-                Ok(start) => start,
-                Err(error) => return Err(CompiledDeploymentValidationError::from_image(error)),
-            };
-            let enclave_len = match checked_len("enclaves", federate.enclaves.len()) {
-                Ok(len) => len,
-                Err(error) => return Err(CompiledDeploymentValidationError::from_image(error)),
-            };
             federates.push(FederateImage::new(
                 runtime_image::FederateId::new(federate.id.as_str()),
                 runtime_image::TargetId::new(federate.target.as_str()),
                 runtime_image::RuntimeBackendId::new(federate.runtime.as_str()),
-                IndexSpan::new(checked_start as usize, enclave_len as usize),
+                federate.enclaves,
             ));
-            enclave_start += federate.enclaves.len();
         }
         for member in &self.federation.members {
             let index = self
@@ -902,9 +883,6 @@ mod tests {
 
     #[test]
     fn owned_deployment_validates_the_complete_borrowed_hierarchy() {
-        let terminal = usize::try_from(u32::MAX).unwrap();
-        assert!(checked_enclave_bounds(terminal, 1).is_some());
-        assert!(checked_enclave_bounds(terminal, 2).is_none());
         let deployment = OwnedCompiledDeployment {
             federation: GlobalFederationImage {
                 members: vec![FederateId::new("host").unwrap()].into_boxed_slice(),
@@ -914,10 +892,11 @@ mod tests {
                 id: FederateId::new("host").unwrap(),
                 target: TargetTriple::new("x86_64-unknown-linux-gnu").unwrap(),
                 runtime: RuntimeBackendId::new("native").unwrap(),
-                enclaves: vec![empty_enclave()].into_boxed_slice(),
+                enclaves: IndexSpan::new(0, 1),
             }]
             .into_iter()
             .collect(),
+            enclaves: vec![empty_enclave()].into_iter().collect(),
             coordination: OwnedCoordinationProjection::Local,
         };
 
@@ -935,7 +914,7 @@ mod tests {
             federates.keys().collect::<Vec<_>>(),
             vec![FederateIndex::new(0)]
         );
-        let enclave = &federates[FederateIndex::new(0)].enclaves()[0];
+        let enclave = &deployment.enclaves()[EnclaveIndex::new(0)];
         let reactor = enclave.reactors.get(ReactorIndex::new(0)).unwrap();
         assert_eq!(reactor.state_binding(), BindingSlotIndex::new(0));
         enclave

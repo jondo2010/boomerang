@@ -271,8 +271,10 @@ pub(crate) fn resource_report(compiled: &OwnedCompiledDeployment) -> ResourceRep
             id: federate.id().to_string(),
             target: federate.target().to_string(),
             runtime: federate.runtime().to_string(),
-            enclaves: federate
+            enclaves: compiled
                 .enclaves()
+                .get_span(federate.enclaves())
+                .expect("lowered Federate span belongs to the deployment Enclave table")
                 .iter()
                 .map(|enclave| {
                     let bounds = enclave.storage_bounds();

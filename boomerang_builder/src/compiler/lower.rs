@@ -12,7 +12,7 @@ use crate::{
     descriptor::{ActionSlotId, DescriptorBound, PortSlotId, ReactionSlotId, ReactorSlotId},
     runtime::image::{
         ActionImage, ActionIndex, ActionSlotIndex, ActionTiming, BindingSlotIndex,
-        BoundaryFailurePolicy, FederateIndex, IndexSpan, LevelReactionImage,
+        BoundaryFailurePolicy, EnclaveIndex, FederateIndex, IndexSpan, LevelReactionImage,
         LifecycleReactionImage, ModeImage, ModeIndex, PortImage, PortIndex, ReactionImage,
         ReactionIndex, ReactorImage, ReactorIndex, RecoveryPolicy, RouteDirection, ScopeImage,
         ScopeIndex, SecurityPolicy, SliceRange, StateSlotIndex, StorageBounds, TimerStartupImage,
@@ -310,46 +310,55 @@ pub fn lower(deployment: &ResolvedDeployment) -> Result<OwnedCompiledDeployment,
     federates.sort_by_cached_key(|federate| canonical_identity_text(federate.id()));
     let members = analysis.federation.members().to_vec().into_boxed_slice();
     let federation_edges = analysis.federation.edges().to_vec().into_boxed_slice();
-    let federates = federates
-        .into_iter()
-        .map(|federate| {
-            let mut enclaves = deployment
-                .topology()
-                .enclaves()
-                .filter(|(_, enclave)| {
-                    let root = deployment
-                        .topology()
-                        .reactor(enclave.root())
-                        .expect("validated Enclave root exists");
-                    let group = root
-                        .placement_group()
-                        .expect("resolved Enclave root is placed");
-                    deployment
-                        .placement(group)
-                        .expect("resolved placement group is assigned")
-                        .federate()
-                        == federate.id()
-                })
-                .collect::<Vec<_>>();
-            sort_by_encoded_identity(&mut enclaves);
-            let enclaves = enclaves
-                .into_iter()
-                .map(|(id, _)| lower_enclave(deployment, id, &analysis))
-                .collect::<Result<Box<[_]>, _>>()?;
-            Ok(OwnedFederateImage {
+    let mut owned_federates: tinymap::TinyMap<FederateIndex, _> = tinymap::TinyMap::new();
+    let mut owned_enclaves: tinymap::TinyMap<EnclaveIndex, _> = tinymap::TinyMap::new();
+    for federate in federates {
+        let mut enclaves = deployment
+            .topology()
+            .enclaves()
+            .filter(|(_, enclave)| {
+                let root = deployment
+                    .topology()
+                    .reactor(enclave.root())
+                    .expect("validated Enclave root exists");
+                let group = root
+                    .placement_group()
+                    .expect("resolved Enclave root is placed");
+                deployment
+                    .placement(group)
+                    .expect("resolved placement group is assigned")
+                    .federate()
+                    == federate.id()
+            })
+            .collect::<Vec<_>>();
+        sort_by_encoded_identity(&mut enclaves);
+        let enclaves = enclaves
+            .into_iter()
+            .map(|(id, _)| lower_enclave(deployment, id, &analysis))
+            .collect::<Result<Vec<_>, _>>()?;
+        let enclave_span = owned_enclaves.try_extend_exact(enclaves).map_err(|error| {
+            CompileError::InvalidDeployment {
+                message: format!("Enclave table {error}"),
+            }
+        })?;
+        owned_federates
+            .try_insert(OwnedFederateImage {
                 id: federate.id().clone(),
                 target: federate.target().clone(),
                 runtime: federate.runtime().clone(),
-                enclaves,
+                enclaves: enclave_span,
             })
-        })
-        .collect::<Result<tinymap::TinyMap<FederateIndex, _>, CompileError>>()?;
+            .map_err(|error| CompileError::InvalidDeployment {
+                message: format!("Federate table {error}"),
+            })?;
+    }
     let compiled = OwnedCompiledDeployment {
         federation: GlobalFederationImage {
             members,
             edges: federation_edges,
         },
-        federates,
+        federates: owned_federates,
+        enclaves: owned_enclaves,
         coordination: match deployment.coordination() {
             super::CoordinationSelection::Local => OwnedCoordinationProjection::Local,
             super::CoordinationSelection::Distributed {
@@ -1540,11 +1549,22 @@ mod tests {
         },
         runtime::image::{
             ActionIndex, ActionTiming, BindingKind, BoundaryFailurePolicy, CodecPolicy,
-            CoordinationProjection, EnclaveIndex, FederateIndex, IndexSpan, ModeIndex,
-            ReactionIndex, ReactorIndex, RecoveryPolicy, RouteDirection, RouteIndex, RtiImage,
-            RtiRouteIndex, ScopeIndex, SecurityPolicy, TimingDomain, TimingPolicy, TransportPolicy,
+            CoordinationProjection, EnclaveIndex, FederateIndex, ModeIndex, ReactionIndex,
+            ReactorIndex, RecoveryPolicy, RouteDirection, RouteIndex, RtiImage, RtiRouteIndex,
+            ScopeIndex, SecurityPolicy, TimingDomain, TimingPolicy, TransportPolicy,
         },
     };
+
+    fn federate_enclaves(
+        deployment: &OwnedCompiledDeployment,
+        federate: FederateIndex,
+    ) -> &[crate::compiler::OwnedEnclaveImage] {
+        deployment
+            .enclaves()
+            .get_span(deployment.federates()[federate].enclaves())
+            .expect("lowered Federate span belongs to the deployment Enclave table")
+    }
+
     fn descriptor(contract: &str, bounds: DescriptorBounds) -> ComponentDescriptor {
         let root = match contract {
             "controller.v1" => "Controller",
@@ -2263,7 +2283,7 @@ mod tests {
         let reverse = lower(&shared_implementation_deployment(true)).unwrap();
         assert_eq!(forward, reverse);
 
-        let enclave = &forward.federates()[FederateIndex::new(0)].enclaves()[0];
+        let enclave = &federate_enclaves(&forward, FederateIndex::new(0))[0];
         assert_eq!(
             enclave
                 .required_bindings()
@@ -2377,7 +2397,7 @@ mod tests {
             forward.federates()[FederateIndex::new(0)].id().as_str(),
             "host"
         );
-        let enclaves = forward.federates()[FederateIndex::new(0)].enclaves();
+        let enclaves = federate_enclaves(&forward, FederateIndex::new(0));
         assert_eq!(enclaves.len(), 2);
         assert_eq!(enclaves[0].id().to_string(), "vehicle/controller");
         assert_eq!(enclaves[1].id().to_string(), "vehicle/sensor");
@@ -2407,18 +2427,12 @@ mod tests {
         let compiled = lower(&deployment(false, true)).unwrap();
         let federate = FederateIndex::new(1);
         let selected = &compiled.federates()[federate];
-        let enclave_start = compiled
-            .federates()
-            .iter()
-            .take_while(|(key, _)| *key != federate)
-            .map(|(_, federate)| federate.enclaves().len())
-            .sum::<usize>();
-        let enclave_start = u32::try_from(enclave_start).unwrap();
-        let expected_range = IndexSpan::new(enclave_start as usize, selected.enclaves().len());
+        let expected_range = selected.enclaves();
+        let expected_enclaves = compiled.enclaves().get_span(expected_range).unwrap();
 
         let slice = compiled.federate_slice(federate).unwrap();
         assert_eq!(slice.federate(), federate);
-        assert!(std::ptr::eq(slice.enclaves(), selected.enclaves()));
+        assert!(std::ptr::eq(slice.enclaves(), expected_enclaves));
         slice.with_runtime_image(|image| {
             assert_eq!(image.federate(), federate);
             assert_eq!(image.image().enclaves(), expected_range);
@@ -2693,7 +2707,7 @@ mod tests {
             DependencyCase::ModeTransition,
         ))
         .unwrap();
-        compiled.federates()[FederateIndex::new(0)].enclaves()[0]
+        federate_enclaves(&compiled, FederateIndex::new(0))[0]
             .with_view(|enclave| {
                 assert_eq!(
                     enclave.reactions()[ReactionIndex::new(1)].mode_effect(),
@@ -2786,7 +2800,7 @@ mod tests {
     #[test]
     fn cross_enclave_connection_lowers_to_paired_scheduler_routes() {
         let compiled = lower(&deployment(false, false)).unwrap();
-        let enclaves = compiled.federates()[FederateIndex::new(0)].enclaves();
+        let enclaves = federate_enclaves(&compiled, FederateIndex::new(0));
         enclaves[0]
             .with_view(|source| {
                 assert_eq!(source.routes().len(), 1);
@@ -2819,7 +2833,7 @@ mod tests {
                 DependencyCase::None,
             ))
             .unwrap();
-            compiled.federates()[FederateIndex::new(0)].enclaves()[0]
+            federate_enclaves(&compiled, FederateIndex::new(0))[0]
                 .with_view(|enclave| {
                     assert_eq!(enclave.ports().len(), 5);
                     assert!(enclave.routes().is_empty());
@@ -2866,7 +2880,7 @@ mod tests {
             DependencyCase::None,
         ))
         .unwrap();
-        compiled.federates()[FederateIndex::new(0)].enclaves()[0]
+        federate_enclaves(&compiled, FederateIndex::new(0))[0]
             .with_view(|enclave| {
                 assert_eq!(enclave.routes().len(), 2);
                 for route in enclave.routes().values() {
@@ -2884,7 +2898,7 @@ mod tests {
             DependencyCase::None,
         ))
         .unwrap();
-        compiled.federates()[FederateIndex::new(0)].enclaves()[0]
+        federate_enclaves(&compiled, FederateIndex::new(0))[0]
             .with_view(|enclave| {
                 assert_eq!(enclave.routes().len(), 2);
                 assert!(enclave
@@ -2906,7 +2920,7 @@ mod tests {
             DependencyCase::None,
         ))
         .unwrap();
-        compiled.federates()[FederateIndex::new(0)].enclaves()[0]
+        federate_enclaves(&compiled, FederateIndex::new(0))[0]
             .with_view(|enclave| {
                 assert_eq!(enclave.reactions().len(), 6);
                 assert_eq!(
@@ -2928,7 +2942,7 @@ mod tests {
     #[test]
     fn modes_actions_lifecycle_and_scopes_are_fully_lowered() {
         let compiled = lower(&deployment(false, false)).unwrap();
-        compiled.federates()[FederateIndex::new(0)].enclaves()[0]
+        federate_enclaves(&compiled, FederateIndex::new(0))[0]
             .with_view(|enclave| {
                 assert_eq!(enclave.actions().len(), 4);
                 assert_eq!(enclave.modes().len(), 2);
@@ -3019,7 +3033,7 @@ mod tests {
             DependencyCase::MutuallyExclusiveModes,
         ))
         .unwrap();
-        compiled.federates()[FederateIndex::new(0)].enclaves()[0]
+        federate_enclaves(&compiled, FederateIndex::new(0))[0]
             .with_view(|enclave| {
                 assert_eq!(
                     enclave.reactions()[ReactionIndex::new(4)].dependency_level(),
@@ -3036,7 +3050,7 @@ mod tests {
             DependencyCase::EncodedOrdering,
         ))
         .unwrap();
-        compiled.federates()[FederateIndex::new(0)].enclaves()[0]
+        federate_enclaves(&compiled, FederateIndex::new(0))[0]
             .with_view(|enclave| {
                 assert!(enclave
                     .reactions()

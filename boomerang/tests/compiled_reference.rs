@@ -9,13 +9,14 @@ use boomerang::runtime::AsyncEvent;
 use boomerang::runtime::{
     execute_owned, execute_owned_federate,
     image::{
-        ActionImage, ActionIndex, ActionSlotIndex, ActionTiming, BindingKind, BindingSlotIndex,
-        BoundaryId, CompiledDeploymentImage, CoordinationProjection, EnclaveImage, EnclaveIndex,
-        FederateImage, FederateIndex, GlobalFederationImage, IdentityRange, ImageValidationError,
-        LevelReactionImage, LifecycleReactionImage, ModeImage, ModeIndex, PortImage, PortIndex,
-        ReactionImage, ReactionIndex, ReactorImage, ReactorIndex, RequiredBindingImage,
-        RouteDirection, RouteImage, ScopeImage, ScopeIndex, StateSlotIndex, StorageBounds,
-        TableRange, TimerStartupImage, TimingDomain, TinyMapView,
+        ActionImage, ActionIndex, ActionSlotIndex, ActionTiming, BindingKind, BindingSlotId,
+        BindingSlotIndex, BoundaryId, CompiledDeploymentImage, CoordinationProjection, EnclaveId,
+        EnclaveImage, EnclaveIndex, FederateId, FederateImage, FederateIndex,
+        GlobalFederationImage, ImageValidationError, LevelReactionImage, LifecycleReactionImage,
+        ModeImage, ModeIndex, PortImage, PortIndex, ReactionImage, ReactionIndex, ReactorImage,
+        ReactorIndex, RequiredBindingImage, RouteDirection, RouteImage, RuntimeBackendId,
+        ScopeImage, ScopeIndex, StateSlotIndex, StorageBounds, TableRange, TargetId,
+        TimerStartupImage, TimingDomain, TinyMapView,
     },
     ActionRef, CommonContext, CompiledModeEffectRef, Config, Context, Duration, EnclaveBindings,
     EnclaveKey, ExecuteOwnedError, ExecuteOwnedFederateError, FederateBindings, InputRef,
@@ -27,6 +28,40 @@ macro_rules! r {
     ($start:expr, $len:expr) => {
         TableRange::new($start, $len)
     };
+}
+
+const fn fixture_federate(
+    id: &'static str,
+    target: &'static str,
+    runtime: &'static str,
+    enclaves: TableRange<EnclaveIndex>,
+) -> FederateImage<'static> {
+    FederateImage::new(
+        FederateId::new(id),
+        TargetId::new(target),
+        RuntimeBackendId::new(runtime),
+        enclaves,
+    )
+}
+
+const fn fixture_route(
+    boundary: &'static str,
+    local_port: PortIndex,
+    direction: RouteDirection,
+    timing: TimingDomain,
+    after_nanos: u64,
+) -> RouteImage<'static> {
+    RouteImage::new(
+        BoundaryId::new(boundary),
+        local_port,
+        direction,
+        timing,
+        after_nanos,
+    )
+}
+
+const fn fixture_binding(id: &'static str, kind: BindingKind) -> RequiredBindingImage<'static> {
+    RequiredBindingImage::new(BindingSlotId::new(id), kind)
 }
 
 /// Mutable reactor state whose startup reaction records one execution.
@@ -136,21 +171,21 @@ static ROUTED_PORTS: [PortImage; 1] = [PortImage::new(
     r!(0, 0),
     BindingSlotIndex::new(2),
 )];
-static ROUTED_ROUTES: [RouteImage; 1] = [RouteImage::new(
-    IdentityRange::new(0, 18),
+static ROUTED_ROUTES: [RouteImage; 1] = [fixture_route(
+    "compiled/reference",
     PortIndex::new(0),
     RouteDirection::Outbound,
     TimingDomain::Logical,
     0,
 )];
 static REQUIRED_BINDINGS: [RequiredBindingImage; 2] = [
-    RequiredBindingImage::new(IdentityRange::new(18, 13), BindingKind::StateInitializer),
-    RequiredBindingImage::new(IdentityRange::new(31, 17), BindingKind::Reaction),
+    fixture_binding("counter-state", BindingKind::StateInitializer),
+    fixture_binding("increment-counter", BindingKind::Reaction),
 ];
 static ROUTED_REQUIRED_BINDINGS: [RequiredBindingImage; 3] = [
     REQUIRED_BINDINGS[0],
     REQUIRED_BINDINGS[1],
-    RequiredBindingImage::new(IdentityRange::new(48, 11), BindingKind::Port),
+    fixture_binding("routed-port", BindingKind::Port),
 ];
 
 const fn fixture_reaction(
@@ -373,13 +408,12 @@ static MODAL_SCOPE_STARTUPS: [LifecycleReactionImage; 1] = [LifecycleReactionIma
 static MODAL_TIMER_STARTUPS: [TimerStartupImage; 1] =
     [TimerStartupImage::new(ActionIndex::new(0), 0)];
 static MODAL_REQUIRED_BINDINGS: [RequiredBindingImage; 3] = [
-    RequiredBindingImage::new(IdentityRange::new(18, 7), BindingKind::StateInitializer),
-    RequiredBindingImage::new(IdentityRange::new(25, 12), BindingKind::Reaction),
-    RequiredBindingImage::new(IdentityRange::new(37, 7), BindingKind::Reaction),
+    fixture_binding("a-state", BindingKind::StateInitializer),
+    fixture_binding("b-transition", BindingKind::Reaction),
+    fixture_binding("c-entry", BindingKind::Reaction),
 ];
 
 static MODAL_IMAGE: EnclaveImage<'static> = EnclaveImage {
-    identity_data: "compiled/referencea-stateb-transitionc-entry",
     reactors: TinyMapView::new(&MODAL_REACTORS),
     actions: TinyMapView::new(&MODAL_ACTIONS),
     reactions: TinyMapView::new(&MODAL_REACTIONS),
@@ -436,11 +470,10 @@ static PERIODIC_MODAL_SCOPES: [ScopeImage; 3] = [
 static PERIODIC_MODAL_STARTUPS: [TimerStartupImage; 1] =
     [TimerStartupImage::new(ActionIndex::new(0), 5)];
 static PERIODIC_MODAL_BINDINGS: [RequiredBindingImage; 2] = [
-    RequiredBindingImage::new(IdentityRange::new(18, 7), BindingKind::StateInitializer),
-    RequiredBindingImage::new(IdentityRange::new(25, 12), BindingKind::Reaction),
+    fixture_binding("a-state", BindingKind::StateInitializer),
+    fixture_binding("b-transition", BindingKind::Reaction),
 ];
 static PERIODIC_MODAL_IMAGE: EnclaveImage<'static> = EnclaveImage {
-    identity_data: "compiled/referencea-stateb-transitionc-entry",
     reactors: TinyMapView::new(&MODAL_REACTORS),
     actions: TinyMapView::new(&PERIODIC_MODAL_ACTIONS),
     reactions: TinyMapView::new(&PERIODIC_MODAL_REACTIONS),
@@ -659,8 +692,7 @@ static COTIMED_IMAGE: EnclaveImage<'static> = EnclaveImage {
 };
 
 static IMAGE: EnclaveImage<'static> = EnclaveImage {
-    identity_data: "compiled/referencecounter-stateincrement-counter",
-    enclave_id: IdentityRange::new(0, 18),
+    enclave_id: EnclaveId::new("compiled/reference"),
     reactors: TinyMapView::new(&REACTORS),
     actions: TinyMapView::new(&ACTIONS),
     ports: TinyMapView::new(&PORTS),
@@ -696,7 +728,6 @@ static COALESCED_IMAGE: EnclaveImage<'static> = EnclaveImage {
 };
 
 static ROUTED_IMAGE: EnclaveImage<'static> = EnclaveImage {
-    identity_data: "compiled/referencecounter-stateincrement-counterrouted-port",
     ports: TinyMapView::new(&ROUTED_PORTS),
     routes: TinyMapView::new(&ROUTED_ROUTES),
     required_bindings: TinyMapView::new(&ROUTED_REQUIRED_BINDINGS),
@@ -713,8 +744,7 @@ static HORIZON_WORK_IMAGE: EnclaveImage<'static> = EnclaveImage {
 };
 
 static HORIZON_IDLE_IMAGE: EnclaveImage<'static> = EnclaveImage {
-    identity_data: "compiled/referencecounter-stateincrement-counter-idle",
-    enclave_id: IdentityRange::new(49, 4),
+    enclave_id: EnclaveId::new("idle"),
     scope_timer_startups: &[],
     timer_startup_actions: &[],
     shutdown_reactions: &HORIZON_SHUTDOWN_REACTIONS,
@@ -729,15 +759,10 @@ static QUIESCENT_HORIZON_IMAGE: EnclaveImage<'static> = EnclaveImage {
 };
 static QUIESCENT_HORIZON_ENCLAVES: [EnclaveImage<'static>; 2] =
     [QUIESCENT_HORIZON_IMAGE, HORIZON_IDLE_IMAGE];
-static HORIZON_FEDERATES: [FederateImage; 1] = [FederateImage::new(
-    IdentityRange::new(0, 4),
-    IdentityRange::new(4, 6),
-    IdentityRange::new(10, 7),
-    r!(0, 2),
-)];
+static HORIZON_FEDERATES: [FederateImage; 1] =
+    [fixture_federate("host", "target", "runtime", r!(0, 2))];
 static HORIZON_FEDERATE_MEMBERS: [FederateIndex; 1] = [FederateIndex::new(0)];
 static HORIZON_DEPLOYMENT: CompiledDeploymentImage<'static> = CompiledDeploymentImage {
-    identity_data: "hosttargetruntime",
     federation: GlobalFederationImage::new(&HORIZON_FEDERATE_MEMBERS, &[]),
     federates: TinyMapView::new(&HORIZON_FEDERATES),
     enclaves: TinyMapView::new(&HORIZON_ENCLAVES),
@@ -825,18 +850,17 @@ fn compiled_reference_returns_typed_image_validation_error() {
     }
 
     let invalid_image = EnclaveImage {
-        enclave_id: IdentityRange::new(u32::MAX, 1),
+        enclave_id: EnclaveId::new(" invalid"),
         ..IMAGE
     };
     let error = validate_local_image(invalid_image);
 
     assert!(matches!(
         error,
-        ExecuteOwnedError::ImageValidation(ImageValidationError::IdentityRangeInvalid {
-            table: "image",
+        ExecuteOwnedError::ImageValidation(ImageValidationError::InvalidStableId {
+            kind: "enclave",
             index: 0,
-            field: "enclave_id",
-            ..
+            id: " invalid",
         })
     ));
 }
@@ -855,8 +879,8 @@ fn compiled_reference_rejects_routes_until_route_execution_is_supported() {
     .expect("the same image must execute when its route table is empty");
 
     for direction in [RouteDirection::Inbound, RouteDirection::Outbound] {
-        let routes = [RouteImage::new(
-            IdentityRange::new(0, 18),
+        let routes = [fixture_route(
+            "compiled/reference",
             PortIndex::new(0),
             direction,
             TimingDomain::Logical,
@@ -1022,21 +1046,20 @@ static ROUTED_SOURCE_SCOPES: [ScopeImage; 1] = [fixture_scope(
     r!(0, 1),
     r!(0, 0),
 )];
-static ROUTED_SOURCE_ROUTES: [RouteImage; 1] = [RouteImage::new(
-    IdentityRange::new(9, 4),
+static ROUTED_SOURCE_ROUTES: [RouteImage; 1] = [fixture_route(
+    "pipe",
     PortIndex::new(0),
     RouteDirection::Outbound,
     TimingDomain::Logical,
     1_000_000,
 )];
 static ROUTED_SOURCE_BINDINGS: [RequiredBindingImage; 3] = [
-    RequiredBindingImage::new(IdentityRange::new(5, 1), BindingKind::StateInitializer),
-    RequiredBindingImage::new(IdentityRange::new(6, 1), BindingKind::Reaction),
-    RequiredBindingImage::new(IdentityRange::new(7, 1), BindingKind::Port),
+    fixture_binding("a", BindingKind::StateInitializer),
+    fixture_binding("b", BindingKind::Reaction),
+    fixture_binding("c", BindingKind::Port),
 ];
 static ROUTED_SOURCE_IMAGE: EnclaveImage<'static> = EnclaveImage {
-    identity_data: "alphaabcxpipe",
-    enclave_id: IdentityRange::new(0, 5),
+    enclave_id: EnclaveId::new("alpha"),
     reactors: TinyMapView::new(&ROUTED_SOURCE_REACTORS),
     actions: TinyMapView::new(&ROUTED_SOURCE_ACTIONS),
     ports: TinyMapView::new(&ROUTED_SOURCE_PORTS),
@@ -1083,21 +1106,20 @@ static ROUTED_SINK_SCOPES: [ScopeImage; 1] = [fixture_scope(
     r!(0, 0),
     r!(0, 0),
 )];
-static ROUTED_SINK_ROUTES: [RouteImage; 1] = [RouteImage::new(
-    IdentityRange::new(7, 4),
+static ROUTED_SINK_ROUTES: [RouteImage; 1] = [fixture_route(
+    "pipe",
     PortIndex::new(0),
     RouteDirection::Inbound,
     TimingDomain::Logical,
     1_000_000,
 )];
 static ROUTED_SINK_BINDINGS: [RequiredBindingImage; 3] = [
-    RequiredBindingImage::new(IdentityRange::new(4, 1), BindingKind::StateInitializer),
-    RequiredBindingImage::new(IdentityRange::new(5, 1), BindingKind::Reaction),
-    RequiredBindingImage::new(IdentityRange::new(6, 1), BindingKind::Port),
+    fixture_binding("a", BindingKind::StateInitializer),
+    fixture_binding("b", BindingKind::Reaction),
+    fixture_binding("c", BindingKind::Port),
 ];
 static ROUTED_SINK_IMAGE: EnclaveImage<'static> = EnclaveImage {
-    identity_data: "betaabcpipe",
-    enclave_id: IdentityRange::new(0, 4),
+    enclave_id: EnclaveId::new("beta"),
     reactors: TinyMapView::new(&ROUTED_SINK_REACTORS),
     actions: TinyMapView::new(&[]),
     ports: TinyMapView::new(&ROUTED_SINK_PORTS),
@@ -1124,16 +1146,11 @@ static ROUTED_SINK_IMAGE: EnclaveImage<'static> = EnclaveImage {
     storage_bounds: StorageBounds::new(1, 0, 8, 0, 0, 0),
 };
 
-static ROUTED_FEDERATES: [FederateImage; 1] = [FederateImage::new(
-    IdentityRange::new(0, 4),
-    IdentityRange::new(4, 6),
-    IdentityRange::new(10, 7),
-    r!(0, 2),
-)];
+static ROUTED_FEDERATES: [FederateImage; 1] =
+    [fixture_federate("host", "target", "runtime", r!(0, 2))];
 static ROUTED_ENCLAVES: [EnclaveImage<'static>; 2] = [ROUTED_SOURCE_IMAGE, ROUTED_SINK_IMAGE];
 static ROUTED_FEDERATE_MEMBERS: [FederateIndex; 1] = [FederateIndex::new(0)];
 static ROUTED_DEPLOYMENT: CompiledDeploymentImage<'static> = CompiledDeploymentImage {
-    identity_data: "hosttargetruntime",
     federation: GlobalFederationImage::new(&ROUTED_FEDERATE_MEMBERS, &[]),
     federates: TinyMapView::new(&ROUTED_FEDERATES),
     enclaves: TinyMapView::new(&ROUTED_ENCLAVES),
@@ -1214,15 +1231,15 @@ fn multi_sink_bindings() -> EnclaveBindings {
         .bind_port(BindingSlotIndex::new(3), PayloadType::<u32>::new())
 }
 
-static MULTI_LEFT_ROUTES: [RouteImage; 1] = [RouteImage::new(
-    IdentityRange::new(9, 4),
+static MULTI_LEFT_ROUTES: [RouteImage; 1] = [fixture_route(
+    "left",
     PortIndex::new(0),
     RouteDirection::Outbound,
     TimingDomain::Logical,
     0,
 )];
-static MULTI_RIGHT_ROUTES: [RouteImage; 1] = [RouteImage::new(
-    IdentityRange::new(9, 5),
+static MULTI_RIGHT_ROUTES: [RouteImage; 1] = [fixture_route(
+    "right",
     PortIndex::new(0),
     RouteDirection::Outbound,
     TimingDomain::Logical,
@@ -1230,11 +1247,11 @@ static MULTI_RIGHT_ROUTES: [RouteImage; 1] = [RouteImage::new(
 )];
 
 const fn multi_source_image(
-    identity_data: &'static str,
+    enclave_id: &'static str,
     routes: &'static [RouteImage],
 ) -> EnclaveImage<'static> {
     EnclaveImage {
-        identity_data,
+        enclave_id: EnclaveId::new(enclave_id),
         routes: TinyMapView::new(routes),
         ..ROUTED_SOURCE_IMAGE
     }
@@ -1252,15 +1269,15 @@ static MULTI_SINK_REACTIONS: [ReactionImage; 1] =
     [fixture_reaction(0, 1, r!(0, 2), r!(0, 0), r!(0, 0))];
 static MULTI_SINK_USE_PORTS: [PortIndex; 2] = [PortIndex::new(0), PortIndex::new(1)];
 static MULTI_SINK_ROUTES: [RouteImage; 2] = [
-    RouteImage::new(
-        IdentityRange::new(8, 4),
+    fixture_route(
+        "left",
         PortIndex::new(0),
         RouteDirection::Inbound,
         TimingDomain::Logical,
         0,
     ),
-    RouteImage::new(
-        IdentityRange::new(12, 5),
+    fixture_route(
+        "right",
         PortIndex::new(1),
         RouteDirection::Inbound,
         TimingDomain::Logical,
@@ -1268,13 +1285,13 @@ static MULTI_SINK_ROUTES: [RouteImage; 2] = [
     ),
 ];
 static MULTI_SINK_BINDINGS: [RequiredBindingImage; 4] = [
-    RequiredBindingImage::new(IdentityRange::new(4, 1), BindingKind::StateInitializer),
-    RequiredBindingImage::new(IdentityRange::new(5, 1), BindingKind::Reaction),
-    RequiredBindingImage::new(IdentityRange::new(6, 1), BindingKind::Port),
-    RequiredBindingImage::new(IdentityRange::new(7, 1), BindingKind::Port),
+    fixture_binding("a", BindingKind::StateInitializer),
+    fixture_binding("b", BindingKind::Reaction),
+    fixture_binding("c", BindingKind::Port),
+    fixture_binding("d", BindingKind::Port),
 ];
 static MULTI_SINK_IMAGE: EnclaveImage<'static> = EnclaveImage {
-    identity_data: "sinkabcdleftright",
+    enclave_id: EnclaveId::new("sink"),
     ports: TinyMapView::new(&MULTI_SINK_PORTS),
     reactions: TinyMapView::new(&MULTI_SINK_REACTIONS),
     reaction_triggers: &MULTI_SINK_TRIGGERS,
@@ -1285,18 +1302,13 @@ static MULTI_SINK_IMAGE: EnclaveImage<'static> = EnclaveImage {
 };
 
 static MULTI_ENCLAVES: [EnclaveImage<'static>; 3] = [
-    multi_source_image("alphaabcxleft", &MULTI_LEFT_ROUTES),
-    multi_source_image("gammaabcxright", &MULTI_RIGHT_ROUTES),
+    multi_source_image("alpha", &MULTI_LEFT_ROUTES),
+    multi_source_image("gamma", &MULTI_RIGHT_ROUTES),
     MULTI_SINK_IMAGE,
 ];
-static MULTI_FEDERATES: [FederateImage; 1] = [FederateImage::new(
-    IdentityRange::new(0, 4),
-    IdentityRange::new(4, 6),
-    IdentityRange::new(10, 7),
-    r!(0, 3),
-)];
+static MULTI_FEDERATES: [FederateImage; 1] =
+    [fixture_federate("host", "target", "runtime", r!(0, 3))];
 static MULTI_DEPLOYMENT: CompiledDeploymentImage<'static> = CompiledDeploymentImage {
-    identity_data: "hosttargetruntime",
     federation: GlobalFederationImage::new(&ROUTED_FEDERATE_MEMBERS, &[]),
     federates: TinyMapView::new(&MULTI_FEDERATES),
     enclaves: TinyMapView::new(&MULTI_ENCLAVES),
@@ -1647,15 +1659,15 @@ fn owned_federate_quiesces_a_positive_delay_route_cycle() {
             None,
         )];
         let routes = [
-            RouteImage::new(
-                IdentityRange::new(9, 4),
+            fixture_route(
+                "pipe",
                 PortIndex::new(0),
                 RouteDirection::Inbound,
                 TimingDomain::Logical,
                 1,
             ),
-            RouteImage::new(
-                IdentityRange::new(9, 4),
+            fixture_route(
+                "pipe",
                 PortIndex::new(0),
                 RouteDirection::Outbound,
                 TimingDomain::Logical,
@@ -1667,12 +1679,7 @@ fn owned_federate_quiesces_a_positive_delay_route_cycle() {
             routes: TinyMapView::new(&routes),
             ..ROUTED_SOURCE_IMAGE
         }];
-        let federates = [FederateImage::new(
-            IdentityRange::new(0, 4),
-            IdentityRange::new(4, 6),
-            IdentityRange::new(10, 7),
-            r!(0, 1),
-        )];
+        let federates = [fixture_federate("host", "target", "runtime", r!(0, 1))];
         let deployment = CompiledDeploymentImage {
             federates: TinyMapView::new(&federates),
             enclaves: TinyMapView::new(&enclaves),
@@ -1741,12 +1748,7 @@ fn owned_federate_preflight_rejects_before_initializers() {
     assert_eq!(ROUTED_INITIALIZATIONS.load(Ordering::SeqCst), 0);
 
     let unpaired_enclaves = [ROUTED_SOURCE_IMAGE];
-    let unpaired_federates = [FederateImage::new(
-        IdentityRange::new(0, 4),
-        IdentityRange::new(4, 6),
-        IdentityRange::new(10, 7),
-        r!(0, 1),
-    )];
+    let unpaired_federates = [fixture_federate("host", "target", "runtime", r!(0, 1))];
     let unpaired = CompiledDeploymentImage {
         federates: TinyMapView::new(&unpaired_federates),
         enclaves: TinyMapView::new(&unpaired_enclaves),
@@ -1837,22 +1839,12 @@ fn owned_federate_preflight_rejects_before_initializers() {
     ));
 
     let cross_federates = [
-        FederateImage::new(
-            IdentityRange::new(0, 1),
-            IdentityRange::new(1, 1),
-            IdentityRange::new(2, 1),
-            r!(0, 1),
-        ),
-        FederateImage::new(
-            IdentityRange::new(3, 1),
-            IdentityRange::new(4, 1),
-            IdentityRange::new(5, 1),
-            r!(1, 1),
-        ),
+        fixture_federate("a", "t", "r", r!(0, 1)),
+        fixture_federate("b", "t", "r", r!(1, 1)),
     ];
     let cross_members = [FederateIndex::new(0), FederateIndex::new(1)];
     let cross_edges = [FederationEdgeImage::new(
-        IdentityRange::new(6, 4),
+        BoundaryId::new("pipe"),
         FederateIndex::new(0),
         FederateIndex::new(1),
         1_000_000,
@@ -1860,7 +1852,7 @@ fn owned_federate_preflight_rejects_before_initializers() {
     let rti_members =
         [RtiMemberImage::new(RecoveryPolicy::FailStop, r!(0, 0), r!(0, 0), r!(0, 0)); 2];
     let rti_routes = [RtiRouteImage::new(
-        IdentityRange::new(0, 4),
+        BoundaryId::new("pipe"),
         FlowIndex::new(0),
         None::<PhysicalBoundaryIndex>,
         None,
@@ -1875,20 +1867,18 @@ fn owned_federate_preflight_rejects_before_initializers() {
         FederateIndex::new(1),
         1_000_000,
     )];
-    let rti_identities = [IdentityRange::new(4, 1)];
+    let rti_identities = ["x"];
     let rti = RtiImage::new(
-        "pipex",
         TinyMapView::new(&rti_members),
         &[],
         &[],
         TinyMapView::new(&rti_routes),
-        IdentityTable::new("pipex", TinyMapView::new(&rti_identities)),
-        IdentityTable::new("pipex", TinyMapView::new(&[])),
-        IdentityTable::new("pipex", TinyMapView::new(&rti_identities)),
-        IdentityTable::new("pipex", TinyMapView::new(&rti_identities)),
+        IdentityTable::new(&rti_identities),
+        IdentityTable::new(&[]),
+        IdentityTable::new(&rti_identities),
+        IdentityTable::new(&rti_identities),
     );
     let cross = CompiledDeploymentImage {
-        identity_data: "atrbtrpipe",
         federation: GlobalFederationImage::new(&cross_members, &cross_edges),
         federates: TinyMapView::new(&cross_federates),
         coordination: CoordinationProjection::CentralRti(rti),
@@ -1911,8 +1901,7 @@ fn owned_federate_preflight_rejects_before_initializers() {
 #[test]
 fn owned_federate_rejects_enclave_without_root_reactor() {
     let rootless_enclaves = [EnclaveImage {
-        identity_data: "rootless",
-        enclave_id: IdentityRange::new(0, 8),
+        enclave_id: EnclaveId::new("rootless"),
         reactors: TinyMapView::new(&[]),
         actions: TinyMapView::new(&[]),
         ports: TinyMapView::new(&[]),
@@ -1938,15 +1927,9 @@ fn owned_federate_rejects_enclave_without_root_reactor() {
         required_bindings: TinyMapView::new(&[]),
         storage_bounds: StorageBounds::new(0, 0, 0, 0, 0, 0),
     }];
-    let rootless_federates = [FederateImage::new(
-        IdentityRange::new(0, 4),
-        IdentityRange::new(4, 6),
-        IdentityRange::new(10, 7),
-        r!(0, 1),
-    )];
+    let rootless_federates = [fixture_federate("host", "target", "runtime", r!(0, 1))];
     let members = [FederateIndex::new(0)];
     let deployment = CompiledDeploymentImage {
-        identity_data: "hosttargetruntime",
         federation: GlobalFederationImage::new(&members, &[]),
         federates: TinyMapView::new(&rootless_federates),
         enclaves: TinyMapView::new(&rootless_enclaves),
@@ -2103,25 +2086,19 @@ fn owned_federate_abort_stops_peer_with_recurring_internal_work_child() {
 
     let recurring_startup = [TimerStartupImage::new(ActionIndex::new(0), 0)];
     let recurring = EnclaveImage {
-        identity_data: "compiled/abortpeercounter-stateincrement-counter",
+        enclave_id: EnclaveId::new("compiled/abortpeer"),
         actions: TinyMapView::new(&PERIODIC_ACTIONS),
         timer_startup_actions: &recurring_startup,
         ..IMAGE
     };
     let panicking = EnclaveImage {
-        identity_data: "compiled/panicpeercounter-stateincrement-counter",
+        enclave_id: EnclaveId::new("compiled/panicpeer"),
         ..IMAGE
     };
     let enclaves = [recurring, panicking];
-    let federates = [FederateImage::new(
-        IdentityRange::new(0, 4),
-        IdentityRange::new(4, 6),
-        IdentityRange::new(10, 7),
-        r!(0, 2),
-    )];
+    let federates = [fixture_federate("host", "target", "runtime", r!(0, 2))];
     let members = [FederateIndex::new(0)];
     let deployment = CompiledDeploymentImage {
-        identity_data: "hosttargetruntime",
         federation: GlobalFederationImage::new(&members, &[]),
         federates: TinyMapView::new(&federates),
         enclaves: TinyMapView::new(&enclaves),
@@ -2153,15 +2130,15 @@ fn owned_federate_abort_stops_peer_with_recurring_internal_work_child() {
 #[test]
 fn owned_federate_retains_route_failure_before_competing_scheduler_panic() {
     COMPETING_PANIC_READY.store(false, Ordering::SeqCst);
-    let outbound = [RouteImage::new(
-        IdentityRange::new(9, 4),
+    let outbound = [fixture_route(
+        "pipe",
         PortIndex::new(0),
         RouteDirection::Outbound,
         TimingDomain::Physical,
         0,
     )];
-    let inbound = [RouteImage::new(
-        IdentityRange::new(9, 4),
+    let inbound = [fixture_route(
+        "pipe",
         PortIndex::new(0),
         RouteDirection::Inbound,
         TimingDomain::Physical,
@@ -2172,7 +2149,7 @@ fn owned_federate_retains_route_failure_before_competing_scheduler_panic() {
         ..ROUTED_SOURCE_IMAGE
     };
     let destination = EnclaveImage {
-        identity_data: "deltaabcxpipe",
+        enclave_id: EnclaveId::new("delta"),
         routes: TinyMapView::new(&inbound),
         storage_bounds: StorageBounds::new(1, 1, 0, 0, 0, 0),
         ..ROUTED_SOURCE_IMAGE

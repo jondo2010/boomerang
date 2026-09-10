@@ -1320,11 +1320,11 @@ mod tests {
     use crate::{
         image::{
             ActionImage, ActionIndex, ActionSlotIndex, ActionTiming, BindingKind, BindingSlotIndex,
-            BoundaryId, EnclaveImage, EnclaveImageView, EnclaveIndex, IdentityRange,
-            LevelReactionImage, ModeImage, PortImage, PortIndex, ReactionImage, ReactionIndex,
-            ReactorImage, ReactorIndex, RequiredBindingImage, RouteDirection, RouteImage,
-            ScopeImage, ScopeIndex, StateSlotIndex, StorageBounds, TableRange, TimerStartupImage,
-            TimingDomain, TinyMapView,
+            BoundaryId, EnclaveImage, EnclaveImageView, EnclaveIndex, LevelReactionImage,
+            ModeImage, PortImage, PortIndex, ReactionImage, ReactionIndex, ReactorImage,
+            ReactorIndex, RequiredBindingImage, RouteDirection, RouteImage, ScopeImage, ScopeIndex,
+            StateSlotIndex, StorageBounds, TableRange, TimerStartupImage, TimingDomain,
+            TinyMapView,
         },
         AsyncEvent, CommonContext, CompiledModeEffectRef, Config, Context, Duration,
         EnclaveBindings, ModeTransitionRequest, OwnedStorage, OwnedStorageError, PayloadType,
@@ -1486,14 +1486,25 @@ mod tests {
         [crate::image::ModeIndex::new(0)];
     static SCOPE_LOGICAL_ACTIONS: [ActionIndex; 1] = [ActionIndex::new(0)];
     static REQUIRED_BINDINGS: [RequiredBindingImage; 4] = [
-        RequiredBindingImage::new(IdentityRange::new(7, 7), BindingKind::StateInitializer),
-        RequiredBindingImage::new(IdentityRange::new(14, 10), BindingKind::Reaction),
-        RequiredBindingImage::new(IdentityRange::new(24, 6), BindingKind::Port),
-        RequiredBindingImage::new(IdentityRange::new(30, 8), BindingKind::Action),
+        RequiredBindingImage::new(
+            crate::image::BindingSlotId::new("a-state"),
+            BindingKind::StateInitializer,
+        ),
+        RequiredBindingImage::new(
+            crate::image::BindingSlotId::new("b-reaction"),
+            BindingKind::Reaction,
+        ),
+        RequiredBindingImage::new(
+            crate::image::BindingSlotId::new("c-port"),
+            BindingKind::Port,
+        ),
+        RequiredBindingImage::new(
+            crate::image::BindingSlotId::new("d-action"),
+            BindingKind::Action,
+        ),
     ];
     static IMAGE: EnclaveImage<'static> = EnclaveImage {
-        identity_data: "enclavea-stateb-reactionc-portd-action",
-        enclave_id: IdentityRange::new(0, 7),
+        enclave_id: crate::image::EnclaveId::new("enclave"),
         reactors: TinyMapView::new(&REACTORS),
         actions: TinyMapView::new(&ACTIONS),
         ports: TinyMapView::new(&PORTS),
@@ -1534,14 +1545,14 @@ mod tests {
     };
     static INBOUND_ROUTES: [RouteImage; 2] = [
         RouteImage::new(
-            IdentityRange::new(7, 7),
+            crate::image::BoundaryId::new("a-state"),
             PortIndex::new(0),
             RouteDirection::Inbound,
             TimingDomain::Logical,
             0,
         ),
         RouteImage::new(
-            IdentityRange::new(14, 10),
+            crate::image::BoundaryId::new("b-reaction"),
             PortIndex::new(0),
             RouteDirection::Inbound,
             TimingDomain::Logical,

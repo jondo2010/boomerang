@@ -275,7 +275,7 @@ pub(crate) fn resource_report(compiled: &OwnedCompiledDeployment) -> ResourceRep
                 .enclaves()
                 .iter()
                 .map(|enclave| {
-                    let bounds = enclave.image().storage_bounds;
+                    let bounds = enclave.storage_bounds();
                     EnclaveResourceReport {
                         id: enclave.id().to_string(),
                         state_slots: bounds.state_slots(),

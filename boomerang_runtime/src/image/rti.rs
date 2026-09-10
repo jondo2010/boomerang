@@ -35,8 +35,8 @@
 //! is preserved metadata; it does not ask the RTI image to reconstruct or analyze a flow graph.
 
 use super::{
-    BoundaryFailurePolicy, CodecPolicy, FederateIndex, IdentityRange, IdentityTable,
-    RecoveryPolicy, SecurityPolicy, TimingPolicy, TransportPolicy,
+    BoundaryFailurePolicy, BoundaryId, CodecPolicy, FederateIndex, RecoveryPolicy, SecurityPolicy,
+    TimingPolicy, TransportPolicy,
 };
 use tinymap::{TableRange, TinyMapView};
 
@@ -54,6 +54,9 @@ tinymap::key_type!(pub FlowIndex);
 tinymap::key_type!(pub PhysicalBoundaryIndex);
 tinymap::key_type!(pub TransportCapabilityIndex);
 tinymap::key_type!(pub CodecCapabilityIndex);
+
+/// A dense typed-key table of borrowed stable identities.
+pub type IdentityTable<'a, K> = TinyMapView<'a, K, &'a str>;
 
 /// One precomputed incoming dependency in dense Federate coordinates.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -106,9 +109,9 @@ pub struct RtiMemberImage {
 /// identity and route-specific settings. Its [`FlowIndex`] may be shared with other sequential or
 /// parallel routes belonging to the same end-to-end application flow.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct RtiRouteImage {
-    /// Stable identity of this concrete boundary hop, stored in the RTI identity blob.
-    pub(super) boundary: IdentityRange,
+pub struct RtiRouteImage<'a> {
+    /// Stable identity of this concrete boundary hop.
+    pub(super) boundary: BoundaryId<'a>,
     /// Dense end-to-end application flow grouping this route with related hops.
     pub(super) flow: FlowIndex,
     /// Optional dense physical input identity.
@@ -137,12 +140,12 @@ pub struct RtiRouteImage {
     delay_nanos: u64,
 }
 
-impl RtiRouteImage {
+impl<'a> RtiRouteImage<'a> {
     /// Creates one unchecked route record.
     #[must_use]
     #[allow(clippy::too_many_arguments, reason = "flat immutable image record")]
     pub const fn new(
-        boundary: IdentityRange,
+        boundary: BoundaryId<'a>,
         flow: FlowIndex,
         physical_input: Option<PhysicalBoundaryIndex>,
         physical_output: Option<PhysicalBoundaryIndex>,
@@ -220,8 +223,6 @@ impl RtiMemberImage {
 /// reachability, SCC, shortest-path, or equivalent graph analysis.
 #[derive(Clone, Copy, Debug)]
 pub struct RtiImage<'a> {
-    /// Concatenated stable identities referenced by RTI records.
-    pub(super) identity_data: &'a str,
     /// Per-Federate ranges in canonical dense-key order.
     pub(super) members: TinyMapView<'a, FederateIndex, RtiMemberImage>,
     /// Packed range backing storage for members' direct and transitive dependencies.
@@ -235,7 +236,7 @@ pub struct RtiImage<'a> {
     /// its affected-downstream range rather than through a synthetic per-entry key.
     pub(super) affected_downstream: &'a [FederateIndex],
     /// Concrete directed boundary hops keyed in canonical deployment-wide RTI order.
-    pub(super) routes: TinyMapView<'a, RtiRouteIndex, RtiRouteImage>,
+    pub(super) routes: TinyMapView<'a, RtiRouteIndex, RtiRouteImage<'a>>,
     /// Distinct end-to-end application identities shared by one or more routes.
     pub(super) flows: IdentityTable<'a, FlowIndex>,
     /// Canonically ordered stable physical input/output identities.
@@ -253,14 +254,16 @@ impl PartialEq for RtiImage<'_> {
                 true $(&& self.$field.values().eq(other.$field.values()))+
             };
         }
-        self.identity_data == other.identity_data
-            && self.dependencies == other.dependencies
+        self.dependencies == other.dependencies
             && self.affected_downstream == other.affected_downstream
-            && views_equal!(members, routes)
-            && self.flows == other.flows
-            && self.physical_boundaries == other.physical_boundaries
-            && self.transport_capabilities == other.transport_capabilities
-            && self.codec_capabilities == other.codec_capabilities
+            && views_equal!(
+                members,
+                routes,
+                flows,
+                physical_boundaries,
+                transport_capabilities,
+                codec_capabilities
+            )
     }
 }
 
@@ -274,6 +277,7 @@ macro_rules! route_identity_accessor {
             let route = self.routes[route];
             self.$table
                 .get(route.$field)
+                .copied()
                 .expect("validated RTI identity reference")
         }
     };
@@ -297,18 +301,16 @@ impl<'a> RtiImage<'a> {
     #[must_use]
     #[allow(clippy::too_many_arguments, reason = "flat immutable image schema")]
     pub const fn new(
-        identity_data: &'a str,
         members: TinyMapView<'a, FederateIndex, RtiMemberImage>,
         dependencies: &'a [RtiDependencyImage],
         affected_downstream: &'a [FederateIndex],
-        routes: TinyMapView<'a, RtiRouteIndex, RtiRouteImage>,
+        routes: TinyMapView<'a, RtiRouteIndex, RtiRouteImage<'a>>,
         flows: IdentityTable<'a, FlowIndex>,
         physical_boundaries: IdentityTable<'a, PhysicalBoundaryIndex>,
         transport_capabilities: IdentityTable<'a, TransportCapabilityIndex>,
         codec_capabilities: IdentityTable<'a, CodecCapabilityIndex>,
     ) -> Self {
         Self {
-            identity_data,
             members,
             dependencies,
             affected_downstream,
@@ -324,7 +326,7 @@ impl<'a> RtiImage<'a> {
     ///
     /// Multiple returned routes may belong to the same end-to-end flow.
     #[must_use]
-    pub const fn routes(self) -> TinyMapView<'a, RtiRouteIndex, RtiRouteImage> {
+    pub const fn routes(self) -> TinyMapView<'a, RtiRouteIndex, RtiRouteImage<'a>> {
         self.routes
     }
 
@@ -339,12 +341,9 @@ impl<'a> RtiImage<'a> {
 
     /// Resolves the stable identity of one concrete boundary hop.
     #[must_use]
-    pub fn route_boundary(self, route: RtiRouteIndex) -> &'a str {
+    pub fn route_boundary(self, route: RtiRouteIndex) -> BoundaryId<'a> {
         let route = self.routes[route];
-        route
-            .boundary
-            .get(self.identity_data)
-            .expect("validated RTI route boundary range")
+        route.boundary
     }
 
     /// Resolves the stable end-to-end application identity grouping this route.
@@ -355,6 +354,7 @@ impl<'a> RtiImage<'a> {
         let route = self.routes[route];
         self.flows
             .get(route.flow)
+            .copied()
             .expect("validated RTI flow identity range")
     }
 
@@ -365,6 +365,7 @@ impl<'a> RtiImage<'a> {
         route.physical_input.map(|index| {
             self.physical_boundaries
                 .get(index)
+                .copied()
                 .expect("validated RTI physical-input identity range")
         })
     }
@@ -376,6 +377,7 @@ impl<'a> RtiImage<'a> {
         route.physical_output.map(|index| {
             self.physical_boundaries
                 .get(index)
+                .copied()
                 .expect("validated RTI physical-output identity range")
         })
     }

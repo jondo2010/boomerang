@@ -628,16 +628,11 @@ fn federate_shutdown_unblocks_a_full_mailbox_and_blocked_sender() {
     assert!(matches!(result, Ok(Err(_))));
 }
 
-/// Returns whether a canonical Enclave index belongs to one Federate's dense range.
-fn federate_contains_enclave(federate: crate::image::FederateImage, enclave: EnclaveIndex) -> bool {
-    federate.enclaves().contains(enclave)
-}
-
 /// Resolves every outbound route to its unique inbound half after root validation.
 fn local_route_endpoints<'image>(
     deployment: &CompiledDeploymentImage<'image>,
     selected_federate: FederateIndex,
-    selected: crate::image::FederateImage,
+    selected: crate::image::FederateImage<'_>,
 ) -> Result<Vec<ResolvedLocalRoute<'image>>, ExecuteOwnedFederateError> {
     let mut endpoints = Vec::new();
     for (source, source_image) in deployment.enclaves.iter() {
@@ -646,12 +641,7 @@ fn local_route_endpoints<'image>(
             .iter()
             .filter(|(_, route)| route.direction() == RouteDirection::Outbound)
         {
-            let boundary = BoundaryId::new(
-                outbound
-                    .boundary()
-                    .get(source_image.identity_data)
-                    .expect("root validation checked outbound boundary identity"),
-            );
+            let boundary = outbound.boundary();
             let (destination, inbound) = deployment
                 .enclaves
                 .iter()
@@ -661,18 +651,13 @@ fn local_route_endpoints<'image>(
                         .values()
                         .map(move |route| (enclave, image, route))
                 })
-                .find(|(_, image, route)| {
-                    route.direction() == RouteDirection::Inbound
-                        && route
-                            .boundary()
-                            .get(image.identity_data)
-                            .map(BoundaryId::new)
-                            == Some(boundary)
+                .find(|(_, _image, route)| {
+                    route.direction() == RouteDirection::Inbound && route.boundary() == boundary
                 })
                 .map(|(enclave, _, route)| (enclave, *route))
                 .expect("root validation paired every outbound route");
-            let source_selected = federate_contains_enclave(selected, source);
-            let destination_selected = federate_contains_enclave(selected, destination);
+            let source_selected = selected.enclaves().contains(source);
+            let destination_selected = selected.enclaves().contains(destination);
             if source_selected != destination_selected {
                 return Err(ExecuteOwnedFederateError::CrossFederateRoute {
                     boundary: boundary.as_str().to_owned(),
@@ -719,7 +704,7 @@ fn preflight_owned_federate<'image>(
         .ok_or(ExecuteOwnedFederateError::FederateNotFound { federate })?;
 
     for enclave in bindings.enclaves.keys() {
-        if !federate_contains_enclave(selected, enclave) {
+        if !selected.enclaves().contains(enclave) {
             return Err(ExecuteOwnedFederateError::UnexpectedEnclaveBinding { enclave, federate });
         }
     }
@@ -1149,11 +1134,11 @@ mod scoped_spawn_tests {
     use super::*;
     use crate::{
         image::{
-            ActionImage, ActionIndex, ActionSlotIndex, ActionTiming, BindingKind, BindingSlotIndex,
-            CoordinationProjection, FederateImage, GlobalFederationImage, IdentityRange,
-            LevelReactionImage, ReactionImage, ReactionIndex, ReactorImage, ReactorIndex,
-            RequiredBindingImage, ScopeImage, ScopeIndex, StorageBounds, TableRange,
-            TimerStartupImage,
+            ActionImage, ActionIndex, ActionSlotIndex, ActionTiming, BindingKind, BindingSlotId,
+            BindingSlotIndex, CoordinationProjection, EnclaveId, FederateId, FederateImage,
+            GlobalFederationImage, LevelReactionImage, ReactionImage, ReactionIndex, ReactorImage,
+            ReactorIndex, RequiredBindingImage, RuntimeBackendId, ScopeImage, ScopeIndex,
+            StorageBounds, TableRange, TargetId, TimerStartupImage,
         },
         keepalive, EnclaveKey, FederateAcquisition, FederateCompletion,
         FederateCoordinationBackend, FederateCoordinationError, FederatePublication, SendContext,
@@ -1180,7 +1165,7 @@ mod scoped_spawn_tests {
     )];
     static SCOPE_DESCENDANTS: [ScopeIndex; 1] = [ScopeIndex::new(0)];
     static REQUIRED_BINDINGS: [RequiredBindingImage; 1] = [RequiredBindingImage::new(
-        IdentityRange::new(5, 5),
+        BindingSlotId::new("state"),
         BindingKind::StateInitializer,
     )];
     /// Timer action that drives the coordinator-panic scheduler into a local barrier.
@@ -1210,14 +1195,13 @@ mod scoped_spawn_tests {
         [TimerStartupImage::new(ActionIndex::new(0), 1_000_000_000)];
     /// State and reaction bindings required by the coordinator-panic fixture.
     static BARRIER_REQUIRED_BINDINGS: [RequiredBindingImage; 2] = [
-        RequiredBindingImage::new(IdentityRange::new(5, 5), BindingKind::StateInitializer),
-        RequiredBindingImage::new(IdentityRange::new(10, 8), BindingKind::Reaction),
+        RequiredBindingImage::new(BindingSlotId::new("state"), BindingKind::StateInitializer),
+        RequiredBindingImage::new(BindingSlotId::new("zreactor"), BindingKind::Reaction),
     ];
 
-    const fn state_only_image(identity_data: &'static str) -> EnclaveImage<'static> {
+    const fn state_only_image(enclave_id: &'static str) -> EnclaveImage<'static> {
         EnclaveImage {
-            identity_data,
-            enclave_id: IdentityRange::new(0, 5),
+            enclave_id: EnclaveId::new(enclave_id),
             reactors: TinyMapView::new(&REACTORS),
             actions: TinyMapView::new(&[]),
             ports: TinyMapView::new(&[]),
@@ -1246,30 +1230,28 @@ mod scoped_spawn_tests {
     }
 
     static ENCLAVES: [EnclaveImage<'static>; 3] = [
-        state_only_image("alphastate"),
-        state_only_image("bravostate"),
-        state_only_image("charlstate"),
+        state_only_image("alpha"),
+        state_only_image("bravo"),
+        state_only_image("charl"),
     ];
     /// Compiled scheduler fixture with one finite nonterminal candidate.
     static BARRIER_IMAGE: EnclaveImage<'static> = EnclaveImage {
-        identity_data: "alphastatezreactor",
         actions: TinyMapView::new(&BARRIER_ACTIONS),
         reactions: TinyMapView::new(&BARRIER_REACTIONS),
         reaction_triggers: &BARRIER_TRIGGERS,
         timer_startup_actions: &BARRIER_STARTUPS,
         required_bindings: TinyMapView::new(&BARRIER_REQUIRED_BINDINGS),
         storage_bounds: StorageBounds::new(1, 1, 1, 0, 0, 0),
-        ..state_only_image("alphastatezreactor")
+        ..state_only_image("alpha")
     };
     static FEDERATES: [FederateImage; 1] = [FederateImage::new(
-        IdentityRange::new(0, 4),
-        IdentityRange::new(4, 6),
-        IdentityRange::new(10, 7),
+        FederateId::new("host"),
+        TargetId::new("target"),
+        RuntimeBackendId::new("runtime"),
         TableRange::new(0, 3),
     )];
     static MEMBERS: [FederateIndex; 1] = [FederateIndex::new(0)];
     static DEPLOYMENT: CompiledDeploymentImage<'static> = CompiledDeploymentImage {
-        identity_data: "hosttargetruntime",
         federation: GlobalFederationImage::new(&MEMBERS, &[]),
         federates: TinyMapView::new(&FEDERATES),
         enclaves: TinyMapView::new(&ENCLAVES),
@@ -1279,15 +1261,15 @@ mod scoped_spawn_tests {
     /// Two-Federate layout whose selected range begins at global Enclave index one.
     static OFFSET_FEDERATES: [FederateImage; 2] = [
         FederateImage::new(
-            IdentityRange::new(0, 4),
-            IdentityRange::new(4, 3),
-            IdentityRange::new(7, 6),
+            FederateId::new("edge"),
+            TargetId::new("x86"),
+            RuntimeBackendId::new("native"),
             TableRange::new(0, 1),
         ),
         FederateImage::new(
-            IdentityRange::new(13, 4),
-            IdentityRange::new(17, 6),
-            IdentityRange::new(23, 7),
+            FederateId::new("host"),
+            TargetId::new("target"),
+            RuntimeBackendId::new("runtime"),
             TableRange::new(1, 2),
         ),
     ];
@@ -1295,7 +1277,6 @@ mod scoped_spawn_tests {
     static OFFSET_MEMBERS: [FederateIndex; 2] = [FederateIndex::new(0), FederateIndex::new(1)];
     /// Complete deployment fixture used to prove global Enclave indices are never rebased.
     static OFFSET_DEPLOYMENT: CompiledDeploymentImage<'static> = CompiledDeploymentImage {
-        identity_data: "edgex86nativehosttargetruntime",
         federation: GlobalFederationImage::new(&OFFSET_MEMBERS, &[]),
         federates: TinyMapView::new(&OFFSET_FEDERATES),
         enclaves: TinyMapView::new(&ENCLAVES),

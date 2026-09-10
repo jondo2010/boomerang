@@ -715,7 +715,7 @@ fn preflight_owned_federate<'image>(
     let start = selected.enclaves().start();
     let end = start + selected.enclaves().len();
     for raw in start..end {
-        let enclave = EnclaveIndex::new(raw);
+        let enclave = EnclaveIndex::from(raw);
         let enclave_bindings = bindings
             .enclaves
             .get(enclave)
@@ -1136,9 +1136,9 @@ mod scoped_spawn_tests {
         image::{
             ActionImage, ActionIndex, ActionSlotIndex, ActionTiming, BindingKind, BindingSlotId,
             BindingSlotIndex, CoordinationProjection, EnclaveId, FederateId, FederateImage,
-            GlobalFederationImage, LevelReactionImage, ReactionImage, ReactionIndex, ReactorImage,
-            ReactorIndex, RequiredBindingImage, RuntimeBackendId, ScopeImage, ScopeIndex,
-            StorageBounds, TableRange, TargetId, TimerStartupImage,
+            GlobalFederationImage, IndexSpan, LevelReactionImage, ReactionImage, ReactionIndex,
+            ReactorImage, ReactorIndex, RequiredBindingImage, RuntimeBackendId, ScopeImage,
+            ScopeIndex, SliceRange, StorageBounds, TargetId, TimerStartupImage,
         },
         keepalive, EnclaveKey, FederateAcquisition, FederateCompletion,
         FederateCoordinationBackend, FederateCoordinationError, FederatePublication, SendContext,
@@ -1148,7 +1148,7 @@ mod scoped_spawn_tests {
         BindingSlotIndex::new(0),
         StateSlotIndex::new(0),
         ScopeIndex::new(0),
-        TableRange::new(0, 0),
+        IndexSpan::new(0, 0),
         None,
         None,
     )];
@@ -1156,12 +1156,12 @@ mod scoped_spawn_tests {
         None,
         ReactorIndex::new(0),
         None,
-        TableRange::new(0, 1),
-        TableRange::new(0, 0),
-        TableRange::new(0, 0),
-        TableRange::new(0, 0),
-        TableRange::new(0, 0),
-        TableRange::new(0, 0),
+        SliceRange::new(0, 1),
+        SliceRange::new(0, 0),
+        SliceRange::new(0, 0),
+        SliceRange::new(0, 0),
+        SliceRange::new(0, 0),
+        SliceRange::new(0, 0),
     )];
     static SCOPE_DESCENDANTS: [ScopeIndex; 1] = [ScopeIndex::new(0)];
     static REQUIRED_BINDINGS: [RequiredBindingImage; 1] = [RequiredBindingImage::new(
@@ -1173,7 +1173,7 @@ mod scoped_spawn_tests {
         ScopeIndex::new(0),
         ActionSlotIndex::new(0),
         ActionTiming::Timer { period_nanos: None },
-        TableRange::new(0, 1),
+        SliceRange::new(0, 1),
         None,
     )];
     /// No-op reaction reached only if the blocked scheduler incorrectly advances.
@@ -1182,10 +1182,10 @@ mod scoped_spawn_tests {
         ScopeIndex::new(0),
         0,
         BindingSlotIndex::new(1),
-        TableRange::new(0, 0),
-        TableRange::new(0, 0),
-        TableRange::new(0, 0),
-        TableRange::new(0, 0),
+        SliceRange::new(0, 0),
+        SliceRange::new(0, 0),
+        SliceRange::new(0, 0),
+        SliceRange::new(0, 0),
     )];
     /// Timer-to-reaction trigger for the coordinator-panic fixture.
     static BARRIER_TRIGGERS: [LevelReactionImage; 1] =
@@ -1248,7 +1248,7 @@ mod scoped_spawn_tests {
         FederateId::new("host"),
         TargetId::new("target"),
         RuntimeBackendId::new("runtime"),
-        TableRange::new(0, 3),
+        IndexSpan::new(0, 3),
     )];
     static MEMBERS: [FederateIndex; 1] = [FederateIndex::new(0)];
     static DEPLOYMENT: CompiledDeploymentImage<'static> = CompiledDeploymentImage {
@@ -1264,13 +1264,13 @@ mod scoped_spawn_tests {
             FederateId::new("edge"),
             TargetId::new("x86"),
             RuntimeBackendId::new("native"),
-            TableRange::new(0, 1),
+            IndexSpan::new(0, 1),
         ),
         FederateImage::new(
             FederateId::new("host"),
             TargetId::new("target"),
             RuntimeBackendId::new("runtime"),
-            TableRange::new(1, 2),
+            IndexSpan::new(1, 2),
         ),
     ];
     /// Canonical membership for the non-zero-range construction fixture.

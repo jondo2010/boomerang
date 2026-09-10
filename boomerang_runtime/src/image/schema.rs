@@ -1,5 +1,5 @@
 //! Immutable dense image records consumed by compiled runtime execution.
-pub use tinymap::{TableRange, TinyMapView};
+pub use tinymap::{IndexSpan, SliceRange, TinyMapView};
 
 tinymap::key_type!(pub ReactorIndex);
 tinymap::key_type!(pub ActionIndex);
@@ -61,7 +61,7 @@ pub struct FederateImage<'a> {
     id: FederateId<'a>,
     target: TargetId<'a>,
     runtime: RuntimeBackendId<'a>,
-    enclaves: TableRange<EnclaveIndex>,
+    enclaves: IndexSpan<EnclaveIndex>,
 }
 
 impl<'a> FederateImage<'a> {
@@ -70,7 +70,7 @@ impl<'a> FederateImage<'a> {
         id: FederateId<'a>,
         target: TargetId<'a>,
         runtime: RuntimeBackendId<'a>,
-        enclaves: TableRange<EnclaveIndex>,
+        enclaves: IndexSpan<EnclaveIndex>,
     ) -> Self {
         Self {
             id,
@@ -96,7 +96,7 @@ impl<'a> FederateImage<'a> {
     }
 
     /// Returns the range of owned Enclave images.
-    pub const fn enclaves(self) -> TableRange<EnclaveIndex> {
+    pub const fn enclaves(self) -> IndexSpan<EnclaveIndex> {
         self.enclaves
     }
 }
@@ -243,7 +243,7 @@ pub struct ReactorImage {
     state_binding: BindingSlotIndex,
     state_slot: StateSlotIndex,
     root_scope: ScopeIndex,
-    modes: TableRange<ModeIndex>,
+    modes: IndexSpan<ModeIndex>,
     initial_mode: Option<ModeIndex>,
     bank: Option<BankInfoImage>,
 }
@@ -254,7 +254,7 @@ impl ReactorImage {
         state_binding: BindingSlotIndex,
         state_slot: StateSlotIndex,
         root_scope: ScopeIndex,
-        modes: TableRange<ModeIndex>,
+        modes: IndexSpan<ModeIndex>,
         initial_mode: Option<ModeIndex>,
         bank: Option<BankInfoImage>,
     ) -> Self {
@@ -284,7 +284,7 @@ impl ReactorImage {
     }
 
     /// Returns the reactor's canonical mode range.
-    pub const fn modes(self) -> TableRange<ModeIndex> {
+    pub const fn modes(self) -> IndexSpan<ModeIndex> {
         self.modes
     }
 
@@ -359,7 +359,7 @@ pub struct ActionImage {
     scope: ScopeIndex,
     storage_slot: ActionSlotIndex,
     timing: ActionTiming,
-    triggers: TableRange<LevelReactionImage>,
+    triggers: SliceRange<LevelReactionImage>,
 }
 
 impl ActionImage {
@@ -368,7 +368,7 @@ impl ActionImage {
         scope: ScopeIndex,
         storage_slot: ActionSlotIndex,
         timing: ActionTiming,
-        triggers: TableRange<LevelReactionImage>,
+        triggers: SliceRange<LevelReactionImage>,
         binding: Option<BindingSlotIndex>,
     ) -> Self {
         Self {
@@ -401,7 +401,7 @@ impl ActionImage {
     }
 
     /// Returns the action's flattened trigger range.
-    pub const fn triggers(self) -> TableRange<LevelReactionImage> {
+    pub const fn triggers(self) -> SliceRange<LevelReactionImage> {
         self.triggers
     }
 }
@@ -412,14 +412,14 @@ pub struct PortImage {
     /// Stable payload binding used to construct this port.
     binding: BindingSlotIndex,
     scope: ScopeIndex,
-    triggers: TableRange<LevelReactionImage>,
+    triggers: SliceRange<LevelReactionImage>,
 }
 
 impl PortImage {
     /// Creates an unchecked port record.
     pub const fn new(
         scope: ScopeIndex,
-        triggers: TableRange<LevelReactionImage>,
+        triggers: SliceRange<LevelReactionImage>,
         binding: BindingSlotIndex,
     ) -> Self {
         Self {
@@ -440,7 +440,7 @@ impl PortImage {
     }
 
     /// Returns the port's flattened trigger range.
-    pub const fn triggers(self) -> TableRange<LevelReactionImage> {
+    pub const fn triggers(self) -> SliceRange<LevelReactionImage> {
         self.triggers
     }
 }
@@ -452,10 +452,10 @@ pub struct ReactionImage {
     scope: ScopeIndex,
     dependency_level: u32,
     binding: BindingSlotIndex,
-    use_ports: TableRange<PortIndex>,
-    effect_ports: TableRange<PortIndex>,
-    actions: TableRange<ActionIndex>,
-    enabled_modes: TableRange<ModeIndex>,
+    use_ports: SliceRange<PortIndex>,
+    effect_ports: SliceRange<PortIndex>,
+    actions: SliceRange<ActionIndex>,
+    enabled_modes: SliceRange<ModeIndex>,
     /// Canonical transition effect supplied to the owned compiled reaction adapter.
     mode_effect: Option<crate::CompiledModeEffectRef>,
 }
@@ -468,10 +468,10 @@ impl ReactionImage {
         scope: ScopeIndex,
         dependency_level: u32,
         binding: BindingSlotIndex,
-        use_ports: TableRange<PortIndex>,
-        effect_ports: TableRange<PortIndex>,
-        actions: TableRange<ActionIndex>,
-        enabled_modes: TableRange<ModeIndex>,
+        use_ports: SliceRange<PortIndex>,
+        effect_ports: SliceRange<PortIndex>,
+        actions: SliceRange<ActionIndex>,
+        enabled_modes: SliceRange<ModeIndex>,
     ) -> Self {
         Self {
             reactor,
@@ -513,22 +513,22 @@ impl ReactionImage {
     }
 
     /// Returns the ordered use-port range.
-    pub const fn use_ports(self) -> TableRange<PortIndex> {
+    pub const fn use_ports(self) -> SliceRange<PortIndex> {
         self.use_ports
     }
 
     /// Returns the ordered effect-port range.
-    pub const fn effect_ports(self) -> TableRange<PortIndex> {
+    pub const fn effect_ports(self) -> SliceRange<PortIndex> {
         self.effect_ports
     }
 
     /// Returns the ordered action-reference range.
-    pub const fn actions(self) -> TableRange<ActionIndex> {
+    pub const fn actions(self) -> SliceRange<ActionIndex> {
         self.actions
     }
 
     /// Returns the enabled-mode range.
-    pub const fn enabled_modes(self) -> TableRange<ModeIndex> {
+    pub const fn enabled_modes(self) -> SliceRange<ModeIndex> {
         self.enabled_modes
     }
 
@@ -568,12 +568,12 @@ pub struct ScopeImage {
     parent: Option<ScopeIndex>,
     reactor: ReactorIndex,
     mode: Option<ModeIndex>,
-    descendants: TableRange<ScopeIndex>,
-    logical_actions: TableRange<ActionIndex>,
-    timer_startups: TableRange<TimerStartupImage>,
-    reset_reactions: TableRange<LevelReactionImage>,
-    startup_reactions: TableRange<LifecycleReactionImage>,
-    shutdown_reactions: TableRange<LifecycleReactionImage>,
+    descendants: SliceRange<ScopeIndex>,
+    logical_actions: SliceRange<ActionIndex>,
+    timer_startups: SliceRange<TimerStartupImage>,
+    reset_reactions: SliceRange<LevelReactionImage>,
+    startup_reactions: SliceRange<LifecycleReactionImage>,
+    shutdown_reactions: SliceRange<LifecycleReactionImage>,
 }
 
 impl ScopeImage {
@@ -583,12 +583,12 @@ impl ScopeImage {
         parent: Option<ScopeIndex>,
         reactor: ReactorIndex,
         mode: Option<ModeIndex>,
-        descendants: TableRange<ScopeIndex>,
-        logical_actions: TableRange<ActionIndex>,
-        timer_startups: TableRange<TimerStartupImage>,
-        reset_reactions: TableRange<LevelReactionImage>,
-        startup_reactions: TableRange<LifecycleReactionImage>,
-        shutdown_reactions: TableRange<LifecycleReactionImage>,
+        descendants: SliceRange<ScopeIndex>,
+        logical_actions: SliceRange<ActionIndex>,
+        timer_startups: SliceRange<TimerStartupImage>,
+        reset_reactions: SliceRange<LevelReactionImage>,
+        startup_reactions: SliceRange<LifecycleReactionImage>,
+        shutdown_reactions: SliceRange<LifecycleReactionImage>,
     ) -> Self {
         Self {
             parent,
@@ -619,32 +619,32 @@ impl ScopeImage {
     }
 
     /// Returns the precomputed descendant range.
-    pub const fn descendants(self) -> TableRange<ScopeIndex> {
+    pub const fn descendants(self) -> SliceRange<ScopeIndex> {
         self.descendants
     }
 
     /// Returns the precomputed logical-action range.
-    pub const fn logical_actions(self) -> TableRange<ActionIndex> {
+    pub const fn logical_actions(self) -> SliceRange<ActionIndex> {
         self.logical_actions
     }
 
     /// Returns the precomputed timer-startup range.
-    pub const fn timer_startups(self) -> TableRange<TimerStartupImage> {
+    pub const fn timer_startups(self) -> SliceRange<TimerStartupImage> {
         self.timer_startups
     }
 
     /// Returns the precomputed reset-reaction range.
-    pub const fn reset_reactions(self) -> TableRange<LevelReactionImage> {
+    pub const fn reset_reactions(self) -> SliceRange<LevelReactionImage> {
         self.reset_reactions
     }
 
     /// Returns the precomputed startup-reaction range.
-    pub const fn startup_reactions(self) -> TableRange<LifecycleReactionImage> {
+    pub const fn startup_reactions(self) -> SliceRange<LifecycleReactionImage> {
         self.startup_reactions
     }
 
     /// Returns the precomputed shutdown-reaction range.
-    pub const fn shutdown_reactions(self) -> TableRange<LifecycleReactionImage> {
+    pub const fn shutdown_reactions(self) -> SliceRange<LifecycleReactionImage> {
         self.shutdown_reactions
     }
 }

@@ -93,7 +93,7 @@ fn generated_sensor_federate_slice_excludes_host_payload_and_preserves_canonical
         source.contains("FederateSliceImage::new(FederateIndex::new(1)"),
         "{source}"
     );
-    assert!(source.contains("TableRange::new(2, 1)"), "{source}");
+    assert!(source.contains("IndexSpan::new(2, 1)"), "{source}");
     assert!(
         source.contains(".bind_enclave(EnclaveIndex::new(2)"),
         "{source}"

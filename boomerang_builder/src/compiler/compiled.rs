@@ -12,7 +12,7 @@ use crate::runtime::image::{
     RequiredBindingImage, RouteImage, RouteIndex, ScopeImage, ScopeIndex, StorageBounds,
     TimerStartupImage,
 };
-use tinymap::{TableRange, TinyMap, TinyMapView};
+use tinymap::{IndexSpan, TinyMap, TinyMapView};
 
 /// Canonical required payload binding identities for one Enclave.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -400,7 +400,7 @@ pub struct FederateSlice<'a> {
     /// Deployment-wide dense identity of the selected Federate.
     federate: FederateIndex,
     image: &'a OwnedFederateImage,
-    enclave_range: TableRange<crate::runtime::image::EnclaveIndex>,
+    enclave_range: IndexSpan<crate::runtime::image::EnclaveIndex>,
 }
 
 /// A failure while projecting one Federate from an owned compiled deployment.
@@ -448,7 +448,7 @@ impl FederateSlice<'_> {
 
     /// Returns the selected Federate's deployment-global Enclave range.
     #[must_use]
-    pub const fn enclave_range(&self) -> TableRange<crate::runtime::image::EnclaveIndex> {
+    pub const fn enclave_range(&self) -> IndexSpan<crate::runtime::image::EnclaveIndex> {
         self.enclave_range
     }
 
@@ -599,7 +599,7 @@ impl OwnedCompiledDeployment {
         Ok(FederateSlice {
             federate,
             image: candidate,
-            enclave_range: TableRange::new(enclave_start, enclave_len),
+            enclave_range: IndexSpan::new(enclave_start as usize, enclave_len as usize),
         })
     }
 
@@ -668,7 +668,7 @@ impl OwnedCompiledDeployment {
                 runtime_image::FederateId::new(federate.id.as_str()),
                 runtime_image::TargetId::new(federate.target.as_str()),
                 runtime_image::RuntimeBackendId::new(federate.runtime.as_str()),
-                TableRange::new(checked_start, enclave_len),
+                IndexSpan::new(checked_start as usize, enclave_len as usize),
             ));
             enclave_start += federate.enclaves.len();
         }
@@ -740,7 +740,7 @@ mod tests {
     use super::*;
     use crate::compiler::{ComponentInstanceId, ImplementationId, StablePath};
     use crate::descriptor::{ReactionSlotId, ReactorSlotId};
-    use crate::runtime::image::{StateSlotIndex, TableRange};
+    use crate::runtime::image::{IndexSpan, SliceRange, StateSlotIndex};
 
     #[test]
     fn direct_binding_symbols_reversibly_escape_descriptor_slots() {
@@ -836,7 +836,7 @@ mod tests {
                 BindingSlotIndex::new(0),
                 StateSlotIndex::new(0),
                 ScopeIndex::new(0),
-                TableRange::new(0, 0),
+                IndexSpan::new(0, 0),
                 None,
                 None,
             )]
@@ -850,12 +850,12 @@ mod tests {
                 None,
                 ReactorIndex::new(0),
                 None,
-                TableRange::new(0, 1),
-                TableRange::new(0, 0),
-                TableRange::new(0, 0),
-                TableRange::new(0, 0),
-                TableRange::new(0, 0),
-                TableRange::new(0, 0),
+                SliceRange::new(0, 1),
+                SliceRange::new(0, 0),
+                SliceRange::new(0, 0),
+                SliceRange::new(0, 0),
+                SliceRange::new(0, 0),
+                SliceRange::new(0, 0),
             )]
             .into_iter()
             .collect(),

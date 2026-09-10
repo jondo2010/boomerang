@@ -10,7 +10,7 @@ pub mod secondary_map;
 
 pub use key_set::KeySet;
 pub use map::{CapacityError, TinyMap, TinyMapView};
-pub use range::{IndexSpan, SliceRange, TableRange};
+pub use range::{IndexSpan, SliceRange};
 pub use secondary_map::TinySecondaryMap;
 
 /// A key that identifies a value by its dense table index.

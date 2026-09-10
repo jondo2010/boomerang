@@ -116,18 +116,3 @@ impl<T> SliceRange<T> {
         values.get(self.indices()?)
     }
 }
-
-impl<K: crate::Key> SliceRange<K> {
-    /// Returns whether the typed table key belongs to this range.
-    pub fn contains(self, key: K) -> bool {
-        let index = key.index() as u64;
-        let start = self.start as u64;
-        index >= start && index < start + self.len as u64
-    }
-}
-
-/// Transitional name for a packed-slice range.
-///
-/// New code must choose [`IndexSpan`] for a dense key domain or [`SliceRange`]
-/// for a packed backing slice. This alias is removed after schema migration.
-pub type TableRange<T> = SliceRange<T>;

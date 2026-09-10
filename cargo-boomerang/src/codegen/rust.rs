@@ -14,7 +14,7 @@ use boomerang_runtime::{
     },
     TransitionKind,
 };
-use tinymap::TableRange;
+use tinymap::{IndexSpan, SliceRange};
 
 use crate::{manifest::ExecutionPolicy, DriverOutput};
 
@@ -31,7 +31,7 @@ pub(super) fn render_launcher(
          use boomerang_runtime::{execute_owned_federate, Config, EnclaveBindings, \
          FederateBindings, ReactorData};\n\
          use boomerang_runtime::image::*;\n\
-         use tinymap::{TableRange, TinyMapView};\n\n\
+         use tinymap::{IndexSpan, SliceRange, TinyMapView};\n\n\
          fn generated_state<'a, T: ReactorData>(\n\
              state: &'a mut dyn ReactorData,\n\
              _initializer: fn() -> T,\n\
@@ -343,7 +343,7 @@ fn render_deployment(
         slice.id().as_str(),
         slice.target().as_str(),
         slice.runtime().as_str(),
-        table_range(slice.enclave_range()),
+        index_span(slice.enclave_range()),
     )?;
     if include_local_deployment {
         source.push_str("static FEDERATES: [FederateImage; 1] = [FEDERATE_SLICE.image()];\n");
@@ -361,7 +361,7 @@ fn render_bindings(
     source: &mut String,
     driver: &DriverOutput,
     enclaves: &[OwnedEnclaveImage],
-    enclave_start: u32,
+    enclave_start: usize,
     aliases: &BTreeMap<String, String>,
     route_bindings: RouteBindings,
 ) -> Result<()> {
@@ -369,9 +369,11 @@ fn render_bindings(
         "fn generated_bindings() -> FederateBindings<'static> {\n    FederateBindings::new()\n",
     );
     for (enclave_offset, enclave) in enclaves.iter().enumerate() {
-        let enclave_index = enclave_start
-            .checked_add(u32::try_from(enclave_offset)?)
-            .ok_or_else(|| anyhow!("compiled Enclave index exceeds the image domain"))?;
+        let enclave_index = u32::try_from(
+            enclave_start
+                .checked_add(enclave_offset)
+                .ok_or_else(|| anyhow!("compiled Enclave index exceeds the image domain"))?,
+        )?;
         writeln!(
             source,
             "        .bind_enclave(EnclaveIndex::new({enclave_index}), EnclaveBindings::new()"
@@ -615,7 +617,7 @@ fn render_reactors(source: &mut String, prefix: &str, image: &EnclaveImage<'_>) 
         image.reactors.len()
     )?;
     for value in image.reactors.values() {
-        writeln!(source, "    ReactorImage::new(BindingSlotIndex::new({}), StateSlotIndex::new({}), ScopeIndex::new({}), {}, {}, {}),", value.state_binding().as_u32(), value.state_slot().as_u32(), value.root_scope().as_u32(), table_range(value.modes()), optional_index("ModeIndex", value.initial_mode().map(|value| value.as_u32())), optional_bank(value.bank()))?;
+        writeln!(source, "    ReactorImage::new(BindingSlotIndex::new({}), StateSlotIndex::new({}), ScopeIndex::new({}), {}, {}, {}),", value.state_binding().as_u32(), value.state_slot().as_u32(), value.root_scope().as_u32(), index_span(value.modes()), optional_index("ModeIndex", value.initial_mode().map(|value| value.as_u32())), optional_bank(value.bank()))?;
     }
     source.push_str("];\n");
     Ok(())
@@ -634,7 +636,7 @@ fn render_actions(source: &mut String, prefix: &str, image: &EnclaveImage<'_>) -
             value.scope().as_u32(),
             value.storage_slot().as_u32(),
             action_timing(value.timing()),
-            table_range(value.triggers()),
+            slice_range(value.triggers()),
             optional_index(
                 "BindingSlotIndex",
                 value.binding().map(|value| value.as_u32())
@@ -656,7 +658,7 @@ fn render_ports(source: &mut String, prefix: &str, image: &EnclaveImage<'_>) -> 
             source,
             "    PortImage::new(ScopeIndex::new({}), {}, BindingSlotIndex::new({})),",
             value.scope().as_u32(),
-            table_range(value.triggers()),
+            slice_range(value.triggers()),
             value.binding().as_u32()
         )?;
     }
@@ -671,7 +673,7 @@ fn render_reactions(source: &mut String, prefix: &str, image: &EnclaveImage<'_>)
         image.reactions.len()
     )?;
     for value in image.reactions.values() {
-        write!(source, "    ReactionImage::new(ReactorIndex::new({}), ScopeIndex::new({}), {}, BindingSlotIndex::new({}), {}, {}, {}, {})", value.reactor().as_u32(), value.scope().as_u32(), value.dependency_level(), value.binding().as_u32(), table_range(value.use_ports()), table_range(value.effect_ports()), table_range(value.actions()), table_range(value.enabled_modes()))?;
+        write!(source, "    ReactionImage::new(ReactorIndex::new({}), ScopeIndex::new({}), {}, BindingSlotIndex::new({}), {}, {}, {}, {})", value.reactor().as_u32(), value.scope().as_u32(), value.dependency_level(), value.binding().as_u32(), slice_range(value.use_ports()), slice_range(value.effect_ports()), slice_range(value.actions()), slice_range(value.enabled_modes()))?;
         if let Some(effect) = value.mode_effect() {
             write!(source, ".with_mode_effect(boomerang_runtime::CompiledModeEffectRef {{ target: ModeIndex::new({}), transition: boomerang_runtime::TransitionKind::{} }})", effect.target.as_u32(), transition(effect.transition))?;
         }
@@ -712,12 +714,12 @@ fn render_scopes(source: &mut String, prefix: &str, image: &EnclaveImage<'_>) ->
             optional_index("ScopeIndex", value.parent().map(|value| value.as_u32())),
             value.reactor().as_u32(),
             optional_index("ModeIndex", value.mode().map(|value| value.as_u32())),
-            table_range(value.descendants()),
-            table_range(value.logical_actions()),
-            table_range(value.timer_startups()),
-            table_range(value.reset_reactions()),
-            table_range(value.startup_reactions()),
-            table_range(value.shutdown_reactions())
+            slice_range(value.descendants()),
+            slice_range(value.logical_actions()),
+            slice_range(value.timer_startups()),
+            slice_range(value.reset_reactions()),
+            slice_range(value.startup_reactions()),
+            slice_range(value.shutdown_reactions())
         )?;
     }
     source.push_str("];\n");
@@ -835,8 +837,12 @@ fn render_indices(
     Ok(())
 }
 
-fn table_range<T>(value: TableRange<T>) -> String {
-    format!("TableRange::new({}, {})", value.start(), value.len())
+fn slice_range<T>(value: SliceRange<T>) -> String {
+    format!("SliceRange::new({}, {})", value.start(), value.len())
+}
+
+fn index_span<K: tinymap::Key>(value: IndexSpan<K>) -> String {
+    format!("IndexSpan::new({}, {})", value.start(), value.len())
 }
 
 fn optional_index(ty: &str, value: Option<u32>) -> String {

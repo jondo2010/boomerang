@@ -12,10 +12,11 @@ use crate::{
     descriptor::{ActionSlotId, DescriptorBound, PortSlotId, ReactionSlotId, ReactorSlotId},
     runtime::image::{
         ActionImage, ActionIndex, ActionSlotIndex, ActionTiming, BindingSlotIndex,
-        BoundaryFailurePolicy, FederateIndex, LevelReactionImage, LifecycleReactionImage,
-        ModeImage, ModeIndex, PortImage, PortIndex, ReactionImage, ReactionIndex, ReactorImage,
-        ReactorIndex, RecoveryPolicy, RouteDirection, ScopeImage, ScopeIndex, SecurityPolicy,
-        StateSlotIndex, StorageBounds, TableRange, TimerStartupImage, TimingDomain, TimingPolicy,
+        BoundaryFailurePolicy, FederateIndex, IndexSpan, LevelReactionImage,
+        LifecycleReactionImage, ModeImage, ModeIndex, PortImage, PortIndex, ReactionImage,
+        ReactionIndex, ReactorImage, ReactorIndex, RecoveryPolicy, RouteDirection, ScopeImage,
+        ScopeIndex, SecurityPolicy, SliceRange, StateSlotIndex, StorageBounds, TimerStartupImage,
+        TimingDomain, TimingPolicy,
     },
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -677,7 +678,7 @@ fn lower_enclave(
                 binding_indices[&format!("state/{id}")],
                 StateSlotIndex::new(index),
                 root_scopes[*id],
-                TableRange::new(mode_cursor, mode_count),
+                IndexSpan::new(mode_cursor as usize, mode_count as usize),
                 reactor_modes
                     .iter()
                     .find(|(_, mode)| mode.parent().is_none() && mode.is_initial())
@@ -740,7 +741,7 @@ fn lower_enclave(
                 scope_for(action.reactor(), action.mode()),
                 ActionSlotIndex::new(checked_u32(index, enclave_id, "actions")?),
                 timing,
-                TableRange::new(start, len),
+                SliceRange::new(start, len),
                 matches!(
                     action.kind(),
                     super::ActionKind::Logical { .. } | super::ActionKind::Physical { .. }
@@ -778,7 +779,7 @@ fn lower_enclave(
             let len = checked_u32(triggers.len(), enclave_id, "reaction-triggers")?;
             Ok(PortImage::new(
                 scope_for(port.reactor(), port.mode()),
-                TableRange::new(start, len),
+                SliceRange::new(start, len),
                 binding_indices[&format!("port/{id}")],
             ))
         })
@@ -1473,8 +1474,8 @@ fn checked_range<T>(
     end: usize,
     enclave: &super::StableEnclaveId,
     resource: &'static str,
-) -> Result<TableRange<T>, CompileError> {
-    Ok(TableRange::new(
+) -> Result<SliceRange<T>, CompileError> {
+    Ok(SliceRange::new(
         checked_u32(start, enclave, resource)?,
         checked_u32(end - start, enclave, resource)?,
     ))
@@ -1491,10 +1492,10 @@ fn push_range<T>(
     values: impl IntoIterator<Item = T>,
     enclave: &super::StableEnclaveId,
     resource: &'static str,
-) -> Result<TableRange<T>, CompileError> {
+) -> Result<SliceRange<T>, CompileError> {
     let start = target.len();
     target.extend(values);
-    Ok(TableRange::new(
+    Ok(SliceRange::new(
         checked_u32(start, enclave, resource)?,
         checked_u32(target.len() - start, enclave, resource)?,
     ))
@@ -1539,9 +1540,9 @@ mod tests {
         },
         runtime::image::{
             ActionIndex, ActionTiming, BindingKind, BoundaryFailurePolicy, CodecPolicy,
-            CoordinationProjection, EnclaveIndex, FederateIndex, ModeIndex, ReactionIndex,
-            ReactorIndex, RecoveryPolicy, RouteDirection, RouteIndex, RtiImage, RtiRouteIndex,
-            ScopeIndex, SecurityPolicy, TableRange, TimingDomain, TimingPolicy, TransportPolicy,
+            CoordinationProjection, EnclaveIndex, FederateIndex, IndexSpan, ModeIndex,
+            ReactionIndex, ReactorIndex, RecoveryPolicy, RouteDirection, RouteIndex, RtiImage,
+            RtiRouteIndex, ScopeIndex, SecurityPolicy, TimingDomain, TimingPolicy, TransportPolicy,
         },
     };
     fn descriptor(contract: &str, bounds: DescriptorBounds) -> ComponentDescriptor {
@@ -2413,7 +2414,7 @@ mod tests {
             .map(|(_, federate)| federate.enclaves().len())
             .sum::<usize>();
         let enclave_start = u32::try_from(enclave_start).unwrap();
-        let expected_range = TableRange::new(enclave_start, selected.enclaves().len() as u32);
+        let expected_range = IndexSpan::new(enclave_start as usize, selected.enclaves().len());
 
         let slice = compiled.federate_slice(federate).unwrap();
         assert_eq!(slice.federate(), federate);

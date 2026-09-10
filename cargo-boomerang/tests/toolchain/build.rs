@@ -397,7 +397,7 @@ fn build_publishes_canonical_federate_artifact_collection() {
         "{host_source}"
     );
     assert!(
-        host_source.contains("TableRange::new(0, 2)"),
+        host_source.contains("IndexSpan::new(0, 2)"),
         "{host_source}"
     );
     assert_eq!(
@@ -413,7 +413,7 @@ fn build_publishes_canonical_federate_artifact_collection() {
         "{sensor_source}"
     );
     assert!(
-        sensor_source.contains("TableRange::new(2, 1)"),
+        sensor_source.contains("IndexSpan::new(2, 1)"),
         "{sensor_source}"
     );
     assert!(

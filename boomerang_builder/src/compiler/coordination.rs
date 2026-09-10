@@ -21,7 +21,7 @@ use crate::runtime::image::{
     PhysicalBoundaryIndex, RtiDependencyImage, RtiImage, RtiMemberImage, RtiRouteImage,
     RtiRouteIndex, TransportCapabilityIndex,
 };
-use tinymap::{TableRange, TinyMap};
+use tinymap::{SliceRange, TinyMap};
 
 /// Failure to represent an analyzed federation in bounded image coordinates.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
@@ -267,7 +267,7 @@ pub(crate) fn project_central_rti(
                 .recovery(),
             direct,
             transitive,
-            TableRange::new(downstream_start, downstream_len),
+            SliceRange::new(downstream_start, downstream_len),
         ));
     }
 
@@ -312,7 +312,7 @@ fn append_dependencies(
     target: &mut Vec<RtiDependencyImage>,
     values: &[(FederateId, super::federation::FederationDelay)],
     indices: &BTreeMap<&FederateId, FederateIndex>,
-) -> Result<TableRange<RtiDependencyImage>, CoordinationProjectionError> {
+) -> Result<SliceRange<RtiDependencyImage>, CoordinationProjectionError> {
     let start = checked_len("dependencies", target.len())?;
     target.extend(
         values
@@ -320,7 +320,7 @@ fn append_dependencies(
             .map(|(source, delay)| RtiDependencyImage::new(indices[source], delay.as_nanos())),
     );
     let len = checked_len("dependencies", target.len() - start as usize)?;
-    Ok(TableRange::new(start, len))
+    Ok(SliceRange::new(start, len))
 }
 
 /// Converts one generated table length to its target image representation.

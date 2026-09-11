@@ -190,6 +190,7 @@ pub enum ImageValidationError<'a> {
 /// A validated allocation-free view of one complete compiled deployment.
 #[derive(Debug)]
 pub struct CompiledDeploymentView<'a> {
+    /// Complete validated deployment image borrowed for this view's lifetime.
     image: &'a CompiledDeploymentImage<'a>,
 }
 
@@ -227,7 +228,9 @@ impl<'a> CompiledDeploymentView<'a> {
 /// A validated borrowed view of one Federate and its Enclaves.
 #[derive(Debug)]
 pub struct FederateImageView<'a> {
+    /// Complete deployment image containing the Federate and its Enclaves.
     image: &'a CompiledDeploymentImage<'a>,
+    /// Validated Federate record selected from the deployment table.
     federate: FederateImage<'a>,
 }
 
@@ -266,6 +269,7 @@ impl<'a> FederateImageView<'a> {
 /// A validated, allocation-free borrowed view of one Enclave image.
 #[derive(Debug)]
 pub struct EnclaveImageView<'a> {
+    /// Copyable borrowed image record whose tables were validated together.
     image: EnclaveImage<'a>,
 }
 
@@ -493,6 +497,7 @@ fn check_range<'a, T>(
     Ok(())
 }
 
+/// Validates one monotonic owner-allocated span against its dense target table.
 fn check_span<'a, K: Key>(
     table: &'static str,
     index: u32,

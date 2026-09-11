@@ -7,8 +7,11 @@ use core::marker::PhantomData;
 /// reconstruct already-allocated metadata.
 #[derive(Debug, PartialEq, Eq)]
 pub struct IndexSpan<K: crate::Key> {
+    /// Platform-sized index of the first key in the span.
     start: usize,
+    /// Number of consecutive keys owned by the span.
     len: usize,
+    /// Invariant marker tying the coordinates to one dense key domain.
     marker: PhantomData<fn() -> K>,
 }
 
@@ -50,6 +53,7 @@ impl<K: crate::Key> IndexSpan<K> {
         self.start.checked_add(self.len)
     }
 
+    /// Returns platform-sized slice indices when the exclusive end is representable.
     pub(crate) fn indices(self) -> Option<core::ops::Range<usize>> {
         Some(self.start..self.checked_end()?)
     }
@@ -64,8 +68,11 @@ impl<K: crate::Key> IndexSpan<K> {
 /// A checked start-plus-length range into a packed contiguous backing slice.
 #[derive(Debug, PartialEq, Eq)]
 pub struct SliceRange<T> {
+    /// Image-format offset of the first entry in the backing slice.
     start: u32,
+    /// Image-format number of consecutive backing-slice entries.
     len: u32,
+    /// Invariant marker tying the coordinates to one backing element type.
     marker: PhantomData<fn() -> T>,
 }
 
@@ -107,6 +114,7 @@ impl<T> SliceRange<T> {
         (self.start as usize).checked_add(self.len as usize)
     }
 
+    /// Returns platform-sized slice indices when the exclusive end is representable.
     pub(crate) fn indices(self) -> Option<core::ops::Range<usize>> {
         Some(self.start as usize..self.checked_end()?)
     }

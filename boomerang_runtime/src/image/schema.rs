@@ -58,9 +58,13 @@ borrowed_id!(
 /// A Federate and the contiguous Enclave images it owns.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FederateImage<'a> {
+    /// Stable Federate identity.
     id: FederateId<'a>,
+    /// Selected compilation-target identity.
     target: TargetId<'a>,
+    /// Selected runtime-backend identity.
     runtime: RuntimeBackendId<'a>,
+    /// Deployment-wide dense Enclave span owned by this Federate.
     enclaves: IndexSpan<EnclaveIndex>,
 }
 
@@ -192,11 +196,17 @@ pub struct CompiledDeploymentImage<'a> {
 /// An immutable reactor scheduler record.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ReactorImage {
+    /// Required binding that initializes this reactor's state.
     state_binding: BindingSlotIndex,
+    /// Dense mutable-state storage slot.
     state_slot: StateSlotIndex,
+    /// Root execution scope owned by this reactor.
     root_scope: ScopeIndex,
+    /// Contiguous dense mode span allocated for this reactor.
     modes: IndexSpan<ModeIndex>,
+    /// Initially active mode, when the reactor is modal.
     initial_mode: Option<ModeIndex>,
+    /// Static reactor-bank position, when banked.
     bank: Option<BankInfoImage>,
 }
 
@@ -308,9 +318,13 @@ pub enum ActionTiming {
 pub struct ActionImage {
     /// Stable payload binding for a standard action, or `None` for executor-owned actions.
     binding: Option<BindingSlotIndex>,
+    /// Static execution scope containing the action.
     scope: ScopeIndex,
+    /// Dense mutable action-storage slot.
     storage_slot: ActionSlotIndex,
+    /// Immutable scheduling semantics.
     timing: ActionTiming,
+    /// Range of reactions triggered by this action.
     triggers: SliceRange<LevelReactionImage>,
 }
 
@@ -363,7 +377,9 @@ impl ActionImage {
 pub struct PortImage {
     /// Stable payload binding used to construct this port.
     binding: BindingSlotIndex,
+    /// Static execution scope containing the port.
     scope: ScopeIndex,
+    /// Range of reactions triggered by this port.
     triggers: SliceRange<LevelReactionImage>,
 }
 
@@ -400,13 +416,21 @@ impl PortImage {
 /// An immutable reaction scheduler record.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ReactionImage {
+    /// Dense reactor that owns the reaction.
     reactor: ReactorIndex,
+    /// Static execution scope containing the reaction.
     scope: ScopeIndex,
+    /// Precomputed dependency level within the scope.
     dependency_level: u32,
+    /// Required callback binding.
     binding: BindingSlotIndex,
+    /// Ordered immutable input ports.
     use_ports: SliceRange<PortIndex>,
+    /// Ordered mutable output ports.
     effect_ports: SliceRange<PortIndex>,
+    /// Ordered mutable action effects.
     actions: SliceRange<ActionIndex>,
+    /// Modes in which the reaction is enabled.
     enabled_modes: SliceRange<ModeIndex>,
     /// Canonical transition effect supplied to the owned compiled reaction adapter.
     mode_effect: Option<crate::CompiledModeEffectRef>,
@@ -517,14 +541,23 @@ impl ModeImage {
 /// An immutable execution-scope scheduler record.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ScopeImage {
+    /// Parent execution scope, or `None` for a reactor root.
     parent: Option<ScopeIndex>,
+    /// Dense reactor that owns the scope.
     reactor: ReactorIndex,
+    /// Dense mode represented by this scope, when nested.
     mode: Option<ModeIndex>,
+    /// Packed transitive descendants in canonical order.
     descendants: SliceRange<ScopeIndex>,
+    /// Packed logical actions contained by this scope.
     logical_actions: SliceRange<ActionIndex>,
+    /// Packed timer startup records contained by this scope.
     timer_startups: SliceRange<TimerStartupImage>,
+    /// Packed reset reactions contained by this scope.
     reset_reactions: SliceRange<LevelReactionImage>,
+    /// Packed startup reactions contained by this scope.
     startup_reactions: SliceRange<LifecycleReactionImage>,
+    /// Packed shutdown reactions contained by this scope.
     shutdown_reactions: SliceRange<LifecycleReactionImage>,
 }
 

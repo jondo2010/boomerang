@@ -4,7 +4,9 @@ use crate::runtime::image::SliceRange;
 
 /// A packed backing slice that generates checked ranges as values are appended.
 pub(crate) struct PackedSliceBuilder<T> {
+    /// Target-image table named in capacity diagnostics.
     table: &'static str,
+    /// Contiguous backing values accumulated in canonical owner order.
     values: Vec<T>,
 }
 
@@ -55,6 +57,7 @@ impl<T> PackedSliceBuilder<T> {
 /// The named packed backing slice cannot represent another segment.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct PackedSliceOverflow {
+    /// Target-image table whose `u32` coordinate domain was exceeded.
     table: &'static str,
 }
 

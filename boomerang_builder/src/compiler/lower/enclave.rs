@@ -4,19 +4,28 @@ use super::*;
 use crate::compiler;
 
 #[derive(Clone)]
+/// Stable semantic owner of one execution scope before dense keys are allocated.
 enum ScopeOwner {
+    /// The root scope owned by a reactor.
     Reactor(compiler::ReactorId),
+    /// A nested scope owned by a reactor mode.
     Mode(compiler::ModeId),
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+/// Stable semantic owner of one required runtime binding.
 enum BindingOwner {
+    /// State initializer for the identified reactor.
     State(compiler::ReactorId),
+    /// Callback implementation for the identified reaction.
     Reaction(compiler::ReactionId),
+    /// Payload implementation for the identified representative port.
     Port(compiler::PortId),
+    /// Payload implementation for the identified standard action.
     Action(compiler::ActionId),
 }
 
+/// Converts a packed-slice capacity error into an Enclave-scoped compile error.
 fn packed_overflow(
     enclave: &compiler::StableEnclaveId,
 ) -> impl FnOnce(PackedSliceOverflow) -> CompileError + '_ {
@@ -26,15 +35,22 @@ fn packed_overflow(
     }
 }
 
+/// Canonically ordered stable semantic records selected for one Enclave.
 struct CanonicalEnclaveSelection<'a> {
+    /// Reactors assigned to the Enclave.
     reactors: Vec<(&'a compiler::ReactorId, &'a compiler::Reactor)>,
+    /// Actions owned by the selected reactors.
     actions: Vec<(&'a compiler::ActionId, &'a compiler::Action)>,
+    /// Modes grouped by their canonical reactor order.
     modes: Vec<(&'a compiler::ModeId, &'a compiler::Mode)>,
+    /// Canonical representatives of local port equivalence classes.
     representatives: Vec<compiler::PortId>,
+    /// Reactions owned by the selected reactors.
     reactions: Vec<(&'a compiler::ReactionId, &'a compiler::Reaction)>,
 }
 
 impl<'a> CanonicalEnclaveSelection<'a> {
+    /// Selects and canonically orders the stable semantic records owned by `enclave_id`.
     fn select(
         topology: &'a compiler::ApplicationTopology,
         enclave_id: &compiler::StableEnclaveId,
@@ -92,12 +108,17 @@ impl<'a> CanonicalEnclaveSelection<'a> {
     }
 }
 
+/// Runtime binding rows and the table-local stable-owner lookup used while lowering.
 struct LoweredBindings {
+    /// Stable host-side requirements in binding-key order.
     entries: Box<[RequiredBinding]>,
+    /// Dense binding key allocated for each stable semantic owner.
     indices: BTreeMap<BindingOwner, BindingSlotIndex>,
+    /// Runtime image rows keyed by their owner-generated binding identities.
     images: tinymap::TinyMap<BindingSlotIndex, OwnedBindingImage>,
 }
 
+/// Allocates the Enclave binding table from stable semantic owners.
 fn lower_bindings(
     deployment: &ResolvedDeployment,
     enclave_id: &compiler::StableEnclaveId,
@@ -216,6 +237,7 @@ fn lower_bindings(
     })
 }
 
+/// Lowers boundary routes incident on the Enclave's locally materialized ports.
 fn lower_routes(
     topology: &compiler::ApplicationTopology,
     enclave_id: &compiler::StableEnclaveId,
@@ -295,35 +317,69 @@ fn lower_routes(
     })
 }
 
+/// Dense entity tables plus temporary stable-to-dense resolution state.
 struct LoweredEntityTables {
+    /// Runtime reactor rows in canonical stable-identity order.
     reactors: tinymap::TinyMap<ReactorIndex, ReactorImage>,
+    /// Runtime action rows in canonical stable-identity order.
     actions: tinymap::TinyMap<ActionIndex, ActionImage>,
+    /// Runtime representative-port rows in canonical stable-identity order.
     ports: tinymap::TinyMap<PortIndex, PortImage>,
+    /// Runtime reaction rows in canonical stable-identity order.
     reactions: tinymap::TinyMap<ReactionIndex, ReactionImage>,
+    /// Runtime mode rows grouped by their owning reactor.
     modes: tinymap::TinyMap<ModeIndex, ModeImage>,
-    reactor_indices: BTreeMap<compiler::ReactorId, ReactorIndex>,
-    action_indices: BTreeMap<compiler::ActionId, ActionIndex>,
-    mode_indices: BTreeMap<compiler::ModeId, ModeIndex>,
-    mode_scopes: BTreeMap<compiler::ModeId, ScopeIndex>,
-    port_indices: BTreeMap<compiler::PortId, PortIndex>,
-    reaction_indices: BTreeMap<compiler::ReactionId, ReactionIndex>,
-    scope_parents: tinymap::TinyMap<ScopeIndex, Option<ScopeIndex>>,
-    action_scopes: tinymap::TinyMap<ActionIndex, ScopeIndex>,
-    reaction_scopes: tinymap::TinyMap<ReactionIndex, ScopeIndex>,
+    /// Runtime scope rows in owner-generated dense-key order.
+    scopes: tinymap::TinyMap<ScopeIndex, ScopeImage>,
+    /// Packed action and port trigger relationships.
     reaction_triggers: Box<[LevelReactionImage]>,
+    /// Packed ordered reaction input-port relationships.
     reaction_use_ports: Box<[PortIndex]>,
+    /// Packed ordered reaction output-port relationships.
     reaction_effect_ports: Box<[PortIndex]>,
+    /// Packed ordered reaction action-effect relationships.
     reaction_actions: Box<[ActionIndex]>,
+    /// Packed reaction enabled-mode filters.
     reaction_modes: Box<[ModeIndex]>,
 }
 
+/// Narrow resolution state required to build scope and lifecycle relationships.
+struct RelationshipInputs {
+    /// Dense reactor key for each stable reactor identity.
+    reactor_indices: BTreeMap<compiler::ReactorId, ReactorIndex>,
+    /// Dense action key for each stable action identity.
+    action_indices: BTreeMap<compiler::ActionId, ActionIndex>,
+    /// Dense mode key for each stable mode identity.
+    mode_indices: BTreeMap<compiler::ModeId, ModeIndex>,
+    /// Dense execution scope allocated for each stable mode identity.
+    mode_scopes: BTreeMap<compiler::ModeId, ScopeIndex>,
+    /// Dense reaction key for each stable reaction identity.
+    reaction_indices: BTreeMap<compiler::ReactionId, ReactionIndex>,
+    /// Parent relation for every final owner-generated execution scope.
+    scope_parents: BTreeMap<ScopeIndex, Option<ScopeIndex>>,
+    /// Stable semantic owner recorded for every final owner-generated scope key.
+    scope_owners: BTreeMap<ScopeIndex, ScopeOwner>,
+    /// Execution scope containing each final owner-generated action key.
+    action_scopes: BTreeMap<ActionIndex, ScopeIndex>,
+    /// Execution scope containing each final owner-generated reaction key.
+    reaction_scopes: BTreeMap<ReactionIndex, ScopeIndex>,
+}
+
+/// Allocates dense entity keys and resolves stable intra-Enclave references.
 fn lower_entity_tables(
     deployment: &ResolvedDeployment,
     enclave_id: &compiler::StableEnclaveId,
     analysis: &GlobalAnalysis,
     selection: &CanonicalEnclaveSelection<'_>,
     bindings: &LoweredBindings,
-) -> Result<LoweredEntityTables, CompileError> {
+) -> Result<
+    (
+        LoweredEntityTables,
+        RelationshipInputs,
+        BTreeMap<compiler::PortId, PortIndex>,
+    ),
+    CompileError,
+> {
     let topology = deployment.topology();
     let CanonicalEnclaveSelection {
         reactors,
@@ -333,77 +389,108 @@ fn lower_entity_tables(
         reactions,
     } = selection;
     let binding_indices = &bindings.indices;
-    let reactor_domain = tinymap::TinyMap::<ReactorIndex, _>::try_from_iter(
-        reactors.iter().map(|(id, _)| (*id).clone()),
-    )
-    .map_err(|_| CompileError::ResourceOverflow {
-        enclave: enclave_id.clone(),
-        resource: "reactors",
-    })?;
-    let reactor_indices = reactor_domain
-        .iter()
-        .map(|(key, id)| (id.clone(), key))
-        .collect::<BTreeMap<_, _>>();
-    let action_domain = tinymap::TinyMap::<ActionIndex, _>::try_from_iter(
-        actions.iter().map(|(id, _)| (*id).clone()),
-    )
-    .map_err(|_| CompileError::ResourceOverflow {
-        enclave: enclave_id.clone(),
-        resource: "actions",
-    })?;
-    let action_indices = action_domain
-        .iter()
-        .map(|(key, id)| (id.clone(), key))
-        .collect::<BTreeMap<_, _>>();
-    let mut mode_domain = tinymap::TinyMap::<ModeIndex, compiler::ModeId>::new();
+    let empty_span = tinymap::IndexSpan::new(0, 0);
+    let mut reactor_images = tinymap::TinyMap::<ReactorIndex, _>::new();
+    let mut reactor_indices = BTreeMap::new();
+    for (id, _) in reactors {
+        let key = reactor_images
+            .try_insert(ReactorImage::new(
+                BindingSlotIndex::new(0),
+                StateSlotIndex::new(0),
+                ScopeIndex::new(0),
+                empty_span,
+                None,
+                None,
+            ))
+            .map_err(|_| CompileError::ResourceOverflow {
+                enclave: enclave_id.clone(),
+                resource: "reactors",
+            })?;
+        reactor_indices.insert((*id).clone(), key);
+    }
+    let mut action_images = tinymap::TinyMap::<ActionIndex, _>::new();
+    let mut action_indices = BTreeMap::new();
+    for (id, _) in actions {
+        let key = action_images
+            .try_insert(ActionImage::new(
+                ScopeIndex::new(0),
+                ActionSlotIndex::new(0),
+                ActionTiming::Shutdown,
+                tinymap::SliceRange::new(0, 0),
+                None,
+            ))
+            .map_err(|_| CompileError::ResourceOverflow {
+                enclave: enclave_id.clone(),
+                resource: "actions",
+            })?;
+        action_indices.insert((*id).clone(), key);
+    }
+    let mut mode_images = tinymap::TinyMap::<ModeIndex, ModeImage>::new();
+    let mut mode_indices = BTreeMap::new();
     let mut reactor_mode_spans = BTreeMap::new();
     for (reactor_id, _) in reactors {
         let reactor_modes = modes
             .iter()
             .filter(|(_, mode)| mode.reactor() == *reactor_id)
-            .map(|(id, _)| (*id).clone())
+            .copied()
             .collect::<Vec<_>>();
-        let span = mode_domain.try_extend_exact(reactor_modes).map_err(|_| {
-            CompileError::ResourceOverflow {
+        let span = mode_images
+            .try_extend_exact_with_key(reactor_modes, |key, (id, _)| {
+                mode_indices.insert(id.clone(), key);
+                ModeImage::new(ReactorIndex::new(0), ScopeIndex::new(0))
+            })
+            .map_err(|_| CompileError::ResourceOverflow {
                 enclave: enclave_id.clone(),
                 resource: "modes",
-            }
-        })?;
+            })?;
         reactor_mode_spans.insert((*reactor_id).clone(), span);
     }
-    let mode_indices = mode_domain
-        .iter()
-        .map(|(key, id)| (id.clone(), key))
-        .collect::<BTreeMap<_, _>>();
-    let scope_domain = tinymap::TinyMap::<ScopeIndex, ScopeOwner>::try_from_iter(
-        reactors
-            .iter()
-            .map(|(id, _)| ScopeOwner::Reactor((*id).clone()))
-            .chain(modes.iter().map(|(id, _)| ScopeOwner::Mode((*id).clone()))),
-    )
-    .map_err(|_| CompileError::ResourceOverflow {
-        enclave: enclave_id.clone(),
-        resource: "scopes",
-    })?;
+    let mut scope_images = tinymap::TinyMap::<ScopeIndex, ScopeImage>::new();
     let mut root_scopes = BTreeMap::new();
     let mut mode_scopes = BTreeMap::new();
-    for (scope, owner) in scope_domain.iter() {
+    let mut scope_owners_by_key = BTreeMap::new();
+    let scope_owners = reactors
+        .iter()
+        .map(|(id, _)| ScopeOwner::Reactor((*id).clone()))
+        .chain(modes.iter().map(|(id, _)| ScopeOwner::Mode((*id).clone())));
+    for owner in scope_owners {
+        let scope = scope_images
+            .try_insert(ScopeImage::new(
+                None,
+                ReactorIndex::new(0),
+                None,
+                tinymap::SliceRange::new(0, 0),
+                tinymap::SliceRange::new(0, 0),
+                tinymap::SliceRange::new(0, 0),
+                tinymap::SliceRange::new(0, 0),
+                tinymap::SliceRange::new(0, 0),
+                tinymap::SliceRange::new(0, 0),
+            ))
+            .map_err(|_| CompileError::ResourceOverflow {
+                enclave: enclave_id.clone(),
+                resource: "scopes",
+            })?;
+        scope_owners_by_key.insert(scope, owner.clone());
         match owner {
-            ScopeOwner::Reactor(id) => root_scopes.insert(id.clone(), scope),
-            ScopeOwner::Mode(id) => mode_scopes.insert(id.clone(), scope),
+            ScopeOwner::Reactor(id) => root_scopes.insert(id, scope),
+            ScopeOwner::Mode(id) => mode_scopes.insert(id, scope),
         };
     }
-    let representative_domain = tinymap::TinyMap::<PortIndex, _>::try_from_iter(
-        representatives.iter().cloned(),
-    )
-    .map_err(|_| CompileError::ResourceOverflow {
-        enclave: enclave_id.clone(),
-        resource: "ports",
-    })?;
-    let representative_indices = representative_domain
-        .iter()
-        .map(|(key, id)| (id.clone(), key))
-        .collect::<BTreeMap<_, _>>();
+    let mut port_images = tinymap::TinyMap::<PortIndex, PortImage>::new();
+    let mut representative_indices = BTreeMap::new();
+    for id in representatives {
+        let key = port_images
+            .try_insert(PortImage::new(
+                ScopeIndex::new(0),
+                tinymap::SliceRange::new(0, 0),
+                BindingSlotIndex::new(0),
+            ))
+            .map_err(|_| CompileError::ResourceOverflow {
+                enclave: enclave_id.clone(),
+                resource: "ports",
+            })?;
+        representative_indices.insert(id.clone(), key);
+    }
     let port_indices = topology
         .ports()
         .filter(|(_, port)| reactor_indices.contains_key(port.reactor()))
@@ -414,67 +501,74 @@ fn lower_entity_tables(
             )
         })
         .collect::<BTreeMap<_, _>>();
-    let reaction_domain = tinymap::TinyMap::<ReactionIndex, _>::try_from_iter(
-        reactions.iter().map(|(id, _)| (*id).clone()),
-    )
-    .map_err(|_| CompileError::ResourceOverflow {
-        enclave: enclave_id.clone(),
-        resource: "reactions",
-    })?;
-    let reaction_indices = reaction_domain
-        .iter()
-        .map(|(key, id)| (id.clone(), key))
-        .collect::<BTreeMap<_, _>>();
+    let mut reaction_images = tinymap::TinyMap::<ReactionIndex, ReactionImage>::new();
+    let mut reaction_indices = BTreeMap::new();
+    for (id, _) in reactions {
+        let key = reaction_images
+            .try_insert(ReactionImage::new(
+                ReactorIndex::new(0),
+                ScopeIndex::new(0),
+                0,
+                BindingSlotIndex::new(0),
+                tinymap::SliceRange::new(0, 0),
+                tinymap::SliceRange::new(0, 0),
+                tinymap::SliceRange::new(0, 0),
+                tinymap::SliceRange::new(0, 0),
+            ))
+            .map_err(|_| CompileError::ResourceOverflow {
+                enclave: enclave_id.clone(),
+                resource: "reactions",
+            })?;
+        reaction_indices.insert((*id).clone(), key);
+    }
     let scope_for = |reactor: &compiler::ReactorId, mode: Option<&compiler::ModeId>| {
         mode.map_or(root_scopes[reactor], |mode| mode_scopes[mode])
     };
-    let state_slots = tinymap::TinyMap::<StateSlotIndex, ()>::try_from_iter(std::iter::repeat_n(
-        (),
-        reactors.len(),
-    ))
-    .map_err(|_| CompileError::ResourceOverflow {
-        enclave: enclave_id.clone(),
-        resource: "state-slots",
-    })?;
-    let reactor_images = reactors
-        .iter()
-        .zip(state_slots.keys())
-        .map(|((id, reactor), state_slot)| {
-            ReactorImage::new(
-                binding_indices[&BindingOwner::State((*id).clone())],
-                state_slot,
-                root_scopes[*id],
-                reactor_mode_spans[*id],
-                modes
-                    .iter()
-                    .filter(|(_, mode)| mode.reactor() == *id)
-                    .find(|(_, mode)| mode.parent().is_none() && mode.is_initial())
-                    .map(|(id, _)| mode_indices[*id]),
-                reactor.bank().map(|bank| {
-                    crate::runtime::image::BankInfoImage::new(bank.index(), bank.total())
-                }),
-            )
-        })
-        .collect::<Vec<_>>();
-    let reactor_images = tinymap::TinyMap::<ReactorIndex, _>::try_from_iter(reactor_images)
-        .map_err(|_| CompileError::ResourceOverflow {
-            enclave: enclave_id.clone(),
-            resource: "reactors",
-        })?;
+    let mut state_slots = tinymap::TinyMap::<StateSlotIndex, ()>::new();
+    let mut state_slot_indices = BTreeMap::new();
+    for (id, _) in reactors {
+        let key = state_slots
+            .try_insert(())
+            .map_err(|_| CompileError::ResourceOverflow {
+                enclave: enclave_id.clone(),
+                resource: "state-slots",
+            })?;
+        state_slot_indices.insert((*id).clone(), key);
+    }
+    for (id, reactor) in reactors {
+        reactor_images[reactor_indices[*id]] = ReactorImage::new(
+            binding_indices[&BindingOwner::State((*id).clone())],
+            state_slot_indices[*id],
+            root_scopes[*id],
+            reactor_mode_spans[*id],
+            modes
+                .iter()
+                .filter(|(_, mode)| mode.reactor() == *id)
+                .find(|(_, mode)| mode.parent().is_none() && mode.is_initial())
+                .map(|(id, _)| mode_indices[*id]),
+            reactor
+                .bank()
+                .map(|bank| crate::runtime::image::BankInfoImage::new(bank.index(), bank.total())),
+        );
+    }
     let mut flattened_triggers = PackedSliceBuilder::new("reaction-triggers");
-    let mut action_triggers = (0..actions.len())
-        .map(|_| Vec::new())
-        .collect::<tinymap::TinyMap<ActionIndex, Vec<LevelReactionImage>>>();
+    let mut action_triggers = action_images
+        .keys()
+        .map(|key| (key, Vec::new()))
+        .collect::<BTreeMap<_, Vec<LevelReactionImage>>>();
     for (id, reaction) in reactions {
         for relation in reaction.relations() {
             if !relation.flags().is_trigger() {
                 continue;
             }
             if let compiler::ReactionRelationTarget::Action(action) = relation.target() {
-                action_triggers[action_indices[action]].push(LevelReactionImage::new(
-                    analysis.reaction_levels[*id],
-                    reaction_indices[*id],
-                ));
+                action_triggers
+                    .get_mut(&action_indices[action])
+                    .expect("action key belongs to the final action table")
+                    .push(LevelReactionImage::new(
+                        analysis.reaction_levels[*id],
+                        reaction_indices[*id],
+                    ));
             }
         }
     }
@@ -482,63 +576,66 @@ fn lower_entity_tables(
         triggers.sort_unstable();
         triggers.dedup();
     }
-    let action_slots = tinymap::TinyMap::<ActionSlotIndex, ()>::try_from_iter(std::iter::repeat_n(
-        (),
-        actions.len(),
-    ))
-    .map_err(|_| CompileError::ResourceOverflow {
-        enclave: enclave_id.clone(),
-        resource: "action-slots",
-    })?;
-    let action_images = actions
-        .iter()
-        .zip(action_triggers.values())
-        .zip(action_slots.keys())
-        .map(|(((id, action), triggers), action_slot)| {
-            let triggers = flattened_triggers
-                .try_extend_exact(triggers.iter().copied())
-                .map_err(packed_overflow(enclave_id))?;
-            let timing = match action.kind() {
-                compiler::ActionKind::Logical { minimum_delay } => ActionTiming::Standard {
-                    domain: TimingDomain::Logical,
-                    min_delay_nanos: duration_nanos(minimum_delay, enclave_id)?,
-                },
-                compiler::ActionKind::Physical { minimum_delay } => ActionTiming::Standard {
-                    domain: TimingDomain::Physical,
-                    min_delay_nanos: duration_nanos(minimum_delay, enclave_id)?,
-                },
-                compiler::ActionKind::Timer { period, .. } => ActionTiming::Timer {
-                    period_nanos: period
-                        .map(|period| duration_nanos(Some(period), enclave_id))
-                        .transpose()?,
-                },
-                compiler::ActionKind::Startup => ActionTiming::Timer { period_nanos: None },
-                compiler::ActionKind::Shutdown => ActionTiming::Shutdown,
-            };
-            Ok(ActionImage::new(
-                scope_for(action.reactor(), action.mode()),
-                action_slot,
-                timing,
-                triggers,
-                matches!(
-                    action.kind(),
-                    compiler::ActionKind::Logical { .. } | compiler::ActionKind::Physical { .. }
-                )
-                .then(|| binding_indices[&BindingOwner::Action((*id).clone())]),
-            ))
-        })
-        .collect::<Result<tinymap::TinyMap<ActionIndex, _>, CompileError>>()?;
-    let mut port_triggers = (0..representatives.len())
-        .map(|_| Vec::new())
-        .collect::<tinymap::TinyMap<PortIndex, Vec<LevelReactionImage>>>();
+    let mut action_slots = tinymap::TinyMap::<ActionSlotIndex, ()>::new();
+    let mut action_slot_indices = BTreeMap::new();
+    for (id, _) in actions {
+        let key = action_slots
+            .try_insert(())
+            .map_err(|_| CompileError::ResourceOverflow {
+                enclave: enclave_id.clone(),
+                resource: "action-slots",
+            })?;
+        action_slot_indices.insert((*id).clone(), key);
+    }
+    for (id, action) in actions {
+        let triggers = &action_triggers[&action_indices[*id]];
+        let triggers = flattened_triggers
+            .try_extend_exact(triggers.iter().copied())
+            .map_err(packed_overflow(enclave_id))?;
+        let timing = match action.kind() {
+            compiler::ActionKind::Logical { minimum_delay } => ActionTiming::Standard {
+                domain: TimingDomain::Logical,
+                min_delay_nanos: duration_nanos(minimum_delay, enclave_id)?,
+            },
+            compiler::ActionKind::Physical { minimum_delay } => ActionTiming::Standard {
+                domain: TimingDomain::Physical,
+                min_delay_nanos: duration_nanos(minimum_delay, enclave_id)?,
+            },
+            compiler::ActionKind::Timer { period, .. } => ActionTiming::Timer {
+                period_nanos: period
+                    .map(|period| duration_nanos(Some(period), enclave_id))
+                    .transpose()?,
+            },
+            compiler::ActionKind::Startup => ActionTiming::Timer { period_nanos: None },
+            compiler::ActionKind::Shutdown => ActionTiming::Shutdown,
+        };
+        action_images[action_indices[*id]] = ActionImage::new(
+            scope_for(action.reactor(), action.mode()),
+            action_slot_indices[*id],
+            timing,
+            triggers,
+            matches!(
+                action.kind(),
+                compiler::ActionKind::Logical { .. } | compiler::ActionKind::Physical { .. }
+            )
+            .then(|| binding_indices[&BindingOwner::Action((*id).clone())]),
+        );
+    }
+    let mut port_triggers = port_images
+        .keys()
+        .map(|key| (key, Vec::new()))
+        .collect::<BTreeMap<_, Vec<LevelReactionImage>>>();
     for (id, reaction) in reactions {
         for relation in reaction.relations() {
             if relation.flags().is_trigger() {
                 if let compiler::ReactionRelationTarget::Port(port) = relation.target() {
-                    port_triggers[port_indices[port]].push(LevelReactionImage::new(
-                        analysis.reaction_levels[*id],
-                        reaction_indices[*id],
-                    ));
+                    port_triggers
+                        .get_mut(&port_indices[port])
+                        .expect("port key belongs to the final port table")
+                        .push(LevelReactionImage::new(
+                            analysis.reaction_levels[*id],
+                            reaction_indices[*id],
+                        ));
                 }
             }
         }
@@ -547,79 +644,74 @@ fn lower_entity_tables(
         triggers.sort_unstable();
         triggers.dedup();
     }
-    let port_images = representatives
-        .iter()
-        .zip(port_triggers.values())
-        .map(|(id, triggers)| {
-            let port = topology.port(id).expect("port representative exists");
-            let triggers = flattened_triggers
-                .try_extend_exact(triggers.iter().copied())
-                .map_err(packed_overflow(enclave_id))?;
-            Ok(PortImage::new(
-                scope_for(port.reactor(), port.mode()),
-                triggers,
-                binding_indices[&BindingOwner::Port(id.clone())],
-            ))
-        })
-        .collect::<Result<tinymap::TinyMap<PortIndex, _>, CompileError>>()?;
+    for id in representatives {
+        let triggers = &port_triggers[&representative_indices[id]];
+        let port = topology.port(id).expect("port representative exists");
+        let triggers = flattened_triggers
+            .try_extend_exact(triggers.iter().copied())
+            .map_err(packed_overflow(enclave_id))?;
+        port_images[representative_indices[id]] = PortImage::new(
+            scope_for(port.reactor(), port.mode()),
+            triggers,
+            binding_indices[&BindingOwner::Port(id.clone())],
+        );
+    }
     let mut use_ports = PackedSliceBuilder::new("reaction-use-ports");
     let mut effect_ports = PackedSliceBuilder::new("reaction-effect-ports");
     let mut reaction_actions = PackedSliceBuilder::new("reaction-actions");
     let mut reaction_modes = PackedSliceBuilder::new("reaction-modes");
-    let reaction_images = reactions
-        .iter()
-        .map(|(id, reaction)| {
-            let mut use_values = Vec::new();
-            let mut effect_values = Vec::new();
-            let mut action_values = Vec::new();
-            for relation in reaction.relations() {
-                match relation.target() {
-                    compiler::ReactionRelationTarget::Port(port) => {
-                        if relation.flags().is_use() && !use_values.contains(&port_indices[port]) {
-                            use_values.push(port_indices[port]);
-                        }
-                        if relation.flags().is_effect()
-                            && !effect_values.contains(&port_indices[port])
-                        {
-                            effect_values.push(port_indices[port]);
-                        }
+    for (id, reaction) in reactions {
+        let mut use_values = Vec::new();
+        let mut effect_values = Vec::new();
+        let mut action_values = Vec::new();
+        for relation in reaction.relations() {
+            match relation.target() {
+                compiler::ReactionRelationTarget::Port(port) => {
+                    if relation.flags().is_use() && !use_values.contains(&port_indices[port]) {
+                        use_values.push(port_indices[port]);
                     }
-                    compiler::ReactionRelationTarget::Action(action) => {
-                        if relation.flags().is_use() || relation.flags().is_effect() {
-                            action_values.push(action_indices[action]);
-                        }
+                    if relation.flags().is_effect() && !effect_values.contains(&port_indices[port])
+                    {
+                        effect_values.push(port_indices[port]);
+                    }
+                }
+                compiler::ReactionRelationTarget::Action(action) => {
+                    if relation.flags().is_use() || relation.flags().is_effect() {
+                        action_values.push(action_indices[action]);
                     }
                 }
             }
-            let use_range = use_ports
-                .try_extend_exact(use_values)
-                .map_err(packed_overflow(enclave_id))?;
-            let effect_range = effect_ports
-                .try_extend_exact(effect_values)
-                .map_err(packed_overflow(enclave_id))?;
-            let action_range = reaction_actions
-                .try_extend_exact(action_values)
-                .map_err(packed_overflow(enclave_id))?;
-            let mode_range = reaction_modes
-                .try_extend_exact(
-                    reaction
-                        .options()
-                        .enabled_modes()
-                        .iter()
-                        .map(|mode| mode_indices[mode]),
-                )
-                .map_err(packed_overflow(enclave_id))?;
-            let image = ReactionImage::new(
-                reactor_indices[reaction.reactor()],
-                scope_for(reaction.reactor(), reaction.options().mode()),
-                analysis.reaction_levels[*id],
-                binding_indices[&BindingOwner::Reaction((*id).clone())],
-                use_range,
-                effect_range,
-                action_range,
-                mode_range,
-            );
-            Ok(reaction.options().transition().map_or(image, |transition| {
+        }
+        let use_range = use_ports
+            .try_extend_exact(use_values)
+            .map_err(packed_overflow(enclave_id))?;
+        let effect_range = effect_ports
+            .try_extend_exact(effect_values)
+            .map_err(packed_overflow(enclave_id))?;
+        let action_range = reaction_actions
+            .try_extend_exact(action_values)
+            .map_err(packed_overflow(enclave_id))?;
+        let mode_range = reaction_modes
+            .try_extend_exact(
+                reaction
+                    .options()
+                    .enabled_modes()
+                    .iter()
+                    .map(|mode| mode_indices[mode]),
+            )
+            .map_err(packed_overflow(enclave_id))?;
+        let image = ReactionImage::new(
+            reactor_indices[reaction.reactor()],
+            scope_for(reaction.reactor(), reaction.options().mode()),
+            analysis.reaction_levels[*id],
+            binding_indices[&BindingOwner::Reaction((*id).clone())],
+            use_range,
+            effect_range,
+            action_range,
+            mode_range,
+        );
+        reaction_images[reaction_indices[*id]] =
+            reaction.options().transition().map_or(image, |transition| {
                 image.with_mode_effect(crate::runtime::CompiledModeEffectRef {
                     target: mode_indices[transition.target()],
                     transition: match transition.kind() {
@@ -631,97 +723,129 @@ fn lower_entity_tables(
                         }
                     },
                 })
-            }))
-        })
-        .collect::<Result<tinymap::TinyMap<ReactionIndex, _>, CompileError>>()?;
-    let mode_images = modes
-        .iter()
-        .map(|(id, mode)| ModeImage::new(reactor_indices[mode.reactor()], mode_scopes[*id]))
-        .collect::<tinymap::TinyMap<ModeIndex, _>>();
-    let mut scope_parents = tinymap::TinyMap::<ScopeIndex, Option<ScopeIndex>>::with_capacity(
-        reactors.len() + modes.len(),
-    );
-    for (_, reactor) in reactors {
-        scope_parents.insert(reactor.parent().and_then(|parent| {
-            root_scopes
-                .get(parent)
-                .map(|root| reactor.scope_mode().map_or(*root, |mode| mode_scopes[mode]))
-        }));
+            });
     }
-    for (_, mode) in modes {
-        scope_parents.insert(Some(
-            mode.parent()
-                .map_or(root_scopes[mode.reactor()], |parent| mode_scopes[parent]),
-        ));
+    for (id, mode) in modes {
+        mode_images[mode_indices[*id]] =
+            ModeImage::new(reactor_indices[mode.reactor()], mode_scopes[*id]);
+    }
+    let mut scope_parents = BTreeMap::new();
+    for (id, reactor) in reactors {
+        scope_parents.insert(
+            root_scopes[*id],
+            reactor.parent().and_then(|parent| {
+                root_scopes
+                    .get(parent)
+                    .map(|root| reactor.scope_mode().map_or(*root, |mode| mode_scopes[mode]))
+            }),
+        );
+    }
+    for (id, mode) in modes {
+        scope_parents.insert(
+            mode_scopes[*id],
+            Some(
+                mode.parent()
+                    .map_or(root_scopes[mode.reactor()], |parent| mode_scopes[parent]),
+            ),
+        );
     }
     let action_scopes = actions
         .iter()
-        .map(|(_, action)| scope_for(action.reactor(), action.mode()))
-        .collect::<tinymap::TinyMap<ActionIndex, _>>();
+        .map(|(id, action)| {
+            (
+                action_indices[*id],
+                scope_for(action.reactor(), action.mode()),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
     let reaction_scopes = reactions
         .iter()
-        .map(|(_, reaction)| scope_for(reaction.reactor(), reaction.options().mode()))
-        .collect::<tinymap::TinyMap<ReactionIndex, _>>();
-    Ok(LoweredEntityTables {
-        reactors: reactor_images,
-        actions: action_images,
-        ports: port_images,
-        reactions: reaction_images,
-        modes: mode_images,
-        reactor_indices,
-        action_indices,
-        mode_indices,
-        mode_scopes,
+        .map(|(id, reaction)| {
+            (
+                reaction_indices[*id],
+                scope_for(reaction.reactor(), reaction.options().mode()),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    Ok((
+        LoweredEntityTables {
+            reactors: reactor_images,
+            actions: action_images,
+            ports: port_images,
+            reactions: reaction_images,
+            modes: mode_images,
+            scopes: scope_images,
+            reaction_triggers: flattened_triggers.into_boxed_slice(),
+            reaction_use_ports: use_ports.into_boxed_slice(),
+            reaction_effect_ports: effect_ports.into_boxed_slice(),
+            reaction_actions: reaction_actions.into_boxed_slice(),
+            reaction_modes: reaction_modes.into_boxed_slice(),
+        },
+        RelationshipInputs {
+            reactor_indices,
+            action_indices,
+            mode_indices,
+            mode_scopes,
+            reaction_indices,
+            scope_parents,
+            scope_owners: scope_owners_by_key,
+            action_scopes,
+            reaction_scopes,
+        },
         port_indices,
-        reaction_indices,
-        scope_parents,
-        action_scopes,
-        reaction_scopes,
-        reaction_triggers: flattened_triggers.into_boxed_slice(),
-        reaction_use_ports: use_ports.into_boxed_slice(),
-        reaction_effect_ports: effect_ports.into_boxed_slice(),
-        reaction_actions: reaction_actions.into_boxed_slice(),
-        reaction_modes: reaction_modes.into_boxed_slice(),
-    })
+    ))
 }
 
+/// Scope and lifecycle tables derived after all entity keys are known.
 struct LoweredRelationshipTables {
-    scopes: tinymap::TinyMap<ScopeIndex, ScopeImage>,
+    /// Packed transitive descendants owned by individual scopes.
     scope_descendants: Box<[ScopeIndex]>,
+    /// Packed logical actions owned by individual scopes.
     scope_logical_actions: Box<[ActionIndex]>,
+    /// Packed timer startup records owned by individual scopes.
     scope_timer_startups: Box<[TimerStartupImage]>,
+    /// Packed reset reactions owned by individual scopes.
     scope_reset_reactions: Box<[LevelReactionImage]>,
+    /// Packed startup reactions owned by individual scopes.
     scope_startup_reactions: Box<[LifecycleReactionImage]>,
+    /// Packed shutdown reactions owned by individual scopes.
     scope_shutdown_reactions: Box<[LifecycleReactionImage]>,
+    /// Enclave-wide one-shot startup actions.
     startup_actions: Box<[TimerStartupImage]>,
+    /// Enclave-wide periodic timer startup actions.
     timer_startup_actions: Box<[TimerStartupImage]>,
+    /// Enclave-wide shutdown reactions.
     shutdown_reactions: Box<[LifecycleReactionImage]>,
+    /// Enclave-wide actions populated during shutdown.
     shutdown_actions: Box<[ActionIndex]>,
 }
 
+/// Builds packed scope and lifecycle relationships from resolved entity keys.
 fn lower_relationship_tables(
     deployment: &ResolvedDeployment,
     enclave_id: &compiler::StableEnclaveId,
     analysis: &GlobalAnalysis,
     selection: &CanonicalEnclaveSelection<'_>,
-    entities: &LoweredEntityTables,
+    scopes: &mut tinymap::TinyMap<ScopeIndex, ScopeImage>,
+    inputs: &RelationshipInputs,
 ) -> Result<LoweredRelationshipTables, CompileError> {
     let topology = deployment.topology();
     let CanonicalEnclaveSelection {
-        reactors,
+        reactors: _,
         actions,
-        modes,
+        modes: _,
         representatives: _,
         reactions,
     } = selection;
-    let reactor_indices = &entities.reactor_indices;
-    let action_indices = &entities.action_indices;
-    let mode_indices = &entities.mode_indices;
-    let reaction_indices = &entities.reaction_indices;
-    let mode_scopes = &entities.mode_scopes;
-    let scope_parents = &entities.scope_parents;
-    let action_scopes = &entities.action_scopes;
-    let reaction_scopes = &entities.reaction_scopes;
+    let reactor_indices = &inputs.reactor_indices;
+    let action_indices = &inputs.action_indices;
+    let mode_indices = &inputs.mode_indices;
+    let reaction_indices = &inputs.reaction_indices;
+    let mode_scopes = &inputs.mode_scopes;
+    let scope_parents = &inputs.scope_parents;
+    let scope_owners = &inputs.scope_owners;
+    let action_scopes = &inputs.action_scopes;
+    let reaction_scopes = &inputs.reaction_scopes;
     let level_reaction = |reaction: &compiler::ReactionId| {
         LevelReactionImage::new(
             analysis.reaction_levels[reaction],
@@ -744,18 +868,25 @@ fn lower_relationship_tables(
             _ => {}
         }
     }
-    let mut reset_by_scope = (0..scope_parents.len())
-        .map(|_| Vec::new())
-        .collect::<tinymap::TinyMap<ScopeIndex, Vec<LevelReactionImage>>>();
-    let mut startup_by_scope = (0..scope_parents.len())
-        .map(|_| Vec::new())
-        .collect::<tinymap::TinyMap<ScopeIndex, Vec<LifecycleReactionImage>>>();
-    let mut shutdown_by_scope = (0..scope_parents.len())
-        .map(|_| Vec::new())
-        .collect::<tinymap::TinyMap<ScopeIndex, Vec<LifecycleReactionImage>>>();
-    for ((id, reaction), scope) in reactions.iter().zip(reaction_scopes.values().copied()) {
+    let mut reset_by_scope = scopes
+        .keys()
+        .map(|scope| (scope, Vec::new()))
+        .collect::<BTreeMap<_, Vec<LevelReactionImage>>>();
+    let mut startup_by_scope = scopes
+        .keys()
+        .map(|scope| (scope, Vec::new()))
+        .collect::<BTreeMap<_, Vec<LifecycleReactionImage>>>();
+    let mut shutdown_by_scope = scopes
+        .keys()
+        .map(|scope| (scope, Vec::new()))
+        .collect::<BTreeMap<_, Vec<LifecycleReactionImage>>>();
+    for (id, reaction) in reactions {
+        let scope = reaction_scopes[&reaction_indices[*id]];
         for mode in reaction.options().reset_modes() {
-            reset_by_scope[mode_scopes[mode]].push(level_reaction(id));
+            reset_by_scope
+                .get_mut(&mode_scopes[mode])
+                .expect("mode scope belongs to the final scope table")
+                .push(level_reaction(id));
         }
         for relation in reaction.relations() {
             if !relation.flags().is_trigger() {
@@ -770,8 +901,14 @@ fn lower_relationship_tables(
                 .expect("reaction action exists")
                 .kind()
             {
-                compiler::ActionKind::Startup => startup_by_scope[scope].push(entry),
-                compiler::ActionKind::Shutdown => shutdown_by_scope[scope].push(entry),
+                compiler::ActionKind::Startup => startup_by_scope
+                    .get_mut(&scope)
+                    .expect("reaction scope belongs to the final scope table")
+                    .push(entry),
+                compiler::ActionKind::Shutdown => shutdown_by_scope
+                    .get_mut(&scope)
+                    .expect("reaction scope belongs to the final scope table")
+                    .push(entry),
                 _ => {}
             }
         }
@@ -791,7 +928,7 @@ fn lower_relationship_tables(
         if candidate == ancestor {
             break true;
         }
-        let Some(parent) = scope_parents[candidate] else {
+        let Some(parent) = scope_parents[&candidate] else {
             break false;
         };
         candidate = parent;
@@ -802,74 +939,72 @@ fn lower_relationship_tables(
     let mut scope_reset_reactions = PackedSliceBuilder::new("scope-reset-reactions");
     let mut scope_startup_reactions = PackedSliceBuilder::new("scope-startup-reactions");
     let mut scope_shutdown_reactions = PackedSliceBuilder::new("scope-shutdown-reactions");
-    let scope_images = scope_parents
-        .iter()
-        .enumerate()
-        .map(|(position, (scope, parent))| {
-            let descendants = scope_descendants
-                .try_extend(
-                    scope_parents
-                        .keys()
-                        .filter(|candidate| is_descendant(*candidate, scope)),
-                )
-                .map_err(packed_overflow(enclave_id))?;
-            let logical_actions = scope_logical_actions
-                .try_extend(
-                    actions
-                        .iter()
-                        .zip(action_scopes.values().copied())
-                        .filter(|((_, action), action_scope)| {
-                            !matches!(action.kind(), compiler::ActionKind::Physical { .. })
-                                && is_descendant(*action_scope, scope)
-                        })
-                        .map(|((id, _), _)| action_indices[*id]),
-                )
-                .map_err(packed_overflow(enclave_id))?;
-            let timer_startups = scope_timer_startups
-                .try_extend(
-                    timer_startup_actions
-                        .iter()
-                        .copied()
-                        .filter(|entry| is_descendant(action_scopes[entry.action()], scope)),
-                )
-                .map_err(packed_overflow(enclave_id))?;
-            let reset_reactions = scope_reset_reactions
-                .try_extend({
-                    let mut values = reset_by_scope
-                        .iter()
-                        .filter(|(candidate, _)| is_descendant(*candidate, scope))
-                        .flat_map(|(_, values)| values.iter().copied())
-                        .collect::<Vec<_>>();
-                    values.sort_unstable();
-                    values.dedup();
-                    values
-                })
-                .map_err(packed_overflow(enclave_id))?;
-            let startup_reactions = scope_startup_reactions
-                .try_extend_exact(startup_by_scope[scope].iter().copied())
-                .map_err(packed_overflow(enclave_id))?;
-            let shutdown_reactions = scope_shutdown_reactions
-                .try_extend_exact(shutdown_by_scope[scope].iter().copied())
-                .map_err(packed_overflow(enclave_id))?;
-            let (reactor, mode) = if position < reactors.len() {
-                (reactor_indices[reactors[position].0], None)
-            } else {
-                let (mode_id, mode) = modes[position - reactors.len()];
+    for (&scope, &parent) in scope_parents {
+        let descendants = scope_descendants
+            .try_extend(
+                scope_parents
+                    .keys()
+                    .copied()
+                    .filter(|candidate| is_descendant(*candidate, scope)),
+            )
+            .map_err(packed_overflow(enclave_id))?;
+        let logical_actions = scope_logical_actions
+            .try_extend(
+                actions
+                    .iter()
+                    .filter(|(id, action)| {
+                        let action_scope = action_scopes[&action_indices[*id]];
+                        !matches!(action.kind(), compiler::ActionKind::Physical { .. })
+                            && is_descendant(action_scope, scope)
+                    })
+                    .map(|(id, _)| action_indices[*id]),
+            )
+            .map_err(packed_overflow(enclave_id))?;
+        let timer_startups = scope_timer_startups
+            .try_extend(
+                timer_startup_actions
+                    .iter()
+                    .copied()
+                    .filter(|entry| is_descendant(action_scopes[&entry.action()], scope)),
+            )
+            .map_err(packed_overflow(enclave_id))?;
+        let reset_reactions = scope_reset_reactions
+            .try_extend({
+                let mut values = reset_by_scope
+                    .iter()
+                    .filter(|(candidate, _)| is_descendant(**candidate, scope))
+                    .flat_map(|(_, values)| values.iter().copied())
+                    .collect::<Vec<_>>();
+                values.sort_unstable();
+                values.dedup();
+                values
+            })
+            .map_err(packed_overflow(enclave_id))?;
+        let startup_reactions = scope_startup_reactions
+            .try_extend_exact(startup_by_scope[&scope].iter().copied())
+            .map_err(packed_overflow(enclave_id))?;
+        let shutdown_reactions = scope_shutdown_reactions
+            .try_extend_exact(shutdown_by_scope[&scope].iter().copied())
+            .map_err(packed_overflow(enclave_id))?;
+        let (reactor, mode) = match &scope_owners[&scope] {
+            ScopeOwner::Reactor(reactor) => (reactor_indices[reactor], None),
+            ScopeOwner::Mode(mode_id) => {
+                let mode = topology.mode(mode_id).expect("selected mode exists");
                 (reactor_indices[mode.reactor()], Some(mode_indices[mode_id]))
-            };
-            Ok(ScopeImage::new(
-                *parent,
-                reactor,
-                mode,
-                descendants,
-                logical_actions,
-                timer_startups,
-                reset_reactions,
-                startup_reactions,
-                shutdown_reactions,
-            ))
-        })
-        .collect::<Result<tinymap::TinyMap<ScopeIndex, _>, CompileError>>()?;
+            }
+        };
+        scopes[scope] = ScopeImage::new(
+            parent,
+            reactor,
+            mode,
+            descendants,
+            logical_actions,
+            timer_startups,
+            reset_reactions,
+            startup_reactions,
+            shutdown_reactions,
+        );
+    }
     let mut shutdown_reactions = shutdown_by_scope
         .values()
         .flat_map(|values| values.iter().copied())
@@ -883,7 +1018,6 @@ fn lower_relationship_tables(
     shutdown_actions.sort_unstable();
     shutdown_actions.dedup();
     Ok(LoweredRelationshipTables {
-        scopes: scope_images,
         scope_descendants: scope_descendants.into_boxed_slice(),
         scope_logical_actions: scope_logical_actions.into_boxed_slice(),
         scope_timer_startups: scope_timer_startups.into_boxed_slice(),
@@ -897,6 +1031,7 @@ fn lower_relationship_tables(
     })
 }
 
+/// Assembles and validates the final owned runtime image from lowered table groups.
 fn assemble_enclave_image(
     enclave_id: &compiler::StableEnclaveId,
     bindings: LoweredBindings,
@@ -916,15 +1051,7 @@ fn assemble_enclave_image(
         ports,
         reactions,
         modes,
-        reactor_indices: _,
-        action_indices: _,
-        mode_indices: _,
-        mode_scopes: _,
-        port_indices: _,
-        reaction_indices: _,
-        scope_parents: _,
-        action_scopes: _,
-        reaction_scopes: _,
+        scopes,
         reaction_triggers,
         reaction_use_ports,
         reaction_effect_ports,
@@ -932,7 +1059,6 @@ fn assemble_enclave_image(
         reaction_modes,
     } = entities;
     let LoweredRelationshipTables {
-        scopes,
         scope_descendants,
         scope_logical_actions,
         scope_timer_startups,
@@ -999,10 +1125,17 @@ pub(super) fn lower_enclave(
         &selection.representatives,
         &selection.actions,
     )?;
-    let entities = lower_entity_tables(deployment, enclave_id, analysis, &selection, &bindings)?;
-    let relationships =
-        lower_relationship_tables(deployment, enclave_id, analysis, &selection, &entities)?;
-    let route_images = lower_routes(topology, enclave_id, &entities.port_indices)?;
+    let (mut entities, relationship_inputs, port_indices) =
+        lower_entity_tables(deployment, enclave_id, analysis, &selection, &bindings)?;
+    let relationships = lower_relationship_tables(
+        deployment,
+        enclave_id,
+        analysis,
+        &selection,
+        &mut entities.scopes,
+        &relationship_inputs,
+    )?;
+    let route_images = lower_routes(topology, enclave_id, &port_indices)?;
     let storage_bounds = storage_bounds(
         deployment,
         enclave_id,

@@ -838,10 +838,12 @@ fn render_indices(
     Ok(())
 }
 
+/// Renders packed-slice coordinates as a generated Rust constructor.
 fn slice_range<T>(value: SliceRange<T>) -> String {
     format!("SliceRange::new({}, {})", value.start(), value.len())
 }
 
+/// Renders an owner-allocated dense-key span as a generated Rust constructor.
 fn index_span<K: tinymap::Key>(value: IndexSpan<K>) -> String {
     format!("IndexSpan::new({}, {})", value.start(), value.len())
 }

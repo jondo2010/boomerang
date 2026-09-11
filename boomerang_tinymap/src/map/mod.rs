@@ -39,11 +39,14 @@ pub use view::TinyMapView;
 /// A dense collection cannot represent the requested number of values.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CapacityError {
+    /// Greatest value count representable by the map's key type.
     max_len: usize,
+    /// Value count requested by the failed operation.
     attempted_len: usize,
 }
 
 impl CapacityError {
+    /// Records the key-domain limit and the value count that exceeded it.
     const fn new(max_len: usize, attempted_len: usize) -> Self {
         Self {
             max_len,
@@ -233,6 +236,34 @@ impl<K: Key, V> TinyMap<K, V> {
         Ok(IndexSpan::new(start, additional))
     }
 
+    /// Appends an exact-size segment built from each owner-generated key.
+    ///
+    /// Capacity is checked before the factory is called or the map is modified.
+    pub fn try_extend_exact_with_key<I, F>(
+        &mut self,
+        items: I,
+        mut f: F,
+    ) -> Result<IndexSpan<K>, CapacityError>
+    where
+        I: IntoIterator,
+        I::IntoIter: ExactSizeIterator,
+        F: FnMut(K, I::Item) -> V,
+    {
+        let items = items.into_iter();
+        let start = self.data.len();
+        let additional = items.len();
+        let attempted_len = start.saturating_add(additional);
+        if start.checked_add(additional).is_none() || attempted_len > K::MAX_LEN {
+            return Err(CapacityError::new(K::MAX_LEN, attempted_len));
+        }
+        self.data.extend(
+            items
+                .enumerate()
+                .map(|(offset, item)| f(K::from(start + offset), item)),
+        );
+        Ok(IndexSpan::new(start, additional))
+    }
+
     /// Collects values into a dense map while enforcing the key capacity.
     pub fn try_from_iter<I>(values: I) -> Result<Self, CapacityError>
     where
@@ -376,6 +407,18 @@ mod tests {
         let error = map.try_extend_exact([20, 30]).unwrap_err();
         assert_eq!(error.attempted_len(), 3);
         assert_eq!(map.values().copied().collect::<Vec<_>>(), vec![10]);
+
+        let mut generated = Vec::new();
+        let mut map = TinyMap::<TwoKey, _>::new();
+        let span = map
+            .try_extend_exact_with_key([10, 20], |key, value| {
+                generated.push(key);
+                value + key.index()
+            })
+            .unwrap();
+        assert_eq!(span, crate::IndexSpan::new(0, 2));
+        assert_eq!(generated, vec![TwoKey(0), TwoKey(1)]);
+        assert_eq!(map.values().copied().collect::<Vec<_>>(), vec![10, 21]);
     }
 
     #[test]

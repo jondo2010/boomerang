@@ -176,14 +176,20 @@ pub struct OwnedEnclaveImage {
 /// Host-owned scheduler route retaining its typed stable boundary identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct OwnedRouteImage {
+    /// Stable scheduler-boundary identity.
     pub(crate) boundary: BoundaryId,
+    /// Dense Enclave-local port attached to the boundary.
     pub(crate) local_port: PortIndex,
+    /// Whether events enter or leave through the local port.
     pub(crate) direction: crate::runtime::image::RouteDirection,
+    /// Clock domain used to interpret the route delay.
     pub(crate) timing_domain: crate::runtime::image::TimingDomain,
+    /// Route delay in nanoseconds.
     pub(crate) delay_nanos: u64,
 }
 
 impl OwnedRouteImage {
+    /// Borrows the owned route as a target-facing runtime image row.
     fn image<'a>(&self, boundary: &'a str) -> RouteImage<'a> {
         RouteImage::new(
             runtime_image::BoundaryId::new(boundary),
@@ -198,14 +204,18 @@ impl OwnedRouteImage {
 /// Host-owned canonical implementation-binding identity and its required kind.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct OwnedBindingImage {
+    /// Stable binding identity retained by host-owned storage.
     id: BindingSlotId<OwnedBindingSlotMarker>,
+    /// Runtime implementation category required at the binding slot.
     kind: BindingKind,
 }
 
+/// Marker separating host-owned binding identities from borrowed runtime identities.
 #[derive(Debug)]
 struct OwnedBindingSlotMarker;
 
 impl OwnedBindingImage {
+    /// Creates a host-owned binding image row from its stable identity and kind.
     pub(crate) fn new(id: impl AsRef<str>, kind: BindingKind) -> Self {
         Self {
             id: BindingSlotId::new(id)
@@ -214,6 +224,7 @@ impl OwnedBindingImage {
         }
     }
 
+    /// Borrows the owned binding as a target-facing runtime image row.
     fn image<'a>(&self, id: &'a str) -> RequiredBindingImage<'a> {
         RequiredBindingImage::new(runtime_image::BindingSlotId::new(id), self.kind)
     }
@@ -400,7 +411,9 @@ pub struct OwnedCompiledDeployment {
 pub struct FederateSlice<'a> {
     /// Deployment-wide dense identity of the selected Federate.
     federate: FederateIndex,
+    /// Host-owned metadata for the selected Federate.
     image: &'a OwnedFederateImage,
+    /// Borrowed deployment table segment owned by the selected Federate.
     enclaves: &'a [OwnedEnclaveImage],
 }
 

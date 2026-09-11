@@ -22,7 +22,7 @@ use crate::runtime::image::{
     PhysicalBoundaryIndex, RtiDependencyImage, RtiImage, RtiMemberImage, RtiRouteImage,
     RtiRouteIndex, TransportCapabilityIndex,
 };
-use tinymap::TinyMap;
+use tinymap::{SliceRange, TinyMap};
 
 /// Failure to represent an analyzed federation in bounded image coordinates.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
@@ -66,24 +66,40 @@ pub struct OwnedRtiImage {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+/// Host-owned route row retaining stable identities beside dense runtime references.
 struct OwnedRtiRouteImage {
+    /// Stable identity of this concrete boundary hop.
     boundary: BoundaryId,
+    /// Dense end-to-end flow containing this route.
     flow: FlowIndex,
+    /// Optional dense physical input boundary.
     physical_input: Option<PhysicalBoundaryIndex>,
+    /// Optional dense physical output boundary.
     physical_output: Option<PhysicalBoundaryIndex>,
+    /// Failure behavior selected for this route.
     failure_policy: crate::runtime::image::BoundaryFailurePolicy,
+    /// Transport contract selected for this route.
     transport_policy: crate::runtime::image::TransportPolicy,
+    /// Codec contract selected for this route.
     codec_policy: crate::runtime::image::CodecPolicy,
+    /// Physical-time contract selected for this route.
     timing_policy: crate::runtime::image::TimingPolicy,
+    /// Communication security profile selected for this route.
     security_policy: crate::runtime::image::SecurityPolicy,
+    /// Dense selected transport capability.
     transport_capability: TransportCapabilityIndex,
+    /// Dense selected codec capability.
     codec_capability: CodecCapabilityIndex,
+    /// Dense source Federate.
     source: FederateIndex,
+    /// Dense target Federate.
     target: FederateIndex,
+    /// Direct route delay in nanoseconds.
     delay_nanos: u64,
 }
 
 impl OwnedRtiRouteImage {
+    /// Borrows this host-owned row as its target-facing runtime representation.
     fn image<'a>(&self, boundary: &'a str) -> RtiRouteImage<'a> {
         RtiRouteImage::new(
             runtime_image::BoundaryId::new(boundary),
@@ -104,10 +120,12 @@ impl OwnedRtiRouteImage {
     }
 }
 
+/// Materializes canonical identity text in a dense table's key order.
 fn identity_text<I: std::fmt::Display, K: tinymap::Key>(values: &TinyMap<K, I>) -> Vec<String> {
     values.values().map(canonical_identity_text).collect()
 }
 
+/// Rebuilds a typed borrowed identity table over temporary canonical text storage.
 fn borrowed_identities<K: tinymap::Key>(values: &[String]) -> TinyMap<K, &str> {
     values.iter().map(String::as_str).collect()
 }
@@ -175,14 +193,22 @@ pub(crate) fn project_central_rti(
     analysis: &AnalyzedFederationGraph,
     deployment: &ResolvedDeployment,
 ) -> Result<OwnedRtiImage, CoordinationProjectionError> {
-    let member_keys = TinyMap::<FederateIndex, _>::try_from_iter(analysis.members().iter())
-        .map_err(|_| CoordinationProjectionError::TableTooLarge { table: "members" })?;
-    let indices = member_keys
-        .iter()
-        .map(|(index, member)| (*member, index))
-        .collect::<BTreeMap<_, _>>();
-
     let mut members = TinyMap::with_capacity(analysis.members().len());
+    let mut indices = BTreeMap::new();
+    for member in analysis.members() {
+        let index = members
+            .try_insert(RtiMemberImage::new(
+                deployment
+                    .federate(member)
+                    .expect("analyzed member has a resolved Federate configuration")
+                    .recovery(),
+                SliceRange::new(0, 0),
+                SliceRange::new(0, 0),
+                SliceRange::new(0, 0),
+            ))
+            .map_err(|_| CoordinationProjectionError::TableTooLarge { table: "members" })?;
+        indices.insert(member, index);
+    }
     let mut dependencies = PackedSliceBuilder::new("dependencies");
     let mut affected_downstream = PackedSliceBuilder::new("affected_downstream");
     macro_rules! dense {
@@ -275,18 +301,15 @@ pub(crate) fn project_central_rti(
                     .map(|target| indices[target]),
             )
             .map_err(coordination_overflow)?;
-        let member_index = members
-            .try_insert(RtiMemberImage::new(
-                deployment
-                    .federate(member)
-                    .expect("analyzed member has a resolved Federate configuration")
-                    .recovery(),
-                direct,
-                transitive,
-                downstream,
-            ))
-            .map_err(|_| CoordinationProjectionError::TableTooLarge { table: "members" })?;
-        debug_assert_eq!(member_index, indices[member]);
+        members[indices[member]] = RtiMemberImage::new(
+            deployment
+                .federate(member)
+                .expect("analyzed member has a resolved Federate configuration")
+                .recovery(),
+            direct,
+            transitive,
+            downstream,
+        );
     }
 
     Ok(OwnedRtiImage {
@@ -304,6 +327,7 @@ pub(crate) fn project_central_rti(
 /// Converts a canonical stable-identity set into a dense table and lookup map.
 type DenseIdentities<'a, I, K> = (TinyMap<K, I>, BTreeMap<&'a I, K>);
 
+/// Allocates canonical dense keys and records their stable-identity lookup.
 fn dense_identities<'a, I, K>(
     table: &'static str,
     identities: BTreeSet<&'a I>,
@@ -325,6 +349,7 @@ where
     Ok((values, indices))
 }
 
+/// Converts packed relationship overflow into the coordination projection error domain.
 fn coordination_overflow(error: PackedSliceOverflow) -> CoordinationProjectionError {
     CoordinationProjectionError::TableTooLarge {
         table: error.table(),
@@ -335,7 +360,6 @@ fn coordination_overflow(error: PackedSliceOverflow) -> CoordinationProjectionEr
 mod tests {
     use super::*;
     use crate::compiler::packed::PackedSliceBuilder;
-    use tinymap::SliceRange;
 
     fn assert_tiny_map<K: tinymap::Key, V>(_: &tinymap::TinyMap<K, V>) {}
 

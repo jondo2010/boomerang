@@ -7,6 +7,7 @@ Current notes:
 
 - [Graph partitioning, federation, and replay architecture](./architecture.md)
 - [Static Federate Deployment Architecture](./deployment-architecture.md)
+- [Compiler-to-runtime image boundary](./compiler-runtime-image-boundary.md)
 - [Scheduler internals and partition coordination](./scheduler-internals.md)
 - [Federated runtime internals](./federated-runtime.md)
 - [Static federated protocol](./federated-protocol.md)

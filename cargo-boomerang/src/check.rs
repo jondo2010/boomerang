@@ -8,7 +8,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use boomerang_builder::compiler::{
-    lower, BoundaryBinding, BoundaryId, BoundaryPolicies, CodecCapabilityId, CoordinationSelection,
+    BoundaryBinding, BoundaryId, BoundaryPolicies, CodecCapabilityId, CoordinationSelection,
     FederateConfig, FederateId, FlowId, ImplementationBinding, OwnedCompiledDeployment,
     PhysicalBoundaryId, PhysicalBoundaryMetadata, PlacementAssignment, PlacementGroupId,
     ResolvedDeployment, RuntimeBackendId, TargetTriple, TransportCapabilityId,
@@ -75,7 +75,9 @@ pub(crate) fn analyze(
         Phase::Validating,
         format_args!("deployment '{deployment_name}'"),
     )?;
-    let compiled = lower(&deployment).context("failed to lower resolved deployment")?;
+    let compiled = deployment
+        .lower()
+        .context("failed to lower resolved deployment")?;
     compiled
         .validate()
         .context("failed to validate compiled deployment")?;

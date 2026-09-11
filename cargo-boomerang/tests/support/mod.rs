@@ -7,8 +7,8 @@ use std::{
 };
 
 use boomerang_builder::compiler::{
-    lower, CoordinationSelection, FederateConfig, FederateId, ImplementationBinding,
-    PlacementAssignment, PlacementGroupId, ResolvedDeployment, RuntimeBackendId, TargetTriple,
+    CoordinationSelection, FederateConfig, FederateId, ImplementationBinding, PlacementAssignment,
+    PlacementGroupId, ResolvedDeployment, RuntimeBackendId, TargetTriple,
 };
 use boomerang_runtime::{execute_owned_federate, image::FederateIndex, Config};
 use serde_json::{json, Value};
@@ -136,17 +136,16 @@ pub fn owned_reference_summary(deployment_name: &str) -> Value {
             backend: coordination.backend,
         },
     };
-    let compiled = lower(
-        &ResolvedDeployment::new(
-            driver.topology().clone(),
-            bindings,
-            placements,
-            federates,
-            coordination,
-            [],
-        )
-        .unwrap(),
+    let compiled = ResolvedDeployment::new(
+        driver.topology().clone(),
+        bindings,
+        placements,
+        federates,
+        coordination,
+        [],
     )
+    .unwrap()
+    .lower()
     .unwrap();
     compiled.validate().unwrap();
 

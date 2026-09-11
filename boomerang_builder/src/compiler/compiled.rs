@@ -1,4 +1,25 @@
 //! Owned compiled-image storage and immutable Federate slice projections.
+//!
+//! [`OwnedCompiledDeployment`] is the host-owned result of
+//! [`ResolvedDeployment::lower`](super::ResolvedDeployment::lower). It retains typed stable
+//! identities where text is still needed and owns the dense tables and relationship slices that
+//! define runtime behavior.
+//!
+//! The owned form supports two target-facing flows:
+//!
+//! ```text
+//! OwnedCompiledDeployment::with_image()
+//!     -> borrowed CompiledDeploymentImage
+//!     -> CompiledDeploymentView validation or direct owned execution
+//!
+//! OwnedCompiledDeployment::federate_slice()
+//!     -> cargo-boomerang Rust rendering
+//!     -> static CompiledDeploymentImage
+//!     -> runtime validation and execution
+//! ```
+//!
+//! Borrowed image rows may reference temporary canonical strings for the duration of a callback.
+//! These strings are ordinary Rust string storage, not a manually packed identity blob.
 use super::{
     BindingSlotId, BoundaryId, ComponentInstanceId, FederateId, ImplementationId,
     OwnedCoordinationProjection, RuntimeBackendId, StableEnclaveId, StablePath, TargetTriple,

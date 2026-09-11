@@ -1,3 +1,13 @@
+//! Typed coordinates for dense-key ownership and packed relationship storage.
+//!
+//! [`IndexSpan`] describes consecutive keys allocated by one dense map owner. Production builders
+//! obtain it from the owning `TinyMap`; manually reconstructed spans are reserved for generated
+//! immutable metadata and focused fixtures.
+//!
+//! [`SliceRange`] describes entries in one packed backing slice. It is appropriate only for
+//! anonymous relationship data, never as a substitute for entity keys or as an offset into packed
+//! identity text.
+
 use core::marker::PhantomData;
 
 /// A contiguous span of keys allocated by a dense map owner.

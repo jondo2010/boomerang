@@ -1,4 +1,23 @@
 //! Cached static launcher generation for one compiled Federate.
+//!
+//! # Compiled-image data flow
+//!
+//! ```text
+//! ResolvedDeployment::lower()
+//!     -> OwnedCompiledDeployment
+//!     -> FederateSlice
+//!     -> generated Rust static tables
+//!     -> CompiledDeploymentImage
+//!     -> runtime validation and execution
+//! ```
+//!
+//! Code generation is a renderer for an already-lowered image. It preserves deployment-wide typed
+//! keys, `IndexSpan` ownership, and `SliceRange` relationship coordinates assigned by the host
+//! compiler; it must not renumber tables or allocate a second key domain.
+//!
+//! Stable identities are emitted as ordinary Rust string literals. Rust and the linker own their
+//! placement in static read-only data; this module must not concatenate identities into a custom
+//! byte blob or generate byte-offset identity ranges.
 
 mod rust;
 

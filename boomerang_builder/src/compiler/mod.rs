@@ -1,4 +1,24 @@
 //! Target-neutral application compiler models.
+//!
+//! # Representation boundary
+//!
+//! Semantic compiler data—topology, deployment selections, resolution, and analysis—uses stable
+//! typed identities. Those models do not retain runtime table keys, dense-key spans, or packed
+//! slice coordinates. Stable identities remain meaningful across compiler runs and at diagnostic,
+//! configuration, and interchange boundaries.
+//!
+//! [`ResolvedDeployment::lower`](crate::compiler::ResolvedDeployment::lower) is the one-way
+//! transition into the runtime image domain:
+//!
+//! ```text
+//! ApplicationTopology + deployment selections
+//!                    -> ResolvedDeployment
+//! ResolvedDeployment::lower()
+//!                    -> OwnedCompiledDeployment
+//! ```
+//!
+//! Lowering may temporarily map stable identities to runtime keys while resolving references, but
+//! that state is private to image materialization. It must not leak back into semantic models.
 #![deny(missing_docs)]
 
 mod compiled;

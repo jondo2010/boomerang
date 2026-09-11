@@ -1,4 +1,13 @@
 //! Checked ownership for compiler-generated packed relationship slices.
+//!
+//! This module packs only anonymous, ordered relationship entries that image rows address through
+//! [`SliceRange`]. Examples include reaction triggers, used ports, scope descendants, and RTI
+//! dependencies. Such entries have no independent entity identity and therefore do not belong in
+//! a keyed table.
+//!
+//! This is not identity-string packing. Stable identities remain typed string values on the host
+//! and become ordinary borrowed strings or Rust string literals at the target boundary. They must
+//! not be concatenated into a byte blob or addressed through byte-offset ranges.
 
 use crate::runtime::image::SliceRange;
 

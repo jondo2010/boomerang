@@ -1,3 +1,21 @@
+//! One-way materialization of resolved compiler semantics into owned runtime images.
+//!
+//! Lowering consumes [`ResolvedDeployment`], performs canonical stable-identity analysis and
+//! selection, and produces [`OwnedCompiledDeployment`]. The final runtime image tables are the
+//! authoritative dense-key owners: each `TinyMap` allocates its own keys, and temporary
+//! stable-identity-to-key registries only retain keys returned by those owners.
+//!
+//! ```text
+//! ResolvedDeployment
+//!     -> canonical stable-ID selection and analysis
+//!     -> owner-generated dense entity tables + packed anonymous relationships
+//!     -> OwnedCompiledDeployment
+//! ```
+//!
+//! Numeric casts, parallel ordinal counters, shared ordinals between key types, and
+//! stringify/reparse bridges must not allocate or translate collection-owned keys. Code
+//! generation renders the assignments made here; it does not perform a second lowering pass.
+
 use super::{
     compiled::{OwnedBindingImage, OwnedRouteImage},
     coordination::project_central_rti,

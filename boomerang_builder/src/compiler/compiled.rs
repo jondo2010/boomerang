@@ -598,16 +598,14 @@ impl OwnedCompiledDeployment {
         })
     }
 
-    /// Validates the complete target-facing deployment hierarchy.
-    pub fn validate(&self) -> Result<(), CompiledDeploymentValidationError> {
-        fn checked_len(
-            table: &'static str,
-            len: usize,
-        ) -> Result<u32, ImageValidationError<'static>> {
-            u32::try_from(len).map_err(|_| ImageValidationError::TableTooLarge { table })
-        }
-
-        let mut federates = Vec::with_capacity(self.federates.len());
+    /// Materializes the complete target-facing deployment image during `f`.
+    ///
+    /// The callback keeps temporary borrowed identity and image rows alive without
+    /// requiring a self-referential owned cache.
+    pub fn with_image<T>(
+        &self,
+        f: impl FnOnce(crate::runtime::image::CompiledDeploymentImage<'_>) -> T,
+    ) -> T {
         let owned_enclaves = self.enclaves.values().collect::<Vec<_>>();
         let enclave_ids = owned_enclaves
             .iter()
@@ -640,75 +638,65 @@ impl OwnedCompiledDeployment {
                 enclave.image_with_rows(id, routes, bindings)
             })
             .collect::<Vec<_>>();
-        let mut members = Vec::with_capacity(self.federates.len());
-        let mut edges = Vec::with_capacity(self.federation.edges.len());
-        if let Err(error) = checked_len("federates", self.federates.len()) {
-            return Err(CompiledDeploymentValidationError::from_image(error));
-        }
-        for federate in self.federates.values() {
-            federates.push(FederateImage::new(
-                runtime_image::FederateId::new(federate.id.as_str()),
-                runtime_image::TargetId::new(federate.target.as_str()),
-                runtime_image::RuntimeBackendId::new(federate.runtime.as_str()),
-                federate.enclaves,
-            ));
-        }
-        for member in &self.federation.members {
-            let index = self
-                .federates
+        let federates = self
+            .federates
+            .values()
+            .map(|federate| {
+                FederateImage::new(
+                    runtime_image::FederateId::new(federate.id.as_str()),
+                    runtime_image::TargetId::new(federate.target.as_str()),
+                    runtime_image::RuntimeBackendId::new(federate.runtime.as_str()),
+                    federate.enclaves,
+                )
+            })
+            .collect::<Vec<_>>();
+        let invalid_federate = FederateIndex::new(u32::MAX);
+        let federate_index = |id: &FederateId| {
+            self.federates
                 .iter()
-                .find_map(|(index, federate)| (federate.id == *member).then_some(index));
-            let index = match index {
-                Some(index) => index,
-                None => FederateIndex::new(
-                    match checked_len("federation.members", self.federates.len()) {
-                        Ok(index) => index,
-                        Err(error) => {
-                            return Err(CompiledDeploymentValidationError::from_image(error));
-                        }
-                    },
-                ),
-            };
-            members.push(index);
-        }
+                .find_map(|(index, federate)| (federate.id == *id).then_some(index))
+                .unwrap_or(invalid_federate)
+        };
+        let members = self
+            .federation
+            .members
+            .iter()
+            .map(federate_index)
+            .collect::<Vec<_>>();
         let edge_ids = self
             .federation
             .edges
             .iter()
             .map(|edge| edge.id().to_canonical_string())
             .collect::<Vec<_>>();
-        for (edge, boundary) in self.federation.edges.iter().zip(&edge_ids) {
-            let source = self
-                .federation
-                .members
-                .binary_search(edge.source())
-                .unwrap_or(self.federation.members.len());
-            let target = self
-                .federation
-                .members
-                .binary_search(edge.target())
-                .unwrap_or(self.federation.members.len());
-            edges.push(crate::runtime::image::FederationEdgeImage::new(
-                runtime_image::BoundaryId::new(boundary),
-                FederateIndex::new(match checked_len("federation.edges", source) {
-                    Ok(source) => source,
-                    Err(error) => return Err(CompiledDeploymentValidationError::from_image(error)),
-                }),
-                FederateIndex::new(match checked_len("federation.edges", target) {
-                    Ok(target) => target,
-                    Err(error) => return Err(CompiledDeploymentValidationError::from_image(error)),
-                }),
-                edge.delay().as_nanos(),
-            ));
-        }
+        let edges = self
+            .federation
+            .edges
+            .iter()
+            .zip(&edge_ids)
+            .map(|(edge, boundary)| {
+                crate::runtime::image::FederationEdgeImage::new(
+                    runtime_image::BoundaryId::new(boundary),
+                    federate_index(edge.source()),
+                    federate_index(edge.target()),
+                    edge.delay().as_nanos(),
+                )
+            })
+            .collect::<Vec<_>>();
 
         self.coordination.with_image(|coordination| {
-            let image = crate::runtime::image::CompiledDeploymentImage {
+            f(crate::runtime::image::CompiledDeploymentImage {
                 federation: runtime_image::GlobalFederationImage::new(&members, &edges),
                 federates: TinyMapView::new(&federates),
                 enclaves: TinyMapView::new(&enclaves),
                 coordination,
-            };
+            })
+        })
+    }
+
+    /// Validates the complete target-facing deployment hierarchy.
+    pub fn validate(&self) -> Result<(), CompiledDeploymentValidationError> {
+        self.with_image(|image| {
             crate::runtime::image::CompiledDeploymentView::new(&image)
                 .map(|_| ())
                 .map_err(CompiledDeploymentValidationError::from_image)
@@ -900,6 +888,12 @@ mod tests {
             coordination: OwnedCoordinationProjection::Local,
         };
 
+        deployment.with_image(|image| {
+            assert_eq!(image.federates.len(), 1);
+            assert_eq!(image.enclaves.len(), 1);
+            assert_eq!(image.federation.members, &[FederateIndex::new(0)]);
+            assert_eq!(image.federates[FederateIndex::new(0)].id().as_str(), "host");
+        });
         deployment.validate().unwrap();
         let invalid = OwnedCompiledDeployment {
             federation: GlobalFederationImage {

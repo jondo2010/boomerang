@@ -1666,7 +1666,7 @@ mod tests {
         },
         runtime::image::{
             ActionIndex, ActionTiming, BindingKind, BoundaryFailurePolicy, CodecPolicy,
-            CoordinationProjection, EnclaveIndex, FederateIndex, ModeIndex, ReactionIndex,
+            CoordinationProjection, FederateIndex, ModeIndex, ReactionIndex,
             ReactorIndex, RecoveryPolicy, RouteDirection, RouteIndex, RtiImage, RtiRouteIndex,
             ScopeIndex, SecurityPolicy, TimingDomain, TimingPolicy, TransportPolicy,
         },
@@ -2549,21 +2549,9 @@ mod tests {
 
         let slice = compiled.federate_slice(federate).unwrap();
         assert_eq!(slice.federate(), federate);
+        assert_eq!(slice.enclave_range(), expected_range);
         assert!(std::ptr::eq(slice.enclaves(), expected_enclaves));
-        slice.with_runtime_image(|image| {
-            assert_eq!(image.federate(), federate);
-            assert_eq!(image.image().enclaves(), expected_range);
-        });
-        assert_eq!(
-            slice
-                .with_view(|view| {
-                    view.enclave_views()
-                        .map(|(key, enclave)| (key, enclave.enclave_id().as_str().to_owned()))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap(),
-            vec![(EnclaveIndex::new(1), "vehicle/controller".to_owned())]
-        );
+        assert_eq!(slice.enclaves()[0].id().to_string(), "vehicle/controller");
         assert_eq!(
             slice
                 .enclaves()

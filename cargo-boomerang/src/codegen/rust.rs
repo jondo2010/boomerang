@@ -112,15 +112,14 @@ pub(super) fn render_launcher(
         source.push_str(
             "fn main() -> Result<(), Box<dyn std::error::Error>> {\n\
                  init_tracing();\n\
-                 let slice = FederateSliceView::new(&FEDERATE_SLICE)?;\n\
                  drop(generated_bindings());\n\
-                 Err(format!(\"distributed generated launcher execution requires backend injection for {:?}\", slice.federate()).into())\n\
+                 Err(format!(\"distributed generated launcher execution requires backend injection for {:?}\", FEDERATE_IMAGE.id()).into())\n\
              }",
         );
     } else {
         writeln!(
             source,
-            "fn main() -> Result<(), Box<dyn std::error::Error>> {{\n    init_tracing();\n    let slice = FederateSliceView::new(&FEDERATE_SLICE)?;\n    let bindings = generated_bindings();\n    let execution = execute_owned_federate(\n        &DEPLOYMENT, slice.federate(), bindings, Config {{\n            fast_forward: {},\n            timeout: {},\n            keep_alive: {},\n            // Legacy public-API compatibility placeholder.\n            physical_event_q_size: 1024,\n        }},\n    )?;\n    write_execution_summary(&execution)?;\n    Ok(())\n}}",
+            "fn main() -> Result<(), Box<dyn std::error::Error>> {{\n    init_tracing();\n    let bindings = generated_bindings();\n    let execution = execute_owned_federate(\n        &DEPLOYMENT, FEDERATE, bindings, Config {{\n            fast_forward: {},\n            timeout: {},\n            keep_alive: {},\n            // Legacy public-API compatibility placeholder.\n            physical_event_q_size: 1024,\n        }},\n    )?;\n    write_execution_summary(&execution)?;\n    Ok(())\n}}",
             execution.fast_forward, timeout, execution.keep_alive,
         )?;
     }
@@ -338,18 +337,20 @@ fn render_deployment(
     source.push_str("];\n");
     writeln!(
         source,
-        "/// Selected immutable Federate slice with deployment-wide dense keys.\nstatic FEDERATE_SLICE: FederateSliceImage<'static> = FederateSliceImage::new(FederateIndex::new({}), FederateImage::new(FederateId::new({:?}), TargetId::new({:?}), RuntimeBackendId::new({:?}), {}), &ENCLAVES);",
+        "static FEDERATE: FederateIndex = FederateIndex::new({});",
         slice.federate().as_u32(),
+    )?;
+    writeln!(
+        source,
+        "static FEDERATE_IMAGE: FederateImage<'static> = FederateImage::new(FederateId::new({:?}), TargetId::new({:?}), RuntimeBackendId::new({:?}), {});",
         slice.id().as_str(),
         slice.target().as_str(),
         slice.runtime().as_str(),
         index_span(slice.enclave_range()),
     )?;
+    source.push_str("static FEDERATES: [FederateImage; 1] = [FEDERATE_IMAGE];\n");
+    source.push_str("static FEDERATION_MEMBERS: [FederateIndex; 1] = [FEDERATE];\n");
     if include_local_deployment {
-        source.push_str("static FEDERATES: [FederateImage; 1] = [FEDERATE_SLICE.image()];\n");
-        source.push_str(
-            "static FEDERATION_MEMBERS: [FederateIndex; 1] = [FEDERATE_SLICE.federate()];\n",
-        );
         source.push_str("static DEPLOYMENT: CompiledDeploymentImage<'static> = CompiledDeploymentImage {\n    federation: GlobalFederationImage::new(&FEDERATION_MEMBERS, &[]),\n    federates: TinyMapView::new(&FEDERATES),\n    enclaves: TinyMapView::new(&ENCLAVES),\n    coordination: CoordinationProjection::Local,\n};\n");
     }
     source.push('\n');

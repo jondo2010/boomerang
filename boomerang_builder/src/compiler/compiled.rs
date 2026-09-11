@@ -6,11 +6,10 @@ use super::{
 use crate::descriptor::{ActionSlotId, PortSlotId, ReactionSlotId, ReactorSlotId};
 use crate::runtime::image::{
     self as runtime_image, ActionImage, ActionIndex, BindingKind, BindingSlotIndex, EnclaveImage,
-    EnclaveImageView, EnclaveIndex, FederateImage, FederateIndex, FederateSliceImage,
-    FederateSliceView, ImageValidationError, LevelReactionImage, LifecycleReactionImage, ModeImage,
-    ModeIndex, PortImage, PortIndex, ReactionImage, ReactionIndex, ReactorImage, ReactorIndex,
-    RequiredBindingImage, RouteImage, RouteIndex, ScopeImage, ScopeIndex, StorageBounds,
-    TimerStartupImage,
+    EnclaveImageView, EnclaveIndex, FederateImage, FederateIndex, ImageValidationError,
+    LevelReactionImage, LifecycleReactionImage, ModeImage, ModeIndex, PortImage, PortIndex,
+    ReactionImage, ReactionIndex, ReactorImage, ReactorIndex, RequiredBindingImage, RouteImage,
+    RouteIndex, ScopeImage, ScopeIndex, StorageBounds, TimerStartupImage,
 };
 use tinymap::{IndexSpan, TinyMap, TinyMapView};
 
@@ -458,76 +457,6 @@ impl FederateSlice<'_> {
     #[must_use]
     pub fn enclaves(&self) -> &[OwnedEnclaveImage] {
         self.enclaves
-    }
-
-    /// Materializes the target-facing runtime image during `f`.
-    ///
-    /// The callback keeps temporary borrowed Enclave rows alive without requiring a
-    /// self-referential owned cache.
-    pub fn with_runtime_image<T>(&self, f: impl FnOnce(FederateSliceImage<'_>) -> T) -> T {
-        let enclave_ids = self
-            .enclaves()
-            .iter()
-            .map(|enclave| enclave.id.to_canonical_string())
-            .collect::<Vec<_>>();
-        let route_identities = self
-            .enclaves()
-            .iter()
-            .map(OwnedEnclaveImage::route_identity_text)
-            .collect::<Vec<_>>();
-        let route_rows = self
-            .enclaves()
-            .iter()
-            .zip(&route_identities)
-            .map(|(enclave, identities)| enclave.route_images(identities))
-            .collect::<Vec<_>>();
-        let binding_identities = self
-            .enclaves()
-            .iter()
-            .map(OwnedEnclaveImage::binding_identity_text)
-            .collect::<Vec<_>>();
-        let bindings = self
-            .enclaves()
-            .iter()
-            .zip(&binding_identities)
-            .map(|(enclave, identities)| enclave.binding_rows(identities))
-            .collect::<Vec<_>>();
-        let enclave_images = self
-            .enclaves()
-            .iter()
-            .zip(&route_rows)
-            .zip(&bindings)
-            .zip(&enclave_ids)
-            .map(|(((enclave, routes), bindings), id)| {
-                enclave.image_with_rows(id, routes, bindings)
-            })
-            .collect::<Vec<_>>();
-        let image = FederateImage::new(
-            runtime_image::FederateId::new(self.id().as_str()),
-            runtime_image::TargetId::new(self.target().as_str()),
-            runtime_image::RuntimeBackendId::new(self.runtime().as_str()),
-            self.image.enclaves,
-        );
-        f(FederateSliceImage::new(
-            self.federate,
-            image,
-            &enclave_images,
-        ))
-    }
-
-    /// Validates and exposes the target-facing borrowed view during `f`.
-    pub fn with_view<T>(
-        &self,
-        f: impl FnOnce(FederateSliceView<'_>) -> T,
-    ) -> Result<T, CompiledDeploymentValidationError> {
-        for enclave in self.enclaves() {
-            enclave.with_view(|_| ())?;
-        }
-        Ok(self.with_runtime_image(|image| {
-            let view = FederateSliceView::new(&image)
-                .expect("host Federate slice preserves validated root metadata");
-            f(view)
-        }))
     }
 }
 

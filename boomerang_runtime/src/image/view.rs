@@ -263,118 +263,6 @@ impl<'a> FederateImageView<'a> {
     }
 }
 
-/// A validated borrowed view of one immutable Federate slice.
-#[derive(Debug)]
-pub struct FederateSliceView<'a> {
-    /// Validated immutable slice backing this view.
-    image: FederateSliceImage<'a>,
-}
-
-impl<'a> FederateSliceView<'a> {
-    /// Validates `image` and borrows its selected Federate hierarchy.
-    pub fn new(image: &FederateSliceImage<'a>) -> Result<Self, ImageValidationError<'a>> {
-        let federate = image.image();
-        let index = image.federate().as_u32();
-        if federate.enclaves().len() != image.enclaves().len() {
-            return Err(ImageValidationError::OwnershipMismatch {
-                table: "federates",
-                index,
-                field: "enclaves",
-            });
-        }
-        if !enclave_span_fits_index_domain(federate.enclaves()) {
-            return Err(ImageValidationError::RangeOutOfBounds {
-                table: "federates",
-                index,
-                field: "enclaves",
-                target: "enclaves",
-                start: federate.enclaves().start(),
-                len: federate.enclaves().len(),
-            });
-        }
-        let id = federate.id();
-        if !valid_id(id.as_str()) {
-            return Err(ImageValidationError::InvalidStableId {
-                kind: "federate",
-                index,
-                id: id.as_str(),
-            });
-        }
-        for (field, value) in [
-            ("target", federate.target().as_str()),
-            ("runtime", federate.runtime().as_str()),
-        ] {
-            if !valid_id(value) {
-                return Err(ImageValidationError::InvalidStableId {
-                    kind: field,
-                    index,
-                    id: value,
-                });
-            }
-        }
-        let mut previous_enclave = None;
-        for (offset, enclave) in image.enclaves().iter().enumerate() {
-            let enclave_index = u32::try_from(federate.enclaves().start() + offset)
-                .expect("validated Enclave key fits its u32 representation");
-            validate(enclave)?;
-            validate_id(
-                "enclave",
-                enclave_index,
-                enclave.enclave_id.as_str(),
-                &mut previous_enclave,
-            )?;
-        }
-        Ok(Self { image: *image })
-    }
-
-    /// Returns the selected deployment-wide Federate index.
-    #[must_use]
-    pub const fn federate(&self) -> FederateIndex {
-        self.image.federate()
-    }
-
-    /// Returns the stable Federate identity.
-    #[must_use]
-    pub fn id(&self) -> FederateId<'a> {
-        self.image.image().id()
-    }
-
-    /// Returns the configured compilation target.
-    #[must_use]
-    pub fn target(&self) -> TargetId<'a> {
-        self.image.image().target()
-    }
-
-    /// Returns the configured runtime backend.
-    #[must_use]
-    pub fn runtime(&self) -> RuntimeBackendId<'a> {
-        self.image.image().runtime()
-    }
-
-    /// Returns the preserved deployment-wide Enclave ownership range.
-    #[must_use]
-    pub const fn enclaves(&self) -> IndexSpan<EnclaveIndex> {
-        self.image.image().enclaves()
-    }
-
-    /// Iterates validated local Enclave views with their deployment-wide keys.
-    pub fn enclave_views(
-        &self,
-    ) -> impl ExactSizeIterator<Item = (EnclaveIndex, EnclaveImageView<'a>)> + 'a {
-        let start = self.enclaves().start();
-        self.image
-            .enclaves()
-            .iter()
-            .enumerate()
-            .map(move |(offset, image)| {
-                (
-                    EnclaveIndex::from(start + offset),
-                    EnclaveImageView::validated(image),
-                )
-            })
-    }
-}
-
 /// A validated, allocation-free borrowed view of one Enclave image.
 #[derive(Debug)]
 pub struct EnclaveImageView<'a> {
@@ -549,13 +437,6 @@ fn check_len<K: Key>(table: &'static str, len: usize) -> Result<(), ImageValidat
     } else {
         Ok(())
     }
-}
-
-/// Returns whether an owner-allocated span fits its dense key domain.
-fn enclave_span_fits_index_domain(span: IndexSpan<EnclaveIndex>) -> bool {
-    let start = span.start() as u64;
-    let len = span.len() as u64;
-    start + len <= u64::from(u32::MAX) + 1
 }
 
 fn check_ref<'a, K: Key, V>(
@@ -1884,7 +1765,6 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
 #[cfg(test)]
 mod tests {
     use super::super::*;
-    use super::enclave_span_fits_index_domain;
     use tinymap::{IndexSpan, SliceRange};
 
     const fn federate_image(
@@ -2278,104 +2158,6 @@ mod tests {
         assert_eq!(federate.id().as_str(), "host");
         assert_eq!(federate.enclaves(), IndexSpan::new(0, 2));
         assert_eq!(federate.enclave_views().count(), 2);
-    }
-
-    /// Preserves external Enclave keys while validating local slice ownership.
-    #[test]
-    fn federate_slice_preserves_deployment_enclave_keys_and_rejects_wrong_length() {
-        let federate = federate_image(
-            "host",
-            "aarch64-unknown-linux-gnu",
-            "hosted",
-            IndexSpan::new(2, 2),
-        );
-        let slice = FederateSliceImage::new(FederateIndex::new(1), federate, &ENCLAVES);
-
-        let view = FederateSliceView::new(&slice).unwrap();
-        assert_eq!(view.federate(), FederateIndex::new(1));
-        assert_eq!(view.enclaves(), IndexSpan::new(2, 2));
-        assert_eq!(
-            view.enclave_views().map(|(key, _)| key).collect::<Vec<_>>(),
-            vec![EnclaveIndex::new(2), EnclaveIndex::new(3)]
-        );
-
-        let reordered_enclaves = [SECOND_IMAGE, IMAGE];
-        let reordered =
-            FederateSliceImage::new(FederateIndex::new(1), federate, &reordered_enclaves);
-        assert!(matches!(
-            FederateSliceView::new(&reordered),
-            Err(ImageValidationError::StableIdsNotSorted {
-                kind: "enclave",
-                index: 3,
-                id: "plant/control",
-            })
-        ));
-
-        let duplicate_enclaves = [IMAGE, IMAGE];
-        let duplicate =
-            FederateSliceImage::new(FederateIndex::new(1), federate, &duplicate_enclaves);
-        assert!(matches!(
-            FederateSliceView::new(&duplicate),
-            Err(ImageValidationError::DuplicateStableId {
-                kind: "enclave",
-                index: 3,
-                id: "plant/control",
-            })
-        ));
-
-        let wrong_length = FederateSliceImage::new(
-            FederateIndex::new(1),
-            federate_image(
-                "host",
-                "aarch64-unknown-linux-gnu",
-                "hosted",
-                IndexSpan::new(2, 1),
-            ),
-            &ENCLAVES,
-        );
-        assert!(matches!(
-            FederateSliceView::new(&wrong_length),
-            Err(ImageValidationError::OwnershipMismatch {
-                table: "federates",
-                index: 1,
-                field: "enclaves",
-            })
-        ));
-
-        let overflowing_range = FederateSliceImage::new(
-            FederateIndex::new(1),
-            federate_image(
-                "host",
-                "aarch64-unknown-linux-gnu",
-                "hosted",
-                IndexSpan::new(u32::MAX as usize, 2),
-            ),
-            &ENCLAVES,
-        );
-        assert!(matches!(
-            FederateSliceView::new(&overflowing_range),
-            Err(ImageValidationError::RangeOutOfBounds {
-                table: "federates",
-                index: 1,
-                field: "enclaves",
-                target: "enclaves",
-                start: 4_294_967_295,
-                len: 2,
-            })
-        ));
-    }
-
-    /// Preserves the last representable Enclave key across all pointer widths.
-    #[test]
-    fn federate_slice_range_arithmetic_preserves_terminal_enclave_key() {
-        assert!(enclave_span_fits_index_domain(IndexSpan::new(
-            u32::MAX as usize,
-            1,
-        )));
-        assert!(!enclave_span_fits_index_domain(IndexSpan::new(
-            u32::MAX as usize,
-            2,
-        )));
     }
 
     #[test]

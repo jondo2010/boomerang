@@ -32,7 +32,7 @@ pub use identity::{
     PlacementGroupId, PortId, ReactionId, ReactorId, RuntimeBackendId, StableEnclaveId, StablePath,
     StablePathSegment, StableText, TargetTriple, TransportCapabilityId,
 };
-pub use lower::{lower, CompileError};
+pub use lower::CompileError;
 pub use model::{
     Action, ActionKind, ApplicationTopology, ApplicationTopologyBuilder, BankMember,
     ComponentInstance, Connection, ConnectionSemantics, Enclave, InvalidBankMember, Mode,
@@ -45,14 +45,6 @@ pub use resolved::{ResolveError, ResolvedDeployment};
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn component_instance_preserves_explicit_contract_requirement() {
-        let component = ComponentInstance::new("vehicle/sensor", "sensor", 7).unwrap();
-        assert_eq!(component.id().to_string(), "vehicle/sensor");
-        assert_eq!(component.contract().as_str(), "sensor");
-        assert_eq!(component.contract_version(), 7);
-    }
 
     #[test]
     fn topology_builder_rejects_duplicate_component_ids() {

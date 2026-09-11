@@ -118,125 +118,6 @@ struct LoweredBindings {
     images: tinymap::TinyMap<BindingSlotIndex, OwnedBindingImage>,
 }
 
-/// Allocates the Enclave binding table from stable semantic owners.
-fn lower_bindings(
-    deployment: &ResolvedDeployment,
-    enclave_id: &compiler::StableEnclaveId,
-    reactors: &[(&compiler::ReactorId, &compiler::Reactor)],
-    reactions: &[(&compiler::ReactionId, &compiler::Reaction)],
-    representatives: &[compiler::PortId],
-    actions: &[(&compiler::ActionId, &compiler::Action)],
-) -> Result<LoweredBindings, CompileError> {
-    let topology = deployment.topology();
-    let mut named = reactors
-        .iter()
-        .map(|(id, reactor)| {
-            let slots = DescriptorSlots::for_component(deployment, reactor.component())?;
-            Ok((
-                BindingOwner::State((*id).clone()),
-                format!("state/{id}"),
-                RequiredBinding::State {
-                    component: reactor.component().clone(),
-                    implementation: slots.implementation.clone(),
-                    reactor: slots.reactor_slot(id)?,
-                },
-            ))
-        })
-        .collect::<Result<Vec<_>, CompileError>>()?;
-    named.extend(
-        reactions
-            .iter()
-            .map(|(id, reaction)| {
-                let component = topology
-                    .reactor(reaction.reactor())
-                    .expect("validated reaction reactor exists")
-                    .component();
-                let slots = DescriptorSlots::for_component(deployment, component)?;
-                Ok((
-                    BindingOwner::Reaction((*id).clone()),
-                    format!("reaction/{id}"),
-                    RequiredBinding::Reaction {
-                        component: component.clone(),
-                        implementation: slots.implementation.clone(),
-                        reaction: slots.reaction_slot(id)?,
-                    },
-                ))
-            })
-            .collect::<Result<Vec<_>, CompileError>>()?,
-    );
-    named.extend(
-        representatives
-            .iter()
-            .map(|id| {
-                let port = topology.port(id).expect("port representative exists");
-                let component = topology
-                    .reactor(port.reactor())
-                    .expect("validated port reactor exists")
-                    .component();
-                let slots = DescriptorSlots::for_component(deployment, component)?;
-                Ok((
-                    BindingOwner::Port(id.clone()),
-                    format!("port/{id}"),
-                    RequiredBinding::Port {
-                        component: component.clone(),
-                        implementation: slots.implementation.clone(),
-                        port: slots.port_slot(id, port.bank())?,
-                    },
-                ))
-            })
-            .collect::<Result<Vec<_>, CompileError>>()?,
-    );
-    named.extend(
-        actions
-            .iter()
-            .filter(|(_, action)| {
-                matches!(
-                    action.kind(),
-                    compiler::ActionKind::Logical { .. } | compiler::ActionKind::Physical { .. }
-                )
-            })
-            .map(|(id, action)| {
-                let component = topology
-                    .reactor(action.reactor())
-                    .expect("validated action reactor exists")
-                    .component();
-                let slots = DescriptorSlots::for_component(deployment, component)?;
-                Ok((
-                    BindingOwner::Action((*id).clone()),
-                    format!("action/{id}"),
-                    RequiredBinding::Action {
-                        component: component.clone(),
-                        implementation: slots.implementation.clone(),
-                        action: slots.action_slot(id)?,
-                    },
-                ))
-            })
-            .collect::<Result<Vec<_>, CompileError>>()?,
-    );
-    named.sort_by(|left, right| left.1.cmp(&right.1));
-    let entries = named
-        .iter()
-        .map(|(_, _, binding)| binding.clone())
-        .collect::<Vec<_>>()
-        .into_boxed_slice();
-    let mut indices = BTreeMap::new();
-    let mut images = tinymap::TinyMap::<BindingSlotIndex, _>::new();
-    for (owner, id, binding) in &named {
-        let key = images
-            .try_insert(OwnedBindingImage::new(id, binding.kind()))
-            .map_err(|_| CompileError::ResourceOverflow {
-                enclave: enclave_id.clone(),
-                resource: "bindings",
-            })?;
-        indices.insert(owner.clone(), key);
-    }
-    Ok(LoweredBindings {
-        entries,
-        indices,
-        images,
-    })
-}
-
 /// Lowers boundary routes incident on the Enclave's locally materialized ports.
 fn lower_routes(
     topology: &compiler::ApplicationTopology,
@@ -822,14 +703,13 @@ struct LoweredRelationshipTables {
 
 /// Builds packed scope and lifecycle relationships from resolved entity keys.
 fn lower_relationship_tables(
-    deployment: &ResolvedDeployment,
+    topology: &ApplicationTopology,
     enclave_id: &compiler::StableEnclaveId,
     analysis: &GlobalAnalysis,
     selection: &CanonicalEnclaveSelection<'_>,
     scopes: &mut tinymap::TinyMap<ScopeIndex, ScopeImage>,
     inputs: &RelationshipInputs,
 ) -> Result<LoweredRelationshipTables, CompileError> {
-    let topology = deployment.topology();
     let CanonicalEnclaveSelection {
         reactors: _,
         actions,
@@ -1109,45 +989,166 @@ fn assemble_enclave_image(
     Ok(owned)
 }
 
-/// Lowers one canonically ordered Enclave slice using deployment-wide analysis.
-pub(super) fn lower_enclave(
-    deployment: &ResolvedDeployment,
-    enclave_id: &compiler::StableEnclaveId,
-    analysis: &GlobalAnalysis,
-) -> Result<OwnedEnclaveImage, CompileError> {
-    let topology = deployment.topology();
-    let selection = CanonicalEnclaveSelection::select(topology, enclave_id, analysis);
-    let bindings = lower_bindings(
-        deployment,
-        enclave_id,
-        &selection.reactors,
-        &selection.reactions,
-        &selection.representatives,
-        &selection.actions,
-    )?;
-    let (mut entities, relationship_inputs, port_indices) =
-        lower_entity_tables(deployment, enclave_id, analysis, &selection, &bindings)?;
-    let relationships = lower_relationship_tables(
-        deployment,
-        enclave_id,
-        analysis,
-        &selection,
-        &mut entities.scopes,
-        &relationship_inputs,
-    )?;
-    let route_images = lower_routes(topology, enclave_id, &port_indices)?;
-    let storage_bounds = storage_bounds(
-        deployment,
-        enclave_id,
-        &selection.reactors,
-        selection.actions.len(),
-    )?;
-    assemble_enclave_image(
-        enclave_id,
-        bindings,
-        entities,
-        relationships,
-        route_images,
-        storage_bounds,
-    )
+impl ResolvedDeployment {
+    /// Lowers one canonically ordered Enclave slice using deployment-wide analysis.
+    pub(super) fn lower_enclave(
+        &self,
+        enclave_id: &compiler::StableEnclaveId,
+        analysis: &GlobalAnalysis,
+    ) -> Result<OwnedEnclaveImage, CompileError> {
+        let topology = self.topology();
+        let selection = CanonicalEnclaveSelection::select(topology, enclave_id, analysis);
+        let bindings = self.lower_bindings(
+            enclave_id,
+            &selection.reactors,
+            &selection.reactions,
+            &selection.representatives,
+            &selection.actions,
+        )?;
+        let (mut entities, relationship_inputs, port_indices) =
+            lower_entity_tables(self, enclave_id, analysis, &selection, &bindings)?;
+        let relationships = lower_relationship_tables(
+            self.topology(),
+            enclave_id,
+            analysis,
+            &selection,
+            &mut entities.scopes,
+            &relationship_inputs,
+        )?;
+        let route_images = lower_routes(topology, enclave_id, &port_indices)?;
+        let storage_bounds = storage_bounds(
+            self,
+            enclave_id,
+            &selection.reactors,
+            selection.actions.len(),
+        )?;
+        assemble_enclave_image(
+            enclave_id,
+            bindings,
+            entities,
+            relationships,
+            route_images,
+            storage_bounds,
+        )
+    }
+
+    /// Allocates the Enclave binding table from stable semantic owners.
+    fn lower_bindings(
+        &self,
+        enclave_id: &compiler::StableEnclaveId,
+        reactors: &[(&compiler::ReactorId, &compiler::Reactor)],
+        reactions: &[(&compiler::ReactionId, &compiler::Reaction)],
+        representatives: &[compiler::PortId],
+        actions: &[(&compiler::ActionId, &compiler::Action)],
+    ) -> Result<LoweredBindings, CompileError> {
+        let topology = self.topology();
+        let mut named = reactors
+            .iter()
+            .map(|(id, reactor)| {
+                let slots = DescriptorSlots::for_component(self, reactor.component())?;
+                Ok((
+                    BindingOwner::State((*id).clone()),
+                    format!("state/{id}"),
+                    RequiredBinding::State {
+                        component: reactor.component().clone(),
+                        implementation: slots.implementation.clone(),
+                        reactor: slots.reactor_slot(id)?,
+                    },
+                ))
+            })
+            .collect::<Result<Vec<_>, CompileError>>()?;
+        named.extend(
+            reactions
+                .iter()
+                .map(|(id, reaction)| {
+                    let component = topology
+                        .reactor(reaction.reactor())
+                        .expect("validated reaction reactor exists")
+                        .component();
+                    let slots = DescriptorSlots::for_component(self, component)?;
+                    Ok((
+                        BindingOwner::Reaction((*id).clone()),
+                        format!("reaction/{id}"),
+                        RequiredBinding::Reaction {
+                            component: component.clone(),
+                            implementation: slots.implementation.clone(),
+                            reaction: slots.reaction_slot(id)?,
+                        },
+                    ))
+                })
+                .collect::<Result<Vec<_>, CompileError>>()?,
+        );
+        named.extend(
+            representatives
+                .iter()
+                .map(|id| {
+                    let port = topology.port(id).expect("port representative exists");
+                    let component = topology
+                        .reactor(port.reactor())
+                        .expect("validated port reactor exists")
+                        .component();
+                    let slots = DescriptorSlots::for_component(self, component)?;
+                    Ok((
+                        BindingOwner::Port(id.clone()),
+                        format!("port/{id}"),
+                        RequiredBinding::Port {
+                            component: component.clone(),
+                            implementation: slots.implementation.clone(),
+                            port: slots.port_slot(id, port.bank())?,
+                        },
+                    ))
+                })
+                .collect::<Result<Vec<_>, CompileError>>()?,
+        );
+        named.extend(
+            actions
+                .iter()
+                .filter(|(_, action)| {
+                    matches!(
+                        action.kind(),
+                        compiler::ActionKind::Logical { .. }
+                            | compiler::ActionKind::Physical { .. }
+                    )
+                })
+                .map(|(id, action)| {
+                    let component = topology
+                        .reactor(action.reactor())
+                        .expect("validated action reactor exists")
+                        .component();
+                    let slots = DescriptorSlots::for_component(self, component)?;
+                    Ok((
+                        BindingOwner::Action((*id).clone()),
+                        format!("action/{id}"),
+                        RequiredBinding::Action {
+                            component: component.clone(),
+                            implementation: slots.implementation.clone(),
+                            action: slots.action_slot(id)?,
+                        },
+                    ))
+                })
+                .collect::<Result<Vec<_>, CompileError>>()?,
+        );
+        named.sort_by(|left, right| left.1.cmp(&right.1));
+        let entries = named
+            .iter()
+            .map(|(_, _, binding)| binding.clone())
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        let mut indices = BTreeMap::new();
+        let mut images = tinymap::TinyMap::<BindingSlotIndex, _>::new();
+        for (owner, id, binding) in &named {
+            let key = images
+                .try_insert(OwnedBindingImage::new(id, binding.kind()))
+                .map_err(|_| CompileError::ResourceOverflow {
+                    enclave: enclave_id.clone(),
+                    resource: "bindings",
+                })?;
+            indices.insert(owner.clone(), key);
+        }
+        Ok(LoweredBindings {
+            entries,
+            indices,
+            images,
+        })
+    }
 }

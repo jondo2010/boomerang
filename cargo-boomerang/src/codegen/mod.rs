@@ -497,7 +497,6 @@ pub(crate) fn generate_analyzed_launcher(
                 &compile_inputs,
                 &aliases,
                 &analyzed.resolved,
-                capabilities,
                 &cargo_program,
                 output,
             )
@@ -613,10 +612,10 @@ fn validate_launcher_graph(
     compile_inputs: &[(String, String)],
     aliases: &BTreeMap<String, String>,
     resolved: &ResolvedWorkspace,
-    capabilities: LauncherCapabilities,
     cargo_program: &OsStr,
     progress: &crate::CommandOutput,
 ) -> Result<PackageId> {
+    let capabilities = launcher_capabilities(federate.runtime.as_str())?;
     let application_workspace = resolved
         .lockfile()
         .path

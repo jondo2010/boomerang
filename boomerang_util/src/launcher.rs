@@ -15,7 +15,7 @@ pub fn init_tracing() {
         .with_default_directive(tracing_subscriber::filter::LevelFilter::OFF.into())
         .from_env_lossy();
     let ansi = std::io::stderr().is_terminal()
-        && std::env::var_os("NO_COLOR").map_or(true, |value| value.is_empty());
+        && std::env::var_os("NO_COLOR").is_none_or(|value| value.is_empty());
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_ansi(ansi)

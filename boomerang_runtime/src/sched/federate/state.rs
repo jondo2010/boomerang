@@ -280,7 +280,6 @@ impl FederateCoordinationState {
     }
 
     /// Returns the typed participant origin retained from the first failure.
-    #[cfg(test)]
     pub(crate) const fn first_failure(&self) -> Option<EnclaveIndex> {
         self.first_failure
     }

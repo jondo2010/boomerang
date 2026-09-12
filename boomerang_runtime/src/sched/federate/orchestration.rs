@@ -240,7 +240,21 @@ pub(crate) struct FederateCoordinator<B: FederateCoordinationBackend> {
 
 impl<B: FederateCoordinationBackend> FederateCoordinator<B> {
     /// Runs until pure coordination stops or returns its first backend, state, or channel failure.
+    #[cfg(test)]
     pub(crate) fn run(mut self) -> Result<(), FederateCoordinationError> {
+        self.run_loop()
+    }
+
+    /// Returns the authoritative first failing participant after bounded peer release.
+    pub(crate) fn run_with_failure_origin(
+        mut self,
+    ) -> (Result<(), FederateCoordinationError>, Option<EnclaveIndex>) {
+        let result = self.run_loop();
+        (result, self.state.first_failure())
+    }
+
+    /// Serializes reports and backend input until terminal coordination.
+    fn run_loop(&mut self) -> Result<(), FederateCoordinationError> {
         loop {
             let outcome = match self.report_rx.recv_timeout(StdDuration::from_millis(1)) {
                 Ok(report) => self.handle_report(report),

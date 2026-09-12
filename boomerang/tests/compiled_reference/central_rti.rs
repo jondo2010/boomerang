@@ -235,13 +235,7 @@ fn completed_source_cannot_emit_late_payload() {
         WireTag,
     };
     let mut rti = admitted_rti();
-    rti.handle(
-        MEMBERS[0],
-        RtiRequest::Publish {
-            revision: 0,
-            next_event: Some(WireTag::ZERO),
-        },
-    );
+    publish(&mut rti, MEMBERS[0], 0, Some(WireTag::ZERO));
     rti.handle(MEMBERS[0], RtiRequest::Complete { tag: WireTag::ZERO });
     let replies = rti.handle(
         MEMBERS[0],
@@ -275,23 +269,11 @@ fn unknown_upstream_blocks_and_in_transit_payload_prevents_idle() {
             }
         )
         .is_empty());
-    let replies = rti.handle(
-        MEMBERS[0],
-        RtiRequest::Publish {
-            revision: 0,
-            next_event: Some(WireTag::ZERO),
-        },
-    );
+    let replies = publish(&mut rti, MEMBERS[0], 0, Some(WireTag::ZERO));
     assert!(
         matches!(replies.as_slice(), [delivery] if delivery.member == MEMBERS[0] && matches!(delivery.reply, RtiReply::Grant { .. }))
     );
-    rti.handle(
-        MEMBERS[1],
-        RtiRequest::Publish {
-            revision: 1,
-            next_event: None,
-        },
-    );
+    publish(&mut rti, MEMBERS[1], 1, None);
     let replies = rti.handle(
         MEMBERS[0],
         RtiRequest::Payload {
@@ -313,24 +295,12 @@ fn unknown_upstream_blocks_and_in_transit_payload_prevents_idle() {
             }
         )
         .is_empty());
-    let replies = rti.handle(
-        MEMBERS[1],
-        RtiRequest::Publish {
-            revision: 2,
-            next_event: Some(destination),
-        },
-    );
+    let replies = publish(&mut rti, MEMBERS[1], 2, Some(destination));
     assert!(
         matches!(replies.as_slice(), [delivery] if matches!(delivery.reply, RtiReply::Grant { revision: 2, tag } if tag == destination))
     );
     rti.handle(MEMBERS[1], RtiRequest::Complete { tag: destination });
-    rti.handle(
-        MEMBERS[1],
-        RtiRequest::Publish {
-            revision: 3,
-            next_event: None,
-        },
-    );
+    publish(&mut rti, MEMBERS[1], 3, None);
     rti.handle(MEMBERS[0], RtiRequest::ConfirmIdle { revision: 1 });
     let replies = rti.handle(MEMBERS[1], RtiRequest::ConfirmIdle { revision: 3 });
     assert_eq!(
@@ -345,31 +315,16 @@ fn unknown_upstream_blocks_and_in_transit_payload_prevents_idle() {
 /// Preserves wakeable idle for members that have not requested termination.
 #[test]
 fn local_idle_is_reversible_without_terminal_participation() {
-    use boomerang::central_rti::{
-        compiled::{RtiReply, RtiRequest},
-        WireTag,
-    };
+    use boomerang::central_rti::{compiled::RtiReply, WireTag};
     let mut rti = admitted_rti();
     for member in MEMBERS {
-        let replies = rti.handle(
-            member,
-            RtiRequest::Publish {
-                revision: 0,
-                next_event: None,
-            },
-        );
+        let replies = publish(&mut rti, member, 0, None);
         assert!(
             replies.is_empty(),
             "local idle must not imply terminal participation"
         );
     }
-    let replies = rti.handle(
-        MEMBERS[0],
-        RtiRequest::Publish {
-            revision: 1,
-            next_event: Some(WireTag::ZERO),
-        },
-    );
+    let replies = publish(&mut rti, MEMBERS[0], 1, Some(WireTag::ZERO));
     assert!(
         matches!(replies.as_slice(), [delivery] if matches!(delivery.reply, RtiReply::Grant { .. }))
     );
@@ -384,32 +339,14 @@ fn positive_delay_completion_does_not_cover_later_source_microsteps() {
     };
     let mut rti = admitted_rti();
     let destination = WireTag::finite(1_000_000, 0);
-    rti.handle(
-        MEMBERS[0],
-        RtiRequest::Publish {
-            revision: 0,
-            next_event: Some(WireTag::ZERO),
-        },
-    );
+    publish(&mut rti, MEMBERS[0], 0, Some(WireTag::ZERO));
     rti.handle(MEMBERS[0], RtiRequest::Complete { tag: WireTag::ZERO });
-    let replies = rti.handle(
-        MEMBERS[1],
-        RtiRequest::Publish {
-            revision: 0,
-            next_event: Some(destination),
-        },
-    );
+    let replies = publish(&mut rti, MEMBERS[1], 0, Some(destination));
     assert!(
         replies.is_empty(),
         "a later source microstep can still reach the requested destination tag"
     );
-    rti.handle(
-        MEMBERS[0],
-        RtiRequest::Publish {
-            revision: 1,
-            next_event: Some(WireTag::finite(0, 1)),
-        },
-    );
+    publish(&mut rti, MEMBERS[0], 1, Some(WireTag::finite(0, 1)));
     let replies = rti.handle(
         MEMBERS[0],
         RtiRequest::Payload {
@@ -427,13 +364,7 @@ fn positive_delay_completion_does_not_cover_later_source_microsteps() {
             tag: WireTag::finite(0, 1),
         },
     );
-    let replies = rti.handle(
-        MEMBERS[0],
-        RtiRequest::Publish {
-            revision: 2,
-            next_event: None,
-        },
-    );
+    let replies = publish(&mut rti, MEMBERS[0], 2, None);
     assert!(
         matches!(replies.as_slice(), [delivery] if matches!(delivery.reply, RtiReply::Grant { tag, .. } if tag == destination))
     );
@@ -453,13 +384,7 @@ fn revised_candidates_preserve_grant_horizons_for_payloads_and_completion() {
         WireTag,
     };
     let mut rti = admitted_rti();
-    rti.handle(
-        MEMBERS[0],
-        RtiRequest::Publish {
-            revision: 0,
-            next_event: Some(WireTag::finite(10, 0)),
-        },
-    );
+    publish(&mut rti, MEMBERS[0], 0, Some(WireTag::finite(10, 0)));
     // An already queued grant can cover earlier work discovered inside the Federate.
     let replies = rti.handle(
         MEMBERS[0],
@@ -478,13 +403,7 @@ fn revised_candidates_preserve_grant_horizons_for_payloads_and_completion() {
             tag: WireTag::finite(5, 0),
         },
     );
-    rti.handle(
-        MEMBERS[0],
-        RtiRequest::Publish {
-            revision: 1,
-            next_event: Some(WireTag::finite(6, 0)),
-        },
-    );
+    publish(&mut rti, MEMBERS[0], 1, Some(WireTag::finite(6, 0)));
     let replies = rti.handle(
         MEMBERS[0],
         RtiRequest::Complete {
@@ -493,4 +412,20 @@ fn revised_candidates_preserve_grant_horizons_for_payloads_and_completion() {
     );
     assert!(!rti.is_finished());
     assert!(replies.is_empty());
+}
+
+/// Publishes a fixture candidate through the public RTI protocol boundary.
+fn publish(
+    rti: &mut CompiledRti<'_>,
+    member: FederateIndex,
+    revision: u64,
+    next_event: Option<boomerang::central_rti::WireTag>,
+) -> Vec<boomerang::central_rti::compiled::RtiDelivery> {
+    rti.handle(
+        member,
+        boomerang::central_rti::compiled::RtiRequest::Publish {
+            revision,
+            next_event,
+        },
+    )
 }

@@ -542,6 +542,20 @@ fn panic_message(payload: Box<dyn Any + Send>) -> String {
     }
 }
 
+/// Selects the causally first scheduler error, falling back to result arrival if no origin survived.
+fn select_scheduler_failure(
+    errors: TinySecondaryMap<EnclaveIndex, ExecuteOwnedFederateError>,
+    origin: Option<EnclaveIndex>,
+    first_arrival: Option<EnclaveIndex>,
+) -> Option<ExecuteOwnedFederateError> {
+    let selected = origin
+        .filter(|key| errors.get(*key).is_some())
+        .or(first_arrival)?;
+    errors
+        .into_iter()
+        .find_map(|(key, error)| (key == selected).then_some(error))
+}
+
 /// Retains a joined coordinator failure only when no worker failure was observed first.
 fn latch_coordinator_result(
     failure: &mut Option<ExecuteOwnedFederateError>,
@@ -1007,7 +1021,7 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
         } else {
             std::thread::Builder::new()
                 .name("federate-coordination".to_owned())
-                .spawn_scoped(scope, move || coordinator.run())
+                .spawn_scoped(scope, move || coordinator.run_with_failure_origin())
         };
         let coordinator_thread = match coordinator_thread {
             Ok(handle) => handle,
@@ -1103,6 +1117,8 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
         drop(participant_ports);
         drop(result_tx);
 
+        let mut worker_errors = TinySecondaryMap::new();
+        let mut first_worker = None;
         let started_count = handles.len();
         let mut results = TinySecondaryMap::with_capacity(enclave_count);
         for _ in 0..started_count {
@@ -1110,14 +1126,15 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
                 Ok((enclave, Ok(result))) => {
                     results.insert(enclave, result);
                 }
-                Ok((_, Err(error))) => {
-                    if failure.is_none() {
+                Ok((enclave, Err(error))) => {
+                    if first_worker.is_none() && failure.is_none() {
                         abort();
-                        failure = Some(error);
                     }
+                    first_worker.get_or_insert(enclave);
+                    worker_errors.insert(enclave, error);
                 }
                 Err(_) => {
-                    if failure.is_none() {
+                    if failure.is_none() && first_worker.is_none() {
                         abort();
                         failure = Some(ExecuteOwnedFederateError::ResultChannelClosed);
                     }
@@ -1127,7 +1144,7 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
         }
         for (enclave, handle) in handles {
             if let Err(payload) = handle.join() {
-                if failure.is_none() {
+                if failure.is_none() && first_worker.is_none() {
                     abort();
                     failure = Some(ExecuteOwnedFederateError::ThreadPanicked {
                         enclave,
@@ -1136,7 +1153,15 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
                 }
             }
         }
-        latch_coordinator_result(&mut failure, coordinator_thread.join());
+        let coordinator_result = coordinator_thread.join();
+        if failure.is_none() {
+            let origin = coordinator_result
+                .as_ref()
+                .ok()
+                .and_then(|(_, origin)| *origin);
+            failure = select_scheduler_failure(worker_errors, origin, first_worker);
+        }
+        latch_coordinator_result(&mut failure, coordinator_result.map(|(result, _)| result));
         (results, failure)
     });
 
@@ -1546,6 +1571,30 @@ mod scoped_spawn_tests {
             ExecuteOwnedFederateError::ThreadSpawn { enclave, source }
                 if enclave == failed_enclave && source.kind() == ErrorKind::Other
         ));
+    }
+
+    /// Coordinator authority wins over a secondary panic that reaches the result channel first.
+    #[test]
+    fn scheduler_failure_selection_uses_origin_with_arrival_fallback() {
+        let source = EnclaveIndex::new(0);
+        let peer = EnclaveIndex::new(1);
+        for origin in [None, Some(source), Some(EnclaveIndex::new(9))] {
+            let mut errors = TinySecondaryMap::new();
+            for enclave in [peer, source] {
+                errors.insert(
+                    enclave,
+                    ExecuteOwnedFederateError::ThreadPanicked {
+                        enclave,
+                        message: "failure".into(),
+                    },
+                );
+            }
+            let selected = select_scheduler_failure(errors, origin, Some(peer)).unwrap();
+            assert!(
+                matches!(selected, ExecuteOwnedFederateError::ThreadPanicked { enclave, .. }
+                if enclave == if origin == Some(source) { source } else { peer })
+            );
+        }
     }
 
     /// Verifies a joined coordinator failure is reported unless a worker failed first.

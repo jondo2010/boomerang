@@ -21,58 +21,18 @@ use crate::{
 /// Maximum accepted execution-summary file size in bytes.
 const MAX_EXECUTION_SUMMARY_BYTES: u64 = 16 * 1024;
 
-/// Saturating sums of scheduler-work counters from a completed generated Federate.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ExecutionStats {
-    /// Scheduler tag-processing steps, including terminal tags.
-    processed_tags: usize,
-    /// Enabled reaction callbacks selected for invocation.
-    processed_reactions: usize,
-    /// Timing-dependent asynchronous scheduler events handled.
-    processed_events: usize,
-    /// Present-port observations during trigger propagation.
-    set_ports: usize,
-    /// Actions explicitly requested by reaction outcomes.
-    scheduled_actions: usize,
-}
-
-impl ExecutionStats {
-    /// Returns the saturating sum of scheduler tag-processing steps, including terminal tags.
-    pub const fn processed_tags(&self) -> usize {
-        self.processed_tags
-    }
-    /// Returns the saturating sum of enabled reaction callbacks selected for invocation.
-    pub const fn processed_reactions(&self) -> usize {
-        self.processed_reactions
-    }
-    /// Returns the saturating sum of timing-dependent asynchronous scheduler events handled.
-    ///
-    /// This is scheduler telemetry, not a count of unique logical events.
-    pub const fn processed_events(&self) -> usize {
-        self.processed_events
-    }
-    /// Returns the saturating sum of present-port observations during trigger propagation.
-    pub const fn set_ports(&self) -> usize {
-        self.set_ports
-    }
-    /// Returns the saturating sum of actions explicitly requested by reaction outcomes.
-    pub const fn scheduled_actions(&self) -> usize {
-        self.scheduled_actions
-    }
-}
-
 /// Final scheduling state reported by one completed generated Federate.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecutionSummary {
     /// Aggregate work counters from the completed execution.
-    stats: ExecutionStats,
+    stats: boomerang_runtime::Stats,
     /// Last nonterminal logical tag observed by the execution.
     final_tag: boomerang_runtime::Tag,
 }
 
 impl ExecutionSummary {
     /// Returns aggregate work counters from the completed execution.
-    pub const fn stats(&self) -> &ExecutionStats {
+    pub const fn stats(&self) -> &boomerang_runtime::Stats {
         &self.stats
     }
     /// Returns the last nonterminal logical tag observed by the execution.
@@ -268,26 +228,10 @@ fn validate_published_host_artifact(document: &DeploymentDocument) -> Result<()>
 struct ExecutionSummaryDocumentV1 {
     /// Protocol schema version.
     schema: u32,
-    /// Aggregate scheduling counters encoded as decimal strings.
-    stats: ExecutionStatsDocumentV1,
+    /// Aggregate scheduling counters.
+    stats: boomerang_runtime::Stats,
     /// Final logical tag encoded as decimal strings.
     final_tag: FinalTagDocumentV1,
-}
-
-/// Schema-v1 aggregate scheduling counters encoded as decimal strings.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ExecutionStatsDocumentV1 {
-    /// Processed logical tag count.
-    processed_tags: String,
-    /// Processed reaction count.
-    processed_reactions: String,
-    /// Processed event count.
-    processed_events: String,
-    /// Set port count.
-    set_ports: String,
-    /// Scheduled action count.
-    scheduled_actions: String,
 }
 
 /// Schema-v1 final logical tag encoded as decimal strings.
@@ -328,13 +272,7 @@ fn read_execution_summary(path: &Path) -> Result<ExecutionSummary> {
         );
     }
     Ok(ExecutionSummary {
-        stats: ExecutionStats {
-            processed_tags: parse_usize("processed_tags", &stats.processed_tags)?,
-            processed_reactions: parse_usize("processed_reactions", &stats.processed_reactions)?,
-            processed_events: parse_usize("processed_events", &stats.processed_events)?,
-            set_ports: parse_usize("set_ports", &stats.set_ports)?,
-            scheduled_actions: parse_usize("scheduled_actions", &stats.scheduled_actions)?,
-        },
+        stats,
         final_tag: boomerang_runtime::Tag::new(
             boomerang_runtime::Duration::nanoseconds_i128(offset_nanos),
             parse_usize("microstep", &final_tag.microstep)?,
@@ -366,7 +304,7 @@ mod tests {
     use super::{copy_verified_executable, prepare_execution_directory, read_execution_summary};
     use crate::bundle::open_published_artifact;
     use std::{fs, io::Write, path::Path};
-    const VALID_SUMMARY: &str = r#"{"schema":1,"stats":{"processed_tags":"1","processed_reactions":"2","processed_events":"3","set_ports":"4","scheduled_actions":"5"},"final_tag":{"offset_nanos":"6","microstep":"7"}}"#;
+    const VALID_SUMMARY: &str = r#"{"schema":1,"stats":{"processed_tags":1,"processed_reactions":2,"processed_events":3,"set_ports":4,"scheduled_actions":5},"final_tag":{"offset_nanos":"6","microstep":"7"}}"#;
     fn write_summary(path: &Path, contents: &str) {
         fs::write(path, contents).unwrap();
     }
@@ -396,37 +334,37 @@ mod tests {
         let cases = [
             (
                 "unsupported-schema",
-                r#"{"schema":2,"stats":{"processed_tags":"1","processed_reactions":"2","processed_events":"3","set_ports":"4","scheduled_actions":"5"},"final_tag":{"offset_nanos":"6","microstep":"7"}}"#,
+                r#"{"schema":2,"stats":{"processed_tags":1,"processed_reactions":2,"processed_events":3,"set_ports":4,"scheduled_actions":5},"final_tag":{"offset_nanos":"6","microstep":"7"}}"#,
                 "unsupported execution summary schema 2",
             ),
             (
                 "unknown-field",
-                r#"{"schema":1,"stats":{"processed_tags":"1","processed_reactions":"2","processed_events":"3","set_ports":"4","scheduled_actions":"5","unexpected":"6"},"final_tag":{"offset_nanos":"6","microstep":"7"}}"#,
+                r#"{"schema":1,"stats":{"processed_tags":1,"processed_reactions":2,"processed_events":3,"set_ports":4,"scheduled_actions":5,"unexpected":6},"final_tag":{"offset_nanos":"6","microstep":"7"}}"#,
                 "unknown field",
             ),
             (
-                "non-decimal",
-                r#"{"schema":1,"stats":{"processed_tags":"one","processed_reactions":"2","processed_events":"3","set_ports":"4","scheduled_actions":"5"},"final_tag":{"offset_nanos":"6","microstep":"7"}}"#,
-                "invalid decimal processed_tags",
+                "string-counter",
+                r#"{"schema":1,"stats":{"processed_tags":"1","processed_reactions":2,"processed_events":3,"set_ports":4,"scheduled_actions":5},"final_tag":{"offset_nanos":"6","microstep":"7"}}"#,
+                "invalid type",
             ),
             (
                 "counter-overflow",
-                r#"{"schema":1,"stats":{"processed_tags":"340282366920938463463374607431768211456","processed_reactions":"2","processed_events":"3","set_ports":"4","scheduled_actions":"5"},"final_tag":{"offset_nanos":"6","microstep":"7"}}"#,
-                "processed_tags is outside host usize",
+                r#"{"schema":1,"stats":{"processed_tags":340282366920938463463374607431768211456,"processed_reactions":2,"processed_events":3,"set_ports":4,"scheduled_actions":5},"final_tag":{"offset_nanos":"6","microstep":"7"}}"#,
+                "expected usize",
             ),
             (
                 "offset-overflow",
-                r#"{"schema":1,"stats":{"processed_tags":"1","processed_reactions":"2","processed_events":"3","set_ports":"4","scheduled_actions":"5"},"final_tag":{"offset_nanos":"170141183460469231731687303715884105728","microstep":"7"}}"#,
+                r#"{"schema":1,"stats":{"processed_tags":1,"processed_reactions":2,"processed_events":3,"set_ports":4,"scheduled_actions":5},"final_tag":{"offset_nanos":"170141183460469231731687303715884105728","microstep":"7"}}"#,
                 "offset_nanos is outside i128",
             ),
             (
                 "duration-min-overflow",
-                r#"{"schema":1,"stats":{"processed_tags":"1","processed_reactions":"2","processed_events":"3","set_ports":"4","scheduled_actions":"5"},"final_tag":{"offset_nanos":"-170141183460469231731687303715884105728","microstep":"7"}}"#,
+                r#"{"schema":1,"stats":{"processed_tags":1,"processed_reactions":2,"processed_events":3,"set_ports":4,"scheduled_actions":5},"final_tag":{"offset_nanos":"-170141183460469231731687303715884105728","microstep":"7"}}"#,
                 "offset_nanos is outside time::Duration range",
             ),
             (
                 "duration-max-overflow",
-                r#"{"schema":1,"stats":{"processed_tags":"1","processed_reactions":"2","processed_events":"3","set_ports":"4","scheduled_actions":"5"},"final_tag":{"offset_nanos":"170141183460469231731687303715884105727","microstep":"7"}}"#,
+                r#"{"schema":1,"stats":{"processed_tags":1,"processed_reactions":2,"processed_events":3,"set_ports":4,"scheduled_actions":5},"final_tag":{"offset_nanos":"170141183460469231731687303715884105727","microstep":"7"}}"#,
                 "offset_nanos is outside time::Duration range",
             ),
         ];

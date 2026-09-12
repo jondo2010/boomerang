@@ -163,11 +163,11 @@ pub fn owned_reference_summary(deployment_name: &str) -> Value {
     json!({
         "schema": 1,
         "stats": {
-            "processed_tags": stats.processed_tags().to_string(),
-            "processed_reactions": stats.processed_reactions().to_string(),
-            "processed_events": stats.processed_events().to_string(),
-            "set_ports": stats.set_ports().to_string(),
-            "scheduled_actions": stats.scheduled_actions().to_string(),
+            "processed_tags": stats.processed_tags(),
+            "processed_reactions": stats.processed_reactions(),
+            "processed_events": stats.processed_events(),
+            "set_ports": stats.set_ports(),
+            "scheduled_actions": stats.scheduled_actions(),
         },
         "final_tag": {
             "offset_nanos": execution.final_tag().offset().whole_nanoseconds().to_string(),

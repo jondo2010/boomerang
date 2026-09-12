@@ -9,6 +9,26 @@ use tracing_subscriber::fmt::format::FmtSpan;
 /// Private protocol variable through which a supervisor requests a summary.
 pub const EXECUTION_SUMMARY_ENV: &str = "BOOMERANG_EXECUTION_SUMMARY_V1";
 
+/// Schema-v1 summary emitted through the private supervisor protocol.
+#[derive(serde::Serialize)]
+struct ExecutionSummaryDocumentV1<'a> {
+    /// Protocol schema version.
+    schema: u32,
+    /// Aggregate runtime scheduling counters.
+    stats: &'a boomerang_runtime::Stats,
+    /// Final logical tag reached by the Federate.
+    final_tag: FinalTagDocumentV1,
+}
+
+/// Schema-v1 final logical tag.
+#[derive(serde::Serialize)]
+struct FinalTagDocumentV1 {
+    /// Signed logical offset in nanoseconds.
+    offset_nanos: String,
+    /// Superdense microstep count.
+    microstep: String,
+}
+
 /// Installs launcher tracing unless this process already has a subscriber.
 pub fn init_tracing() {
     let filter = EnvFilter::builder()
@@ -44,25 +64,18 @@ pub fn write_execution_summary(
         .write(true)
         .create_new(true)
         .open(path)?;
-    let stats = execution.stats();
-    writeln!(
-        file,
-        concat!(
-            "{{\"schema\":1,\"stats\":{{",
-            "\"processed_tags\":\"{}\",",
-            "\"processed_reactions\":\"{}\",",
-            "\"processed_events\":\"{}\",",
-            "\"set_ports\":\"{}\",",
-            "\"scheduled_actions\":\"{}\"}},",
-            "\"final_tag\":{{\"offset_nanos\":\"{}\",",
-            "\"microstep\":\"{}\"}}}}",
-        ),
-        stats.processed_tags(),
-        stats.processed_reactions(),
-        stats.processed_events(),
-        stats.set_ports(),
-        stats.scheduled_actions(),
-        execution.final_tag().offset().whole_nanoseconds(),
-        execution.final_tag().microstep(),
-    )
+    let document = ExecutionSummaryDocumentV1 {
+        schema: 1,
+        stats: execution.stats(),
+        final_tag: FinalTagDocumentV1 {
+            offset_nanos: execution
+                .final_tag()
+                .offset()
+                .whole_nanoseconds()
+                .to_string(),
+            microstep: execution.final_tag().microstep().to_string(),
+        },
+    };
+    serde_json::to_writer(&mut file, &document).map_err(std::io::Error::other)?;
+    writeln!(file)
 }

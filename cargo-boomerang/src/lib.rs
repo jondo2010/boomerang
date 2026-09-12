@@ -22,7 +22,7 @@ pub use manifest::{
     RecoveryPolicy, Rti, SecurityPolicy, TimingPolicy, Topology, TransportPolicy,
 };
 pub use output::{ColorChoice, CommandOutput};
-pub use run::{run, run_with_output, ExecutionStats, ExecutionSummary, RunOutcome};
+pub use run::{run, run_with_output, ExecutionSummary, RunOutcome};
 pub use workspace::{
     resolve_workspace, CargoPackage, LockfileIdentity, ResolvedFederate, ResolvedWorkspace,
 };

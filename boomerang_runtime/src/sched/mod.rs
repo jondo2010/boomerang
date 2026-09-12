@@ -116,7 +116,10 @@ impl Config {
     }
 }
 
+/// Scheduler-work counters accumulated by one execution or saturating aggregate.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(deny_unknown_fields))]
 pub struct Stats {
     /// Scheduler tag-processing steps, including terminal tags.
     processed_tags: usize,
@@ -1165,6 +1168,28 @@ mod tests {
 #[cfg(test)]
 mod stats_tests {
     use super::*;
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn stats_serde_round_trips_numeric_counters() {
+        let stats = Stats {
+            processed_tags: 1,
+            processed_reactions: 2,
+            processed_events: 3,
+            set_ports: 4,
+            scheduled_actions: 5,
+        };
+
+        let expected = serde_json::json!({
+            "processed_tags": 1,
+            "processed_reactions": 2,
+            "processed_events": 3,
+            "set_ports": 4,
+            "scheduled_actions": 5,
+        });
+        assert_eq!(serde_json::to_value(stats).unwrap(), expected);
+        assert_eq!(serde_json::from_value::<Stats>(expected).unwrap(), stats);
+    }
 
     #[test]
     fn stats_aggregation_saturates_every_counter() {

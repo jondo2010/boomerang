@@ -91,7 +91,9 @@ Execution-summary emission shall retain the existing private protocol:
 
 - no file is created unless `BOOMERANG_EXECUTION_SUMMARY_V1` is present;
 - the file is created without overwriting an existing path;
-- schema version 1 and decimal-string numeric fields are preserved; and
+- schema version 1 embeds `Stats` through its serde representation, while
+  final-tag values remain decimal strings so the full logical-time range is
+  representable; and
 - write failures fail the launcher, because a supervising
   `cargo-boomerang run` requested the result.
 
@@ -193,7 +195,8 @@ through the existing run result handling.
 Moving the writer must not weaken the supervisor's validation. The host-side
 reader in `cargo-boomerang` shall continue to reject symlinks and non-regular
 files, oversized documents, unknown fields, unsupported schema versions,
-malformed decimal values, and values outside host numeric ranges.
+malformed counter types or final-tag decimals, and values outside host numeric
+ranges.
 
 The environment-variable name and schema-v1 document shape form a private
 versioned contract shared by `boomerang_util::launcher` and `cargo-boomerang`.

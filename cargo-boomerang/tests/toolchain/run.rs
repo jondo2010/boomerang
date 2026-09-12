@@ -35,11 +35,11 @@ fn summary_json(summary: &cargo_boomerang::ExecutionSummary) -> Value {
     json!({
         "schema": 1,
         "stats": {
-            "processed_tags": stats.processed_tags().to_string(),
-            "processed_reactions": stats.processed_reactions().to_string(),
-            "processed_events": stats.processed_events().to_string(),
-            "set_ports": stats.set_ports().to_string(),
-            "scheduled_actions": stats.scheduled_actions().to_string(),
+            "processed_tags": stats.processed_tags(),
+            "processed_reactions": stats.processed_reactions(),
+            "processed_events": stats.processed_events(),
+            "set_ports": stats.set_ports(),
+            "scheduled_actions": stats.scheduled_actions(),
         },
         "final_tag": {
             "offset_nanos": summary.final_tag().offset().whole_nanoseconds().to_string(),
@@ -75,8 +75,8 @@ fn generated_monolith_matches_owned_reference_execution_summary() {
     ] {
         assert_eq!(observed["stats"][counter], expected["stats"][counter]);
     }
-    assert_ne!(expected["stats"]["processed_events"], "0");
-    assert_ne!(observed["stats"]["processed_events"], "0");
+    assert_ne!(expected["stats"]["processed_events"], 0);
+    assert_ne!(observed["stats"]["processed_events"], 0);
 }
 
 #[test]

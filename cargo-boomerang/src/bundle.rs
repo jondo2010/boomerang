@@ -218,6 +218,48 @@ pub(crate) struct BundleSource<'a> {
     pub(crate) executable: &'a Path,
 }
 
+/// Stable paths produced by one successful immutable bundle publication.
+#[derive(Debug)]
+pub(crate) struct PublishedBundle {
+    /// Published deployment manifest returned by the public build API.
+    manifest: PathBuf,
+    /// Canonically ordered executable artifacts in the published bundle.
+    executables: Vec<PublishedExecutable>,
+}
+
+impl PublishedBundle {
+    /// Returns the canonically ordered published executable artifacts.
+    pub(crate) fn executables(&self) -> &[PublishedExecutable] {
+        &self.executables
+    }
+
+    /// Consumes the publication result and returns its deployment manifest.
+    pub(crate) fn into_manifest(self) -> PathBuf {
+        self.manifest
+    }
+}
+
+/// One federate-owned executable in an immutable published bundle.
+#[derive(Debug)]
+pub(crate) struct PublishedExecutable {
+    /// Stable federate identity owning this executable.
+    federate: String,
+    /// Absolute path to the published executable bytes.
+    path: PathBuf,
+}
+
+impl PublishedExecutable {
+    /// Returns the stable identity of the owning Federate.
+    pub(crate) fn federate(&self) -> &str {
+        &self.federate
+    }
+
+    /// Returns the absolute path to the published executable.
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
 /// Verified document and executable selected from a published deployment bundle.
 #[derive(Debug)]
 pub(crate) struct PublishedArtifact {
@@ -291,7 +333,7 @@ pub(crate) fn publish_bundle(
     target_directory: &Path,
     mut document: DeploymentDocument,
     sources: &[BundleSource<'_>],
-) -> Result<PathBuf> {
+) -> Result<PublishedBundle> {
     validate_segment(&document.deployment, "deployment")?;
     validate_fingerprint(&document.fingerprint)?;
     if sources.len() != document.federates.len() {
@@ -365,7 +407,7 @@ pub(crate) fn publish_bundle(
     validate_bundle(staging.path(), &decoded)?;
 
     let final_directory = parent.join(&document.fingerprint);
-    match rename_noreplace(staging.path(), &final_directory) {
+    let manifest = match rename_noreplace(staging.path(), &final_directory) {
         Ok(()) => accept_existing(&final_directory, &document),
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
             accept_existing(&final_directory, &document)
@@ -377,7 +419,24 @@ pub(crate) fn publish_bundle(
                 final_directory.display()
             )
         }),
-    }
+    }?;
+    let bundle = manifest
+        .parent()
+        .expect("published deployment manifest has a bundle parent");
+    let executables = document
+        .artifacts
+        .iter()
+        .map(|artifact| {
+            Ok(PublishedExecutable {
+                federate: artifact.federate.clone(),
+                path: join_normalized(bundle, &artifact.path)?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(PublishedBundle {
+        manifest,
+        executables,
+    })
 }
 
 /// Atomically renames a directory only when the destination does not exist.
@@ -1035,7 +1094,8 @@ mod tests {
                 executable: &executable,
             }],
         )
-        .unwrap();
+        .unwrap()
+        .into_manifest();
         let bundle = first.parent().unwrap();
         let manifest_before = fs::read(&first).unwrap();
         let artifact = bundle.join("artifacts/host/launcher");
@@ -1052,7 +1112,8 @@ mod tests {
                 executable: &executable,
             }],
         )
-        .unwrap();
+        .unwrap()
+        .into_manifest();
 
         assert_eq!(second, first);
         assert_eq!(fs::read(&first).unwrap(), manifest_before);

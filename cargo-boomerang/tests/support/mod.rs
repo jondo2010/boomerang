@@ -183,19 +183,27 @@ pub fn without_ansi(output: &str) -> String {
 
 /// Asserts the complete ordered sequence of cargo-boomerang progress labels.
 pub fn assert_progress_phases(stderr: &str, expected: &[&str]) {
-    const PHASES: [&str; 7] = [
+    const PHASES: [&str; 8] = [
         "Analyzing",
         "Generating",
         "Building",
         "Validating",
         "Bundling",
         "Publishing",
+        "Published",
         "Running",
     ];
     let plain_stderr = without_ansi(stderr);
     let actual = plain_stderr
         .lines()
-        .filter_map(|line| line.split_whitespace().next())
+        .filter_map(|line| {
+            let mut words = line.split_whitespace();
+            let phase = words.next()?;
+            if phase == "Running" && words.next().is_some_and(|word| word.starts_with('`')) {
+                return None;
+            }
+            Some(phase)
+        })
         .filter(|word| PHASES.contains(word))
         .collect::<Vec<_>>();
     assert_eq!(actual, expected, "unexpected progress sequence:\n{stderr}");

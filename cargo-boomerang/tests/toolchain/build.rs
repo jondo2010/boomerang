@@ -29,6 +29,19 @@ fn build_fixture_with_options(deployment: &str, target: &Path, options: &[&str])
         .unwrap()
 }
 
+/// Resolves the sole executable recorded by a single-Federate build result.
+fn published_executable(stdout: &str) -> PathBuf {
+    let manifest = PathBuf::from(stdout.trim());
+    let artifacts = manifest.parent().unwrap().join("artifacts/host");
+    let mut entries = fs::read_dir(artifacts)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect::<Vec<_>>();
+    entries.sort();
+    assert_eq!(entries.len(), 1, "unexpected published artifacts");
+    entries.pop().unwrap()
+}
+
 fn assert_no_staging_residue(path: &Path) {
     for entry in fs::read_dir(path).unwrap() {
         let entry = entry.unwrap();
@@ -54,6 +67,15 @@ fn build_reports_cargo_style_progress_without_polluting_stdout() {
 
     assert!(output.status.success(), "{stderr}");
     assert_eq!(stdout.lines().count(), 1, "unexpected stdout: {stdout:?}");
+    let executable = published_executable(&stdout);
+    assert!(executable.is_absolute(), "{}", executable.display());
+    assert!(
+        support::without_ansi(&stderr).contains(&format!(
+            "Published Federate 'host' executable {}",
+            executable.display()
+        )),
+        "{stderr}"
+    );
     assert!(stderr.contains("Building"), "{stderr}");
     assert!(stderr.contains("Bundling"), "{stderr}");
     support::assert_progress_phases(
@@ -67,6 +89,7 @@ fn build_reports_cargo_style_progress_without_polluting_stdout() {
             "Building",
             "Bundling",
             "Publishing",
+            "Published",
         ],
     );
 }
@@ -83,6 +106,11 @@ fn quiet_build_keeps_its_machine_readable_result_without_progress() {
 
     assert!(output.status.success(), "{stderr}");
     assert_eq!(stdout.lines().count(), 1, "unexpected stdout: {stdout:?}");
+    let executable = published_executable(&stdout);
+    assert!(
+        !support::without_ansi(&stderr).contains(executable.to_string_lossy().as_ref()),
+        "unexpected published path on quiet stderr: {stderr:?}"
+    );
     support::assert_progress_phases(&stderr, &[]);
     assert!(!stderr.contains('\u{1b}'), "unexpected color: {stderr:?}");
 }
@@ -124,6 +152,7 @@ fn verbose_build_forwards_nested_cargo_output_between_progress_phases() {
             "Building",
             "Bundling",
             "Publishing",
+            "Published",
         ],
     );
     let plain_stderr = support::without_ansi(&stderr);

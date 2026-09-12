@@ -181,7 +181,18 @@ pub(crate) fn build_analyzed(
             executable: built.executable_path(),
         })
         .collect::<Vec<_>>();
-    publish_bundle(analyzed.resolved.target_directory(), document, &sources)
+    let published = publish_bundle(analyzed.resolved.target_directory(), document, &sources)?;
+    for executable in published.executables() {
+        output.status(
+            Phase::Published,
+            format_args!(
+                "Federate '{}' executable {}",
+                executable.federate(),
+                executable.path().display()
+            ),
+        )?;
+    }
+    Ok(published.into_manifest())
 }
 
 /// Builds canonical fingerprint and document records for selected bindings.

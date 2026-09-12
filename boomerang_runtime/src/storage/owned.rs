@@ -250,7 +250,7 @@ impl<T: ReactorData> PortFactory for TypedPortFactory<T> {
 }
 
 /// Type-erased outbound route installed only after both typed endpoints pass preflight.
-trait OutboundRoute: Send {
+pub(crate) trait OutboundRoute: Send {
     /// Clones and admits one present source value at its destination timing boundary.
     fn emit(&mut self, source: &dyn BasePort, tag: Tag) -> Result<(), OwnedStorageError>;
 }
@@ -375,6 +375,26 @@ where
 /// Errors building or accessing heap-backed compiled-image storage.
 #[derive(thiserror::Error, Debug, Clone, PartialEq, Eq)]
 pub enum OwnedStorageError {
+    #[cfg(feature = "federated")]
+    /// An external route's selected codec could not encode its value.
+    #[error("external route '{boundary}' encoding failed: {source}")]
+    ExternalRouteEncoding {
+        /// Stable compiled boundary identity.
+        boundary: String,
+        /// Failure returned by the selected payload codec.
+        #[source]
+        source: crate::PayloadCodecError,
+    },
+    #[cfg(feature = "federated")]
+    /// The bound transport could not accept an encoded route value.
+    #[error("external route '{boundary}' submission failed: {source}")]
+    ExternalRouteSubmission {
+        /// Stable compiled boundary identity.
+        boundary: String,
+        /// Failure returned by the bound transport sink.
+        #[source]
+        source: crate::BoundarySubmissionError,
+    },
     /// A required image binding did not receive an implementation.
     #[error("missing {kind:?} binding at {slot}")]
     MissingBinding {
@@ -799,6 +819,20 @@ impl<'image> OwnedStorage<'image> {
             routes.push(route);
         } else {
             self.outbound_routes.insert(source_port, vec![route]);
+        }
+    }
+
+    #[cfg(feature = "federated")]
+    /// Installs a preflight-checked external adapter at its compiled source port.
+    pub(crate) fn bind_external_outbound(
+        &mut self,
+        port: PortIndex,
+        route: Box<dyn OutboundRoute + 'image>,
+    ) {
+        if let Some(routes) = self.outbound_routes.get_mut(port) {
+            routes.push(route);
+        } else {
+            self.outbound_routes.insert(port, vec![route]);
         }
     }
 

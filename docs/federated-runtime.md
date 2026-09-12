@@ -1,11 +1,25 @@
 # Federated Runtime Internals
 
-This note records the current static federation design after the in-memory
-runtime work. It is internal developer documentation, not an end-user guide.
+This note describes the legacy action-backed static federation bridge, retained
+until the compiled replacement is proven in phase 5. It is internal developer
+documentation, not an end-user guide.
 The user-facing static federation documentation lives in
 `book/src/static-federation.md`.
 
-## Current Scope
+Compiled owned-slice execution instead binds `InboundBoundaryAdapter` to a
+validated local port and scheduler mailbox. It decodes and admits `TaggedPayload`
+data without owning graph identity, logical actions, or grant authority. Both
+paths reuse `PayloadEncoder`, `PayloadDecoder`, and `OutboundBoundarySink`;
+compiled admission errors remain separate from `LegacyFederatedError`. Each codec
+trait has its own associated `Error` type. The hosted delivery adapters normalize
+codec failures into `PayloadCodecError` only when returning erased runtime errors;
+codec implementations do not need to allocate that diagnostic themselves.
+The compiled adapters and backend entry point still use the transitional
+`federated` feature gate. The target feature model makes Federate structure
+unconditional and selects transport/RTI dependencies through backend-specific
+internal capabilities; see the [feature model](deployment-architecture.md#feature-model).
+
+## Legacy Bridge Scope
 
 The implemented runtime path supports static, persistent federates connected by
 logical cross-federate messages. A federate is represented as a runtime enclave
@@ -122,10 +136,10 @@ flowchart LR
     BarrierB -. checks local fault state .-> ConnectionB
 ```
 
-Each generated sender reaction represents one statically known endpoint, so
-lowering attaches its final endpoint-specific sink directly. That sink is
-implemented in `boomerang_federated`: it accepts the protocol-free
-`FederatedOutboundCommand`, performs the checked wire-tag conversion, constructs
+Each legacy sender reaction represents one statically known route, so
+lowering attaches its final route-specific sink directly. That sink is
+implemented in `boomerang_central_rti`: it accepts the protocol-free
+`TaggedPayload`, performs the checked wire-tag conversion, constructs
 the protocol `MSG`, and sends it into the source federate's prebuilt mailbox.
 There is no runtime router or intermediate `kanal` queue.
 
@@ -208,7 +222,7 @@ fault latch and enqueues `LTC` into that same mailbox after all reaction-emitted
 messages for the completed tag.
 
 Inbound payloads arrive as protocol `MSG` frames from the RTI. Each lowered
-`FederateClientRoute` owns its type-erased `FederatedInboundEndpoint`, which
+`FederateClientRoute` owns its type-erased `LegacyInboundActionAdapter`, which
 decodes and schedules that route's payload directly. The barrier returns the
 queued `AsyncEvent` to the scheduler before reading a later RTI frame. A barrier
 cannot dispatch an endpoint belonging to another federate because that route is

@@ -32,7 +32,7 @@ fn build_fixture_with_options(deployment: &str, target: &Path, options: &[&str])
 /// Resolves the sole executable recorded by a single-Federate build result.
 fn published_executable(stdout: &str) -> PathBuf {
     let manifest = PathBuf::from(stdout.trim());
-    let artifacts = manifest.parent().unwrap().join("artifacts/host");
+    let artifacts = manifest.parent().unwrap().join("artifacts").join("host");
     let mut entries = fs::read_dir(artifacts)
         .unwrap()
         .map(|entry| entry.unwrap().path())

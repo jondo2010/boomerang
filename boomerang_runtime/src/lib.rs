@@ -41,11 +41,14 @@ pub use env::{
 };
 pub use event::{AsyncEvent, AsyncEventTarget};
 #[cfg(feature = "federated")]
-pub use federated::{
-    FederatedEndpointError, FederatedFaultState, FederatedInboundEndpoint,
-    FederatedOutboundCommand, FederatedOutboundMessage, FederatedOutboundSink,
-    FederatedPayloadDecoder, FederatedPayloadEncoder,
+mod boundary;
+#[cfg(feature = "federated")]
+pub use boundary::{
+    BoundaryAdmissionError, BoundarySubmissionError, InboundBoundaryAdapter, OutboundBoundarySink,
+    PayloadCodecError, PayloadDecoder, PayloadEncoder, TaggedPayload,
 };
+#[cfg(feature = "federated")]
+pub use federated::{FederatedFaultState, LegacyFederatedError, LegacyInboundActionAdapter};
 pub use kanal::{Receiver, Sender};
 pub use key_set::KeySetLimits as ReactionSetLimits;
 pub use port::{DynPortRef, DynPortRefMut, *};
@@ -56,6 +59,8 @@ pub use reaction::{
     EnclaveSenderReactionFn, FromRefs, Reaction, ReactionFn, ReactionKey,
 };
 pub use reactor::*;
+#[cfg(feature = "federated")]
+pub use reference::execute_owned_federate_with_backend;
 pub use reference::{
     execute_owned, execute_owned_federate, EnclaveExecution, ExecuteOwnedError,
     ExecuteOwnedFederateError, FederateBindings, FederateExecution, StateAccessError,

@@ -210,6 +210,8 @@ pub(crate) struct FederateCoordinator<B: FederateCoordinationBackend> {
     state: FederateCoordinationState,
     /// Selected transport-neutral coordination backend.
     backend: B,
+    /// Records a stop attempt before calling user code, including failures and panics.
+    backend_stop_attempted: bool,
     #[cfg(test)]
     /// One-shot queue-race hook immediately before the final parked recheck.
     commit_window_hook: Option<Box<dyn FnOnce() + Send>>,
@@ -263,7 +265,7 @@ impl<B: FederateCoordinationBackend> FederateCoordinator<B> {
             CoordinatorReport::LogicalHorizon { enclave, tag } => {
                 self.require_participant(enclave)?;
                 let _ = self.state.stop();
-                self.backend.stop()?;
+                self.stop_backend_once()?;
                 self.send_available(ParticipantCommand::LogicalHorizon(tag));
                 Ok(true)
             }
@@ -310,7 +312,7 @@ impl<B: FederateCoordinationBackend> FederateCoordinator<B> {
                     self.send_available(ParticipantCommand::Action(action));
                 }
                 action @ (CoordinationAction::Stop | CoordinationAction::Abort) => {
-                    self.backend.stop()?;
+                    self.stop_backend_once()?;
                     self.terminate_available(ParticipantCommand::Action(action));
                     return Ok(true);
                 }
@@ -321,11 +323,19 @@ impl<B: FederateCoordinationBackend> FederateCoordinator<B> {
 
     /// Progresses one backend input and applies any acquired grant through the pure state.
     fn progress_backend(&mut self) -> Result<bool, FederateCoordinationError> {
-        let Some(acquisition) = self.backend.progress(StdDuration::from_millis(1))? else {
-            return Ok(false);
-        };
-        let actions = self.state.handle_acquisition(acquisition)?;
-        self.execute_actions(actions)
+        if let Some(acquisition) = self.backend.progress(StdDuration::from_millis(1))? {
+            let actions = self.state.handle_acquisition(acquisition)?;
+            if self.execute_actions(actions)? {
+                return Ok(true);
+            }
+        }
+        if let Some(revision) = self.state.idle_confirmation_revision() {
+            if self.backend.confirm_idle(revision)? {
+                let actions = self.state.handle_idle_confirmation(revision);
+                return self.execute_actions(actions);
+            }
+        }
+        Ok(false)
     }
 
     /// Sends one translated action to every compiled participant.
@@ -378,8 +388,16 @@ impl<B: FederateCoordinationBackend> FederateCoordinator<B> {
         let _ = self
             .state
             .handle_scheduler(SchedulerMessage::Failed { enclave: None });
-        let _ = self.backend.stop();
         self.terminate_available(ParticipantCommand::Action(CoordinationAction::Abort));
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.stop_backend_once()));
+    }
+
+    /// Releases backend ownership once while preserving an explicit stop failure.
+    fn stop_backend_once(&mut self) -> Result<(), FederateCoordinationError> {
+        if std::mem::replace(&mut self.backend_stop_attempted, true) {
+            return Ok(());
+        }
+        self.backend.stop()
     }
 }
 
@@ -387,6 +405,7 @@ impl<B: FederateCoordinationBackend> FederateCoordinator<B> {
 ///
 /// A terminal command queued by the normal run path remains first in each FIFO; this fallback Abort
 /// is observed only when coordinator ownership ends before a graceful command is available.
+/// Backend cleanup is attempted once; secondary failures cannot replace an existing unwind.
 impl<B: FederateCoordinationBackend> Drop for FederateCoordinator<B> {
     fn drop(&mut self) {
         for (enclave, sender) in self.commands.iter() {
@@ -399,6 +418,7 @@ impl<B: FederateCoordinationBackend> Drop for FederateCoordinator<B> {
                 }
             }
         }
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.stop_backend_once()));
     }
 }
 
@@ -849,6 +869,7 @@ impl<B: FederateCoordinationBackend> FederateCoordinationParts<B> {
                 events,
                 state,
                 backend,
+                backend_stop_attempted: false,
                 #[cfg(test)]
                 commit_window_hook: None,
             },
@@ -928,6 +949,167 @@ mod tests {
         }
     }
 
+    /// Controllable authority at the transport boundary; queue handling stays real.
+    struct IdleAuthorityBackend {
+        local: LocalFederateCoordinationBackend,
+        accepted: bool,
+        fail: bool,
+        input: Option<crate::Sender<AsyncEvent>>,
+        confirmations: usize,
+        progresses: usize,
+    }
+
+    impl FederateCoordinationBackend for IdleAuthorityBackend {
+        fn publish(
+            &mut self,
+            publication: FederatePublication,
+        ) -> Result<(), FederateCoordinationError> {
+            self.local.publish(publication)
+        }
+        fn progress(
+            &mut self,
+            timeout: StdDuration,
+        ) -> Result<Option<FederateAcquisition>, FederateCoordinationError> {
+            self.progresses += 1;
+            self.local.progress(timeout)
+        }
+        fn complete(
+            &mut self,
+            completion: FederateCompletion,
+        ) -> Result<(), FederateCoordinationError> {
+            self.local.complete(completion)
+        }
+        fn confirm_idle(
+            &mut self,
+            _revision: super::super::backend::CoordinationRevision,
+        ) -> Result<bool, FederateCoordinationError> {
+            self.confirmations += 1;
+            if self.fail {
+                return Err(FederateCoordinationError::BackendStop {
+                    message: "idle rejected".into(),
+                });
+            }
+            if self.accepted {
+                if let Some(input) = self.input.take() {
+                    input
+                        .send(AsyncEvent::Shutdown {
+                            delay: Duration::ZERO,
+                        })
+                        .unwrap();
+                }
+            }
+            Ok(self.accepted)
+        }
+        fn stop(&mut self) -> Result<(), FederateCoordinationError> {
+            if self.fail {
+                return Err(FederateCoordinationError::BackendStop {
+                    message: "cleanup rejected".into(),
+                });
+            }
+            self.local.stop()
+        }
+    }
+
+    /// Catches premature local stop, missing backend polling, or skipping the queue recheck.
+    #[test]
+    fn coordinated_idle_waits_and_admits_input_during_confirmation() {
+        let enclave = EnclaveIndex::new(3);
+        let (event_tx, event_rx) = kanal::unbounded();
+        let FederateCoordinationParts {
+            mut coordinator,
+            participants,
+            ..
+        } = FederateCoordinationParts::new(
+            [(enclave, event_tx.clone(), event_rx)],
+            LifecyclePolicy::CoordinatedTermination,
+            IdleAuthorityBackend {
+                local: LocalFederateCoordinationBackend::default(),
+                accepted: false,
+                fail: false,
+                input: Some(event_tx),
+                confirmations: 0,
+                progresses: 0,
+            },
+        )
+        .unwrap();
+        let (_, mut participant) = participants.into_iter().next().unwrap();
+        coordinator
+            .handle_report(CoordinatorReport::Scheduler(SchedulerMessage::Publish {
+                enclave,
+                next_event: None,
+            }))
+            .unwrap();
+        let revision = coordinator.state.revision();
+        for observation in [
+            Observation::Probed,
+            Observation::Parked,
+            Observation::Rechecked,
+        ] {
+            assert!(!coordinator
+                .handle_report(CoordinatorReport::Observation {
+                    enclave,
+                    revision,
+                    observation
+                })
+                .unwrap());
+        }
+        assert!(!coordinator.progress_backend().unwrap());
+        assert_eq!(coordinator.backend.confirmations, 1);
+        assert_eq!(coordinator.backend.progresses, 1);
+        assert!(!coordinator.state.is_stopped());
+        coordinator.backend.accepted = true;
+        assert!(!coordinator.progress_backend().unwrap());
+        assert_eq!(coordinator.backend.confirmations, 2);
+        assert_eq!(coordinator.state.phase(), CoordinationPhase::Probing);
+        assert!(matches!(
+            participant.wait().unwrap(),
+            FederateIdleWait::Interrupted(AsyncEvent::Shutdown { .. })
+        ));
+        while let Ok(report) = coordinator.report_rx.try_recv() {
+            assert!(!coordinator.handle_report(report).unwrap());
+        }
+        assert_eq!(coordinator.state.phase(), CoordinationPhase::Active);
+        assert!(!coordinator.state.is_stopped());
+    }
+
+    /// Catches discarded authority errors and cleanup overwriting the first failure.
+    #[test]
+    fn coordinated_idle_confirmation_failure_aborts_and_retains_first_error() {
+        let enclave = EnclaveIndex::new(3);
+        let (event_tx, event_rx) = kanal::unbounded();
+        let FederateCoordinationParts {
+            coordinator,
+            participants,
+            ..
+        } = FederateCoordinationParts::new(
+            [(enclave, event_tx, event_rx)],
+            LifecyclePolicy::CoordinatedTermination,
+            IdleAuthorityBackend {
+                local: LocalFederateCoordinationBackend::default(),
+                accepted: false,
+                fail: true,
+                input: None,
+                confirmations: 0,
+                progresses: 0,
+            },
+        )
+        .unwrap();
+        let (_, mut participant) = participants.into_iter().next().unwrap();
+        std::thread::scope(|scope| {
+            let handle = scope.spawn(move || coordinator.run());
+            assert!(matches!(
+                participant.wait().unwrap(),
+                FederateIdleWait::Aborted
+            ));
+            assert_eq!(
+                handle.join().unwrap().unwrap_err(),
+                FederateCoordinationError::BackendStop {
+                    message: "idle rejected".into()
+                }
+            );
+        });
+    }
+
     /// Backend operation observed by terminal-path integration tests.
     #[derive(Debug, Eq, PartialEq)]
     enum BackendCall {
@@ -984,7 +1166,12 @@ mod tests {
     }
 
     /// Backend whose abort path proves the original operation failure remains authoritative.
-    struct PublishAndStopFailingBackend;
+    struct PublishAndStopFailingBackend {
+        /// Selects a panic instead of a returned cleanup error.
+        panic_stop: bool,
+        /// Counts stop attempts across normal error handling and destruction.
+        stops: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
 
     impl FederateCoordinationBackend for PublishAndStopFailingBackend {
         /// Rejects the publication with the first operation-specific failure.
@@ -1015,6 +1202,8 @@ mod tests {
 
         /// Fails during cleanup so the test can prove it does not replace the first failure.
         fn stop(&mut self) -> Result<(), FederateCoordinationError> {
+            self.stops.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            assert!(!self.panic_stop, "injected cleanup panic");
             Err(FederateCoordinationError::BackendStop {
                 message: "cleanup stop rejected".to_owned(),
             })
@@ -1279,34 +1468,41 @@ mod tests {
     /// Verifies abort cleanup cannot replace the first backend operation failure.
     #[test]
     fn first_backend_failure_survives_abort_cleanup() {
-        let enclave = EnclaveIndex::new(3);
-        let (event_tx, event_rx) = kanal::unbounded();
-        let FederateCoordinationParts {
-            coordinator,
-            participants,
-            ..
-        } = FederateCoordinationParts::new(
-            [(enclave, event_tx, event_rx)],
-            LifecyclePolicy::KeepAlive,
-            PublishAndStopFailingBackend,
-        )
-        .unwrap();
-        let (participant_enclave, mut participant) = participants.into_iter().next().unwrap();
-        assert_eq!(participant_enclave, enclave);
+        for panic_stop in [false, true] {
+            let stops = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let enclave = EnclaveIndex::new(3);
+            let (event_tx, event_rx) = kanal::unbounded();
+            let FederateCoordinationParts {
+                coordinator,
+                participants,
+                ..
+            } = FederateCoordinationParts::new(
+                [(enclave, event_tx, event_rx)],
+                LifecyclePolicy::KeepAlive,
+                PublishAndStopFailingBackend {
+                    panic_stop,
+                    stops: stops.clone(),
+                },
+            )
+            .unwrap();
+            let (participant_enclave, mut participant) = participants.into_iter().next().unwrap();
+            assert_eq!(participant_enclave, enclave);
 
-        std::thread::scope(|scope| {
-            let coordinator = scope.spawn(move || coordinator.run());
-            assert!(matches!(
-                participant.wait().unwrap(),
-                FederateIdleWait::Aborted
-            ));
-            assert_eq!(
-                coordinator.join().unwrap().unwrap_err(),
-                FederateCoordinationError::BackendPublish {
-                    message: "publication rejected".to_owned(),
-                }
-            );
-        });
+            std::thread::scope(|scope| {
+                let coordinator = scope.spawn(move || coordinator.run());
+                assert!(matches!(
+                    participant.wait().unwrap(),
+                    FederateIdleWait::Aborted
+                ));
+                assert_eq!(
+                    coordinator.join().unwrap().unwrap_err(),
+                    FederateCoordinationError::BackendPublish {
+                        message: "publication rejected".to_owned(),
+                    }
+                );
+            });
+            assert_eq!(stops.load(std::sync::atomic::Ordering::SeqCst), 1);
+        }
     }
 
     /// Verifies failed backend cleanup aborts an otherwise graceful idle stop.
@@ -1371,6 +1567,29 @@ mod tests {
             participant.terminal_after_event_channel_closed().unwrap(),
             Some(FederateTermination::Abort)
         );
+    }
+
+    /// Dropping an unstarted or unwinding coordinator releases its connected backend once.
+    #[test]
+    fn coordinator_drop_stops_backend_before_start_and_during_unwind() {
+        for unwind in [false, true] {
+            let (event_tx, event_rx) = kanal::unbounded();
+            let (call_tx, call_rx) = mpsc::channel();
+            let parts = FederateCoordinationParts::new(
+                [(EnclaveIndex::new(3), event_tx, event_rx)],
+                LifecyclePolicy::CoordinatedTermination,
+                CallRecordingBackend { call_tx },
+            )
+            .unwrap();
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                let _coordinator = parts.coordinator;
+                if unwind {
+                    panic!("injected coordinator unwind");
+                }
+            }));
+            assert_eq!(outcome.is_err(), unwind);
+            assert_eq!(call_rx.into_iter().collect::<Vec<_>>(), [BackendCall::Stop]);
+        }
     }
 
     /// Verifies successful scheduler finalization remains present for fixed-point commands.

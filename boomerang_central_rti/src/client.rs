@@ -22,9 +22,9 @@ pub enum FederateClientError {
     /// A runtime value could not be represented by the wire protocol.
     #[error("runtime bridge error: {0}")]
     RuntimeBridge(#[from] RuntimeBridgeError),
-    /// The runtime rejected a federated endpoint operation.
-    #[error("runtime endpoint error: {0}")]
-    RuntimeEndpoint(#[from] boomerang_runtime::FederatedEndpointError),
+    /// The legacy action-backed bridge rejected delivery.
+    #[error("legacy federation delivery error: {0}")]
+    LegacyDelivery(#[from] boomerang_runtime::LegacyFederatedError),
 
     /// A peer violated the protocol sequencing or topology contract.
     #[error("protocol error: {0}")]
@@ -379,7 +379,7 @@ pub struct FederateClientRoute {
     /// Federate that receives payloads through this endpoint.
     pub target: FederateId,
     /// Runtime delivery endpoint attached while lowering the target enclave.
-    inbound: Option<boomerang_runtime::FederatedInboundEndpoint>,
+    inbound: Option<boomerang_runtime::LegacyInboundActionAdapter>,
 }
 impl FederateClientRoute {
     /// Create route metadata for one runtime federated endpoint.
@@ -396,12 +396,12 @@ impl FederateClientRoute {
         }
     }
 
-    pub(crate) fn bind_inbound(&mut self, inbound: boomerang_runtime::FederatedInboundEndpoint) {
+    pub(crate) fn bind_inbound(&mut self, inbound: boomerang_runtime::LegacyInboundActionAdapter) {
         debug_assert!(self.inbound.is_none());
         self.inbound = Some(inbound);
     }
 
-    pub(crate) fn inbound(&self) -> Option<&boomerang_runtime::FederatedInboundEndpoint> {
+    pub(crate) fn inbound(&self) -> Option<&boomerang_runtime::LegacyInboundActionAdapter> {
         self.inbound.as_ref()
     }
 }
@@ -669,7 +669,7 @@ impl RtiFederatedTimeBarrier {
 
     fn check_runtime_fault(&self) -> Result<(), FederateClientError> {
         match self.faults.get() {
-            Some(error) => Err(FederateClientError::RuntimeEndpoint(error)),
+            Some(error) => Err(FederateClientError::LegacyDelivery(error)),
             None => Ok(()),
         }
     }
@@ -823,7 +823,7 @@ mod tests {
     }
 
     fn inbound_endpoint_for_u32() -> (
-        boomerang_runtime::FederatedInboundEndpoint,
+        boomerang_runtime::LegacyInboundActionAdapter,
         boomerang_runtime::Receiver<boomerang_runtime::AsyncEvent>,
         boomerang_runtime::ActionKey,
         boomerang_runtime::keepalive::Sender,
@@ -834,18 +834,14 @@ mod tests {
         });
         let action_ref = enclave.create_async_action_ref::<u32>(action_key);
         let context = enclave.create_send_context(boomerang_runtime::EnclaveKey::from(0));
-        let endpoint = boomerang_runtime::FederatedInboundEndpoint::new(
+        let endpoint = boomerang_runtime::LegacyInboundActionAdapter::new(
             context,
             action_ref,
             Box::new(|bytes: &[u8]| {
                 std::str::from_utf8(bytes)
-                    .map_err(|error| {
-                        boomerang_runtime::FederatedEndpointError::codec(error.to_string())
-                    })?
+                    .map_err(|error| boomerang_runtime::PayloadCodecError::new(error.to_string()))?
                     .parse::<u32>()
-                    .map_err(|error| {
-                        boomerang_runtime::FederatedEndpointError::codec(error.to_string())
-                    })
+                    .map_err(|error| boomerang_runtime::PayloadCodecError::new(error.to_string()))
             }),
         )
         .unwrap();
@@ -923,12 +919,10 @@ mod tests {
             None
         );
         outbound
-            .send(boomerang_runtime::FederatedOutboundCommand::Msg(
-                boomerang_runtime::FederatedOutboundMessage {
-                    tag: boomerang_runtime::Tag::ZERO,
-                    payload: b"7".to_vec(),
-                },
-            ))
+            .send(boomerang_runtime::TaggedPayload {
+                tag: boomerang_runtime::Tag::ZERO,
+                payload: b"7".to_vec(),
+            })
             .unwrap();
         barrier
             .report_logical_tag_complete(boomerang_runtime::Tag::ZERO)
@@ -1147,7 +1141,7 @@ mod tests {
 
         assert!(matches!(
             barrier.wait_for_tag(boomerang_runtime::Tag::ZERO, &event_rx),
-            Err(FederateClientError::RuntimeEndpoint(_))
+            Err(FederateClientError::LegacyDelivery(_))
         ));
         assert!(barrier.failed);
         assert!(matches!(

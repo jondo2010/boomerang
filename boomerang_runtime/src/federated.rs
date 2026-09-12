@@ -1,3 +1,4 @@
+//! Legacy action-backed federation delivery; removed with the runtime bridge in phase 5.
 use std::{
     fmt,
     sync::{Arc, OnceLock},
@@ -7,122 +8,72 @@ use crate::{
     event::AsyncEvent, ActionCommon, AsyncActionRef, CommonContext, ReactorData, SendContext, Tag,
 };
 
-#[derive(Debug, Clone, thiserror::Error)]
-pub enum FederatedEndpointError {
+/// Failures specific to the legacy action-backed federation bridge.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum LegacyFederatedError {
+    /// The selected payload codec rejected a value.
     #[error("federated payload codec error: {0}")]
-    Codec(String),
+    Codec(#[from] crate::PayloadCodecError),
 
+    /// The outbound transport rejected submission.
     #[error("federated outbound sink error: {0}")]
-    Send(String),
+    Submission(#[from] crate::BoundarySubmissionError),
 
-    #[error("federated endpoints cannot target physical actions")]
+    /// Logical federation delivery cannot target a physical action.
+    #[error("legacy inbound action adapters cannot target physical actions")]
     PhysicalAction,
 
     #[error("federated inbound endpoint scheduler channel is closed")]
     SchedulerClosed,
 }
 
-/// Shared first-error latch for terminal federated runtime endpoint failures.
+/// First-error latch for the legacy action-backed federation bridge.
 #[derive(Debug, Clone, Default)]
 pub struct FederatedFaultState {
-    first_error: Arc<OnceLock<FederatedEndpointError>>,
+    /// First terminal failure, shared with the legacy coordinator.
+    first_error: Arc<OnceLock<LegacyFederatedError>>,
 }
 
 impl FederatedFaultState {
-    /// Record `error` if no earlier endpoint failure has been published.
-    pub fn record(&self, error: FederatedEndpointError) {
+    /// Record `error` if no earlier legacy delivery failure has been published.
+    pub fn record(&self, error: LegacyFederatedError) {
         let _ = self.first_error.set(error);
     }
 
-    /// Return the first published endpoint failure without consuming it.
-    pub fn get(&self) -> Option<FederatedEndpointError> {
+    /// Return the first published legacy delivery failure without consuming it.
+    pub fn get(&self) -> Option<LegacyFederatedError> {
         self.first_error.get().cloned()
     }
 }
 
-impl FederatedEndpointError {
-    pub fn codec(message: impl Into<String>) -> Self {
-        Self::Codec(message.into())
-    }
+/// Erased decode-and-schedule operation for one legacy logical action.
+type FederatedInboundHandler = dyn Fn(Tag, &[u8]) -> Result<(), LegacyFederatedError> + Send + Sync;
 
-    pub fn send(message: impl Into<String>) -> Self {
-        Self::Send(message.into())
-    }
-}
-
-/// Encodes typed payload values for a federated endpoint.
-pub trait FederatedPayloadEncoder<T: ReactorData>: Send + Sync + 'static {
-    fn encode(&self, value: &T) -> Result<Vec<u8>, FederatedEndpointError>;
-}
-
-impl<T, F> FederatedPayloadEncoder<T> for F
-where
-    T: ReactorData,
-    F: Fn(&T) -> Result<Vec<u8>, FederatedEndpointError> + Send + Sync + 'static,
-{
-    fn encode(&self, value: &T) -> Result<Vec<u8>, FederatedEndpointError> {
-        (self)(value)
-    }
-}
-
-/// Decodes typed payload values for a federated endpoint.
-pub trait FederatedPayloadDecoder<T: ReactorData>: Send + Sync + 'static {
-    fn decode(&self, bytes: &[u8]) -> Result<T, FederatedEndpointError>;
-}
-
-impl<T, F> FederatedPayloadDecoder<T> for F
-where
-    T: ReactorData,
-    F: Fn(&[u8]) -> Result<T, FederatedEndpointError> + Send + Sync + 'static,
-{
-    fn decode(&self, bytes: &[u8]) -> Result<T, FederatedEndpointError> {
-        (self)(bytes)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FederatedOutboundMessage {
-    pub tag: Tag,
-    pub payload: Vec<u8>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FederatedOutboundCommand {
-    Msg(FederatedOutboundMessage),
-}
-
-pub trait FederatedOutboundSink: Send + Sync + 'static {
-    fn send(&self, command: FederatedOutboundCommand) -> Result<(), FederatedEndpointError>;
-}
-
-type FederatedInboundHandler =
-    dyn Fn(Tag, &[u8]) -> Result<(), FederatedEndpointError> + Send + Sync;
-
-/// Type-erased runtime handler attached directly to one lowered federated route.
+/// Legacy action-backed delivery adapter; compiled execution uses `InboundBoundaryAdapter`.
 #[derive(Clone)]
-pub struct FederatedInboundEndpoint {
+pub struct LegacyInboundActionAdapter {
     /// Typed decode-and-schedule operation erased after lowering.
     handler: Arc<FederatedInboundHandler>,
 }
 
-impl fmt::Debug for FederatedInboundEndpoint {
+impl fmt::Debug for LegacyInboundActionAdapter {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("FederatedInboundEndpoint").finish()
+        f.debug_struct("LegacyInboundActionAdapter").finish()
     }
 }
 
-impl FederatedInboundEndpoint {
+impl LegacyInboundActionAdapter {
     /// Erase one typed logical-action decoder and scheduler target for storage in a route.
     pub fn new<T>(
         context: SendContext,
         action_ref: AsyncActionRef<T>,
-        decoder: Box<dyn FederatedPayloadDecoder<T>>,
-    ) -> Result<Self, FederatedEndpointError>
+        decoder: Box<dyn crate::PayloadDecoder<T, Error = crate::PayloadCodecError>>,
+    ) -> Result<Self, LegacyFederatedError>
     where
         T: ReactorData,
     {
         if !action_ref.is_logical() {
-            return Err(FederatedEndpointError::PhysicalAction);
+            return Err(LegacyFederatedError::PhysicalAction);
         }
 
         Ok(Self {
@@ -136,14 +87,14 @@ impl FederatedInboundEndpoint {
                 if scheduled {
                     Ok(())
                 } else {
-                    Err(FederatedEndpointError::SchedulerClosed)
+                    Err(LegacyFederatedError::SchedulerClosed)
                 }
             }),
         })
     }
 
     /// Decode and schedule one payload at its logical tag.
-    pub fn schedule(&self, tag: Tag, payload: &[u8]) -> Result<(), FederatedEndpointError> {
+    pub fn schedule(&self, tag: Tag, payload: &[u8]) -> Result<(), LegacyFederatedError> {
         (self.handler)(tag, payload)
     }
 }
@@ -155,12 +106,12 @@ mod tests {
     #[test]
     fn federated_fault_state_preserves_first_error() {
         let faults = FederatedFaultState::default();
-        faults.record(FederatedEndpointError::codec("first"));
-        faults.record(FederatedEndpointError::send("second"));
+        faults.record(crate::PayloadCodecError::new("first").into());
+        faults.record(crate::BoundarySubmissionError::new("second").into());
 
         assert!(matches!(
             faults.get(),
-            Some(FederatedEndpointError::Codec(message)) if message == "first"
+            Some(LegacyFederatedError::Codec(message)) if message == crate::PayloadCodecError::new("first")
         ));
     }
 }

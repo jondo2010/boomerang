@@ -1,5 +1,10 @@
 //! Standard-library reference implementation for synchronously executing validated compiled enclave images as a behavioral baseline for target executors.
 
+#[cfg(feature = "federated")]
+mod distributed;
+#[cfg(feature = "federated")]
+pub use distributed::execute_owned_federate_with_backend;
+
 use std::{
     any::{Any, TypeId},
     collections::BTreeMap,
@@ -26,8 +31,8 @@ use crate::{
         run_owned_scheduler_with_coordination,
     },
     storage::owned::StoredState,
-    AsyncEvent, Config, EnclaveBindings, OwnedSchedulerOutcome, OwnedStorage, OwnedStorageError,
-    PayloadType, ReactorData, RuntimeError, Stats, Tag,
+    AsyncEvent, Config, EnclaveBindings, FederateCoordinationBackend, OwnedSchedulerOutcome,
+    OwnedStorage, OwnedStorageError, PayloadType, ReactorData, RuntimeError, Stats, Tag,
 };
 
 /// Failure while validating, initializing, or synchronously executing a compiled image.
@@ -153,6 +158,9 @@ pub struct FederateBindings<'binding> {
     duplicate_enclaves: TinySecondaryMap<EnclaveIndex, ()>,
     /// Statically typed route adapters retained until image preflight resolves their endpoints.
     routes: Vec<Box<dyn RouteBinding + 'binding>>,
+    #[cfg(feature = "federated")]
+    /// Typed adapters for route halves whose peer is outside this Federate.
+    external_routes: Vec<distributed::ExternalRoute<'binding>>,
 }
 
 impl<'binding> FederateBindings<'binding> {
@@ -262,6 +270,14 @@ struct ResolvedLocalRoute<'image> {
     timing_domain: TimingDomain,
     /// Compiled delay shared by both halves.
     delay_nanos: u64,
+}
+
+/// Validated owned scheduler images and paired local routes, retaining canonical keys.
+struct PreparedFederate<'image> {
+    /// This Federate's subset of the deployment-wide Enclave domain.
+    images: TinySecondaryMap<EnclaveIndex, EnclaveImage<'image>>,
+    /// Routes whose source and destination both belong to this subset.
+    endpoints: Vec<ResolvedLocalRoute<'image>>,
 }
 
 /// Final owned results aggregating every canonical Enclave executed through typed local routes
@@ -550,10 +566,9 @@ fn request_federate_shutdown(senders: &[crate::Sender<AsyncEvent>]) {
     }
 }
 
-/// Builds one local-backend coordinator from the selected immutable Federate layout.
-fn build_federate_coordination(
-    deployment: &CompiledDeploymentImage<'_>,
-    federate: FederateIndex,
+/// Builds one coordinator from the selected immutable Federate layout and backend.
+fn build_federate_coordination<B: FederateCoordinationBackend>(
+    images: &TinySecondaryMap<EnclaveIndex, EnclaveImage<'_>>,
     channels: impl IntoIterator<
         Item = (
             EnclaveIndex,
@@ -561,19 +576,10 @@ fn build_federate_coordination(
             crate::Receiver<AsyncEvent>,
         ),
     >,
-    config: &Config,
-) -> Result<FederateCoordinationParts<LocalFederateCoordinationBackend>, ExecuteOwnedFederateError>
-{
-    let selected = deployment
-        .federates
-        .get(federate)
-        .copied()
-        .ok_or(ExecuteOwnedFederateError::FederateNotFound { federate })?;
-    let participant_indices = deployment
-        .enclaves
-        .keys()
-        .filter(|enclave| selected.enclaves().contains(*enclave))
-        .collect::<Vec<_>>();
+    lifecycle_policy: LifecyclePolicy,
+    backend: B,
+) -> Result<FederateCoordinationParts<B>, ExecuteOwnedFederateError> {
+    let participant_indices = images.keys().collect::<Vec<_>>();
     let mut channels = channels.into_iter().collect::<Vec<_>>();
     let ordered_channels = participant_indices.iter().copied().map(|enclave| {
         let position = channels
@@ -583,17 +589,8 @@ fn build_federate_coordination(
         let (_, event_tx, event_rx) = channels.swap_remove(position);
         (enclave, event_tx, event_rx)
     });
-    let lifecycle_policy = if config.keep_alive {
-        LifecyclePolicy::KeepAlive
-    } else {
-        LifecyclePolicy::TerminateWhenIdle
-    };
-    let coordination = FederateCoordinationParts::new(
-        ordered_channels,
-        lifecycle_policy,
-        LocalFederateCoordinationBackend::default(),
-    )
-    .expect("validated Federate layout has unique compiled Enclave identities");
+    let coordination = FederateCoordinationParts::new(ordered_channels, lifecycle_policy, backend)
+        .map_err(|source| ExecuteOwnedFederateError::FederateCoordination { source })?;
     assert!(
         channels.is_empty(),
         "validated Federate storage supplies only selected compiled scheduler channels"
@@ -691,7 +688,7 @@ fn preflight_owned_federate<'image>(
     deployment: &CompiledDeploymentImage<'image>,
     federate: FederateIndex,
     bindings: &FederateBindings<'_>,
-) -> Result<Vec<ResolvedLocalRoute<'image>>, ExecuteOwnedFederateError> {
+) -> Result<PreparedFederate<'image>, ExecuteOwnedFederateError> {
     CompiledDeploymentView::new(deployment).map_err(|error| {
         ExecuteOwnedFederateError::ImageValidation {
             message: error.to_string(),
@@ -703,33 +700,67 @@ fn preflight_owned_federate<'image>(
         .copied()
         .ok_or(ExecuteOwnedFederateError::FederateNotFound { federate })?;
 
+    let images = deployment
+        .enclaves
+        .iter()
+        .filter(|(key, _)| selected.enclaves().contains(*key))
+        .map(|(key, image)| (key, *image))
+        .collect();
+    preflight_enclave_bindings(federate, &images, bindings)?;
+    #[cfg(feature = "federated")]
+    if let Some(route) = bindings.external_routes.first() {
+        return Err(ExecuteOwnedFederateError::UnexpectedRouteBinding {
+            boundary: route.boundary.as_str().to_owned(),
+            federate,
+        });
+    }
+    let endpoints = local_route_endpoints(deployment, federate, selected)?;
+    preflight_local_bindings(federate, &images, &endpoints, bindings)?;
+    Ok(PreparedFederate { images, endpoints })
+}
+
+/// Checks every owned payload binding without running any user initializer.
+fn preflight_enclave_bindings(
+    federate: FederateIndex,
+    images: &TinySecondaryMap<EnclaveIndex, EnclaveImage<'_>>,
+    bindings: &FederateBindings<'_>,
+) -> Result<(), ExecuteOwnedFederateError> {
+    if images.is_empty() {
+        return Err(ExecuteOwnedFederateError::FederateCoordination {
+            source: crate::FederateCoordinationError::NoParticipants,
+        });
+    }
     for enclave in bindings.enclaves.keys() {
-        if !selected.enclaves().contains(enclave) {
+        if !images.contains_key(enclave) {
             return Err(ExecuteOwnedFederateError::UnexpectedEnclaveBinding { enclave, federate });
         }
     }
     if let Some(enclave) = bindings.duplicate_enclaves.keys().next() {
         return Err(ExecuteOwnedFederateError::DuplicateEnclaveBinding { enclave });
     }
-
-    let start = selected.enclaves().start();
-    let end = start + selected.enclaves().len();
-    for raw in start..end {
-        let enclave = EnclaveIndex::from(raw);
-        let enclave_bindings = bindings
+    for (enclave, raw) in images.iter() {
+        let owned = bindings
             .enclaves
             .get(enclave)
             .ok_or(ExecuteOwnedFederateError::MissingEnclaveBinding { enclave })?;
-        let image = EnclaveImageView::new(&deployment.enclaves[enclave]).map_err(|error| {
+        let image = EnclaveImageView::new(raw).map_err(|error| {
             ExecuteOwnedFederateError::ImageValidation {
                 message: error.to_string(),
             }
         })?;
-        OwnedStorage::validate_image_bindings(&image, enclave_bindings)
+        OwnedStorage::validate_image_bindings(&image, owned)
             .map_err(|source| ExecuteOwnedFederateError::EnclavePreflight { enclave, source })?;
     }
+    Ok(())
+}
 
-    let endpoints = local_route_endpoints(deployment, federate, selected)?;
+/// Checks local route witnesses against the two already validated owned port bindings.
+fn preflight_local_bindings(
+    federate: FederateIndex,
+    images: &TinySecondaryMap<EnclaveIndex, EnclaveImage<'_>>,
+    endpoints: &[ResolvedLocalRoute<'_>],
+    bindings: &FederateBindings<'_>,
+) -> Result<(), ExecuteOwnedFederateError> {
     for route in &bindings.routes {
         let matches = bindings
             .routes
@@ -751,7 +782,7 @@ fn preflight_owned_federate<'image>(
             });
         }
     }
-    for endpoint in &endpoints {
+    for endpoint in endpoints {
         let route = bindings
             .routes
             .iter()
@@ -777,7 +808,7 @@ fn preflight_owned_federate<'image>(
                 endpoint.destination_port,
             ),
         ] {
-            let image = EnclaveImageView::new(&deployment.enclaves[enclave])
+            let image = EnclaveImageView::new(&images[enclave])
                 .expect("root validation checked endpoint images");
             let slot = image.ports()[port].binding();
             let (found_id, found) = bindings
@@ -798,7 +829,7 @@ fn preflight_owned_federate<'image>(
             }
         }
     }
-    Ok(endpoints)
+    Ok(())
 }
 
 /// Executes every Enclave in one validated Federate with direct typed local routes.
@@ -826,13 +857,41 @@ fn execute_owned_federate_with_spawn_guard(
     federate: FederateIndex,
     bindings: FederateBindings<'_>,
     config: Config,
+    fail_spawn: impl FnMut(Option<EnclaveIndex>) -> bool,
+) -> Result<FederateExecution, ExecuteOwnedFederateError> {
+    let prepared = preflight_owned_federate(deployment, federate, &bindings)?;
+    let lifecycle = if config.keep_alive {
+        LifecyclePolicy::KeepAlive
+    } else {
+        LifecyclePolicy::TerminateWhenIdle
+    };
+    execute_prepared_federate(
+        prepared,
+        bindings,
+        config,
+        lifecycle,
+        |_| Ok(LocalFederateCoordinationBackend::default()),
+        fail_spawn,
+    )
+}
+
+/// Initializes and supervises validated scheduler storage with one caller-selected backend.
+fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
+    prepared: PreparedFederate<'image>,
+    bindings: FederateBindings<'_>,
+    config: Config,
+    lifecycle: LifecyclePolicy,
+    connect: impl FnOnce(
+        &mut [(EnclaveIndex, OwnedStorage<'image>)],
+    ) -> Result<B, ExecuteOwnedFederateError>,
     mut fail_spawn: impl FnMut(Option<EnclaveIndex>) -> bool,
 ) -> Result<FederateExecution, ExecuteOwnedFederateError> {
-    let endpoints = preflight_owned_federate(deployment, federate, &bindings)?;
+    let PreparedFederate { images, endpoints } = prepared;
     let FederateBindings {
         enclaves,
         duplicate_enclaves: _,
         routes,
+        ..
     } = bindings;
     let route_bindings = endpoints
         .iter()
@@ -846,7 +905,7 @@ fn execute_owned_federate_with_spawn_guard(
         .collect::<BTreeMap<_, _>>();
     let mut storages = Vec::with_capacity(enclaves.len());
     for (enclave, owned) in enclaves {
-        let image = EnclaveImageView::new(&deployment.enclaves[enclave])
+        let image = EnclaveImageView::new(&images[enclave])
             .expect("Federate preflight validated every selected Enclave image");
         let enclave_key = runtime_enclave_key(enclave);
         let storage =
@@ -919,6 +978,7 @@ fn execute_owned_federate_with_spawn_guard(
             .1
             .add_upstream(source_key, source_context, delay);
     }
+    let backend = connect(&mut storages)?;
     let enclave_count = storages.len();
     let FederateCoordinationParts {
         abort_handle,
@@ -926,8 +986,7 @@ fn execute_owned_federate_with_spawn_guard(
         participants,
         ..
     } = build_federate_coordination(
-        deployment,
-        federate,
+        &images,
         storages.iter().map(|(enclave, storage)| {
             (
                 *enclave,
@@ -935,7 +994,8 @@ fn execute_owned_federate_with_spawn_guard(
                 storage.scheduler_event_rx(),
             )
         }),
-        &config,
+        lifecycle,
+        backend,
     )?;
     let origin = Instant::now();
     let (results, failure) = std::thread::scope(|scope| {
@@ -1374,10 +1434,19 @@ mod scoped_spawn_tests {
             ];
             let coordination: FederateCoordinationParts<LocalFederateCoordinationBackend> =
                 build_federate_coordination(
-                    &OFFSET_DEPLOYMENT,
-                    FederateIndex::new(1),
+                    &OFFSET_DEPLOYMENT
+                        .enclaves
+                        .iter()
+                        .filter(|(key, _)| OFFSET_FEDERATES[1].enclaves().contains(*key))
+                        .map(|(key, image)| (key, *image))
+                        .collect(),
                     channels,
-                    &Config::default().with_keep_alive(keep_alive),
+                    if keep_alive {
+                        LifecyclePolicy::KeepAlive
+                    } else {
+                        LifecyclePolicy::TerminateWhenIdle
+                    },
+                    LocalFederateCoordinationBackend::default(),
                 )
                 .unwrap();
 

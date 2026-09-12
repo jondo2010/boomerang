@@ -1,5 +1,9 @@
 //! Exercises the host-runtime seam from a compiled image and direct bindings through owned storage and scheduling to typed results, excluding compiler lowering and live-graph construction.
 
+#[cfg(feature = "federated")]
+#[path = "compiled_reference/distributed.rs"]
+mod distributed;
+
 use std::{
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     time::Instant,

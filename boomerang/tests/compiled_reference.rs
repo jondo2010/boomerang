@@ -4,6 +4,10 @@
 #[path = "compiled_reference/distributed.rs"]
 mod distributed;
 
+#[cfg(feature = "federated")]
+#[path = "compiled_reference/central_rti.rs"]
+mod central_rti;
+
 use std::{
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     time::Instant,
@@ -2191,13 +2195,16 @@ fn owned_federate_retains_route_failure_before_competing_scheduler_panic() {
     )
     .unwrap_err();
 
-    assert!(matches!(
-        error,
-        ExecuteOwnedFederateError::EnclaveExecution {
-            enclave,
-            source: OwnedStorageError::OutboundRouteChannelFull { destination, .. },
-        } if enclave == EnclaveIndex::new(0) && destination == EnclaveIndex::new(1)
-    ));
+    assert!(
+        matches!(
+            &error,
+            ExecuteOwnedFederateError::EnclaveExecution {
+                enclave,
+                source: OwnedStorageError::OutboundRouteChannelFull { destination, .. },
+            } if *enclave == EnclaveIndex::new(0) && *destination == EnclaveIndex::new(1)
+        ),
+        "{error:?}"
+    );
     assert!(started.elapsed() < owned_federate_watchdog_timeout());
 }
 

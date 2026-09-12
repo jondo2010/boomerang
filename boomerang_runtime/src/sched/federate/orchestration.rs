@@ -9,7 +9,10 @@ use std::{sync::mpsc, time::Duration as StdDuration};
 use tinymap::TinySecondaryMap;
 
 use super::{
-    backend::{CoordinationRevision, FederateCoordinationBackend, FederateCoordinationError},
+    backend::{
+        CoordinationRevision, FederateCoordinationBackend, FederateCoordinationError,
+        FederatePublication,
+    },
     state::{
         CoordinationAction, CoordinationStateError, FederateCoordinationState, LifecyclePolicy,
         Observation, SchedulerMessage,
@@ -128,6 +131,13 @@ enum CoordinatorReport {
         /// Typed scheduler message stamped by the participant.
         SchedulerMessage,
     ),
+    /// Fresh mailbox observation for an externally visible publication.
+    PublicationObserved {
+        /// Participant that checked its event queue.
+        enclave: EnclaveIndex,
+        /// Local publication-fence generation.
+        generation: u64,
+    },
     /// One revision-bound fixed-point observation.
     Observation {
         /// Compiled participant supplying the observation.
@@ -149,6 +159,11 @@ enum CoordinatorReport {
 /// Coordinator-to-participant operations translated from pure coordination actions.
 #[derive(Clone, Copy)]
 enum ParticipantCommand {
+    /// Check the mailbox before exposing a new aggregate lower bound to the backend.
+    PublicationProbe {
+        /// Local publication-fence generation.
+        generation: u64,
+    },
     /// Pure action addressed to one or every participant.
     Action(
         /// Grant, fixed-point, resume, or terminal action selected by the pure state.
@@ -208,6 +223,12 @@ pub(crate) struct FederateCoordinator<B: FederateCoordinationBackend> {
     events: TinySecondaryMap<EnclaveIndex, crate::Sender<AsyncEvent>>,
     /// Authoritative candidate, phase, completion, and terminal state.
     state: FederateCoordinationState,
+    /// Publication awaiting a fresh mailbox observation from every participant.
+    pending_publication: Option<FederatePublication>,
+    /// Independent monotonic publication-fence generation.
+    publication_generation: u64,
+    /// Last mailbox observation from each participant in its existing typed domain.
+    publication_observed: TinySecondaryMap<EnclaveIndex, u64>,
     /// Selected transport-neutral coordination backend.
     backend: B,
     /// Records a stop attempt before calling user code, including failures and panics.
@@ -219,7 +240,21 @@ pub(crate) struct FederateCoordinator<B: FederateCoordinationBackend> {
 
 impl<B: FederateCoordinationBackend> FederateCoordinator<B> {
     /// Runs until pure coordination stops or returns its first backend, state, or channel failure.
+    #[cfg(test)]
     pub(crate) fn run(mut self) -> Result<(), FederateCoordinationError> {
+        self.run_loop()
+    }
+
+    /// Returns the authoritative first failing participant after bounded peer release.
+    pub(crate) fn run_with_failure_origin(
+        mut self,
+    ) -> (Result<(), FederateCoordinationError>, Option<EnclaveIndex>) {
+        let result = self.run_loop();
+        (result, self.state.first_failure())
+    }
+
+    /// Serializes reports and backend input until terminal coordination.
+    fn run_loop(&mut self) -> Result<(), FederateCoordinationError> {
         loop {
             let outcome = match self.report_rx.recv_timeout(StdDuration::from_millis(1)) {
                 Ok(report) => self.handle_report(report),
@@ -248,6 +283,27 @@ impl<B: FederateCoordinationBackend> FederateCoordinator<B> {
         report: CoordinatorReport,
     ) -> Result<bool, FederateCoordinationError> {
         match report {
+            CoordinatorReport::PublicationObserved {
+                enclave,
+                generation,
+            } => {
+                self.require_participant(enclave)?;
+                if generation == self.publication_generation {
+                    self.publication_observed[enclave] = generation;
+                    if self
+                        .publication_observed
+                        .values()
+                        .all(|observed| *observed == generation)
+                    {
+                        if let Some(publication) = self.pending_publication.take() {
+                            if publication.revision() == self.state.revision() {
+                                self.backend.publish(publication)?;
+                            }
+                        }
+                    }
+                }
+                Ok(false)
+            }
             CoordinatorReport::Scheduler(message) => {
                 let actions = self.state.handle_scheduler(message)?;
                 self.execute_actions(actions)
@@ -289,12 +345,20 @@ impl<B: FederateCoordinationBackend> FederateCoordinator<B> {
         for action in actions {
             match action {
                 CoordinationAction::Publish(publication) => {
-                    self.backend.publish(publication)?;
+                    self.publication_generation = self
+                        .publication_generation
+                        .checked_add(1)
+                        .expect("publication generation exhausted");
+                    self.pending_publication = Some(publication);
+                    self.send_all(ParticipantCommand::PublicationProbe {
+                        generation: self.publication_generation,
+                    })?;
                 }
                 action @ CoordinationAction::AdvanceHorizon { .. } => {
                     self.send_all(ParticipantCommand::Action(action))?;
                 }
-                action @ CoordinationAction::Grant { enclave, .. } => {
+                action @ (CoordinationAction::Grant { enclave, .. }
+                | CoordinationAction::CompletionProbe { enclave, .. }) => {
                     self.send_one(enclave, ParticipantCommand::Action(action))?;
                 }
                 CoordinationAction::Complete(completion) => self.backend.complete(completion)?,
@@ -329,7 +393,11 @@ impl<B: FederateCoordinationBackend> FederateCoordinator<B> {
                 return Ok(true);
             }
         }
-        if let Some(revision) = self.state.idle_confirmation_revision() {
+        if let Some(revision) = self
+            .state
+            .idle_confirmation_revision()
+            .filter(|_| self.pending_publication.is_none())
+        {
             if self.backend.confirm_idle(revision)? {
                 let actions = self.state.handle_idle_confirmation(revision);
                 return self.execute_actions(actions);
@@ -434,6 +502,10 @@ pub(crate) struct EnclaveCoordinationPort {
     command_rx: mpsc::Receiver<ParticipantCommand>,
     /// Scheduler event receiver inspected only by this participant.
     event_rx: crate::Receiver<AsyncEvent>,
+    /// Publication probe retained across control-only interruptions.
+    publication_probe: Option<u64>,
+    /// Completion probe retained across non-revising control-event interruptions.
+    completion_probe: Option<u64>,
     /// Revision in which this participant entered the parked barrier.
     parked_revision: Option<CoordinationRevision>,
     /// Legacy shared logical horizon, when one ended coordination.
@@ -454,9 +526,38 @@ impl EnclaveCoordinationPort {
         self.grant_horizon = Some(self.grant_horizon.map_or(tag, |current| current.max(tag)));
     }
 
+    /// Acknowledges retained probes only after the caller freshly checked its mailbox.
+    fn confirm_mailbox_probes(&mut self) -> Result<(), FederateCoordinationError> {
+        if let Some(generation) = self.publication_probe.take() {
+            self.report(CoordinatorReport::PublicationObserved {
+                enclave: self.enclave,
+                generation,
+            })?;
+        }
+        if let Some(generation) = self.completion_probe.take() {
+            self.report(CoordinatorReport::Scheduler(
+                SchedulerMessage::CompletionObserved {
+                    enclave: self.enclave,
+                    generation,
+                },
+            ))?;
+        }
+        Ok(())
+    }
+
     /// Applies one command while control-only work waits for authorization.
     fn apply_control_command(&mut self, command: ParticipantCommand) -> bool {
         match command {
+            ParticipantCommand::PublicationProbe { generation } => {
+                self.publication_probe = Some(generation);
+                false
+            }
+            ParticipantCommand::Action(CoordinationAction::CompletionProbe {
+                generation, ..
+            }) => {
+                self.completion_probe = Some(generation);
+                false
+            }
             ParticipantCommand::Action(CoordinationAction::AdvanceHorizon { tag }) => {
                 self.advance_horizon(tag);
                 false
@@ -577,7 +678,17 @@ impl FederateSchedulerCoordination for EnclaveCoordinationPort {
             if let Some(event) = self.take_active_event()? {
                 return Ok(FederateIdleWait::Interrupted(event));
             }
+            self.confirm_mailbox_probes()?;
             match self.command_rx.recv_timeout(StdDuration::from_millis(1)) {
+                Ok(ParticipantCommand::PublicationProbe { generation }) => {
+                    self.publication_probe = Some(generation);
+                }
+                Ok(ParticipantCommand::Action(CoordinationAction::CompletionProbe {
+                    generation,
+                    ..
+                })) => {
+                    self.completion_probe = Some(generation);
+                }
                 Ok(ParticipantCommand::Action(CoordinationAction::Probe { revision })) => {
                     if let Some(event) = self.take_active_event()? {
                         return Ok(FederateIdleWait::Interrupted(event));
@@ -646,7 +757,17 @@ impl FederateSchedulerCoordination for EnclaveCoordinationPort {
             if let Some(event) = self.take_active_event()? {
                 return Ok(FederateTagAcquisition::Interrupted(event));
             }
+            self.confirm_mailbox_probes()?;
             match self.command_rx.recv_timeout(StdDuration::from_millis(1)) {
+                Ok(ParticipantCommand::PublicationProbe { generation }) => {
+                    self.publication_probe = Some(generation);
+                }
+                Ok(ParticipantCommand::Action(CoordinationAction::CompletionProbe {
+                    generation,
+                    ..
+                })) => {
+                    self.completion_probe = Some(generation);
+                }
                 Ok(ParticipantCommand::Action(CoordinationAction::Grant {
                     tag: granted, ..
                 })) if granted >= tag => {
@@ -707,6 +828,7 @@ impl FederateSchedulerCoordination for EnclaveCoordinationPort {
             if let Some(event) = self.take_active_event()? {
                 return Ok(FederateControlAuthorization::Interrupted(event));
             }
+            self.confirm_mailbox_probes()?;
             if self.grant_horizon.is_some_and(|horizon| horizon >= tag) {
                 return Ok(FederateControlAuthorization::Authorized);
             }
@@ -837,11 +959,13 @@ impl<B: FederateCoordinationBackend> FederateCoordinationParts<B> {
         )?;
         let (report_tx, report_rx) = mpsc::channel();
         let mut commands = TinySecondaryMap::new();
+        let mut publication_observed = TinySecondaryMap::new();
         let mut events = TinySecondaryMap::new();
         let mut ports = TinySecondaryMap::new();
         for (enclave, event_tx, event_rx) in participants {
             let (command_tx, command_rx) = mpsc::channel();
             commands.insert(enclave, command_tx);
+            publication_observed.insert(enclave, 0);
             events.insert(enclave, event_tx);
             ports.insert(
                 enclave,
@@ -851,6 +975,8 @@ impl<B: FederateCoordinationBackend> FederateCoordinationParts<B> {
                     command_rx,
                     event_rx,
                     parked_revision: None,
+                    completion_probe: None,
+                    publication_probe: None,
                     logical_horizon: None,
                     grant_horizon: None,
                     deferred_error: None,
@@ -868,6 +994,9 @@ impl<B: FederateCoordinationBackend> FederateCoordinationParts<B> {
                 commands,
                 events,
                 state,
+                pending_publication: None,
+                publication_generation: 0,
+                publication_observed,
                 backend,
                 backend_stop_attempted: false,
                 #[cfg(test)]
@@ -1039,6 +1168,12 @@ mod tests {
                 next_event: None,
             }))
             .unwrap();
+        coordinator
+            .handle_report(CoordinatorReport::PublicationObserved {
+                enclave,
+                generation: coordinator.publication_generation,
+            })
+            .unwrap();
         let revision = coordinator.state.revision();
         for observation in [
             Observation::Probed,
@@ -1120,6 +1255,83 @@ mod tests {
         },
         /// Terminal backend stop.
         Stop,
+    }
+
+    /// External lower bounds wait for every mailbox, including an apparently idle sibling.
+    #[test]
+    fn backend_publication_waits_for_fresh_local_mailboxes() {
+        for candidate in [None, Some(Tag::new(Duration::seconds(100), 0))] {
+            let first = EnclaveIndex::new(3);
+            let second = EnclaveIndex::new(7);
+            let (first_tx, first_rx) = kanal::unbounded();
+            let (second_tx, second_rx) = kanal::unbounded();
+            let (call_tx, call_rx) = mpsc::channel();
+            let mut parts = FederateCoordinationParts::new(
+                [(first, first_tx, first_rx), (second, second_tx, second_rx)],
+                LifecyclePolicy::KeepAlive,
+                CallRecordingBackend { call_tx },
+            )
+            .unwrap();
+            for (enclave, next_event) in [(second, None), (first, candidate)] {
+                parts
+                    .coordinator
+                    .handle_report(CoordinatorReport::Scheduler(SchedulerMessage::Publish {
+                        enclave,
+                        next_event,
+                    }))
+                    .unwrap();
+            }
+            assert!(
+                call_rx.try_recv().is_err(),
+                "a stale sibling publication cannot authorize downstream execution"
+            );
+            let old = parts.coordinator.publication_generation;
+            parts
+                .coordinator
+                .handle_report(CoordinatorReport::PublicationObserved {
+                    enclave: first,
+                    generation: old,
+                })
+                .unwrap();
+            parts
+                .coordinator
+                .handle_report(CoordinatorReport::Scheduler(SchedulerMessage::Active {
+                    enclave: second,
+                }))
+                .unwrap();
+            parts
+                .coordinator
+                .handle_report(CoordinatorReport::PublicationObserved {
+                    enclave: second,
+                    generation: old,
+                })
+                .unwrap();
+            assert!(
+                call_rx.try_recv().is_err(),
+                "new local work invalidates the old publication fence"
+            );
+            parts
+                .coordinator
+                .handle_report(CoordinatorReport::Scheduler(SchedulerMessage::Publish {
+                    enclave: second,
+                    next_event: None,
+                }))
+                .unwrap();
+            let generation = parts.coordinator.publication_generation;
+            assert!(generation > old);
+            for enclave in [first, second] {
+                parts
+                    .coordinator
+                    .handle_report(CoordinatorReport::PublicationObserved {
+                        enclave,
+                        generation,
+                    })
+                    .unwrap();
+            }
+            assert!(
+                matches!(call_rx.try_recv(), Ok(BackendCall::Publish { next_event }) if next_event == candidate)
+            );
+        }
     }
 
     /// Backend that records publication and stop ordering through a channel.
@@ -1268,6 +1480,8 @@ mod tests {
             command_rx,
             event_rx,
             parked_revision: None,
+            completion_probe: None,
+            publication_probe: None,
             logical_horizon: None,
             grant_horizon: None,
             deferred_error: None,
@@ -1275,6 +1489,49 @@ mod tests {
             termination: None,
         };
         (participant, event_tx)
+    }
+
+    /// Control-only interrupts retain completion probes until a fresh mailbox check.
+    #[test]
+    fn control_authorization_preserves_completion_probe_across_interruptions() {
+        let enclave = EnclaveIndex::new(3);
+        let (report_tx, report_rx) = mpsc::channel();
+        let (command_tx, command_rx) = mpsc::channel();
+        let (mut participant, event_tx) = participant_with_events(enclave, report_tx, command_rx);
+        let horizon = Tag::new(Duration::seconds(2), 0);
+        command_tx
+            .send(ParticipantCommand::Action(
+                CoordinationAction::CompletionProbe {
+                    enclave,
+                    generation: 7,
+                },
+            ))
+            .unwrap();
+        event_tx
+            .send(AsyncEvent::TagReleaseProvisional {
+                enclave: crate::EnclaveKey::new(0),
+                tag: horizon,
+            })
+            .unwrap();
+        assert!(matches!(
+            participant.authorize_control(horizon).unwrap(),
+            FederateControlAuthorization::Interrupted(_)
+        ));
+        command_tx
+            .send(ParticipantCommand::Action(
+                CoordinationAction::AdvanceHorizon { tag: horizon },
+            ))
+            .unwrap();
+        assert!(matches!(
+            participant.authorize_control(horizon).unwrap(),
+            FederateControlAuthorization::Authorized
+        ));
+        assert!(matches!(
+            report_rx.try_recv(),
+            Ok(CoordinatorReport::Scheduler(
+                SchedulerMessage::CompletionObserved { generation: 7, .. }
+            ))
+        ));
     }
 
     /// Verifies terminal coordination cannot be mistaken for an acquired logical tag.

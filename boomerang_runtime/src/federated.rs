@@ -7,8 +7,11 @@ use crate::{
     event::AsyncEvent, ActionCommon, AsyncActionRef, CommonContext, ReactorData, SendContext, Tag,
 };
 
-#[derive(Debug, Clone, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum FederatedEndpointError {
+    /// A compiled inbound event must carry a finite, nonnegative logical tag.
+    #[error("invalid compiled inbound tag: {0:?}")]
+    InvalidTag(Tag),
     #[error("federated payload codec error: {0}")]
     Codec(String),
 
@@ -112,6 +115,33 @@ impl fmt::Debug for FederatedInboundEndpoint {
 }
 
 impl FederatedInboundEndpoint {
+    /// Installs a decoded value directly into a validated compiled inbound route's port.
+    pub(crate) fn for_port<T: ReactorData>(
+        sender: crate::Sender<AsyncEvent>,
+        port: crate::image::PortIndex,
+        decoder: impl FederatedPayloadDecoder<T>,
+    ) -> Self {
+        Self {
+            handler: Arc::new(move |tag, payload| {
+                if tag < Tag::ZERO || tag >= Tag::FOREVER {
+                    return Err(FederatedEndpointError::InvalidTag(tag));
+                }
+                let value = decoder.decode(payload)?;
+                match sender.try_send(AsyncEvent::Logical {
+                    tag,
+                    target: crate::AsyncEventTarget::BoundaryPort(port),
+                    value: Box::new(value),
+                }) {
+                    Ok(true) => Ok(()),
+                    Ok(false) => Err(FederatedEndpointError::send(
+                        "compiled inbound mailbox is full",
+                    )),
+                    Err(_) => Err(FederatedEndpointError::SchedulerClosed),
+                }
+            }),
+        }
+    }
+
     /// Erase one typed logical-action decoder and scheduler target for storage in a route.
     pub fn new<T>(
         context: SendContext,
@@ -151,6 +181,27 @@ impl FederatedInboundEndpoint {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Rejects non-event tags before a codec can run or an event can enter the mailbox.
+    #[test]
+    fn compiled_inbound_rejects_invalid_tags_before_decoding_or_admission() {
+        let (tx, rx) = kanal::unbounded();
+        let endpoint = FederatedInboundEndpoint::for_port(
+            tx,
+            crate::image::PortIndex::new(4),
+            |_: &[u8]| -> Result<u32, FederatedEndpointError> {
+                panic!("invalid tags must not invoke user codecs")
+            },
+        );
+        for tag in [
+            Tag::NEVER,
+            Tag::FOREVER,
+            Tag::new(crate::Duration::nanoseconds(-1), 0),
+        ] {
+            assert!(endpoint.schedule(tag, b"payload").is_err());
+            assert!(rx.try_recv().unwrap().is_none());
+        }
+    }
 
     #[test]
     fn federated_fault_state_preserves_first_error() {

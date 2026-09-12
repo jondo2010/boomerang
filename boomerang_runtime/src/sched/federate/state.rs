@@ -20,6 +20,8 @@ pub(crate) enum LifecyclePolicy {
     KeepAlive,
     /// Confirm a stable fixed point and stop the Federate.
     TerminateWhenIdle,
+    /// Require backend idle authority before the final local fixed point.
+    CoordinatedTermination,
 }
 
 /// Current phase of the pure Federate coordination state machine.
@@ -35,6 +37,8 @@ pub(crate) enum CoordinationPhase {
     Rechecking,
     /// KeepAlive participants are unanimously idle and wakeable.
     Parked,
+    /// Locally idle participants await backend authority while remaining wakeable.
+    AwaitingIdleConfirmation,
     /// The Federate has committed stop or failure and accepts no more work.
     Stopped,
 }
@@ -193,6 +197,8 @@ pub(crate) struct FederateCoordinationState {
     first_failure: Option<EnclaveIndex>,
     /// Idle behavior selected by the runtime adapter.
     lifecycle: LifecyclePolicy,
+    /// Revision of the final local fixed point authorized by the backend.
+    idle_authorization: Option<CoordinationRevision>,
     /// Current active, fixed-point, or terminal phase.
     phase: CoordinationPhase,
 }
@@ -224,6 +230,7 @@ impl FederateCoordinationState {
             grant_horizon: None,
             first_failure: None,
             lifecycle,
+            idle_authorization: None,
             phase: CoordinationPhase::Active,
         })
     }
@@ -348,7 +355,10 @@ impl FederateCoordinationState {
         observation: Observation,
     ) -> Result<Vec<CoordinationAction>, CoordinationStateError> {
         self.participant(enclave)?;
-        if self.is_stopped() || revision != self.revision {
+        if self.is_stopped()
+            || revision != self.revision
+            || self.phase == CoordinationPhase::AwaitingIdleConfirmation
+        {
             return Ok(Vec::new());
         }
         if matches!(
@@ -405,10 +415,40 @@ impl FederateCoordinationState {
                 CoordinationAction::Recheck { revision }
             }
             Observation::Rechecked => {
+                if self.lifecycle == LifecyclePolicy::CoordinatedTermination
+                    && self.idle_authorization != Some(revision)
+                {
+                    self.phase = CoordinationPhase::AwaitingIdleConfirmation;
+                    return Ok(Vec::new());
+                }
                 return Ok(self.stop());
             }
         };
         Ok(vec![action])
+    }
+
+    /// Revision awaiting external idle authority, if any.
+    pub(crate) fn idle_confirmation_revision(&self) -> Option<CoordinationRevision> {
+        (self.phase == CoordinationPhase::AwaitingIdleConfirmation).then_some(self.revision)
+    }
+
+    /// Applies current backend authority, then requires a fresh full local fixed point.
+    pub(crate) fn handle_idle_confirmation(
+        &mut self,
+        revision: CoordinationRevision,
+    ) -> Vec<CoordinationAction> {
+        if self.idle_confirmation_revision() != Some(revision) {
+            return Vec::new();
+        }
+        // A new revision prevents delayed acknowledgements from the initial idle check
+        // from satisfying this final check. Intervening work advances it again.
+        self.revision = self.revision.next();
+        self.pending_publication = None;
+        self.idle_authorization = Some(self.revision);
+        self.phase = CoordinationPhase::Probing;
+        vec![CoordinationAction::Probe {
+            revision: self.revision,
+        }]
     }
 
     /// Enters terminal stop and emits `Stop` at most once.
@@ -542,6 +582,7 @@ impl FederateCoordinationState {
                 }),
                 CoordinationPhase::Active
                 | CoordinationPhase::Parked
+                | CoordinationPhase::AwaitingIdleConfirmation
                 | CoordinationPhase::Stopped => None,
             };
             return Ok(action.into_iter().collect());
@@ -574,7 +615,10 @@ impl FederateCoordinationState {
         }
         self.phase = match (next_event, self.lifecycle) {
             (None, LifecyclePolicy::KeepAlive) => CoordinationPhase::Parked,
-            (None, LifecyclePolicy::TerminateWhenIdle) => {
+            (
+                None,
+                LifecyclePolicy::TerminateWhenIdle | LifecyclePolicy::CoordinatedTermination,
+            ) => {
                 actions.push(CoordinationAction::Probe {
                     revision: self.revision,
                 });
@@ -890,6 +934,74 @@ mod tests {
                 assert!(!state.is_stopped());
             }
         }
+    }
+
+    /// Catches local idle stop without backend authority and reuse after intervening work.
+    #[test]
+    fn coordinated_idle_requires_current_authority_and_a_new_fixed_point() {
+        let enclave = EnclaveIndex::new(3);
+        let mut state =
+            FederateCoordinationState::new([enclave], LifecyclePolicy::CoordinatedTermination)
+                .unwrap();
+        publish(&mut state, enclave, None);
+        let revision = state.revision();
+        for observation in [
+            Observation::Probed,
+            Observation::Parked,
+            Observation::Rechecked,
+        ] {
+            observe(&mut state, enclave, revision, observation).unwrap();
+        }
+        assert!(!state.is_stopped());
+        assert_eq!(state.idle_confirmation_revision(), Some(revision));
+        // Duplicate reports from the completed first check remain harmless while waiting.
+        for observation in [
+            Observation::Probed,
+            Observation::Parked,
+            Observation::Rechecked,
+        ] {
+            assert!(observe(&mut state, enclave, revision, observation)
+                .unwrap()
+                .is_empty());
+        }
+        assert!(state.handle_idle_confirmation(revision.next()).is_empty());
+        assert_eq!(
+            state.handle_idle_confirmation(revision),
+            vec![CoordinationAction::Probe {
+                revision: revision.next(),
+            }]
+        );
+        assert!(!state.is_stopped());
+        // Old acknowledgements must not satisfy the post-confirmation fixed point.
+        assert!(
+            observe(&mut state, enclave, revision, Observation::Rechecked)
+                .unwrap()
+                .is_empty()
+        );
+        state
+            .handle_scheduler(SchedulerMessage::Active { enclave })
+            .unwrap();
+        publish(&mut state, enclave, None);
+        let current = state.revision();
+        for observation in [
+            Observation::Probed,
+            Observation::Parked,
+            Observation::Rechecked,
+        ] {
+            observe(&mut state, enclave, current, observation).unwrap();
+        }
+        assert!(!state.is_stopped());
+        assert_eq!(state.idle_confirmation_revision(), Some(current));
+        assert!(state.handle_idle_confirmation(revision).is_empty());
+        state.handle_idle_confirmation(current);
+        let confirmed = state.revision();
+        observe(&mut state, enclave, confirmed, Observation::Probed).unwrap();
+        observe(&mut state, enclave, confirmed, Observation::Parked).unwrap();
+        assert!(!state.is_stopped());
+        assert_eq!(
+            observe(&mut state, enclave, confirmed, Observation::Rechecked).unwrap(),
+            vec![CoordinationAction::Stop]
+        );
     }
 
     /// Verifies each fixed-point phase requires unanimous, idempotent acknowledgements.

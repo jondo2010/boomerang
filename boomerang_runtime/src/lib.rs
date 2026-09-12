@@ -56,6 +56,8 @@ pub use reaction::{
     EnclaveSenderReactionFn, FromRefs, Reaction, ReactionFn, ReactionKey,
 };
 pub use reactor::*;
+#[cfg(feature = "federated")]
+pub use reference::execute_owned_federate_with_backend;
 pub use reference::{
     execute_owned, execute_owned_federate, EnclaveExecution, ExecuteOwnedError,
     ExecuteOwnedFederateError, FederateBindings, FederateExecution, StateAccessError,

@@ -250,7 +250,7 @@ impl<T: ReactorData> PortFactory for TypedPortFactory<T> {
 }
 
 /// Type-erased outbound route installed only after both typed endpoints pass preflight.
-trait OutboundRoute: Send {
+pub(crate) trait OutboundRoute: Send {
     /// Clones and admits one present source value at its destination timing boundary.
     fn emit(&mut self, source: &dyn BasePort, tag: Tag) -> Result<(), OwnedStorageError>;
 }
@@ -375,6 +375,16 @@ where
 /// Errors building or accessing heap-backed compiled-image storage.
 #[derive(thiserror::Error, Debug, Clone, PartialEq, Eq)]
 pub enum OwnedStorageError {
+    #[cfg(feature = "federated")]
+    /// An external compiled route failed to encode or submit its value.
+    #[error("external route '{boundary}' failed: {source}")]
+    ExternalRoute {
+        /// Stable compiled boundary identity.
+        boundary: String,
+        /// Codec or transport submission failure.
+        #[source]
+        source: crate::FederatedEndpointError,
+    },
     /// A required image binding did not receive an implementation.
     #[error("missing {kind:?} binding at {slot}")]
     MissingBinding {
@@ -799,6 +809,20 @@ impl<'image> OwnedStorage<'image> {
             routes.push(route);
         } else {
             self.outbound_routes.insert(source_port, vec![route]);
+        }
+    }
+
+    #[cfg(feature = "federated")]
+    /// Installs a preflight-checked external adapter at its compiled source port.
+    pub(crate) fn bind_external_outbound(
+        &mut self,
+        port: PortIndex,
+        route: Box<dyn OutboundRoute + 'image>,
+    ) {
+        if let Some(routes) = self.outbound_routes.get_mut(port) {
+            routes.push(route);
+        } else {
+            self.outbound_routes.insert(port, vec![route]);
         }
     }
 

@@ -196,6 +196,19 @@ pub trait FederateCoordinationBackend: Send {
     fn complete(&mut self, completion: FederateCompletion)
         -> Result<(), FederateCoordinationError>;
 
+    /// Polls for authority to terminate the current locally idle revision.
+    ///
+    /// `true` promises no future inbound work for this Federate. The coordinator
+    /// still rechecks local queues before stopping. `false` keeps participants
+    /// wakeable and continues backend progress. This must be nonblocking or bounded;
+    /// failures must use [FederateCoordinationError::BackendStop].
+    fn confirm_idle(
+        &mut self,
+        _revision: CoordinationRevision,
+    ) -> Result<bool, FederateCoordinationError> {
+        Ok(false)
+    }
+
     /// Stops coordination and releases any backend-owned pending state.
     ///
     /// Failures must use [FederateCoordinationError::BackendStop].

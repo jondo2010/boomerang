@@ -12,11 +12,11 @@ use boomerang::runtime::{
         ActionImage, ActionIndex, ActionSlotIndex, ActionTiming, BindingKind, BindingSlotId,
         BindingSlotIndex, BoundaryId, CompiledDeploymentImage, CoordinationProjection, EnclaveId,
         EnclaveImage, EnclaveIndex, FederateId, FederateImage, FederateIndex,
-        GlobalFederationImage, ImageValidationError, LevelReactionImage, LifecycleReactionImage,
-        ModeImage, ModeIndex, PortImage, PortIndex, ReactionImage, ReactionIndex, ReactorImage,
-        ReactorIndex, RequiredBindingImage, RouteDirection, RouteImage, RuntimeBackendId,
-        ScopeImage, ScopeIndex, StateSlotIndex, StorageBounds, TableRange, TargetId,
-        TimerStartupImage, TimingDomain, TinyMapView,
+        GlobalFederationImage, ImageValidationError, IndexSpan, LevelReactionImage,
+        LifecycleReactionImage, ModeImage, ModeIndex, PortImage, PortIndex, ReactionImage,
+        ReactionIndex, ReactorImage, ReactorIndex, RequiredBindingImage, RouteDirection,
+        RouteImage, RuntimeBackendId, ScopeImage, ScopeIndex, SliceRange, StateSlotIndex,
+        StorageBounds, TargetId, TimerStartupImage, TimingDomain, TinyMapView,
     },
     ActionRef, CommonContext, CompiledModeEffectRef, Config, Context, Duration, EnclaveBindings,
     EnclaveKey, ExecuteOwnedError, ExecuteOwnedFederateError, FederateBindings, InputRef,
@@ -26,7 +26,13 @@ use boomerang::runtime::{
 
 macro_rules! r {
     ($start:expr, $len:expr) => {
-        TableRange::new($start, $len)
+        SliceRange::new($start, $len)
+    };
+}
+
+macro_rules! s {
+    ($start:expr, $len:expr) => {
+        IndexSpan::new($start, $len)
     };
 }
 
@@ -34,7 +40,7 @@ const fn fixture_federate(
     id: &'static str,
     target: &'static str,
     runtime: &'static str,
-    enclaves: TableRange<EnclaveIndex>,
+    enclaves: IndexSpan<EnclaveIndex>,
 ) -> FederateImage<'static> {
     FederateImage::new(
         FederateId::new(id),
@@ -104,7 +110,7 @@ static REACTORS: [ReactorImage; 1] = [ReactorImage::new(
     BindingSlotIndex::new(0),
     StateSlotIndex::new(0),
     ScopeIndex::new(0),
-    r!(0, 0),
+    s!(0, 0),
     None,
     None,
 )];
@@ -191,9 +197,9 @@ static ROUTED_REQUIRED_BINDINGS: [RequiredBindingImage; 3] = [
 const fn fixture_reaction(
     scope: u32,
     binding: u32,
-    use_ports: TableRange<PortIndex>,
-    actions: TableRange<ActionIndex>,
-    modes: TableRange<ModeIndex>,
+    use_ports: SliceRange<PortIndex>,
+    actions: SliceRange<ActionIndex>,
+    modes: SliceRange<ModeIndex>,
 ) -> ReactionImage {
     ReactionImage::new(
         ReactorIndex::new(0),
@@ -210,7 +216,7 @@ const fn fixture_reaction(
 const fn fixture_timer_action(
     slot: u32,
     period_nanos: Option<u64>,
-    triggers: TableRange<LevelReactionImage>,
+    triggers: SliceRange<LevelReactionImage>,
 ) -> ActionImage {
     ActionImage::new(
         ScopeIndex::new(0),
@@ -224,10 +230,10 @@ const fn fixture_timer_action(
 const fn fixture_scope(
     parent: Option<ScopeIndex>,
     mode: Option<ModeIndex>,
-    descendants: TableRange<ScopeIndex>,
-    logical_actions: TableRange<ActionIndex>,
-    timer_startups: TableRange<TimerStartupImage>,
-    startups: TableRange<LifecycleReactionImage>,
+    descendants: SliceRange<ScopeIndex>,
+    logical_actions: SliceRange<ActionIndex>,
+    timer_startups: SliceRange<TimerStartupImage>,
+    startups: SliceRange<LifecycleReactionImage>,
 ) -> ScopeImage {
     ScopeImage::new(
         parent,
@@ -356,7 +362,7 @@ static MODAL_REACTORS: [ReactorImage; 1] = [ReactorImage::new(
     BindingSlotIndex::new(0),
     StateSlotIndex::new(0),
     ScopeIndex::new(0),
-    r!(0, 2),
+    s!(0, 2),
     Some(ModeIndex::new(0)),
     None,
 )];
@@ -760,7 +766,7 @@ static QUIESCENT_HORIZON_IMAGE: EnclaveImage<'static> = EnclaveImage {
 static QUIESCENT_HORIZON_ENCLAVES: [EnclaveImage<'static>; 2] =
     [QUIESCENT_HORIZON_IMAGE, HORIZON_IDLE_IMAGE];
 static HORIZON_FEDERATES: [FederateImage; 1] =
-    [fixture_federate("host", "target", "runtime", r!(0, 2))];
+    [fixture_federate("host", "target", "runtime", s!(0, 2))];
 static HORIZON_FEDERATE_MEMBERS: [FederateIndex; 1] = [FederateIndex::new(0)];
 static HORIZON_DEPLOYMENT: CompiledDeploymentImage<'static> = CompiledDeploymentImage {
     federation: GlobalFederationImage::new(&HORIZON_FEDERATE_MEMBERS, &[]),
@@ -1006,7 +1012,7 @@ static ROUTED_SOURCE_REACTORS: [ReactorImage; 1] = [ReactorImage::new(
     BindingSlotIndex::new(0),
     StateSlotIndex::new(0),
     ScopeIndex::new(0),
-    r!(0, 0),
+    s!(0, 0),
     None,
     None,
 )];
@@ -1147,7 +1153,7 @@ static ROUTED_SINK_IMAGE: EnclaveImage<'static> = EnclaveImage {
 };
 
 static ROUTED_FEDERATES: [FederateImage; 1] =
-    [fixture_federate("host", "target", "runtime", r!(0, 2))];
+    [fixture_federate("host", "target", "runtime", s!(0, 2))];
 static ROUTED_ENCLAVES: [EnclaveImage<'static>; 2] = [ROUTED_SOURCE_IMAGE, ROUTED_SINK_IMAGE];
 static ROUTED_FEDERATE_MEMBERS: [FederateIndex; 1] = [FederateIndex::new(0)];
 static ROUTED_DEPLOYMENT: CompiledDeploymentImage<'static> = CompiledDeploymentImage {
@@ -1307,7 +1313,7 @@ static MULTI_ENCLAVES: [EnclaveImage<'static>; 3] = [
     MULTI_SINK_IMAGE,
 ];
 static MULTI_FEDERATES: [FederateImage; 1] =
-    [fixture_federate("host", "target", "runtime", r!(0, 3))];
+    [fixture_federate("host", "target", "runtime", s!(0, 3))];
 static MULTI_DEPLOYMENT: CompiledDeploymentImage<'static> = CompiledDeploymentImage {
     federation: GlobalFederationImage::new(&ROUTED_FEDERATE_MEMBERS, &[]),
     federates: TinyMapView::new(&MULTI_FEDERATES),
@@ -1679,7 +1685,7 @@ fn owned_federate_quiesces_a_positive_delay_route_cycle() {
             routes: TinyMapView::new(&routes),
             ..ROUTED_SOURCE_IMAGE
         }];
-        let federates = [fixture_federate("host", "target", "runtime", r!(0, 1))];
+        let federates = [fixture_federate("host", "target", "runtime", s!(0, 1))];
         let deployment = CompiledDeploymentImage {
             federates: TinyMapView::new(&federates),
             enclaves: TinyMapView::new(&enclaves),
@@ -1748,7 +1754,7 @@ fn owned_federate_preflight_rejects_before_initializers() {
     assert_eq!(ROUTED_INITIALIZATIONS.load(Ordering::SeqCst), 0);
 
     let unpaired_enclaves = [ROUTED_SOURCE_IMAGE];
-    let unpaired_federates = [fixture_federate("host", "target", "runtime", r!(0, 1))];
+    let unpaired_federates = [fixture_federate("host", "target", "runtime", s!(0, 1))];
     let unpaired = CompiledDeploymentImage {
         federates: TinyMapView::new(&unpaired_federates),
         enclaves: TinyMapView::new(&unpaired_enclaves),
@@ -1839,8 +1845,8 @@ fn owned_federate_preflight_rejects_before_initializers() {
     ));
 
     let cross_federates = [
-        fixture_federate("a", "t", "r", r!(0, 1)),
-        fixture_federate("b", "t", "r", r!(1, 1)),
+        fixture_federate("a", "t", "r", s!(0, 1)),
+        fixture_federate("b", "t", "r", s!(1, 1)),
     ];
     let cross_members = [FederateIndex::new(0), FederateIndex::new(1)];
     let cross_edges = [FederationEdgeImage::new(
@@ -1927,7 +1933,7 @@ fn owned_federate_rejects_enclave_without_root_reactor() {
         required_bindings: TinyMapView::new(&[]),
         storage_bounds: StorageBounds::new(0, 0, 0, 0, 0, 0),
     }];
-    let rootless_federates = [fixture_federate("host", "target", "runtime", r!(0, 1))];
+    let rootless_federates = [fixture_federate("host", "target", "runtime", s!(0, 1))];
     let members = [FederateIndex::new(0)];
     let deployment = CompiledDeploymentImage {
         federation: GlobalFederationImage::new(&members, &[]),
@@ -2096,7 +2102,7 @@ fn owned_federate_abort_stops_peer_with_recurring_internal_work_child() {
         ..IMAGE
     };
     let enclaves = [recurring, panicking];
-    let federates = [fixture_federate("host", "target", "runtime", r!(0, 2))];
+    let federates = [fixture_federate("host", "target", "runtime", s!(0, 2))];
     let members = [FederateIndex::new(0)];
     let deployment = CompiledDeploymentImage {
         federation: GlobalFederationImage::new(&members, &[]),

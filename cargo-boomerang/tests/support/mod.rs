@@ -7,16 +7,11 @@ use std::{
 };
 
 use boomerang_builder::compiler::{
-    lower, CoordinationSelection, FederateConfig, FederateId, ImplementationBinding,
-    PlacementAssignment, PlacementGroupId, ResolvedDeployment, RuntimeBackendId, TargetTriple,
+    CoordinationSelection, FederateConfig, FederateId, ImplementationBinding, PlacementAssignment,
+    PlacementGroupId, ResolvedDeployment, RuntimeBackendId, TargetTriple,
 };
-use boomerang_runtime::{
-    execute_owned_federate,
-    image::{CompiledDeploymentImage, FederateIndex, GlobalFederationImage},
-    Config,
-};
+use boomerang_runtime::{execute_owned_federate, image::FederateIndex, Config};
 use serde_json::{json, Value};
-use tinymap::TinyMapView;
 
 pub fn fixture_workspace() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/workspace")
@@ -141,31 +136,21 @@ pub fn owned_reference_summary(deployment_name: &str) -> Value {
             backend: coordination.backend,
         },
     };
-    let compiled = lower(
-        &ResolvedDeployment::new(
-            driver.topology().clone(),
-            bindings,
-            placements,
-            federates,
-            coordination,
-            [],
-        )
-        .unwrap(),
+    let compiled = ResolvedDeployment::new(
+        driver.topology().clone(),
+        bindings,
+        placements,
+        federates,
+        coordination,
+        [],
     )
+    .unwrap()
+    .lower()
     .unwrap();
     compiled.validate().unwrap();
 
     let selected = FederateIndex::new(0);
-    let slice = compiled.federate_slice(selected).unwrap();
-    let execution = slice.with_runtime_image(|slice| {
-        let federates = [slice.image()];
-        let members = [selected];
-        let image = CompiledDeploymentImage {
-            federation: GlobalFederationImage::new(&members, &[]),
-            federates: TinyMapView::new(&federates),
-            enclaves: TinyMapView::new(slice.enclaves()),
-            coordination: boomerang_runtime::image::CoordinationProjection::Local,
-        };
+    let execution = compiled.with_image(|image| {
         execute_owned_federate(
             &image,
             selected,

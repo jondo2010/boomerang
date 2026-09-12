@@ -26,7 +26,7 @@ use std::{
     ops::{Index, IndexMut},
 };
 
-use crate::Key;
+use crate::{IndexSpan, Key};
 
 mod chunks;
 mod iter_many;
@@ -35,6 +35,47 @@ mod view;
 pub use chunks::{Chunks, ChunksMut, SplitChunks};
 pub use iter_many::IterManyMut;
 pub use view::TinyMapView;
+
+/// A dense collection cannot represent the requested number of values.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CapacityError {
+    /// Greatest value count representable by the map's key type.
+    max_len: usize,
+    /// Value count requested by the failed operation.
+    attempted_len: usize,
+}
+
+impl CapacityError {
+    /// Records the key-domain limit and the value count that exceeded it.
+    const fn new(max_len: usize, attempted_len: usize) -> Self {
+        Self {
+            max_len,
+            attempted_len,
+        }
+    }
+
+    /// Returns the greatest representable collection length.
+    pub const fn max_len(self) -> usize {
+        self.max_len
+    }
+
+    /// Returns the length requested by the failed operation.
+    pub const fn attempted_len(self) -> usize {
+        self.attempted_len
+    }
+}
+
+impl Display for CapacityError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "dense collection length {} exceeds key capacity {}",
+            self.attempted_len, self.max_len
+        )
+    }
+}
+
+impl std::error::Error for CapacityError {}
 
 /// A map that uses a custom key type to index its values.
 ///
@@ -140,18 +181,100 @@ impl<K: Key, V> TinyMap<K, V> {
 
     /// Inserts a new value into the map and returns the key.
     pub fn insert(&mut self, value: V) -> K {
-        let key = K::from(self.data.len());
-        self.data.push(value);
-        key
+        self.try_insert(value)
+            .unwrap_or_else(|error| panic!("{error}"))
     }
 
+    /// Inserts a new value and returns its owner-generated key.
+    ///
+    /// Returns an error without modifying the map when the key domain is full.
+    pub fn try_insert(&mut self, value: V) -> Result<K, CapacityError> {
+        self.try_insert_with_key(|_| value)
+    }
+
+    /// Inserts a value created from its owner-generated key.
     pub fn insert_with_key<F>(&mut self, f: F) -> K
     where
         F: FnOnce(K) -> V,
     {
+        self.try_insert_with_key(f)
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    /// Inserts a value created from its owner-generated key.
+    ///
+    /// The factory is not called when the key domain is full.
+    pub fn try_insert_with_key<F>(&mut self, f: F) -> Result<K, CapacityError>
+    where
+        F: FnOnce(K) -> V,
+    {
+        let attempted_len = self.data.len().saturating_add(1);
+        if attempted_len > K::MAX_LEN {
+            return Err(CapacityError::new(K::MAX_LEN, attempted_len));
+        }
         let key = K::from(self.data.len());
         self.data.push(f(key));
-        key
+        Ok(key)
+    }
+
+    /// Appends an exact-size value segment and returns its generated key span.
+    ///
+    /// Capacity is checked before the map is modified.
+    pub fn try_extend_exact<I>(&mut self, values: I) -> Result<IndexSpan<K>, CapacityError>
+    where
+        I: IntoIterator<Item = V>,
+        I::IntoIter: ExactSizeIterator,
+    {
+        let values = values.into_iter();
+        let start = self.data.len();
+        let additional = values.len();
+        let attempted_len = start.saturating_add(additional);
+        if start.checked_add(additional).is_none() || attempted_len > K::MAX_LEN {
+            return Err(CapacityError::new(K::MAX_LEN, attempted_len));
+        }
+        self.data.extend(values);
+        Ok(IndexSpan::new(start, additional))
+    }
+
+    /// Appends an exact-size segment built from each owner-generated key.
+    ///
+    /// Capacity is checked before the factory is called or the map is modified.
+    pub fn try_extend_exact_with_key<I, F>(
+        &mut self,
+        items: I,
+        mut f: F,
+    ) -> Result<IndexSpan<K>, CapacityError>
+    where
+        I: IntoIterator,
+        I::IntoIter: ExactSizeIterator,
+        F: FnMut(K, I::Item) -> V,
+    {
+        let items = items.into_iter();
+        let start = self.data.len();
+        let additional = items.len();
+        let attempted_len = start.saturating_add(additional);
+        if start.checked_add(additional).is_none() || attempted_len > K::MAX_LEN {
+            return Err(CapacityError::new(K::MAX_LEN, attempted_len));
+        }
+        self.data.extend(
+            items
+                .enumerate()
+                .map(|(offset, item)| f(K::from(start + offset), item)),
+        );
+        Ok(IndexSpan::new(start, additional))
+    }
+
+    /// Collects values into a dense map while enforcing the key capacity.
+    pub fn try_from_iter<I>(values: I) -> Result<Self, CapacityError>
+    where
+        I: IntoIterator<Item = V>,
+    {
+        let values = values.into_iter();
+        let mut map = Self::with_capacity(values.size_hint().0.min(K::MAX_LEN));
+        for value in values {
+            map.try_insert(value)?;
+        }
+        Ok(map)
     }
 
     pub fn len(&self) -> usize {
@@ -187,6 +310,11 @@ impl<K: Key, V> TinyMap<K, V> {
         self.data.get(key.index())
     }
 
+    /// Returns the values in an owner-allocated key span.
+    pub fn get_span(&self, span: IndexSpan<K>) -> Option<&[V]> {
+        self.data.get(span.indices()?)
+    }
+
     /// Borrows this map as an allocation-free typed view.
     pub fn as_view(&self) -> TinyMapView<'_, K, V> {
         TinyMapView::new(&self.data)
@@ -195,10 +323,7 @@ impl<K: Key, V> TinyMap<K, V> {
 
 impl<K: Key, V> FromIterator<V> for TinyMap<K, V> {
     fn from_iter<T: IntoIterator<Item = V>>(iter: T) -> Self {
-        Self {
-            data: iter.into_iter().collect(),
-            _k: PhantomData,
-        }
+        Self::try_from_iter(iter).unwrap_or_else(|error| panic!("{error}"))
     }
 }
 
@@ -216,11 +341,93 @@ impl<K: Key, V> IntoIterator for TinyMap<K, V> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{key_type, DefaultKey};
+    use std::cell::Cell;
+
+    use crate::{key_type, DefaultKey, Key};
 
     use super::*;
 
     key_type!(pub TestKey);
+
+    #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+    struct TwoKey(u8);
+
+    impl From<usize> for TwoKey {
+        fn from(value: usize) -> Self {
+            Self(value.try_into().expect("test key index fits u8"))
+        }
+    }
+
+    impl Key for TwoKey {
+        const MAX_LEN: usize = 2;
+
+        fn index(&self) -> usize {
+            usize::from(self.0)
+        }
+    }
+
+    #[test]
+    fn fallible_insertion_stops_before_exceeding_the_key_domain() {
+        let mut map = TinyMap::<TwoKey, _>::new();
+
+        assert_eq!(map.try_insert(10).unwrap(), TwoKey(0));
+        assert_eq!(map.try_insert(20).unwrap(), TwoKey(1));
+        let error = map.try_insert(30).unwrap_err();
+
+        assert_eq!(error.max_len(), 2);
+        assert_eq!(error.attempted_len(), 3);
+        assert_eq!(map.values().copied().collect::<Vec<_>>(), vec![10, 20]);
+    }
+
+    #[test]
+    fn failed_key_aware_insertion_does_not_call_the_value_factory() {
+        let mut map = TinyMap::<TwoKey, _>::try_from_iter([10, 20]).unwrap();
+        let called = Cell::new(false);
+
+        let error = map
+            .try_insert_with_key(|_| {
+                called.set(true);
+                30
+            })
+            .unwrap_err();
+
+        assert_eq!(error.attempted_len(), 3);
+        assert!(!called.get());
+    }
+
+    #[test]
+    fn exact_extension_is_atomic_and_returns_the_allocated_span() {
+        let mut map = TinyMap::<TwoKey, _>::new();
+
+        let span = map.try_extend_exact([10, 20]).unwrap();
+        assert_eq!(span, crate::IndexSpan::new(0, 2));
+
+        let mut map = TinyMap::<TwoKey, _>::new();
+        map.try_insert(10).unwrap();
+        let error = map.try_extend_exact([20, 30]).unwrap_err();
+        assert_eq!(error.attempted_len(), 3);
+        assert_eq!(map.values().copied().collect::<Vec<_>>(), vec![10]);
+
+        let mut generated = Vec::new();
+        let mut map = TinyMap::<TwoKey, _>::new();
+        let span = map
+            .try_extend_exact_with_key([10, 20], |key, value| {
+                generated.push(key);
+                value + key.index()
+            })
+            .unwrap();
+        assert_eq!(span, crate::IndexSpan::new(0, 2));
+        assert_eq!(generated, vec![TwoKey(0), TwoKey(1)]);
+        assert_eq!(map.values().copied().collect::<Vec<_>>(), vec![10, 21]);
+    }
+
+    #[test]
+    fn fallible_collection_rejects_an_unrepresentable_dense_table() {
+        let error = TinyMap::<TwoKey, _>::try_from_iter([10, 20, 30]).unwrap_err();
+
+        assert_eq!(error.max_len(), 2);
+        assert_eq!(error.attempted_len(), 3);
+    }
 
     #[test]
     fn test_insert_and_get() {

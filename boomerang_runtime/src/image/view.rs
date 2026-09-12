@@ -1,6 +1,6 @@
 //! Checked borrowed views over immutable compiled runtime images.
 use super::*;
-use tinymap::{Key, TinyMapView};
+use tinymap::{IndexSpan, Key, SliceRange, TinyMapView};
 
 /// A precise, allocation-free scheduler-image validation failure.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
@@ -37,9 +37,9 @@ pub enum ImageValidationError<'a> {
         /// Target flattened table.
         target: &'static str,
         /// Invalid range start.
-        start: u32,
+        start: usize,
         /// Invalid range length.
-        len: u32,
+        len: usize,
     },
     /// Canonical owner ranges overlap or move backwards.
     #[error("{table}[{index}].{field} starts at {start} before {previous_end}")]
@@ -51,7 +51,7 @@ pub enum ImageValidationError<'a> {
         /// Source field.
         field: &'static str,
         /// Offending start.
-        start: u32,
+        start: usize,
         /// End of the previous range.
         previous_end: usize,
     },
@@ -190,6 +190,7 @@ pub enum ImageValidationError<'a> {
 /// A validated allocation-free view of one complete compiled deployment.
 #[derive(Debug)]
 pub struct CompiledDeploymentView<'a> {
+    /// Complete validated deployment image borrowed for this view's lifetime.
     image: &'a CompiledDeploymentImage<'a>,
 }
 
@@ -227,7 +228,9 @@ impl<'a> CompiledDeploymentView<'a> {
 /// A validated borrowed view of one Federate and its Enclaves.
 #[derive(Debug)]
 pub struct FederateImageView<'a> {
+    /// Complete deployment image containing the Federate and its Enclaves.
     image: &'a CompiledDeploymentImage<'a>,
+    /// Validated Federate record selected from the deployment table.
     federate: FederateImage<'a>,
 }
 
@@ -248,7 +251,7 @@ impl<'a> FederateImageView<'a> {
     }
 
     /// Returns the typed deployment-wide range of Enclaves owned by this Federate.
-    pub const fn enclaves(&self) -> TableRange<EnclaveIndex> {
+    pub const fn enclaves(&self) -> IndexSpan<EnclaveIndex> {
         self.federate.enclaves()
     }
 
@@ -257,128 +260,16 @@ impl<'a> FederateImageView<'a> {
         let images = self
             .image
             .enclaves
-            .get_range(self.federate.enclaves())
+            .get_span(self.federate.enclaves())
             .expect("compiled deployment ranges are validated");
         images.iter().map(EnclaveImageView::validated)
-    }
-}
-
-/// A validated borrowed view of one immutable Federate slice.
-#[derive(Debug)]
-pub struct FederateSliceView<'a> {
-    /// Validated immutable slice backing this view.
-    image: FederateSliceImage<'a>,
-}
-
-impl<'a> FederateSliceView<'a> {
-    /// Validates `image` and borrows its selected Federate hierarchy.
-    pub fn new(image: &FederateSliceImage<'a>) -> Result<Self, ImageValidationError<'a>> {
-        let federate = image.image();
-        let index = image.federate().as_u32();
-        if federate.enclaves().len() as usize != image.enclaves().len() {
-            return Err(ImageValidationError::OwnershipMismatch {
-                table: "federates",
-                index,
-                field: "enclaves",
-            });
-        }
-        if !enclave_range_fits_index_domain(federate.enclaves().start(), federate.enclaves().len())
-        {
-            return Err(ImageValidationError::RangeOutOfBounds {
-                table: "federates",
-                index,
-                field: "enclaves",
-                target: "enclaves",
-                start: federate.enclaves().start(),
-                len: federate.enclaves().len(),
-            });
-        }
-        let id = federate.id();
-        if !valid_id(id.as_str()) {
-            return Err(ImageValidationError::InvalidStableId {
-                kind: "federate",
-                index,
-                id: id.as_str(),
-            });
-        }
-        for (field, value) in [
-            ("target", federate.target().as_str()),
-            ("runtime", federate.runtime().as_str()),
-        ] {
-            if !valid_id(value) {
-                return Err(ImageValidationError::InvalidStableId {
-                    kind: field,
-                    index,
-                    id: value,
-                });
-            }
-        }
-        let mut previous_enclave = None;
-        for (offset, enclave) in image.enclaves().iter().enumerate() {
-            let enclave_index = federate.enclaves().start() + offset as u32;
-            validate(enclave)?;
-            validate_id(
-                "enclave",
-                enclave_index,
-                enclave.enclave_id.as_str(),
-                &mut previous_enclave,
-            )?;
-        }
-        Ok(Self { image: *image })
-    }
-
-    /// Returns the selected deployment-wide Federate index.
-    #[must_use]
-    pub const fn federate(&self) -> FederateIndex {
-        self.image.federate()
-    }
-
-    /// Returns the stable Federate identity.
-    #[must_use]
-    pub fn id(&self) -> FederateId<'a> {
-        self.image.image().id()
-    }
-
-    /// Returns the configured compilation target.
-    #[must_use]
-    pub fn target(&self) -> TargetId<'a> {
-        self.image.image().target()
-    }
-
-    /// Returns the configured runtime backend.
-    #[must_use]
-    pub fn runtime(&self) -> RuntimeBackendId<'a> {
-        self.image.image().runtime()
-    }
-
-    /// Returns the preserved deployment-wide Enclave ownership range.
-    #[must_use]
-    pub const fn enclaves(&self) -> TableRange<EnclaveIndex> {
-        self.image.image().enclaves()
-    }
-
-    /// Iterates validated local Enclave views with their deployment-wide keys.
-    pub fn enclave_views(
-        &self,
-    ) -> impl ExactSizeIterator<Item = (EnclaveIndex, EnclaveImageView<'a>)> + 'a {
-        let start = self.enclaves().start();
-        self.image
-            .enclaves()
-            .iter()
-            .enumerate()
-            .map(move |(offset, image)| {
-                let offset = u32::try_from(offset).expect("slice length is bounded by TableRange");
-                (
-                    EnclaveIndex::new(start + offset),
-                    EnclaveImageView::validated(image),
-                )
-            })
     }
 }
 
 /// A validated, allocation-free borrowed view of one Enclave image.
 #[derive(Debug)]
 pub struct EnclaveImageView<'a> {
+    /// Copyable borrowed image record whose tables were validated together.
     image: EnclaveImage<'a>,
 }
 
@@ -552,11 +443,6 @@ fn check_len<K: Key>(table: &'static str, len: usize) -> Result<(), ImageValidat
     }
 }
 
-/// Returns whether an Enclave ownership range fits the complete `u32` key domain.
-fn enclave_range_fits_index_domain(start: u32, len: u32) -> bool {
-    u64::from(start) + u64::from(len) <= u64::from(u32::MAX) + 1
-}
-
 fn check_ref<'a, K: Key, V>(
     table: &'static str,
     index: u32,
@@ -583,7 +469,7 @@ fn check_range<'a, T>(
     index: u32,
     field: &'static str,
     target: &'static str,
-    range: TableRange<T>,
+    range: SliceRange<T>,
     len: usize,
     previous_end: &mut usize,
 ) -> Result<(), ImageValidationError<'a>> {
@@ -594,8 +480,8 @@ fn check_range<'a, T>(
             index,
             field,
             target,
-            start: range.start(),
-            len: range.len(),
+            start: range.start() as usize,
+            len: range.len() as usize,
         });
     }
     if (range.start() as usize) < *previous_end {
@@ -603,11 +489,45 @@ fn check_range<'a, T>(
             table,
             index,
             field,
-            start: range.start(),
+            start: range.start() as usize,
             previous_end: *previous_end,
         });
     }
     *previous_end = end.unwrap();
+    Ok(())
+}
+
+/// Validates one monotonic owner-allocated span against its dense target table.
+fn check_span<'a, K: Key>(
+    table: &'static str,
+    index: u32,
+    field: &'static str,
+    target: &'static str,
+    span: IndexSpan<K>,
+    len: usize,
+    previous_end: &mut usize,
+) -> Result<(), ImageValidationError<'a>> {
+    let end = span.checked_end();
+    if end.is_none_or(|end| end > len) {
+        return Err(ImageValidationError::RangeOutOfBounds {
+            table,
+            index,
+            field,
+            target,
+            start: span.start(),
+            len: span.len(),
+        });
+    }
+    if span.start() < *previous_end {
+        return Err(ImageValidationError::RangesNotMonotonic {
+            table,
+            index,
+            field,
+            start: span.start(),
+            previous_end: *previous_end,
+        });
+    }
+    *previous_end = end.expect("checked dense span has an end");
     Ok(())
 }
 
@@ -653,7 +573,7 @@ fn check_rti_range<'a, T>(
     index: u32,
     field: &'static str,
     target: &'static str,
-    range: TableRange<T>,
+    range: SliceRange<T>,
     len: usize,
     previous_end: &mut usize,
 ) -> Result<(), ImageValidationError<'a>> {
@@ -902,14 +822,14 @@ fn validate_compiled_deployment<'a>(
                 });
             }
         }
-        if federate.enclaves().start() as usize != enclave_end {
+        if federate.enclaves().start() != enclave_end {
             return Err(ImageValidationError::OwnershipMismatch {
                 table: "federates",
                 index,
                 field: "enclaves",
             });
         }
-        check_range(
+        check_span(
             "federates",
             index,
             "enclaves",
@@ -1004,10 +924,11 @@ fn validate_compiled_deployment<'a>(
         let mut previous_enclave = None;
         let enclaves = image
             .enclaves
-            .get_range(federate.enclaves())
+            .get_span(federate.enclaves())
             .expect("compiled deployment ranges are validated");
         for (offset, enclave) in enclaves.iter().enumerate() {
-            let index = federate.enclaves().start() + offset as u32;
+            let index = u32::try_from(federate.enclaves().start() + offset)
+                .expect("validated Enclave key fits its u32 representation");
             validate(enclave)?;
             validate_id(
                 "enclave",
@@ -1226,7 +1147,7 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
                 field: "root_scope",
             });
         }
-        check_range(
+        check_span(
             "reactors",
             index,
             "modes",
@@ -1849,13 +1770,13 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
 #[cfg(test)]
 mod tests {
     use super::super::*;
-    use super::enclave_range_fits_index_domain;
+    use tinymap::{IndexSpan, SliceRange};
 
     const fn federate_image(
         id: &'static str,
         target: &'static str,
         runtime: &'static str,
-        enclaves: TableRange<EnclaveIndex>,
+        enclaves: IndexSpan<EnclaveIndex>,
     ) -> FederateImage<'static> {
         FederateImage::new(
             FederateId::new(id),
@@ -1886,10 +1807,10 @@ mod tests {
     }
 
     #[test]
-    fn table_ranges_address_their_flattened_value_table() {
+    fn slice_ranges_address_their_packed_backing_slice() {
         let values = [10, 20, 30];
 
-        assert_eq!(TableRange::new(1, 2).get(&values), Some(&values[1..3]));
+        assert_eq!(SliceRange::new(1, 2).get(&values), Some(&values[1..3]));
     }
 
     #[test]
@@ -1898,7 +1819,7 @@ mod tests {
             FederateId::new("fédérate"),
             TargetId::new("aarch64-unknown-none"),
             RuntimeBackendId::new("static"),
-            TableRange::new(0, 0),
+            IndexSpan::new(0, 0),
         );
         let boundary = BoundaryId::new("network/in");
         let route = RouteImage::new(
@@ -1921,14 +1842,14 @@ mod tests {
         assert_eq!(binding.id().as_str(), "reaction/main");
     }
 
-    const RANGE_0_0: TableRange<PortIndex> = TableRange::new(0, 0);
+    const RANGE_0_0: SliceRange<PortIndex> = SliceRange::new(0, 0);
 
     static REACTORS: [ReactorImage; 2] = [
         ReactorImage::new(
             BindingSlotIndex::new(2),
             StateSlotIndex::new(0),
             ScopeIndex::new(0),
-            TableRange::new(0, 1),
+            IndexSpan::new(0, 1),
             Some(ModeIndex::new(0)),
             Some(BankInfoImage::new(0, 2)),
         ),
@@ -1936,7 +1857,7 @@ mod tests {
             BindingSlotIndex::new(3),
             StateSlotIndex::new(1),
             ScopeIndex::new(2),
-            TableRange::new(1, 0),
+            IndexSpan::new(1, 0),
             None,
             Some(BankInfoImage::new(1, 2)),
         ),
@@ -1948,18 +1869,18 @@ mod tests {
             domain: TimingDomain::Logical,
             min_delay_nanos: 7,
         },
-        TableRange::new(0, 2),
+        SliceRange::new(0, 2),
         Some(BindingSlotIndex::new(5)),
     )];
     static PORTS: [PortImage; 2] = [
         PortImage::new(
             ScopeIndex::new(0),
-            TableRange::new(2, 1),
+            SliceRange::new(2, 1),
             BindingSlotIndex::new(4),
         ),
         PortImage::new(
             ScopeIndex::new(2),
-            TableRange::new(3, 1),
+            SliceRange::new(3, 1),
             BindingSlotIndex::new(4),
         ),
     ];
@@ -1969,20 +1890,20 @@ mod tests {
             ScopeIndex::new(1),
             0,
             BindingSlotIndex::new(0),
-            TableRange::new(0, 1),
-            TableRange::new(0, 1),
-            TableRange::new(0, 1),
-            TableRange::new(0, 1),
+            SliceRange::new(0, 1),
+            SliceRange::new(0, 1),
+            SliceRange::new(0, 1),
+            SliceRange::new(0, 1),
         ),
         ReactionImage::new(
             ReactorIndex::new(1),
             ScopeIndex::new(2),
             1,
             BindingSlotIndex::new(1),
-            TableRange::new(1, 1),
-            TableRange::new(1, 0),
-            TableRange::new(1, 0),
-            TableRange::new(1, 0),
+            SliceRange::new(1, 1),
+            SliceRange::new(1, 0),
+            SliceRange::new(1, 0),
+            SliceRange::new(1, 0),
         ),
     ];
     static MODES: [ModeImage; 1] = [ModeImage::new(ReactorIndex::new(0), ScopeIndex::new(1))];
@@ -1991,34 +1912,34 @@ mod tests {
             None,
             ReactorIndex::new(0),
             None,
-            TableRange::new(0, 2),
-            TableRange::new(0, 1),
-            TableRange::new(0, 1),
-            TableRange::new(0, 0),
-            TableRange::new(0, 0),
-            TableRange::new(0, 0),
+            SliceRange::new(0, 2),
+            SliceRange::new(0, 1),
+            SliceRange::new(0, 1),
+            SliceRange::new(0, 0),
+            SliceRange::new(0, 0),
+            SliceRange::new(0, 0),
         ),
         ScopeImage::new(
             Some(ScopeIndex::new(0)),
             ReactorIndex::new(0),
             Some(ModeIndex::new(0)),
-            TableRange::new(2, 1),
-            TableRange::new(1, 1),
-            TableRange::new(1, 1),
-            TableRange::new(0, 1),
-            TableRange::new(0, 1),
-            TableRange::new(0, 1),
+            SliceRange::new(2, 1),
+            SliceRange::new(1, 1),
+            SliceRange::new(1, 1),
+            SliceRange::new(0, 1),
+            SliceRange::new(0, 1),
+            SliceRange::new(0, 1),
         ),
         ScopeImage::new(
             None,
             ReactorIndex::new(1),
             None,
-            TableRange::new(3, 1),
-            TableRange::new(2, 0),
-            TableRange::new(2, 0),
-            TableRange::new(1, 0),
-            TableRange::new(1, 0),
-            TableRange::new(1, 0),
+            SliceRange::new(3, 1),
+            SliceRange::new(2, 0),
+            SliceRange::new(2, 0),
+            SliceRange::new(1, 0),
+            SliceRange::new(1, 0),
+            SliceRange::new(1, 0),
         ),
     ];
     static REACTION_TRIGGERS: [LevelReactionImage; 4] = [
@@ -2122,7 +2043,7 @@ mod tests {
         "host",
         "aarch64-unknown-linux-gnu",
         "hosted",
-        TableRange::new(0, 2),
+        IndexSpan::new(0, 2),
     )];
     static ENCLAVES: [EnclaveImage<'static>; 2] = [IMAGE, SECOND_IMAGE];
     static FEDERATION_MEMBERS: [FederateIndex; 1] = [FederateIndex::new(0)];
@@ -2162,7 +2083,7 @@ mod tests {
         );
         assert_eq!(
             COMPILED.federates[FederateIndex::new(0)].enclaves(),
-            TableRange::new(0, 2)
+            IndexSpan::new(0, 2)
         );
 
         let view = EnclaveImageView::new(&IMAGE).unwrap();
@@ -2240,109 +2161,17 @@ mod tests {
         assert_eq!(view.federates().len(), 1);
         let federate = view.federate(FederateIndex::new(0));
         assert_eq!(federate.id().as_str(), "host");
-        assert_eq!(federate.enclaves(), TableRange::new(0, 2));
+        assert_eq!(federate.enclaves(), IndexSpan::new(0, 2));
         assert_eq!(federate.enclave_views().count(), 2);
-    }
-
-    /// Preserves external Enclave keys while validating local slice ownership.
-    #[test]
-    fn federate_slice_preserves_deployment_enclave_keys_and_rejects_wrong_length() {
-        let federate = federate_image(
-            "host",
-            "aarch64-unknown-linux-gnu",
-            "hosted",
-            TableRange::new(2, 2),
-        );
-        let slice = FederateSliceImage::new(FederateIndex::new(1), federate, &ENCLAVES);
-
-        let view = FederateSliceView::new(&slice).unwrap();
-        assert_eq!(view.federate(), FederateIndex::new(1));
-        assert_eq!(view.enclaves(), TableRange::new(2, 2));
-        assert_eq!(
-            view.enclave_views().map(|(key, _)| key).collect::<Vec<_>>(),
-            vec![EnclaveIndex::new(2), EnclaveIndex::new(3)]
-        );
-
-        let reordered_enclaves = [SECOND_IMAGE, IMAGE];
-        let reordered =
-            FederateSliceImage::new(FederateIndex::new(1), federate, &reordered_enclaves);
-        assert!(matches!(
-            FederateSliceView::new(&reordered),
-            Err(ImageValidationError::StableIdsNotSorted {
-                kind: "enclave",
-                index: 3,
-                id: "plant/control",
-            })
-        ));
-
-        let duplicate_enclaves = [IMAGE, IMAGE];
-        let duplicate =
-            FederateSliceImage::new(FederateIndex::new(1), federate, &duplicate_enclaves);
-        assert!(matches!(
-            FederateSliceView::new(&duplicate),
-            Err(ImageValidationError::DuplicateStableId {
-                kind: "enclave",
-                index: 3,
-                id: "plant/control",
-            })
-        ));
-
-        let wrong_length = FederateSliceImage::new(
-            FederateIndex::new(1),
-            federate_image(
-                "host",
-                "aarch64-unknown-linux-gnu",
-                "hosted",
-                TableRange::new(2, 1),
-            ),
-            &ENCLAVES,
-        );
-        assert!(matches!(
-            FederateSliceView::new(&wrong_length),
-            Err(ImageValidationError::OwnershipMismatch {
-                table: "federates",
-                index: 1,
-                field: "enclaves",
-            })
-        ));
-
-        let overflowing_range = FederateSliceImage::new(
-            FederateIndex::new(1),
-            federate_image(
-                "host",
-                "aarch64-unknown-linux-gnu",
-                "hosted",
-                TableRange::new(u32::MAX, 2),
-            ),
-            &ENCLAVES,
-        );
-        assert!(matches!(
-            FederateSliceView::new(&overflowing_range),
-            Err(ImageValidationError::RangeOutOfBounds {
-                table: "federates",
-                index: 1,
-                field: "enclaves",
-                target: "enclaves",
-                start: u32::MAX,
-                len: 2,
-            })
-        ));
-    }
-
-    /// Preserves the last representable Enclave key across all pointer widths.
-    #[test]
-    fn federate_slice_range_arithmetic_preserves_terminal_enclave_key() {
-        assert!(enclave_range_fits_index_domain(u32::MAX, 1));
-        assert!(!enclave_range_fits_index_domain(u32::MAX, 2));
     }
 
     #[test]
     fn compiled_view_enforces_coordination_cardinality() {
         let member = RtiMemberImage::new(
             RecoveryPolicy::FailStop,
-            TableRange::new(0, 0),
-            TableRange::new(0, 0),
-            TableRange::new(0, 0),
+            SliceRange::new(0, 0),
+            SliceRange::new(0, 0),
+            SliceRange::new(0, 0),
         );
         let one = [member];
         let image = CompiledDeploymentImage {
@@ -2364,7 +2193,7 @@ mod tests {
                 "z",
                 FEDERATES[0].target().as_str(),
                 FEDERATES[0].runtime().as_str(),
-                TableRange::new(2, 0),
+                IndexSpan::new(2, 0),
             ),
         ];
         let federation_members = [FederateIndex::new(0), FederateIndex::new(1)];
@@ -2388,9 +2217,9 @@ mod tests {
     fn compiled_view_requires_rti_routes_to_match_the_authoritative_federation() {
         let members = [RtiMemberImage::new(
             RecoveryPolicy::FailStop,
-            TableRange::new(0, 0),
-            TableRange::new(0, 0),
-            TableRange::new(0, 0),
+            SliceRange::new(0, 0),
+            SliceRange::new(0, 0),
+            SliceRange::new(0, 0),
         )];
         let edges = [FederationEdgeImage::new(
             BoundaryId::new("host"),
@@ -2439,9 +2268,9 @@ mod tests {
         let flows = [];
         let member = RtiMemberImage::new(
             RecoveryPolicy::FailStop,
-            TableRange::new(0, 0),
-            TableRange::new(0, 0),
-            TableRange::new(0, 0),
+            SliceRange::new(0, 0),
+            SliceRange::new(0, 0),
+            SliceRange::new(0, 0),
         );
         let members = [member];
         let routes = [RtiRouteImage::new(
@@ -2482,9 +2311,9 @@ mod tests {
 
         let ranged_members = [RtiMemberImage::new(
             RecoveryPolicy::FailStop,
-            TableRange::new(0, 1),
-            TableRange::new(0, 0),
-            TableRange::new(0, 0),
+            SliceRange::new(0, 1),
+            SliceRange::new(0, 0),
+            SliceRange::new(0, 0),
         )];
         let image = CompiledDeploymentImage {
             coordination: CoordinationProjection::CentralRti(rti_fixture(
@@ -2604,7 +2433,7 @@ mod tests {
             "host",
             "aarch64-unknown-linux-gnu",
             "hosted",
-            TableRange::new(0, 3),
+            IndexSpan::new(0, 3),
         )];
         let duplicate_enclaves = [
             EnclaveImage {
@@ -2631,8 +2460,8 @@ mod tests {
     #[test]
     fn compiled_view_orders_enclaves_within_each_federate() {
         let federates = [
-            federate_image("alpha", "target", "runtime", TableRange::new(0, 2)),
-            federate_image("beta", "target", "runtime", TableRange::new(2, 2)),
+            federate_image("alpha", "target", "runtime", IndexSpan::new(0, 2)),
+            federate_image("beta", "target", "runtime", IndexSpan::new(2, 2)),
         ];
         let enclaves = [
             EnclaveImage {
@@ -2659,9 +2488,9 @@ mod tests {
         let members = [FederateIndex::new(0), FederateIndex::new(1)];
         let rti_members = [RtiMemberImage::new(
             RecoveryPolicy::FailStop,
-            TableRange::new(0, 0),
-            TableRange::new(0, 0),
-            TableRange::new(0, 0),
+            SliceRange::new(0, 0),
+            SliceRange::new(0, 0),
+            SliceRange::new(0, 0),
         ); 2];
         let image = CompiledDeploymentImage {
             federation: GlobalFederationImage::new(&members, &[]),
@@ -2690,7 +2519,7 @@ mod tests {
             "host",
             "aarch64-unknown-linux-gnu",
             "hosted",
-            TableRange::new(0, 3),
+            IndexSpan::new(0, 3),
         )];
         let image = CompiledDeploymentImage {
             federates: TinyMapView::new(&federates),
@@ -2726,7 +2555,7 @@ mod tests {
                 ScopeIndex::new(1),
                 ActionSlotIndex::new(0),
                 timing,
-                TableRange::new(0, 2),
+                SliceRange::new(0, 2),
                 matches!(timing, ActionTiming::Standard { .. }).then_some(BindingSlotIndex::new(5)),
             )];
             let image = EnclaveImage {
@@ -2751,8 +2580,8 @@ mod tests {
             BindingSlotIndex::new(0),
             RANGE_0_0,
             RANGE_0_0,
-            TableRange::new(0, 0),
-            TableRange::new(0, 0),
+            SliceRange::new(0, 0),
+            SliceRange::new(0, 0),
         )];
         let bad_actions = [ActionImage::new(
             ScopeIndex::new(1),
@@ -2761,7 +2590,7 @@ mod tests {
                 domain: TimingDomain::Logical,
                 min_delay_nanos: 7,
             },
-            TableRange::new(4, 1),
+            SliceRange::new(4, 1),
             Some(BindingSlotIndex::new(5)),
         )];
         let cases = [
@@ -2812,12 +2641,12 @@ mod tests {
                 Some(ScopeIndex::new(0)),
                 ReactorIndex::new(0),
                 None,
-                TableRange::new(0, 2),
-                TableRange::new(0, 1),
-                TableRange::new(0, 1),
-                TableRange::new(0, 0),
-                TableRange::new(0, 0),
-                TableRange::new(0, 0),
+                SliceRange::new(0, 2),
+                SliceRange::new(0, 1),
+                SliceRange::new(0, 1),
+                SliceRange::new(0, 0),
+                SliceRange::new(0, 0),
+                SliceRange::new(0, 0),
             ),
             SCOPES[1],
             SCOPES[2],
@@ -2924,7 +2753,7 @@ mod tests {
                 BindingSlotIndex::new(2),
                 StateSlotIndex::new(0),
                 ScopeIndex::new(0),
-                TableRange::new(0, 1),
+                IndexSpan::new(0, 1),
                 Some(ModeIndex::new(0)),
                 Some(BankInfoImage::new(2, 2)),
             ),

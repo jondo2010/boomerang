@@ -90,10 +90,12 @@ fn generated_sensor_federate_slice_excludes_host_payload_and_preserves_canonical
 
     let source = std::fs::read_to_string(launcher.source_path()).unwrap();
     assert!(
-        source.contains("FederateSliceImage::new(FederateIndex::new(1)"),
+        source.contains("static FEDERATE: FederateIndex = FederateIndex::new(1);"),
         "{source}"
     );
-    assert!(source.contains("TableRange::new(2, 1)"), "{source}");
+    assert!(!source.contains("FederateSliceImage"), "{source}");
+    assert!(!source.contains("FederateSliceView"), "{source}");
+    assert!(source.contains("IndexSpan::new(2, 1)"), "{source}");
     assert!(
         source.contains(".bind_enclave(EnclaveIndex::new(2)"),
         "{source}"

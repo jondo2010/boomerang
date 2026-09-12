@@ -286,9 +286,9 @@ mod tests {
     use crate::{
         image::{
             ActionImage, ActionSlotIndex, ActionTiming, BindingKind, BindingSlotIndex,
-            EnclaveImage, EnclaveImageView, LifecycleReactionImage, ReactionImage, ReactorImage,
-            RequiredBindingImage, ScopeImage, StateSlotIndex, StorageBounds, TableRange,
-            TimerStartupImage,
+            EnclaveImage, EnclaveImageView, IndexSpan, LifecycleReactionImage, ReactionImage,
+            ReactorImage, RequiredBindingImage, ScopeImage, SliceRange, StateSlotIndex,
+            StorageBounds, TimerStartupImage,
         },
         keepalive, AsyncEvent, CompiledModeEffectRef, Context, EnclaveBindings,
         FederateCoordinationError, ReactionBindingError, ReactionRefs, SendContext,
@@ -416,7 +416,7 @@ mod tests {
         BindingSlotIndex::new(0),
         StateSlotIndex::new(0),
         ScopeIndex::new(0),
-        TableRange::new(0, 0),
+        IndexSpan::new(0, 0),
         None,
         None,
     )];
@@ -425,7 +425,7 @@ mod tests {
         ScopeIndex::new(0),
         ActionSlotIndex::new(0),
         ActionTiming::Timer { period_nanos: None },
-        TableRange::new(0, 1),
+        SliceRange::new(0, 1),
         None,
     )];
     /// Reaction table for the compiled scheduler fixture.
@@ -434,22 +434,22 @@ mod tests {
         ScopeIndex::new(0),
         0,
         BindingSlotIndex::new(1),
-        TableRange::new(0, 0),
-        TableRange::new(0, 0),
-        TableRange::new(0, 0),
-        TableRange::new(0, 0),
+        SliceRange::new(0, 0),
+        SliceRange::new(0, 0),
+        SliceRange::new(0, 0),
+        SliceRange::new(0, 0),
     )];
     /// Scope table for the compiled scheduler fixture.
     static SCOPES: [ScopeImage; 1] = [ScopeImage::new(
         None,
         ReactorIndex::new(0),
         None,
-        TableRange::new(0, 1),
-        TableRange::new(0, 0),
-        TableRange::new(0, 0),
-        TableRange::new(0, 0),
-        TableRange::new(0, 0),
-        TableRange::new(0, 0),
+        SliceRange::new(0, 1),
+        SliceRange::new(0, 0),
+        SliceRange::new(0, 0),
+        SliceRange::new(0, 0),
+        SliceRange::new(0, 0),
+        SliceRange::new(0, 0),
     )];
     /// Trigger table for the compiled scheduler fixture.
     static TRIGGERS: [LevelReactionImage; 1] = [LevelReactionImage::new(0, ReactionIndex::new(0))];

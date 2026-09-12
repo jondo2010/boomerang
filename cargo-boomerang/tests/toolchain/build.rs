@@ -393,11 +393,13 @@ fn build_publishes_canonical_federate_artifact_collection() {
     );
     let host_source = fs::read_to_string(bundle.join("generated/host/src/main.rs")).unwrap();
     assert!(
-        host_source.contains("FederateSliceImage::new(FederateIndex::new(0)"),
+        host_source.contains("static FEDERATE: FederateIndex = FederateIndex::new(0);"),
         "{host_source}"
     );
+    assert!(!host_source.contains("FederateSliceImage"), "{host_source}");
+    assert!(!host_source.contains("FederateSliceView"), "{host_source}");
     assert!(
-        host_source.contains("TableRange::new(0, 2)"),
+        host_source.contains("IndexSpan::new(0, 2)"),
         "{host_source}"
     );
     assert_eq!(
@@ -409,11 +411,19 @@ fn build_publishes_canonical_federate_artifact_collection() {
     );
     let sensor_source = fs::read_to_string(bundle.join("generated/sensor/src/main.rs")).unwrap();
     assert!(
-        sensor_source.contains("FederateSliceImage::new(FederateIndex::new(1)"),
+        sensor_source.contains("static FEDERATE: FederateIndex = FederateIndex::new(1);"),
         "{sensor_source}"
     );
     assert!(
-        sensor_source.contains("TableRange::new(2, 1)"),
+        !sensor_source.contains("FederateSliceImage"),
+        "{sensor_source}"
+    );
+    assert!(
+        !sensor_source.contains("FederateSliceView"),
+        "{sensor_source}"
+    );
+    assert!(
+        sensor_source.contains("IndexSpan::new(2, 1)"),
         "{sensor_source}"
     );
     assert!(

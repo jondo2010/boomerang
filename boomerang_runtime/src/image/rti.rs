@@ -38,7 +38,7 @@ use super::{
     BoundaryFailurePolicy, BoundaryId, CodecPolicy, FederateIndex, RecoveryPolicy, SecurityPolicy,
     TimingPolicy, TransportPolicy,
 };
-use tinymap::{TableRange, TinyMapView};
+use tinymap::{SliceRange, TinyMapView};
 
 tinymap::key_type!(
     /// Dense image-local index of one deployment-wide cross-Federate RTI route.
@@ -96,11 +96,11 @@ pub struct RtiMemberImage {
     /// Explicit recovery policy selected for this Federate.
     pub(super) recovery: RecoveryPolicy,
     /// Direct incoming dependencies grouped by this target Federate.
-    pub(super) direct_incoming: TableRange<RtiDependencyImage>,
+    pub(super) direct_incoming: SliceRange<RtiDependencyImage>,
     /// Transitive incoming dependencies grouped by this target Federate.
-    pub(super) transitive_incoming: TableRange<RtiDependencyImage>,
+    pub(super) transitive_incoming: SliceRange<RtiDependencyImage>,
     /// Reachable downstream Federates grouped by this source Federate.
-    pub(super) affected_downstream: TableRange<FederateIndex>,
+    pub(super) affected_downstream: SliceRange<FederateIndex>,
 }
 
 /// One concrete directed cross-Federate boundary hop.
@@ -202,9 +202,9 @@ impl RtiMemberImage {
     #[must_use]
     pub const fn new(
         recovery: RecoveryPolicy,
-        direct_incoming: TableRange<RtiDependencyImage>,
-        transitive_incoming: TableRange<RtiDependencyImage>,
-        affected_downstream: TableRange<FederateIndex>,
+        direct_incoming: SliceRange<RtiDependencyImage>,
+        transitive_incoming: SliceRange<RtiDependencyImage>,
+        affected_downstream: SliceRange<FederateIndex>,
     ) -> Self {
         Self {
             recovery,

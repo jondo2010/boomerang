@@ -1320,11 +1320,11 @@ mod tests {
     use crate::{
         image::{
             ActionImage, ActionIndex, ActionSlotIndex, ActionTiming, BindingKind, BindingSlotIndex,
-            BoundaryId, EnclaveImage, EnclaveImageView, EnclaveIndex, LevelReactionImage,
-            ModeImage, PortImage, PortIndex, ReactionImage, ReactionIndex, ReactorImage,
-            ReactorIndex, RequiredBindingImage, RouteDirection, RouteImage, ScopeImage, ScopeIndex,
-            StateSlotIndex, StorageBounds, TableRange, TimerStartupImage, TimingDomain,
-            TinyMapView,
+            BoundaryId, EnclaveImage, EnclaveImageView, EnclaveIndex, IndexSpan,
+            LevelReactionImage, ModeImage, PortImage, PortIndex, ReactionImage, ReactionIndex,
+            ReactorImage, ReactorIndex, RequiredBindingImage, RouteDirection, RouteImage,
+            ScopeImage, ScopeIndex, SliceRange, StateSlotIndex, StorageBounds, TimerStartupImage,
+            TimingDomain, TinyMapView,
         },
         AsyncEvent, CommonContext, CompiledModeEffectRef, Config, Context, Duration,
         EnclaveBindings, ModeTransitionRequest, OwnedStorage, OwnedStorageError, PayloadType,
@@ -1404,7 +1404,7 @@ mod tests {
         BindingSlotIndex::new(0),
         StateSlotIndex::new(0),
         ScopeIndex::new(0),
-        TableRange::new(0, 1),
+        IndexSpan::new(0, 1),
         Some(crate::image::ModeIndex::new(0)),
         None,
     )];
@@ -1418,7 +1418,7 @@ mod tests {
             ScopeIndex::new(0),
             ActionSlotIndex::new(0),
             timing,
-            TableRange::new(0, 0),
+            SliceRange::new(0, 0),
             binding,
         )
     }
@@ -1432,7 +1432,7 @@ mod tests {
     })];
     static PORTS: [PortImage; 1] = [PortImage::new(
         ScopeIndex::new(0),
-        TableRange::new(0, 0),
+        SliceRange::new(0, 0),
         BindingSlotIndex::new(2),
     )];
     static REACTIONS: [ReactionImage; 1] = [ReactionImage::new(
@@ -1440,20 +1440,20 @@ mod tests {
         ScopeIndex::new(0),
         0,
         BindingSlotIndex::new(1),
-        TableRange::new(0, 0),
-        TableRange::new(0, 1),
-        TableRange::new(0, 1),
-        TableRange::new(0, 0),
+        SliceRange::new(0, 0),
+        SliceRange::new(0, 1),
+        SliceRange::new(0, 1),
+        SliceRange::new(0, 0),
     )];
     static FILTERED_REACTIONS: [ReactionImage; 1] = [ReactionImage::new(
         ReactorIndex::new(0),
         ScopeIndex::new(0),
         0,
         BindingSlotIndex::new(1),
-        TableRange::new(0, 0),
-        TableRange::new(0, 0),
-        TableRange::new(0, 0),
-        TableRange::new(0, 1),
+        SliceRange::new(0, 0),
+        SliceRange::new(0, 0),
+        SliceRange::new(0, 0),
+        SliceRange::new(0, 1),
     )];
     static MODES: [ModeImage; 1] = [ModeImage::new(ReactorIndex::new(0), ScopeIndex::new(1))];
     static SCOPES: [ScopeImage; 2] = [
@@ -1461,23 +1461,23 @@ mod tests {
             None,
             ReactorIndex::new(0),
             None,
-            TableRange::new(0, 2),
-            TableRange::new(0, 1),
-            TableRange::new(0, 0),
-            TableRange::new(0, 0),
-            TableRange::new(0, 0),
-            TableRange::new(0, 0),
+            SliceRange::new(0, 2),
+            SliceRange::new(0, 1),
+            SliceRange::new(0, 0),
+            SliceRange::new(0, 0),
+            SliceRange::new(0, 0),
+            SliceRange::new(0, 0),
         ),
         ScopeImage::new(
             Some(ScopeIndex::new(0)),
             ReactorIndex::new(0),
             Some(crate::image::ModeIndex::new(0)),
-            TableRange::new(2, 1),
-            TableRange::new(1, 0),
-            TableRange::new(0, 0),
-            TableRange::new(0, 0),
-            TableRange::new(0, 0),
-            TableRange::new(0, 0),
+            SliceRange::new(2, 1),
+            SliceRange::new(1, 0),
+            SliceRange::new(0, 0),
+            SliceRange::new(0, 0),
+            SliceRange::new(0, 0),
+            SliceRange::new(0, 0),
         ),
     ];
     static SCOPE_DESCENDANTS: [ScopeIndex; 3] =
@@ -1795,10 +1795,10 @@ mod tests {
             ScopeIndex::new(0),
             0,
             BindingSlotIndex::new(1),
-            TableRange::new(0, 0),
-            TableRange::new(0, 0),
-            TableRange::new(0, 2),
-            TableRange::new(0, 0),
+            SliceRange::new(0, 0),
+            SliceRange::new(0, 0),
+            SliceRange::new(0, 2),
+            SliceRange::new(0, 0),
         )];
         let aliased_image = EnclaveImage {
             reactions: TinyMapView::new(&reactions),
@@ -2035,7 +2035,7 @@ mod tests {
             ScopeIndex::new(0),
             ActionSlotIndex::new(0),
             ActionTiming::Timer { period_nanos: None },
-            TableRange::new(0, 1),
+            SliceRange::new(0, 1),
             None,
         )];
         let reaction_triggers = [LevelReactionImage::new(0, ReactionIndex::new(0))];

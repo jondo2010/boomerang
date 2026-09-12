@@ -43,8 +43,8 @@ pub use build::{DeferredRuntimeFactory, EnclaveDep, PartitionMap, RuntimeAssembl
 
 #[cfg(feature = "federated")]
 type FederatedCodecPair<T> = (
-    Box<dyn runtime::FederatedPayloadEncoder<T>>,
-    Box<dyn runtime::FederatedPayloadDecoder<T>>,
+    Box<dyn runtime::PayloadEncoder<T>>,
+    Box<dyn runtime::PayloadDecoder<T>>,
 );
 
 mod util {
@@ -85,7 +85,7 @@ mod util {
 type ReplayFunctionFactory = dyn FnOnce(&RuntimeAssembly) -> Box<dyn runtime::replay::ReplayFn>;
 
 #[cfg(feature = "federated")]
-type FederatedInboundEndpointFactory = dyn FnOnce(
+type LegacyInboundActionAdapterFactory = dyn FnOnce(
     &RuntimeAssembly,
     &mut boomerang_central_rti::FederatedRuntimeConnections,
 ) -> Result<(), AssemblyError>;
@@ -95,8 +95,8 @@ type FederatedCodecEntry = dyn Any + Send + Sync;
 
 #[cfg(feature = "federated")]
 struct FederatedCodecRegistration<T: runtime::ReactorData> {
-    encoder_factory: Box<dyn Fn() -> Box<dyn runtime::FederatedPayloadEncoder<T>> + Send + Sync>,
-    decoder_factory: Box<dyn Fn() -> Box<dyn runtime::FederatedPayloadDecoder<T>> + Send + Sync>,
+    encoder_factory: Box<dyn Fn() -> Box<dyn runtime::PayloadEncoder<T>> + Send + Sync>,
+    decoder_factory: Box<dyn Fn() -> Box<dyn runtime::PayloadDecoder<T>> + Send + Sync>,
 }
 
 #[derive(Debug)]
@@ -125,7 +125,7 @@ pub struct Assembly {
     federated_codecs: HashMap<TypeId, Box<FederatedCodecEntry>>,
     #[cfg(feature = "federated")]
     /// Factories for runtime handlers attached to inbound federated routes.
-    pub(super) federated_inbound_endpoint_factories: Vec<Box<FederatedInboundEndpointFactory>>,
+    pub(super) federated_inbound_endpoint_factories: Vec<Box<LegacyInboundActionAdapterFactory>>,
     #[cfg(feature = "replay")]
     /// Factories for replay functions.
     pub(super) replay_factories: SecondaryMap<AssemblyActionKey, Box<ReplayFunctionFactory>>,
@@ -711,7 +711,7 @@ impl Assembly {
         endpoint: boomerang_federated::EndpointId,
         target_partition: AssemblyReactorKey,
         target_action_key: AssemblyActionKey,
-        decoder: Box<dyn runtime::FederatedPayloadDecoder<T>>,
+        decoder: Box<dyn runtime::PayloadDecoder<T>>,
     ) where
         T: runtime::ReactorData,
     {

@@ -2,8 +2,7 @@
 use super::*;
 use crate::{
     image::{FederateImage, RouteImage},
-    FederatedInboundEndpoint, FederatedOutboundSink, FederatedPayloadDecoder,
-    FederatedPayloadEncoder,
+    InboundBoundaryAdapter, OutboundBoundarySink, PayloadDecoder, PayloadEncoder,
 };
 use std::sync::Arc;
 
@@ -11,7 +10,7 @@ use std::sync::Arc;
 type InstallRoute<'binding> = dyn for<'image> FnOnce(
         &mut OwnedStorage<'image>,
         RouteImage<'image>,
-    ) -> Option<FederatedInboundEndpoint>
+    ) -> Option<InboundBoundaryAdapter>
     + Send
     + 'binding;
 
@@ -36,8 +35,8 @@ impl<'binding> FederateBindings<'binding> {
         mut self,
         boundary: BoundaryId<'binding>,
         _payload: PayloadType<T>,
-        encoder: impl FederatedPayloadEncoder<T>,
-        sink: Arc<dyn FederatedOutboundSink>,
+        encoder: impl PayloadEncoder<T>,
+        sink: Arc<dyn OutboundBoundarySink>,
     ) -> Self {
         self.external_routes.push(ExternalRoute {
             boundary,
@@ -60,20 +59,20 @@ impl<'binding> FederateBindings<'binding> {
 
     /// Binds an external inbound half to its typed decoder and compiled destination port.
     ///
-    /// The backend receives the installed endpoint before schedulers start and must admit
+    /// The backend receives the installed adapter before schedulers start and must admit
     /// preceding payloads before returning a grant. Received tags already include route delay.
     pub fn bind_inbound_route<T: ReactorData>(
         mut self,
         boundary: BoundaryId<'binding>,
         _payload: PayloadType<T>,
-        decoder: impl FederatedPayloadDecoder<T>,
+        decoder: impl PayloadDecoder<T>,
     ) -> Self {
         self.external_routes.push(ExternalRoute {
             boundary,
             direction: RouteDirection::Inbound,
             payload_type: (TypeId::of::<T>(), std::any::type_name::<T>()),
             install: Box::new(move |storage, route| {
-                Some(FederatedInboundEndpoint::for_port(
+                Some(InboundBoundaryAdapter::for_port(
                     storage.scheduler_event_tx(),
                     route.local_port(),
                     decoder,
@@ -89,9 +88,9 @@ struct EncodedOutbound<'image, T: ReactorData> {
     /// Compiled outbound half defining source port, identity, and delay.
     route: RouteImage<'image>,
     /// Typed encoder selected by direct generated bindings.
-    encoder: Arc<dyn FederatedPayloadEncoder<T>>,
-    /// Ordered nonblocking transport submission endpoint.
-    sink: Arc<dyn FederatedOutboundSink>,
+    encoder: Arc<dyn PayloadEncoder<T>>,
+    /// Ordered nonblocking transport submission sink.
+    sink: Arc<dyn OutboundBoundarySink>,
 }
 
 impl<T: ReactorData> crate::storage::owned::OutboundRoute for EncodedOutbound<'_, T> {
@@ -121,19 +120,21 @@ impl<T: ReactorData> crate::storage::owned::OutboundRoute for EncodedOutbound<'_
                 delay_nanos,
             })?
         };
-        let send = || {
-            let payload = self.encoder.encode(value)?;
-            self.sink.send(crate::FederatedOutboundCommand::Msg(
-                crate::FederatedOutboundMessage {
-                    tag: target,
-                    payload,
-                },
-            ))
-        };
-        send().map_err(|source| OwnedStorageError::ExternalRoute {
-            boundary: boundary.to_owned(),
-            source,
-        })
+        let payload = self.encoder.encode(value).map_err(|source| {
+            OwnedStorageError::ExternalRouteEncoding {
+                boundary: boundary.to_owned(),
+                source,
+            }
+        })?;
+        self.sink
+            .send(crate::TaggedPayload {
+                tag: target,
+                payload,
+            })
+            .map_err(|source| OwnedStorageError::ExternalRouteSubmission {
+                boundary: boundary.to_owned(),
+                source,
+            })
     }
 }
 
@@ -146,7 +147,7 @@ impl<T: ReactorData> crate::storage::owned::OutboundRoute for EncodedOutbound<'_
 ///
 /// Every route must pair locally or have exactly one matching external binding. This baseline
 /// supports logical external routes only. Preflight completes before user initialization or
-/// `connect`; the latter installs a backend from the prepared inbound endpoints. Callers own
+/// `connect`; the latter installs a backend from the prepared inbound boundary adapters. Callers own
 /// transport readiness bounds. Backend failure aborts and joins the same scheduler threads used
 /// by local execution. Idle termination additionally requires backend confirmation.
 pub fn execute_owned_federate_with_backend<'image, B: FederateCoordinationBackend>(
@@ -156,7 +157,7 @@ pub fn execute_owned_federate_with_backend<'image, B: FederateCoordinationBacken
     mut bindings: FederateBindings<'_>,
     config: Config,
     connect: impl FnOnce(
-        BTreeMap<BoundaryId<'image>, FederatedInboundEndpoint>,
+        BTreeMap<BoundaryId<'image>, InboundBoundaryAdapter>,
     ) -> Result<B, crate::FederateCoordinationError>,
 ) -> Result<FederateExecution, ExecuteOwnedFederateError> {
     let images = prepare_images(image, images)?;
@@ -182,8 +183,8 @@ pub fn execute_owned_federate_with_backend<'image, B: FederateCoordinationBacken
                     .find(|(key, _)| *key == enclave)
                     .expect("validated external route belongs to owned storage")
                     .1;
-                if let Some(endpoint) = (adapter.install)(storage, route) {
-                    inbound.insert(route.boundary(), endpoint);
+                if let Some(adapter) = (adapter.install)(storage, route) {
+                    inbound.insert(route.boundary(), adapter);
                 }
             }
             connect(inbound)

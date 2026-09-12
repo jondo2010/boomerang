@@ -163,9 +163,9 @@ pub enum StaticFederationRunnerError {
     #[error("RTI session error: {0}")]
     Session(#[from] SessionError),
 
-    /// The runtime rejected a federated endpoint operation.
-    #[error("runtime endpoint error: {0}")]
-    RuntimeEndpoint(#[from] boomerang_runtime::FederatedEndpointError),
+    /// The legacy action-backed bridge rejected delivery.
+    #[error("legacy federation delivery error: {0}")]
+    LegacyDelivery(#[from] boomerang_runtime::LegacyFederatedError),
 
     /// Tokio could not construct the runner-owned runtime.
     #[error("failed to build the static federation Tokio runtime: {source}")]

@@ -376,14 +376,24 @@ where
 #[derive(thiserror::Error, Debug, Clone, PartialEq, Eq)]
 pub enum OwnedStorageError {
     #[cfg(feature = "federated")]
-    /// An external compiled route failed to encode or submit its value.
-    #[error("external route '{boundary}' failed: {source}")]
-    ExternalRoute {
+    /// An external route's selected codec could not encode its value.
+    #[error("external route '{boundary}' encoding failed: {source}")]
+    ExternalRouteEncoding {
         /// Stable compiled boundary identity.
         boundary: String,
-        /// Codec or transport submission failure.
+        /// Failure returned by the selected payload codec.
         #[source]
-        source: crate::FederatedEndpointError,
+        source: crate::PayloadCodecError,
+    },
+    #[cfg(feature = "federated")]
+    /// The bound transport could not accept an encoded route value.
+    #[error("external route '{boundary}' submission failed: {source}")]
+    ExternalRouteSubmission {
+        /// Stable compiled boundary identity.
+        boundary: String,
+        /// Failure returned by the bound transport sink.
+        #[source]
+        source: crate::BoundarySubmissionError,
     },
     /// A required image binding did not receive an implementation.
     #[error("missing {kind:?} binding at {slot}")]

@@ -5,10 +5,7 @@ use crate::{
     InputRef, OutputRef, ReactionRefs, ReactionRefsExtract, ReactorData, SendContext,
 };
 #[cfg(feature = "federated")]
-use crate::{
-    FederatedFaultState, FederatedOutboundCommand, FederatedOutboundMessage, FederatedOutboundSink,
-    FederatedPayloadEncoder,
-};
+use crate::{FederatedFaultState, OutboundBoundarySink, PayloadEncoder, TaggedPayload};
 
 tinymap::key_type! { pub ReactionKey }
 
@@ -186,8 +183,8 @@ impl<'store, T: ReactorData + Clone> ReactionFn<'store> for EnclaveSenderReactio
 #[cfg(feature = "federated")]
 pub struct FederatedSenderReactionFn<T: ReactorData + Clone> {
     target_action_ref: AsyncActionRef<T>,
-    encoder: Box<dyn FederatedPayloadEncoder<T>>,
-    outbound: Box<dyn FederatedOutboundSink>,
+    encoder: Box<dyn PayloadEncoder<T>>,
+    outbound: Box<dyn OutboundBoundarySink>,
     faults: FederatedFaultState,
 }
 
@@ -195,8 +192,8 @@ pub struct FederatedSenderReactionFn<T: ReactorData + Clone> {
 impl<T: ReactorData + Clone> FederatedSenderReactionFn<T> {
     pub fn new(
         target_action_ref: AsyncActionRef<T>,
-        encoder: Box<dyn FederatedPayloadEncoder<T>>,
-        outbound: Box<dyn FederatedOutboundSink>,
+        encoder: Box<dyn PayloadEncoder<T>>,
+        outbound: Box<dyn OutboundBoundarySink>,
         faults: FederatedFaultState,
     ) -> Self {
         Self {
@@ -246,16 +243,16 @@ impl<'store, T: ReactorData + Clone> ReactionFn<'store> for FederatedSenderReact
             Ok(payload) => payload,
             Err(error) => {
                 tracing::error!(?error, "Failed to encode federated payload");
-                self.faults.record(error);
+                self.faults.record(error.into());
                 return;
             }
         };
 
-        let command = FederatedOutboundCommand::Msg(FederatedOutboundMessage { tag, payload });
+        let message = TaggedPayload { tag, payload };
 
-        if let Err(error) = self.outbound.send(command) {
+        if let Err(error) = self.outbound.send(message) {
             tracing::error!(?error, "Failed to emit federated command");
-            self.faults.record(error);
+            self.faults.record(error.into());
         }
     }
 }

@@ -255,7 +255,7 @@ impl FederatedRuntimeConnections {
         endpoint: &crate::EndpointId,
     ) -> Result<
         (
-            Box<dyn boomerang_runtime::FederatedOutboundSink>,
+            Box<dyn boomerang_runtime::OutboundBoundarySink>,
             boomerang_runtime::FederatedFaultState,
         ),
         FederateClientError,
@@ -270,7 +270,7 @@ impl FederatedRuntimeConnections {
             .get(&route.source)
             .expect("route sources are validated when connections are built");
         Ok((
-            Box::new(ProtocolFederatedOutboundSink {
+            Box::new(ProtocolOutboundBoundarySink {
                 endpoint: route.endpoint.clone(),
                 source: route.source.clone(),
                 target: route.target.clone(),
@@ -287,7 +287,7 @@ impl FederatedRuntimeConnections {
         endpoint: crate::EndpointId,
         context: boomerang_runtime::SendContext,
         action_ref: boomerang_runtime::AsyncActionRef<T>,
-        decoder: Box<dyn boomerang_runtime::FederatedPayloadDecoder<T>>,
+        decoder: Box<dyn boomerang_runtime::PayloadDecoder<T>>,
     ) -> Result<(), FederateClientError>
     where
         T: boomerang_runtime::ReactorData,
@@ -305,7 +305,7 @@ impl FederatedRuntimeConnections {
             return Err(FederateClientError::DuplicateInboundBinding(endpoint));
         }
         let inbound =
-            boomerang_runtime::FederatedInboundEndpoint::new(context, action_ref, decoder)?;
+            boomerang_runtime::LegacyInboundActionAdapter::new(context, action_ref, decoder)?;
         route.bind_inbound(inbound);
         Ok(())
     }
@@ -328,7 +328,7 @@ impl FederatedRuntimeConnections {
         &self,
         federate: &FederateId,
         endpoint: &crate::EndpointId,
-    ) -> Option<&boomerang_runtime::FederatedInboundEndpoint> {
+    ) -> Option<&boomerang_runtime::LegacyInboundActionAdapter> {
         self.federates
             .get(federate)?
             .routes
@@ -360,7 +360,7 @@ impl FederatedRuntimeConnections {
 }
 
 /// Runtime-facing outbound sink that emits one protocol `MSG` route.
-struct ProtocolFederatedOutboundSink {
+struct ProtocolOutboundBoundarySink {
     /// Stable endpoint selected during lowering.
     endpoint: crate::EndpointId,
     /// Federate that owns the outbound runtime endpoint.
@@ -371,14 +371,13 @@ struct ProtocolFederatedOutboundSink {
     sender: FederateProtocolSender,
 }
 
-impl boomerang_runtime::FederatedOutboundSink for ProtocolFederatedOutboundSink {
+impl boomerang_runtime::OutboundBoundarySink for ProtocolOutboundBoundarySink {
     fn send(
         &self,
-        command: boomerang_runtime::FederatedOutboundCommand,
-    ) -> Result<(), boomerang_runtime::FederatedEndpointError> {
-        let boomerang_runtime::FederatedOutboundCommand::Msg(message) = command;
+        message: boomerang_runtime::TaggedPayload,
+    ) -> Result<(), boomerang_runtime::BoundarySubmissionError> {
         let tag = wire_tag_from_runtime(message.tag)
-            .map_err(|error| boomerang_runtime::FederatedEndpointError::send(error.to_string()))?;
+            .map_err(|error| boomerang_runtime::BoundarySubmissionError::new(error.to_string()))?;
         self.sender
             .send(FederateToRti::Msg {
                 source: self.source.clone(),
@@ -387,7 +386,7 @@ impl boomerang_runtime::FederatedOutboundSink for ProtocolFederatedOutboundSink 
                 tag,
                 payload: message.payload,
             })
-            .map_err(|error| boomerang_runtime::FederatedEndpointError::send(error.to_string()))
+            .map_err(|error| boomerang_runtime::BoundarySubmissionError::new(error.to_string()))
     }
 }
 
@@ -483,12 +482,10 @@ mod tests {
             FederatedRuntimeConnections::new([source.clone(), target.clone()], [route]).unwrap();
         let (sink, _) = connections.outbound_endpoint(&endpoint).unwrap();
 
-        sink.send(boomerang_runtime::FederatedOutboundCommand::Msg(
-            boomerang_runtime::FederatedOutboundMessage {
-                tag: boomerang_runtime::Tag::ZERO,
-                payload: b"7".to_vec(),
-            },
-        ))
+        sink.send(boomerang_runtime::TaggedPayload {
+            tag: boomerang_runtime::Tag::ZERO,
+            payload: b"7".to_vec(),
+        })
         .unwrap();
 
         let mut mailbox = connections.take_federate(&source).unwrap().into_mailbox();
@@ -522,12 +519,10 @@ mod tests {
             .sender();
 
         for payload in [b"first".to_vec(), b"second".to_vec()] {
-            sink.send(boomerang_runtime::FederatedOutboundCommand::Msg(
-                boomerang_runtime::FederatedOutboundMessage {
-                    tag: boomerang_runtime::Tag::ZERO,
-                    payload,
-                },
-            ))
+            sink.send(boomerang_runtime::TaggedPayload {
+                tag: boomerang_runtime::Tag::ZERO,
+                payload,
+            })
             .unwrap();
         }
         progress
@@ -617,7 +612,7 @@ mod tests {
                         .unwrap()
                         .parse::<u32>()
                         .map_err(|error| {
-                            boomerang_runtime::FederatedEndpointError::codec(error.to_string())
+                            boomerang_runtime::PayloadCodecError::new(error.to_string())
                         })
                 }),
             )
@@ -638,7 +633,7 @@ mod tests {
                         .unwrap()
                         .parse::<u32>()
                         .map_err(|error| {
-                            boomerang_runtime::FederatedEndpointError::codec(error.to_string())
+                            boomerang_runtime::PayloadCodecError::new(error.to_string())
                         })
                 }),
             )

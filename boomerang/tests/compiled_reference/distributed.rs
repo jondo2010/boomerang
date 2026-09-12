@@ -1,10 +1,10 @@
 //! Compiled network route adapters reuse the owned execution fixture and scheduler.
 use super::*;
 use boomerang::runtime::{
-    execute_owned_federate_with_backend, CoordinationRevision, FederateAcquisition,
-    FederateCompletion, FederateCoordinationBackend, FederateCoordinationError,
-    FederatePublication, FederatedEndpointError, FederatedOutboundCommand,
-    FederatedOutboundMessage, FederatedOutboundSink,
+    execute_owned_federate_with_backend, BoundaryAdmissionError, BoundarySubmissionError,
+    CoordinationRevision, FederateAcquisition, FederateCompletion, FederateCoordinationBackend,
+    FederateCoordinationError, FederatePublication, OutboundBoundarySink, PayloadCodecError,
+    TaggedPayload,
 };
 use std::sync::{Arc, Mutex};
 
@@ -54,20 +54,19 @@ impl FederateCoordinationBackend for GrantBackend {
 #[derive(Default)]
 struct CaptureSink(
     /// Submitted messages in transport order.
-    Mutex<Vec<FederatedOutboundMessage>>,
+    Mutex<Vec<TaggedPayload>>,
 );
-impl FederatedOutboundSink for CaptureSink {
-    fn send(&self, command: FederatedOutboundCommand) -> Result<(), FederatedEndpointError> {
-        let FederatedOutboundCommand::Msg(message) = command;
+impl OutboundBoundarySink for CaptureSink {
+    fn send(&self, message: TaggedPayload) -> Result<(), BoundarySubmissionError> {
         self.0.lock().unwrap().push(message);
         Ok(())
     }
 }
 
 /// Decodes the fixture's explicit four-byte little-endian contract.
-fn decode_u32(bytes: &[u8]) -> Result<u32, FederatedEndpointError> {
+fn decode_u32(bytes: &[u8]) -> Result<u32, PayloadCodecError> {
     Ok(u32::from_le_bytes(bytes.try_into().map_err(|_| {
-        FederatedEndpointError::codec("expected four bytes")
+        PayloadCodecError::new("expected four bytes")
     })?))
 }
 
@@ -103,7 +102,7 @@ fn isolated_slices_execute_encoded_route_halves_at_canonical_enclave_keys() {
         let messages = wire.0.lock().unwrap().clone();
         assert_eq!(
             messages,
-            [FederatedOutboundMessage {
+            [TaggedPayload {
                 tag: Tag::new(Duration::milliseconds(1), 0),
                 payload: vec![42, 0, 0, 0],
             }]
@@ -118,9 +117,12 @@ fn isolated_slices_execute_encoded_route_halves_at_canonical_enclave_keys() {
             Config::default().with_fast_forward(true),
             |inbound| {
                 let endpoint = inbound.get(&route_boundary()).unwrap();
-                assert!(endpoint.schedule(messages[0].tag, &[1]).is_err());
+                assert!(matches!(
+                    endpoint.admit(messages[0].tag, &[1]),
+                    Err(BoundaryAdmissionError::Decode(_))
+                ));
                 endpoint
-                    .schedule(messages[0].tag, &messages[0].payload)
+                    .admit(messages[0].tag, &messages[0].payload)
                     .unwrap();
                 Ok(GrantBackend::default())
             },
@@ -169,9 +171,9 @@ fn slice_backend_failure_wakes_and_joins_an_idle_scheduler() {
 /// Transport sink that exposes submission failures without blocking the scheduler.
 struct RejectedSink;
 
-impl FederatedOutboundSink for RejectedSink {
-    fn send(&self, _: FederatedOutboundCommand) -> Result<(), FederatedEndpointError> {
-        Err(FederatedEndpointError::send("transport rejected payload"))
+impl OutboundBoundarySink for RejectedSink {
+    fn send(&self, _: TaggedPayload) -> Result<(), BoundarySubmissionError> {
+        Err(BoundarySubmissionError::new("transport rejected payload"))
     }
 }
 
@@ -191,7 +193,7 @@ fn slice_preserves_codec_and_submission_failures_through_scheduler_cleanup() {
                         PayloadType::<u32>::new(),
                         move |value: &u32| {
                             if reject_codec {
-                                Err(FederatedEndpointError::codec("encoding rejected value"))
+                                Err(PayloadCodecError::new("encoding rejected value"))
                             } else {
                                 Ok(value.to_le_bytes().to_vec())
                             }
@@ -202,17 +204,30 @@ fn slice_preserves_codec_and_submission_failures_through_scheduler_cleanup() {
                 |_| Ok(GrantBackend::default()),
             )
             .unwrap_err();
-            let expected = if reject_codec {
-                FederatedEndpointError::codec("encoding rejected value")
-            } else {
-                FederatedEndpointError::send("transport rejected payload")
-            };
-            assert!(
-                matches!(error, ExecuteOwnedFederateError::EnclaveExecution {
-                enclave, source: OwnedStorageError::ExternalRoute { boundary, source }
-            } if enclave == EnclaveIndex::new(5)
-                && boundary == route_boundary().as_str() && source == expected)
-            );
+            match error {
+                ExecuteOwnedFederateError::EnclaveExecution { enclave, source } => {
+                    assert_eq!(enclave, EnclaveIndex::new(5));
+                    match source {
+                        OwnedStorageError::ExternalRouteEncoding { boundary, source }
+                            if reject_codec =>
+                        {
+                            assert_eq!(boundary, route_boundary().as_str());
+                            assert_eq!(source, PayloadCodecError::new("encoding rejected value"));
+                        }
+                        OwnedStorageError::ExternalRouteSubmission { boundary, source }
+                            if !reject_codec =>
+                        {
+                            assert_eq!(boundary, route_boundary().as_str());
+                            assert_eq!(
+                                source,
+                                BoundarySubmissionError::new("transport rejected payload")
+                            );
+                        }
+                        other => panic!("wrong failure category: {other:?}"),
+                    }
+                }
+                other => panic!("wrong execution failure: {other:?}"),
+            }
         }
     });
 }

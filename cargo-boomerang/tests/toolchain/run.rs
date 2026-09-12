@@ -9,11 +9,21 @@ use super::support;
 
 /// Runs the installed Cargo plugin for one fixture deployment in the shared toolchain target.
 fn run_cli(deployment: &str, environment: &[(&str, &str)]) -> Output {
+    run_cli_with_options(deployment, &[], environment)
+}
+
+/// Runs the installed Cargo plugin with global CLI options for one fixture deployment.
+fn run_cli_with_options(
+    deployment: &str,
+    options: &[&str],
+    environment: &[(&str, &str)],
+) -> Output {
     let target = support::toolchain_target();
     let mut command = Command::new(env!("CARGO_BIN_EXE_cargo-boomerang"));
     command
         .args(["boomerang", "--workspace"])
         .arg(support::fixture_workspace())
+        .args(options)
         .args(["run", "--deployment", deployment])
         .env("CARGO_TARGET_DIR", target)
         .env_remove("RUST_LOG");
@@ -175,12 +185,50 @@ fn run_forwards_application_streams_without_reframing() {
             "Running",
         ],
     );
+    let plain_stderr = support::without_ansi(&stderr);
+    let running_line = plain_stderr
+        .lines()
+        .find(|line| line.split_whitespace().next() == Some("Running"))
+        .expect("run reports its executable");
+    let reported = running_line
+        .trim_start()
+        .strip_prefix("Running ")
+        .unwrap()
+        .split_once(" (deployment ")
+        .unwrap()
+        .0;
+    let reported = std::path::Path::new(reported);
+    assert!(reported.is_absolute(), "{}", reported.display());
+    assert_eq!(
+        reported.file_name().unwrap(),
+        format!("launcher{}", std::env::consts::EXE_SUFFIX).as_str()
+    );
+    assert!(
+        plain_stderr.find(running_line).unwrap()
+            < plain_stderr.find("sensor scheduling shutdown").unwrap(),
+        "{stderr}"
+    );
     assert_eq!(
         stderr.matches("sensor scheduling shutdown\n").count(),
         1,
         "{stderr}"
     );
     assert!(stderr.ends_with("sensor scheduling shutdown\n"), "{stderr}");
+}
+
+#[test]
+fn quiet_run_suppresses_tool_progress_but_not_application_streams() {
+    let _guard = support::toolchain_lock();
+    let target = support::toolchain_target();
+    support::reset_deployment_output(&target, "production");
+    let output = run_cli_with_options("production", &["--quiet"], &[]);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+
+    assert!(output.status.success(), "{stderr}");
+    assert_eq!(stdout, "sensor received command 42\n");
+    support::assert_progress_phases(&stderr, &[]);
+    assert!(stderr.contains("sensor scheduling shutdown\n"), "{stderr}");
 }
 
 #[test]

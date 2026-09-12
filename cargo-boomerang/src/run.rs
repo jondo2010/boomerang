@@ -157,7 +157,10 @@ pub fn run_with_output(
     copy_verified_executable(&mut executable, &launcher, &published.executable_hash)?;
     output.status(
         Phase::Running,
-        format_args!("deployment '{deployment_name}'"),
+        format_args!(
+            "{} (deployment '{deployment_name}', Federate '{federate_id}')",
+            launcher.display()
+        ),
     )?;
     let status = Command::new(&launcher)
         .env(EXECUTION_SUMMARY_ENV, &summary_path)

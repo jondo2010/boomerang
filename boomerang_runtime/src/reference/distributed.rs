@@ -47,7 +47,8 @@ impl<'binding> FederateBindings<'binding> {
                     route.local_port(),
                     Box::new(EncodedOutbound {
                         route,
-                        encoder: Arc::new(encoder),
+                        encoder,
+                        payload_type: std::marker::PhantomData::<fn() -> T>,
                         sink,
                     }),
                 );
@@ -84,16 +85,20 @@ impl<'binding> FederateBindings<'binding> {
 }
 
 /// Encodes an owned port value and submits the already delay-adjusted logical tag.
-struct EncodedOutbound<'image, T: ReactorData> {
+struct EncodedOutbound<'image, T: ReactorData, C> {
     /// Compiled outbound half defining source port, identity, and delay.
     route: RouteImage<'image>,
     /// Typed encoder selected by direct generated bindings.
-    encoder: Arc<dyn PayloadEncoder<T>>,
+    encoder: C,
+    /// Concrete port value type accepted by the encoder.
+    payload_type: std::marker::PhantomData<fn() -> T>,
     /// Ordered nonblocking transport submission sink.
     sink: Arc<dyn OutboundBoundarySink>,
 }
 
-impl<T: ReactorData> crate::storage::owned::OutboundRoute for EncodedOutbound<'_, T> {
+impl<T: ReactorData, C: PayloadEncoder<T>> crate::storage::owned::OutboundRoute
+    for EncodedOutbound<'_, T, C>
+{
     fn emit(&mut self, source: &dyn crate::BasePort, tag: Tag) -> Result<(), OwnedStorageError> {
         let boundary = self.route.boundary().as_str();
         let typed = source.downcast_ref::<crate::Port<T>>().ok_or_else(|| {
@@ -123,7 +128,7 @@ impl<T: ReactorData> crate::storage::owned::OutboundRoute for EncodedOutbound<'_
         let payload = self.encoder.encode(value).map_err(|source| {
             OwnedStorageError::ExternalRouteEncoding {
                 boundary: boundary.to_owned(),
-                source,
+                source: crate::PayloadCodecError::new(source.to_string()),
             }
         })?;
         self.sink

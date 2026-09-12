@@ -64,10 +64,8 @@ impl OutboundBoundarySink for CaptureSink {
 }
 
 /// Decodes the fixture's explicit four-byte little-endian contract.
-fn decode_u32(bytes: &[u8]) -> Result<u32, PayloadCodecError> {
-    Ok(u32::from_le_bytes(bytes.try_into().map_err(|_| {
-        PayloadCodecError::new("expected four bytes")
-    })?))
+fn decode_u32(bytes: &[u8]) -> Result<u32, std::array::TryFromSliceError> {
+    Ok(u32::from_le_bytes(bytes.try_into()?))
 }
 
 /// Proves independent owned slices exchange the encoded value with one delay application.
@@ -84,7 +82,7 @@ fn isolated_slices_execute_encoded_route_halves_at_canonical_enclave_keys() {
                 .bind_outbound_route(
                     route_boundary(),
                     PayloadType::<u32>::new(),
-                    |value: &u32| Ok(value.to_le_bytes().to_vec()),
+                    |value: &u32| Ok::<_, std::convert::Infallible>(value.to_le_bytes().to_vec()),
                     wire.clone(),
                 ),
             Config::default().with_fast_forward(true),
@@ -193,7 +191,7 @@ fn slice_preserves_codec_and_submission_failures_through_scheduler_cleanup() {
                         PayloadType::<u32>::new(),
                         move |value: &u32| {
                             if reject_codec {
-                                Err(PayloadCodecError::new("encoding rejected value"))
+                                Err(std::io::Error::other("encoding rejected value"))
                             } else {
                                 Ok(value.to_le_bytes().to_vec())
                             }
@@ -256,13 +254,13 @@ fn slice_preflight_rejects_external_binding_errors_before_initialization_or_conn
             1 => bindings.bind_outbound_route(
                 route_boundary(),
                 PayloadType::<u32>::new(),
-                |_: &u32| Ok(Vec::new()),
+                |_: &u32| Ok::<_, std::convert::Infallible>(Vec::new()),
                 Arc::new(CaptureSink::default()),
             ),
             2 => bindings.bind_inbound_route(
                 route_boundary(),
                 PayloadType::<u64>::new(),
-                |_: &[u8]| Ok(0_u64),
+                |_: &[u8]| Ok::<_, std::convert::Infallible>(0_u64),
             ),
             _ => {
                 bindings.bind_inbound_route(route_boundary(), PayloadType::<u32>::new(), decode_u32)

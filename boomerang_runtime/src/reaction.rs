@@ -183,7 +183,7 @@ impl<'store, T: ReactorData + Clone> ReactionFn<'store> for EnclaveSenderReactio
 #[cfg(feature = "federated")]
 pub struct FederatedSenderReactionFn<T: ReactorData + Clone> {
     target_action_ref: AsyncActionRef<T>,
-    encoder: Box<dyn PayloadEncoder<T>>,
+    encoder: Box<dyn PayloadEncoder<T, Error = crate::PayloadCodecError>>,
     outbound: Box<dyn OutboundBoundarySink>,
     faults: FederatedFaultState,
 }
@@ -192,7 +192,7 @@ pub struct FederatedSenderReactionFn<T: ReactorData + Clone> {
 impl<T: ReactorData + Clone> FederatedSenderReactionFn<T> {
     pub fn new(
         target_action_ref: AsyncActionRef<T>,
-        encoder: Box<dyn PayloadEncoder<T>>,
+        encoder: Box<dyn PayloadEncoder<T, Error = crate::PayloadCodecError>>,
         outbound: Box<dyn OutboundBoundarySink>,
         faults: FederatedFaultState,
     ) -> Self {

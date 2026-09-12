@@ -67,7 +67,7 @@ impl LegacyInboundActionAdapter {
     pub fn new<T>(
         context: SendContext,
         action_ref: AsyncActionRef<T>,
-        decoder: Box<dyn crate::PayloadDecoder<T>>,
+        decoder: Box<dyn crate::PayloadDecoder<T, Error = crate::PayloadCodecError>>,
     ) -> Result<Self, LegacyFederatedError>
     where
         T: ReactorData,

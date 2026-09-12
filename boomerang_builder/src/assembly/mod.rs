@@ -43,8 +43,8 @@ pub use build::{DeferredRuntimeFactory, EnclaveDep, PartitionMap, RuntimeAssembl
 
 #[cfg(feature = "federated")]
 type FederatedCodecPair<T> = (
-    Box<dyn runtime::PayloadEncoder<T>>,
-    Box<dyn runtime::PayloadDecoder<T>>,
+    Box<dyn runtime::PayloadEncoder<T, Error = runtime::PayloadCodecError>>,
+    Box<dyn runtime::PayloadDecoder<T, Error = runtime::PayloadCodecError>>,
 );
 
 mod util {
@@ -95,8 +95,16 @@ type FederatedCodecEntry = dyn Any + Send + Sync;
 
 #[cfg(feature = "federated")]
 struct FederatedCodecRegistration<T: runtime::ReactorData> {
-    encoder_factory: Box<dyn Fn() -> Box<dyn runtime::PayloadEncoder<T>> + Send + Sync>,
-    decoder_factory: Box<dyn Fn() -> Box<dyn runtime::PayloadDecoder<T>> + Send + Sync>,
+    encoder_factory: Box<
+        dyn Fn() -> Box<dyn runtime::PayloadEncoder<T, Error = runtime::PayloadCodecError>>
+            + Send
+            + Sync,
+    >,
+    decoder_factory: Box<
+        dyn Fn() -> Box<dyn runtime::PayloadDecoder<T, Error = runtime::PayloadCodecError>>
+            + Send
+            + Sync,
+    >,
 }
 
 #[derive(Debug)]
@@ -711,7 +719,7 @@ impl Assembly {
         endpoint: boomerang_federated::EndpointId,
         target_partition: AssemblyReactorKey,
         target_action_key: AssemblyActionKey,
-        decoder: Box<dyn runtime::PayloadDecoder<T>>,
+        decoder: Box<dyn runtime::PayloadDecoder<T, Error = runtime::PayloadCodecError>>,
     ) where
         T: runtime::ReactorData,
     {

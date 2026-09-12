@@ -10,7 +10,10 @@ Compiled owned-slice execution instead binds `InboundBoundaryAdapter` to a
 validated local port and scheduler mailbox. It decodes and admits `TaggedPayload`
 data without owning graph identity, logical actions, or grant authority. Both
 paths reuse `PayloadEncoder`, `PayloadDecoder`, and `OutboundBoundarySink`;
-compiled admission errors remain separate from `LegacyFederatedError`.
+compiled admission errors remain separate from `LegacyFederatedError`. Each codec
+trait has its own associated `Error` type. The hosted delivery adapters normalize
+codec failures into `PayloadCodecError` only when returning erased runtime errors;
+codec implementations do not need to allocate that diagnostic themselves.
 The compiled adapters and backend entry point still use the transitional
 `federated` feature gate. The target feature model makes Federate structure
 unconditional and selects transport/RTI dependencies through backend-specific

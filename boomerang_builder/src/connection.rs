@@ -25,7 +25,9 @@ where
     T: runtime::ReactorData,
     C: boomerang_federated::PayloadEncoder<T> + Send + Sync + 'static,
 {
-    fn encode(&self, value: &T) -> Result<Vec<u8>, runtime::PayloadCodecError> {
+    type Error = runtime::PayloadCodecError;
+
+    fn encode(&self, value: &T) -> Result<Vec<u8>, Self::Error> {
         self.codec
             .encode(value)
             .map_err(|error| runtime::PayloadCodecError::new(error.to_string()))
@@ -43,7 +45,9 @@ where
     T: runtime::ReactorData,
     C: boomerang_federated::PayloadDecoder<T> + Send + Sync + 'static,
 {
-    fn decode(&self, bytes: &[u8]) -> Result<T, runtime::PayloadCodecError> {
+    type Error = runtime::PayloadCodecError;
+
+    fn decode(&self, bytes: &[u8]) -> Result<T, Self::Error> {
         self.codec
             .decode(bytes)
             .map_err(|error| runtime::PayloadCodecError::new(error.to_string()))
@@ -537,7 +541,7 @@ fn build_federated_connection_source<T: runtime::ReactorData + Clone>(
     target_partition: AssemblyReactorKey,
     target_action_key: AssemblyActionKey,
     endpoint: boomerang_federated::EndpointId,
-    encoder: Box<dyn runtime::PayloadEncoder<T>>,
+    encoder: Box<dyn runtime::PayloadEncoder<T, Error = runtime::PayloadCodecError>>,
 ) -> Result<EnclaveConnectionSource<T>, AssemblyError> {
     let mut source_ctx = assembly.add_reactor("con_reactor_src", parent_key, None, (), false);
     if let Some(scope_mode) = scope_mode {

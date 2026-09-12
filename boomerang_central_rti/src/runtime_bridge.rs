@@ -287,7 +287,9 @@ impl FederatedRuntimeConnections {
         endpoint: crate::EndpointId,
         context: boomerang_runtime::SendContext,
         action_ref: boomerang_runtime::AsyncActionRef<T>,
-        decoder: Box<dyn boomerang_runtime::PayloadDecoder<T>>,
+        decoder: Box<
+            dyn boomerang_runtime::PayloadDecoder<T, Error = boomerang_runtime::PayloadCodecError>,
+        >,
     ) -> Result<(), FederateClientError>
     where
         T: boomerang_runtime::ReactorData,

@@ -3,7 +3,7 @@ use std::{fmt, sync::Arc};
 
 use crate::{image::PortIndex, AsyncEvent, AsyncEventTarget, ReactorData, Sender, Tag};
 
-/// A payload could not be encoded or decoded according to its selected codec.
+/// Hosted diagnostic produced when a typed codec failure crosses an erased runtime boundary.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("payload codec failed: {0}")]
 pub struct PayloadCodecError(
@@ -35,28 +35,44 @@ impl BoundarySubmissionError {
 
 /// Encodes one concrete payload type at a serialized boundary.
 pub trait PayloadEncoder<T: ReactorData>: Send + Sync + 'static {
+    /// Concrete failure reported by this encoder.
+    type Error: core::error::Error;
+
     /// Produces bytes in the boundary's selected encoding.
-    fn encode(&self, value: &T) -> Result<Vec<u8>, PayloadCodecError>;
+    fn encode(&self, value: &T) -> Result<Vec<u8>, Self::Error>;
 }
 
-impl<T: ReactorData, F: Fn(&T) -> Result<Vec<u8>, PayloadCodecError> + Send + Sync + 'static>
-    PayloadEncoder<T> for F
+impl<T, E, F> PayloadEncoder<T> for F
+where
+    T: ReactorData,
+    E: core::error::Error,
+    F: Fn(&T) -> Result<Vec<u8>, E> + Send + Sync + 'static,
 {
-    fn encode(&self, value: &T) -> Result<Vec<u8>, PayloadCodecError> {
+    type Error = E;
+
+    fn encode(&self, value: &T) -> Result<Vec<u8>, Self::Error> {
         (self)(value)
     }
 }
 
 /// Decodes one concrete payload type at a serialized boundary.
 pub trait PayloadDecoder<T: ReactorData>: Send + Sync + 'static {
+    /// Concrete failure reported by this decoder; it may differ from its encoder's error.
+    type Error: core::error::Error;
+
     /// Validates and decodes bytes in the boundary's selected encoding.
-    fn decode(&self, bytes: &[u8]) -> Result<T, PayloadCodecError>;
+    fn decode(&self, bytes: &[u8]) -> Result<T, Self::Error>;
 }
 
-impl<T: ReactorData, F: Fn(&[u8]) -> Result<T, PayloadCodecError> + Send + Sync + 'static>
-    PayloadDecoder<T> for F
+impl<T, E, F> PayloadDecoder<T> for F
+where
+    T: ReactorData,
+    E: core::error::Error,
+    F: Fn(&[u8]) -> Result<T, E> + Send + Sync + 'static,
 {
-    fn decode(&self, bytes: &[u8]) -> Result<T, PayloadCodecError> {
+    type Error = E;
+
+    fn decode(&self, bytes: &[u8]) -> Result<T, Self::Error> {
         (self)(bytes)
     }
 }
@@ -125,7 +141,9 @@ impl InboundBoundaryAdapter {
                 if tag < Tag::ZERO || tag >= Tag::FOREVER {
                     return Err(BoundaryAdmissionError::InvalidTag(tag));
                 }
-                let value = decoder.decode(payload)?;
+                let value = decoder
+                    .decode(payload)
+                    .map_err(|error| PayloadCodecError::new(error.to_string()))?;
                 match sender.try_send(AsyncEvent::Logical {
                     tag,
                     target: AsyncEventTarget::BoundaryPort(port),
@@ -157,7 +175,7 @@ mod tests {
             if bytes == b"valid" {
                 Ok(42_u32)
             } else {
-                Err(PayloadCodecError::new("malformed"))
+                Err(std::io::Error::other("malformed"))
             }
         });
         assert_eq!(

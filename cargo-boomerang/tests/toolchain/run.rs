@@ -30,6 +30,21 @@ fn run_cli_with_options(
     command.envs(environment.iter().copied()).output().unwrap()
 }
 
+/// Runs the installed Cargo plugin with options specific to the `run` command.
+fn run_cli_with_run_options(deployment: &str, options: &[&str]) -> Output {
+    let target = support::toolchain_target();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_cargo-boomerang"));
+    command
+        .args(["boomerang", "--workspace"])
+        .arg(support::fixture_workspace())
+        .args(["run", "--deployment", deployment])
+        .args(options)
+        .env("CARGO_TARGET_DIR", target)
+        .env_remove("RUST_LOG")
+        .output()
+        .unwrap()
+}
+
 fn summary_json(summary: &cargo_boomerang::ExecutionSummary) -> Value {
     let stats = summary.stats();
     json!({
@@ -77,6 +92,34 @@ fn generated_monolith_matches_owned_reference_execution_summary() {
     }
     assert_ne!(expected["stats"]["processed_events"], 0);
     assert_ne!(observed["stats"]["processed_events"], 0);
+}
+
+/// Persists the decoded execution summary when the CLI receives `-s`.
+#[test]
+fn run_writes_the_requested_execution_summary() {
+    let _guard = support::toolchain_lock();
+    let target = support::toolchain_target();
+    support::reset_deployment_output(&target, "production");
+    let directory = tempfile::tempdir().unwrap();
+    let summary_path = directory.path().join("result.json");
+    let summary_path_argument = summary_path.to_str().unwrap();
+
+    let output = run_cli_with_run_options("production", &["-s", summary_path_argument]);
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let document: Value = serde_json::from_slice(&fs::read(summary_path).unwrap()).unwrap();
+    assert_eq!(document["schema"], 1);
+    assert!(document["stats"]["processed_tags"].is_number());
+    assert!(document["stats"]["processed_reactions"].is_number());
+    assert!(document["stats"]["processed_events"].is_number());
+    assert!(document["stats"]["set_ports"].is_number());
+    assert!(document["stats"]["scheduled_actions"].is_number());
+    assert!(document["final_tag"]["offset_nanos"].is_string());
+    assert!(document["final_tag"]["microstep"].is_string());
 }
 
 #[test]

@@ -2,14 +2,14 @@
 
 use std::{
     fs::{self, File, OpenOptions},
-    io::{self, Seek, SeekFrom},
+    io::{self, Seek, SeekFrom, Write as _},
     path::{Path, PathBuf},
     process::{Command, ExitStatus},
 };
 
 use anyhow::{anyhow, bail, Context, Result};
 use boomerang_util::launcher::EXECUTION_SUMMARY_ENV;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     build::build_analyzed,
@@ -31,6 +31,24 @@ pub struct ExecutionSummary {
 }
 
 impl ExecutionSummary {
+    /// Serializes this execution summary as a schema-v1 JSON document.
+    pub fn write_json(&self, path: impl AsRef<Path>) -> Result<()> {
+        let path = path.as_ref();
+        let mut file =
+            File::create(path).with_context(|| format!("failed to create {}", path.display()))?;
+        let document = ExecutionSummaryDocumentV1 {
+            schema: 1,
+            stats: &self.stats,
+            final_tag: FinalTagDocumentV1 {
+                offset_nanos: self.final_tag.offset().whole_nanoseconds().to_string(),
+                microstep: self.final_tag.microstep().to_string(),
+            },
+        };
+        serde_json::to_writer(&mut file, &document)
+            .with_context(|| format!("failed to serialize {}", path.display()))?;
+        writeln!(file).with_context(|| format!("failed to finish {}", path.display()))
+    }
+
     /// Returns aggregate work counters from the completed execution.
     pub const fn stats(&self) -> &boomerang_runtime::Stats {
         &self.stats
@@ -222,20 +240,20 @@ fn validate_published_host_artifact(document: &DeploymentDocument) -> Result<()>
     Ok(())
 }
 
-/// Schema-v1 summary document emitted only through the private out-of-band file.
-#[derive(Deserialize)]
+/// Schema-v1 summary document used by the launcher protocol and CLI export.
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct ExecutionSummaryDocumentV1 {
+struct ExecutionSummaryDocumentV1<S = boomerang_runtime::Stats> {
     /// Protocol schema version.
     schema: u32,
     /// Aggregate scheduling counters.
-    stats: boomerang_runtime::Stats,
+    stats: S,
     /// Final logical tag encoded as decimal strings.
     final_tag: FinalTagDocumentV1,
 }
 
 /// Schema-v1 final logical tag encoded as decimal strings.
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct FinalTagDocumentV1 {
     /// Signed logical offset in nanoseconds.

@@ -18,7 +18,7 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use tinymap::{IndexSpan, SliceRange};
 
-use crate::{manifest::ExecutionPolicy, DriverOutput};
+use crate::{codegen::LauncherCapabilities, manifest::ExecutionPolicy, DriverOutput};
 
 /// Validates and deterministically formats one complete generated Rust file.
 fn format_rust(tokens: TokenStream) -> Result<String> {
@@ -33,6 +33,7 @@ pub(super) fn render_launcher(
     aliases: &BTreeMap<String, String>,
     execution: &ExecutionPolicy,
     distributed: bool,
+    capabilities: LauncherCapabilities,
 ) -> Result<String> {
     let enclaves = slice.enclaves();
     let mut route_bindings = BTreeMap::new();
@@ -59,10 +60,16 @@ pub(super) fn render_launcher(
             )))
         },
     );
+    let init_tracing = capabilities
+        .hosted
+        .then(|| quote!(boomerang_util::launcher::init_tracing();));
+    let write_execution_summary = capabilities
+        .hosted
+        .then(|| quote!(boomerang_util::launcher::write_execution_summary(&execution)?;));
     let main = if distributed {
         quote! {
             fn main() -> Result<(), Box<dyn std::error::Error>> {
-                init_tracing();
+                #init_tracing
                 drop(generated_bindings());
                 Err(format!(
                     "distributed generated launcher execution requires backend injection for {:?}",
@@ -76,7 +83,7 @@ pub(super) fn render_launcher(
         let keep_alive = execution.keep_alive;
         quote! {
             fn main() -> Result<(), Box<dyn std::error::Error>> {
-                init_tracing();
+                #init_tracing
                 let bindings = generated_bindings();
                 let execution = execute_owned_federate(
                     &DEPLOYMENT,
@@ -90,7 +97,7 @@ pub(super) fn render_launcher(
                         physical_event_q_size: 1024,
                     },
                 )?;
-                write_execution_summary(&execution)?;
+                #write_execution_summary
                 Ok(())
             }
         }
@@ -109,59 +116,6 @@ pub(super) fn render_launcher(
             state
                 .downcast_mut::<T>()
                 .expect("generated state initializer and reaction must agree")
-        }
-
-        const EXECUTION_SUMMARY_ENV: &str = "BOOMERANG_EXECUTION_SUMMARY_V1";
-
-        /// Installs launcher tracing unless this process already has a subscriber.
-        fn init_tracing() {
-            let filter = tracing_subscriber::EnvFilter::builder()
-                .with_default_directive(
-                    tracing_subscriber::filter::LevelFilter::OFF.into(),
-                )
-                .from_env_lossy();
-            let ansi = std::io::IsTerminal::is_terminal(&std::io::stderr())
-                && std::env::var_os("NO_COLOR").map_or(true, |value| value.is_empty());
-            let _ = tracing_subscriber::fmt()
-                .with_env_filter(filter)
-                .with_ansi(ansi)
-                .with_writer(std::io::stderr)
-                .try_init();
-        }
-
-        /// Writes the optional version-1 execution summary for the supervising host.
-        fn write_execution_summary(
-            execution: &boomerang_runtime::FederateExecution,
-        ) -> std::io::Result<()> {
-            let Some(path) = std::env::var_os(EXECUTION_SUMMARY_ENV) else {
-                return Ok(());
-            };
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(path)?;
-            let stats = execution.stats();
-            use std::io::Write as _;
-            writeln!(
-                file,
-                concat!(
-                    "{{\"schema\":1,\"stats\":{{",
-                    "\"processed_tags\":\"{}\",",
-                    "\"processed_reactions\":\"{}\",",
-                    "\"processed_events\":\"{}\",",
-                    "\"set_ports\":\"{}\",",
-                    "\"scheduled_actions\":\"{}\"}},",
-                    "\"final_tag\":{{\"offset_nanos\":\"{}\",",
-                    "\"microstep\":\"{}\"}}}}",
-                ),
-                stats.processed_tags(),
-                stats.processed_reactions(),
-                stats.processed_events(),
-                stats.set_ports(),
-                stats.scheduled_actions(),
-                execution.final_tag().offset().whole_nanoseconds(),
-                execution.final_tag().microstep(),
-            )
         }
 
         #compatibility_checks

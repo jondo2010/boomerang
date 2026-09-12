@@ -145,6 +145,35 @@ pub(crate) fn dependency(
     }
     Ok(rendered.into())
 }
+
+/// Renders a same-release Boomerang package beside the resolved runtime package.
+pub(crate) fn runtime_sibling_dependency(
+    runtime: &CargoPackage,
+    package: &str,
+    features: Vec<String>,
+) -> Result<toml::Value> {
+    let mut rendered = dependency(runtime, false, features)?;
+    let table = rendered
+        .as_table_mut()
+        .expect("dependency renders as a TOML table");
+    table.insert("package".into(), package.into());
+    if runtime.source.is_none() {
+        let workspace = runtime
+            .manifest_path
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("local runtime package has a workspace parent");
+        table.insert(
+            "path".into(),
+            workspace
+                .join(package)
+                .to_string_lossy()
+                .into_owned()
+                .into(),
+        );
+    }
+    Ok(rendered)
+}
 /// Rewrites an application entry path to the generated topology dependency alias.
 fn aliased_topology_entry(entry: &str, expected_crate: &str) -> Result<String> {
     let mut segments = entry.split("::");

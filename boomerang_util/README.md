@@ -7,4 +7,13 @@
 [![docs](https://docs.rs/boomerang_util/badge.svg)](https://docs.rs/boomerang_util)
 [![codecov](https://codecov.io/github/jondo2010/boomerang/graph/badge.svg?token=PYXF8VSNY9)](https://codecov.io/github/jondo2010/boomerang)
 
-This crate provides non-core utility Reactors for [`boomerang`](https://docs.rs/boomerang) as well as top-level runner methods for executing the runtime (see the [`runner`] module).
+This crate owns optional host-side support that does not belong in the core
+runtime. The `launcher` feature is the canonical process-policy layer for
+generated launchers. It provides tracing initialization and the private
+execution-summary protocol used by `cargo-boomerang`.
+
+The `runner` feature retains the older convenience API that builds, lowers, and
+executes a Reactor in one process. New production applications should use
+`cargo-boomerang` and generated launchers. The `test-tracing` feature remains a
+compatibility helper for existing tests while delegating subscriber setup to
+the launcher support implementation.

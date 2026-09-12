@@ -8,6 +8,7 @@ use std::{
 };
 
 use anyhow::{anyhow, bail, Context, Result};
+use boomerang_util::launcher::EXECUTION_SUMMARY_ENV;
 use serde::Deserialize;
 
 use crate::{
@@ -17,8 +18,6 @@ use crate::{
     output::{CommandOutput, Phase},
 };
 
-/// Private environment key used by generated launchers for schema-v1 summaries.
-const EXECUTION_SUMMARY_ENV: &str = "BOOMERANG_EXECUTION_SUMMARY_V1";
 /// Maximum accepted execution-summary file size in bytes.
 const MAX_EXECUTION_SUMMARY_BYTES: u64 = 16 * 1024;
 

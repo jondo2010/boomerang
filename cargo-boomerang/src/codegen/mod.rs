@@ -37,7 +37,7 @@ use cargo_metadata::{Message, Metadata, PackageId};
 
 use crate::{
     check::{analyze, AnalyzedDeployment},
-    generated::dependency,
+    generated::{dependency, runtime_sibling_dependency},
     generated_cache::{
         artifact_matches, copy_private_artifact, generated_cargo_program,
         resolve_generated_workspace, GeneratedRole, GeneratedWorkspace, GeneratedWorkspaceRequest,
@@ -79,6 +79,21 @@ struct ConfiguredFiles {
     target_json: Option<(PathBuf, Vec<u8>)>,
     /// Optional Cargo configuration included in launcher identity and Cargo arguments.
     cargo_config: Option<(PathBuf, Vec<u8>)>,
+}
+
+/// Host-process facilities selected by a configured runtime backend.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct LauncherCapabilities {
+    /// Whether generated code links hosted launcher support.
+    hosted: bool,
+}
+
+/// Resolves launcher facilities from the runtime backend without target inference.
+fn launcher_capabilities(runtime: &str) -> Result<LauncherCapabilities> {
+    match runtime {
+        "std" => Ok(LauncherCapabilities { hosted: true }),
+        unsupported => bail!("unsupported runtime '{unsupported}'"),
+    }
 }
 
 impl ConfiguredFiles {
@@ -400,12 +415,12 @@ pub(crate) fn generate_analyzed_launcher(
                 analyzed.resolved.deployment_name()
             )
         })?;
-    if federate.runtime().as_str() != "std" {
-        bail!(
+    let capabilities = launcher_capabilities(federate.runtime().as_str()).map_err(|_| {
+        anyhow!(
             "Federate '{federate_id}' selects unsupported runtime '{}'",
             federate.runtime()
-        );
-    }
+        )
+    })?;
     let mut configuration = analyzed
         .resolved
         .deployment()
@@ -421,15 +436,21 @@ pub(crate) fn generate_analyzed_launcher(
     let slice = analyzed.compiled.federate_slice(federate_index)?;
     let distributed = federates.len() > 1;
     let aliases = payload_aliases(&analyzed.resolved, &analyzed.driver, slice.enclaves())?;
-    let manifest = render_manifest(&analyzed.resolved, &aliases, distributed)?;
+    let manifest = render_manifest(&analyzed.resolved, &aliases, distributed, capabilities)?;
     let execution = analyzed
         .resolved
         .deployment()
         .execution
         .clone()
         .unwrap_or_default();
-    let source =
-        rust::render_launcher(&analyzed.driver, &slice, &aliases, &execution, distributed)?;
+    let source = rust::render_launcher(
+        &analyzed.driver,
+        &slice,
+        &aliases,
+        &execution,
+        distributed,
+        capabilities,
+    )?;
     let compile_inputs = payload_compile_inputs(&analyzed.resolved, &analyzed.driver, &aliases)?;
     let application_workspace = analyzed
         .resolved
@@ -476,6 +497,7 @@ pub(crate) fn generate_analyzed_launcher(
                 &compile_inputs,
                 &aliases,
                 &analyzed.resolved,
+                capabilities,
                 &cargo_program,
                 output,
             )
@@ -591,6 +613,7 @@ fn validate_launcher_graph(
     compile_inputs: &[(String, String)],
     aliases: &BTreeMap<String, String>,
     resolved: &ResolvedWorkspace,
+    capabilities: LauncherCapabilities,
     cargo_program: &OsStr,
     progress: &crate::CommandOutput,
 ) -> Result<PackageId> {
@@ -639,12 +662,15 @@ fn validate_launcher_graph(
                     .any(|candidate| candidate.id == **package && candidate.name == name)
             })
     };
-    let tracing_package = direct_package("tracing-subscriber").ok_or_else(|| {
-        anyhow!("generated launcher does not depend directly on tracing-subscriber")
-    })?;
     // The generated manifest owns these direct dependencies and therefore their complete closures.
     let mut launcher_dependencies = BTreeSet::new();
-    let mut pending = vec![tracing_package.clone()];
+    let mut pending = Vec::new();
+    if capabilities.hosted {
+        let launcher_support = direct_package("boomerang_util").ok_or_else(|| {
+            anyhow!("generated hosted launcher does not depend directly on boomerang_util")
+        })?;
+        pending.push(launcher_support.clone());
+    }
     if let Some(backend) = direct_package("boomerang_central_rti") {
         pending.push(backend.clone());
     }
@@ -742,6 +768,7 @@ fn render_manifest(
     resolved: &ResolvedWorkspace,
     aliases: &BTreeMap<String, String>,
     distributed: bool,
+    capabilities: LauncherCapabilities,
 ) -> Result<String> {
     let mut dependencies = BTreeMap::new();
     dependencies.insert(
@@ -752,45 +779,22 @@ fn render_manifest(
         String::from("tinymap"),
         dependency(resolved.table_store(), false, Vec::new())?,
     );
-    if distributed {
-        let mut backend = dependency(resolved.runtime(), false, Vec::new())?;
-        let backend = backend
-            .as_table_mut()
-            .expect("rendered dependency is a TOML table");
-        backend.insert("package".into(), "boomerang_central_rti".into());
-        if backend.contains_key("path") {
-            let runtime = resolved
-                .runtime()
-                .manifest_path
-                .parent()
-                .expect("runtime manifest has a parent");
-            let path = runtime
-                .parent()
-                .expect("local runtime package has a workspace parent")
-                .join("boomerang_central_rti");
-            backend.insert("path".into(), path.to_string_lossy().into_owned().into());
-        }
+    if capabilities.hosted {
         dependencies.insert(
-            String::from("boomerang_central_rti"),
-            backend.clone().into(),
+            String::from("boomerang_util"),
+            runtime_sibling_dependency(
+                resolved.runtime(),
+                "boomerang_util",
+                vec![String::from("launcher")],
+            )?,
         );
     }
-    dependencies.insert(
-        String::from("tracing-subscriber"),
-        toml::Table::from_iter([
-            ("version".into(), "=0.3.23".into()),
-            ("default-features".into(), false.into()),
-            (
-                "features".into(),
-                vec!["ansi", "env-filter", "fmt"]
-                    .into_iter()
-                    .map(toml::Value::from)
-                    .collect::<Vec<_>>()
-                    .into(),
-            ),
-        ])
-        .into(),
-    );
+    if distributed {
+        dependencies.insert(
+            String::from("boomerang_central_rti"),
+            runtime_sibling_dependency(resolved.runtime(), "boomerang_central_rti", Vec::new())?,
+        );
+    }
     for (implementation, alias) in aliases {
         let package = resolved
             .package(implementation)
@@ -896,11 +900,18 @@ fn require_success(phase: &'static str, output: &Output) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        configured_metadata_arguments, configured_path_argument, launcher_command,
-        launcher_request_identity, rendered_compiler_diagnostics, ConfiguredFiles,
+        configured_metadata_arguments, configured_path_argument, launcher_capabilities,
+        launcher_command, launcher_request_identity, rendered_compiler_diagnostics,
+        ConfiguredFiles,
     };
     use crate::{RecoveryPolicy, ResolvedFederate};
     use std::{ffi::OsStr, path::Path};
+
+    #[test]
+    fn launcher_capabilities_depend_only_on_the_runtime_backend() {
+        assert!(launcher_capabilities("std").unwrap().hosted);
+        assert!(launcher_capabilities("embedded").is_err());
+    }
 
     #[test]
     fn metadata_reconciliation_preserves_federate_toolchain_and_cargo_config() {

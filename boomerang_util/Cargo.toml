@@ -17,11 +17,14 @@ default = []
 ## Support for built-in CLI/runner methods
 runner = ["dep:clap", "dep:anyhow", "dep:boomerang"]
 
+## Hosted process support for generated launchers
+launcher = ["dep:boomerang_runtime", "dep:tracing-subscriber"]
+
 ## Support for recording and replaying
 replay = ["dep:boomerang", "boomerang/replay"]
 
 ## Test helper for fmt tracing with span lifecycle output
-test-tracing = ["dep:tracing-subscriber"]
+test-tracing = ["launcher"]
 
 [dependencies]
 anyhow = { version = "1.0", optional = true }
@@ -32,6 +35,7 @@ tracing.workspace = true
 tracing-subscriber = { workspace = true, optional = true }
 
 boomerang = { workspace = true, optional = true }
+boomerang_runtime = { workspace = true, optional = true }
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }

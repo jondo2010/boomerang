@@ -13,6 +13,7 @@ anyhow.workspace = true
 blake3.workspace = true
 boomerang_builder = { workspace = true, features = ["descriptor-fingerprint", "host-interchange"] }
 boomerang_runtime = { workspace = true, features = ["serde"] }
+boomerang_util = { workspace = true, features = ["launcher"] }
 cargo_metadata.workspace = true
 fs2.workspace = true
 humantime.workspace = true
@@ -28,11 +29,6 @@ target-lexicon = "0.13"
 tinymap.workspace = true
 toml.workspace = true
 syn = { version = "3", features = ["full"] }
-tracing-subscriber = { version = "=0.3.23", default-features = false, features = [
-    "ansi",
-    "env-filter",
-    "fmt",
-] }
 
 [dev-dependencies]
 owned-reference-payloads = { path = "tests/fixtures/owned-reference-payloads" }

@@ -4,6 +4,9 @@
 #![deny(unsafe_code)]
 #![deny(clippy::all)]
 
+/// Hosted process support used by generated launchers.
+#[cfg(feature = "launcher")]
+pub mod launcher;
 #[cfg(feature = "runner")]
 pub mod runner;
 #[cfg(feature = "test-tracing")]

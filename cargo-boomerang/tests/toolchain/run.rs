@@ -70,22 +70,26 @@ fn generated_monolith_matches_owned_reference_execution_summary() {
 }
 
 #[test]
-fn generated_launcher_emits_the_versioned_execution_summary_writer() {
+fn generated_launcher_manifest_uses_canonical_host_support() {
     let _guard = support::toolchain_lock();
     let target = support::toolchain_target();
     let launcher = support::with_target_directory(&target, || {
         cargo_boomerang::generate_launcher(support::fixture_workspace(), "execution", "host")
             .unwrap()
     });
-    let source = fs::read_to_string(launcher.source_path()).unwrap();
+    let manifest: toml::Value =
+        toml::from_str(&fs::read_to_string(launcher.manifest_path()).unwrap()).unwrap();
+    let dependencies = manifest["dependencies"].as_table().unwrap();
 
-    assert!(
-        source.contains("BOOMERANG_EXECUTION_SUMMARY_V1"),
-        "{source}"
+    assert_eq!(
+        dependencies["boomerang_util"]["features"]
+            .as_array()
+            .unwrap(),
+        &[toml::Value::String(String::from("launcher"))]
     );
-    assert!(source.contains("create_new(true)"), "{source}");
-    assert!(source.contains("execution.stats()"), "{source}");
-    assert!(source.contains("execution.final_tag()"), "{source}");
+    assert!(!dependencies.contains_key("tracing-subscriber"));
+    launcher.build_locked_offline().unwrap();
+    launcher.run_locked_offline().unwrap();
 }
 
 /// Rejects distributed execution until the compiled central RTI runner lands.

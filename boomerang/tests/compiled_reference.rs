@@ -4,6 +4,10 @@
 #[path = "compiled_reference/distributed.rs"]
 mod distributed;
 
+#[cfg(feature = "federated")]
+#[path = "compiled_reference/central_rti.rs"]
+mod central_rti;
+
 use std::{
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     time::Instant,

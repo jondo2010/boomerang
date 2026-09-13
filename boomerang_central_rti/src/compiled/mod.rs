@@ -4,6 +4,7 @@
 //! identity before dispatch. The in-memory adapters serve testing/reference execution.
 //! Image dependencies are authoritative and are never recomputed from a topology.
 mod client;
+pub mod hosted;
 pub mod in_memory;
 mod state;
 #[cfg(test)]

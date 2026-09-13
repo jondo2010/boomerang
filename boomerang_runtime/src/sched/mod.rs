@@ -162,7 +162,7 @@ impl Stats {
     }
 
     /// Adds every scheduler counter from `other`, saturating at [`usize::MAX`].
-    pub(crate) fn saturating_add_assign(&mut self, other: &Self) {
+    pub fn saturating_add_assign(&mut self, other: &Self) {
         self.processed_tags = self.processed_tags.saturating_add(other.processed_tags);
         self.processed_reactions = self
             .processed_reactions

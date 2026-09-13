@@ -785,17 +785,22 @@ deployment, and performs global lowering without compiling target payloads.
 ```text
 target/boomerang/<deployment>/<fingerprint>/
 |- generated/
-|  |- <federate>/Cargo.toml
-|  |- <federate>/src/
+|  |- federates/<federate>/Cargo.toml
+|  |- federates/<federate>/src/
 |  `- rti/                    # central-rti only
 |- artifacts/
-|  |- <federate>/<binary>
+|  |- federates/<federate>/<binary>
 |  `- rti/<binary>           # central-rti only
 |- deployment.json
 `- reports/
    |- topology.json
    `- resource-usage.json
 ```
+
+Central bundles use the distinct `federates/` namespace above, so a Federate named `rti`
+cannot collide with the coordinator. Existing local bundles retain `generated/<federate>/`
+and `artifacts/<federate>/`. The optional `rti` document owns its target, profile, generated
+files and executable separately from the Federate records.
 
 Generated crates are ephemeral and never committed. `deployment.json` contains artifact paths and
 hashes, deployment and boundary fingerprints, target triples, runtime backends, Federate
@@ -807,6 +812,32 @@ host assignment.
 for `central-rti`, it launches the generated RTI followed by independent Federate processes. A
 future peer-to-peer runner launches the Federates without an RTI. It supervises startup, logs,
 coordinated shutdown, and exit status. It rejects non-host-runnable artifacts.
+
+The initial hosted projection uses `boomerang.compiled-hosted.v1` framing over TCP and the
+`serde-json` payload capability. This is the Phase 5 process transport; the canonical compact
+protocol and broader capability set remain Phase 6 work. A domain-separated coordination digest
+covers the rendered immutable coordination tables, compiler schema, protocol and compatibility
+descriptors. All artifacts embed the same digest. Stable member names are resolved once during
+admission; payload exchanges carry typed `RtiRouteIndex` values, never boundary strings.
+`RtiImageView` validates the coordinator's borrowed tables without requiring scheduler images.
+The RTI crate owns transport I/O, while `cargo-boomerang` owns filesystem publication and child
+processes. The in-memory transport remains solely a testing/reference implementation.
+
+For hosted `run`, readiness uses a private loopback connection with a ten-second deadline.
+Federates start only after the RTI reports its bound data address. Admission, partial frames,
+stalled writes and terminal flushing have ten-second bounds; healthy inactive sessions may wait
+indefinitely. Frames are limited to one MiB and queues to sixteen frames per stage. The supervisor
+allows ten seconds for peers to exit after the first successful child exit, or one second after a
+failure, then kills outstanding children and reaps all of them. It forwards application streams,
+returns a failing child status, and exports a summary only when every child succeeds (saturated
+counter sums and the greatest final tag). Successful compiled execution uses RTI-authorized global
+quiescence; the existing fail-stop contract treats unilateral early local shutdown as failure.
+
+A separately launched RTI accepts `BOOMERANG_RTI_BIND` (default `127.0.0.1:0`). Its owner can set
+`BOOMERANG_RTI_READY_ADDRESS` for the bounded readiness callback; otherwise the RTI prints its bound
+address. Federates receive that address in `BOOMERANG_RTI_ADDRESS`. Host `run` always selects a
+loopback binding. The current transport implements the selected `security-policy = "none"` contract.
+Unsupported coordination, transport, codec and policy selections fail before launcher generation.
 
 External deployment systems consume `deployment.json` to flash, provision, place, configure, and
 supervise heterogeneous artifacts.

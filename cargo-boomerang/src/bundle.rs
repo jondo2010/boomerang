@@ -3,7 +3,7 @@
 use std::{
     collections::BTreeSet,
     fs::{self, File},
-    io::{self, BufReader, Read, Write},
+    io::{self, BufReader, Read, Seek, Write},
     path::{Path, PathBuf},
 };
 
@@ -42,6 +42,9 @@ pub(crate) struct DeploymentDocument {
     pub(crate) bindings: Vec<BindingDocument>,
     /// Built Federates in compiler identity order.
     pub(crate) federates: Vec<FederateDocument>,
+    /// Separate compiled central RTI, absent for local coordination.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) rti: Option<RtiDocument>,
     /// Deployment execution policy embedded in every generated launcher.
     pub(crate) execution: ExecutionPolicyDocument,
     /// Canonical statically computed resource bounds.
@@ -75,12 +78,31 @@ struct FingerprintInputV1<'a> {
     generated_source_hash: &'a str,
     /// Federate target and runtime selections in compiler identity order.
     federates: &'a [FederateDocument],
+    /// RTI compilation selection, excluding publication paths and bytes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rti: Option<RtiFingerprintInput<'a>>,
     /// Deployment execution policy embedded in generated source.
     execution: &'a ExecutionPolicyDocument,
     /// Canonical static resource projection.
     resources: &'a ResourceReport,
     /// Selected coordination backend and protocol identity.
     coordination: &'a CoordinationDocument,
+}
+
+/// Path-neutral RTI build inputs participating in the deployment fingerprint.
+#[derive(Serialize)]
+struct RtiFingerprintInput<'a> {
+    target: &'a str,
+    profile: Option<&'a str>,
+}
+
+impl<'a> From<&'a RtiDocument> for RtiFingerprintInput<'a> {
+    fn from(rti: &'a RtiDocument) -> Self {
+        Self {
+            target: &rti.target,
+            profile: rti.profile.as_deref(),
+        }
+    }
 }
 
 /// Computes the canonical semantic fingerprint for one deployment document.
@@ -95,6 +117,7 @@ pub(crate) fn deployment_fingerprint(document: &DeploymentDocument) -> Result<St
         generated_lock_hash: &document.generated_lock_hash,
         generated_source_hash: &document.generated_source_hash,
         federates: &document.federates,
+        rti: document.rti.as_ref().map(RtiFingerprintInput::from),
         execution: &document.execution,
         resources: &document.resources,
         coordination: &document.coordination,
@@ -190,6 +213,33 @@ pub(crate) struct CoordinationDocument {
     pub(crate) backend: String,
     /// Versioned protocol identity, absent for local coordination.
     pub(crate) protocol: Option<String>,
+    /// Shared deployment identity embedded in RTI and Federate launchers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) identity: Option<String>,
+}
+
+/// Compilation identity and files owned by the central RTI, never by a Federate.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RtiDocument {
+    /// Rust target selected for the hosted RTI executable.
+    pub(crate) target: String,
+    /// Optional Cargo profile selector.
+    pub(crate) profile: Option<String>,
+    /// Generated RTI workspace files retained for reproduction.
+    pub(crate) generated: Vec<RtiFileRecord>,
+    /// Exactly one executable once the bundle is published.
+    pub(crate) artifact: Option<RtiFileRecord>,
+}
+
+/// One file owned by the RTI; ownership follows from the enclosing RTI document.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RtiFileRecord {
+    /// Normalized bundle-relative path in the dedicated RTI namespace.
+    path: String,
+    /// BLAKE3 hash of the published bytes.
+    blake3: String,
 }
 
 /// One normalized bundle-relative file path and exact content hash.
@@ -218,6 +268,18 @@ pub(crate) struct BundleSource<'a> {
     pub(crate) executable: &'a Path,
 }
 
+/// Temporary generated workspace and executable owned by the central RTI.
+pub(crate) struct RtiBundleSource<'a> {
+    /// Generated RTI Cargo manifest.
+    pub(crate) manifest: &'a Path,
+    /// Reconciled RTI Cargo lockfile.
+    pub(crate) lockfile: &'a Path,
+    /// Generated RTI Rust source.
+    pub(crate) source: &'a Path,
+    /// RTI executable emitted by Cargo.
+    pub(crate) executable: &'a Path,
+}
+
 /// Stable paths produced by one successful immutable bundle publication.
 #[derive(Debug)]
 pub(crate) struct PublishedBundle {
@@ -225,12 +287,19 @@ pub(crate) struct PublishedBundle {
     manifest: PathBuf,
     /// Canonically ordered executable artifacts in the published bundle.
     executables: Vec<PublishedExecutable>,
+    /// Separate central RTI executable, if this deployment uses it.
+    rti_executable: Option<PathBuf>,
 }
 
 impl PublishedBundle {
     /// Returns the canonically ordered published executable artifacts.
     pub(crate) fn executables(&self) -> &[PublishedExecutable] {
         &self.executables
+    }
+
+    /// Returns the separately owned central RTI executable.
+    pub(crate) fn rti_executable(&self) -> Option<&Path> {
+        self.rti_executable.as_deref()
     }
 
     /// Consumes the publication result and returns its deployment manifest.
@@ -261,6 +330,7 @@ impl PublishedExecutable {
 }
 
 /// Verified document and executable selected from a published deployment bundle.
+#[cfg(test)]
 #[derive(Debug)]
 pub(crate) struct PublishedArtifact {
     /// Complete validated deployment document.
@@ -271,8 +341,39 @@ pub(crate) struct PublishedArtifact {
     pub(crate) executable_hash: String,
 }
 
-/// Loads one immutable, semantically validated local deployment artifact.
-pub(crate) fn load_published_artifact(manifest: &Path) -> Result<PublishedArtifact> {
+/// All opened executables from one validated immutable deployment bundle.
+#[derive(Debug)]
+pub(crate) struct PublishedArtifacts {
+    /// Complete validated deployment document.
+    pub(crate) document: DeploymentDocument,
+    /// Federate artifacts in compiler identity order.
+    pub(crate) federates: Vec<LoadedFederateArtifact>,
+    /// Separately owned RTI executable, present only for central coordination.
+    pub(crate) rti: Option<LoadedRtiArtifact>,
+}
+
+/// Opened Federate executable and the digest expected by execution staging.
+#[derive(Debug)]
+pub(crate) struct LoadedFederateArtifact {
+    /// Stable identity of this artifact's Federate.
+    pub(crate) federate: String,
+    /// Open regular executable with verified bytes.
+    pub(crate) executable: File,
+    /// Expected BLAKE3 digest, retained for execution staging verification.
+    pub(crate) executable_hash: String,
+}
+
+/// Opened RTI executable and the digest expected by execution staging.
+#[derive(Debug)]
+pub(crate) struct LoadedRtiArtifact {
+    /// Open regular executable with verified bytes.
+    pub(crate) executable: File,
+    /// Expected BLAKE3 digest, retained for execution staging verification.
+    pub(crate) executable_hash: String,
+}
+
+/// Loads and opens every executable after verifying the complete bundle.
+pub(crate) fn load_published_artifacts(manifest: &Path) -> Result<PublishedArtifacts> {
     if manifest.file_name().and_then(|name| name.to_str()) != Some("deployment.json") {
         bail!("published artifact manifest must be named deployment.json");
     }
@@ -281,8 +382,7 @@ pub(crate) fn load_published_artifact(manifest: &Path) -> Result<PublishedArtifa
         .ok_or_else(|| anyhow!("published artifact manifest has no parent directory"))?;
     let document = read_document(bundle)?;
     validate_bundle(bundle, &document)?;
-    let fingerprint = deployment_fingerprint(&document)?;
-    if fingerprint != document.fingerprint {
+    if deployment_fingerprint(&document)? != document.fingerprint {
         bail!("deployment semantic fingerprint mismatch");
     }
     let directory_name = bundle
@@ -292,28 +392,73 @@ pub(crate) fn load_published_artifact(manifest: &Path) -> Result<PublishedArtifa
     if directory_name != document.fingerprint {
         bail!("published artifact directory name does not match deployment fingerprint");
     }
-    if document.federates.len() != 1 {
-        bail!("distributed deployment execution is unsupported until issue #131");
+    // Artifact records may arrive in any order; execution follows compiler identity order.
+    let federates = document
+        .federates
+        .iter()
+        .map(|federate| {
+            let artifact = document
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.federate == federate.id)
+                .expect("validated Federate has exactly one artifact");
+            Ok(LoadedFederateArtifact {
+                federate: federate.id.clone(),
+                executable: open_verified_artifact(bundle, &artifact.path, &artifact.blake3)?,
+                executable_hash: artifact.blake3.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let rti = document
+        .rti
+        .as_ref()
+        .map(|rti| {
+            let artifact = rti
+                .artifact
+                .as_ref()
+                .expect("validated RTI has an artifact");
+            Ok::<_, anyhow::Error>(LoadedRtiArtifact {
+                executable: open_verified_artifact(bundle, &artifact.path, &artifact.blake3)?,
+                executable_hash: artifact.blake3.clone(),
+            })
+        })
+        .transpose()?;
+    Ok(PublishedArtifacts {
+        document,
+        federates,
+        rti,
+    })
+}
+
+/// Loads one immutable, semantically validated local deployment artifact.
+#[cfg(test)]
+pub(crate) fn load_published_artifact(manifest: &Path) -> Result<PublishedArtifact> {
+    let PublishedArtifacts {
+        document,
+        mut federates,
+        rti,
+    } = load_published_artifacts(manifest)?;
+    if federates.len() != 1 || rti.is_some() {
+        bail!("single-artifact loader requires one local Federate");
     }
-    let federate = &document.federates[0];
-    if document.artifacts.len() != 1 {
-        bail!("published artifact requires exactly one artifact record");
-    }
-    let artifact = &document.artifacts[0];
-    if artifact.federate != federate.id {
-        bail!(
-            "published artifact is not owned by local Federate '{}'",
-            federate.id
-        );
-    }
-    let executable = bundle.join(join_normalized(Path::new(""), &artifact.path)?);
-    let executable_hash = artifact.blake3.clone();
-    let executable = open_published_artifact(&executable)?;
+    let artifact = federates.pop().expect("checked one Federate artifact");
     Ok(PublishedArtifact {
         document,
-        executable,
-        executable_hash,
+        executable: artifact.executable,
+        executable_hash: artifact.executable_hash,
     })
+}
+
+/// Rechecks bytes on the opened handle to close the validation-to-open race.
+fn open_verified_artifact(bundle: &Path, relative: &str, expected: &str) -> Result<File> {
+    let path = join_normalized(bundle, relative)?;
+    let mut file = open_published_artifact(&path)?;
+    if hash_open_file(&mut file)? != expected {
+        bail!("bundle hash mismatch for {relative}");
+    }
+    file.rewind()
+        .context("failed to rewind verified artifact")?;
+    Ok(file)
 }
 
 /// Opens one regular artifact selected from an already validated published bundle.
@@ -329,11 +474,26 @@ pub(crate) fn open_published_artifact(path: &Path) -> Result<File> {
 }
 
 /// Stages, verifies, and atomically publishes an immutable deployment bundle.
+#[cfg(test)]
 pub(crate) fn publish_bundle(
+    target_directory: &Path,
+    document: DeploymentDocument,
+    sources: &[BundleSource<'_>],
+) -> Result<PublishedBundle> {
+    publish_bundle_with_rti(target_directory, document, sources, None)
+}
+
+/// Publishes Federate workspaces and an optional separately owned central RTI.
+pub(crate) fn publish_bundle_with_rti(
     target_directory: &Path,
     mut document: DeploymentDocument,
     sources: &[BundleSource<'_>],
+    rti_source: Option<&RtiBundleSource<'_>>,
 ) -> Result<PublishedBundle> {
+    validate_coordination(&document)?;
+    if document.rti.is_some() != rti_source.is_some() {
+        bail!("RTI source must be present exactly when central RTI metadata is present");
+    }
     validate_segment(&document.deployment, "deployment")?;
     validate_fingerprint(&document.fingerprint)?;
     if sources.len() != document.federates.len() {
@@ -365,7 +525,7 @@ pub(crate) fn publish_bundle(
     document.generated.clear();
     document.artifacts.clear();
     for source in sources {
-        let generated = format!("generated/{}", source.federate);
+        let generated = federate_directory("generated", source.federate, document.rti.is_some());
         document.generated.extend([
             stage_file(
                 staging.path(),
@@ -395,10 +555,34 @@ pub(crate) fn publish_bundle(
             staging.path(),
             source.federate,
             source.executable,
-            &format!("artifacts/{}/{executable_name}", source.federate),
+            &format!(
+                "{}/{executable_name}",
+                federate_directory("artifacts", source.federate, document.rti.is_some())
+            ),
         )?);
     }
 
+    if let (Some(rti), Some(source)) = (&mut document.rti, rti_source) {
+        rti.generated = [
+            (source.manifest, "generated/rti/Cargo.toml"),
+            (source.lockfile, "generated/rti/Cargo.lock"),
+            (source.source, "generated/rti/src/main.rs"),
+        ]
+        .into_iter()
+        .map(|(source, path)| stage_rti_file(staging.path(), source, path))
+        .collect::<Result<Vec<_>>>()?;
+        let name = source
+            .executable
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| anyhow!("RTI executable name is not valid UTF-8"))?;
+        validate_segment(name, "RTI executable")?;
+        rti.artifact = Some(stage_rti_file(
+            staging.path(),
+            source.executable,
+            &format!("artifacts/rti/{name}"),
+        )?);
+    }
     write_document(staging.path(), &document)?;
     let decoded = read_document(staging.path())?;
     if decoded != document {
@@ -425,17 +609,23 @@ pub(crate) fn publish_bundle(
         .expect("published deployment manifest has a bundle parent");
     let executables = document
         .artifacts
-        .iter()
+        .into_iter()
         .map(|artifact| {
             Ok(PublishedExecutable {
-                federate: artifact.federate.clone(),
+                federate: artifact.federate,
                 path: join_normalized(bundle, &artifact.path)?,
             })
         })
         .collect::<Result<Vec<_>>>()?;
+    let rti_executable = document
+        .rti
+        .and_then(|rti| rti.artifact)
+        .map(|artifact| join_normalized(bundle, &artifact.path))
+        .transpose()?;
     Ok(PublishedBundle {
         manifest,
         executables,
+        rti_executable,
     })
 }
 
@@ -568,6 +758,25 @@ fn os_status(succeeded: bool) -> io::Result<()> {
 
 /// Copies one source file and proves the staged bytes match its recorded hash.
 fn stage_file(staging: &Path, federate: &str, source: &Path, relative: &str) -> Result<FileRecord> {
+    let blake3 = stage_bytes(staging, source, relative)?;
+    Ok(FileRecord {
+        federate: federate.to_owned(),
+        path: relative.to_owned(),
+        blake3,
+    })
+}
+
+/// Stages RTI bytes without inventing a Federate owner.
+fn stage_rti_file(staging: &Path, source: &Path, relative: &str) -> Result<RtiFileRecord> {
+    let blake3 = stage_bytes(staging, source, relative)?;
+    Ok(RtiFileRecord {
+        path: relative.to_owned(),
+        blake3,
+    })
+}
+
+/// Copies and verifies one file into the unpublished bundle.
+fn stage_bytes(staging: &Path, source: &Path, relative: &str) -> Result<String> {
     let expected = hash_file(source)?;
     let destination = join_normalized(staging, relative)?;
     let destination_parent = destination
@@ -586,11 +795,7 @@ fn stage_file(staging: &Path, federate: &str, source: &Path, relative: &str) -> 
     if actual != expected {
         bail!("staged file {} changed while copying", source.display());
     }
-    Ok(FileRecord {
-        federate: federate.to_owned(),
-        path: relative.to_owned(),
-        blake3: expected,
-    })
+    Ok(expected)
 }
 
 /// Writes a durable, newline-terminated deployment document into staging.
@@ -641,6 +846,59 @@ fn accept_existing(final_directory: &Path, candidate: &DeploymentDocument) -> Re
     Ok(final_directory.join("deployment.json"))
 }
 
+/// Keeps RTI paths separate even when a real Federate is named `rti`.
+fn federate_directory(category: &str, federate: &str, central: bool) -> String {
+    if central {
+        format!("{category}/federates/{federate}")
+    } else {
+        format!("{category}/{federate}")
+    }
+}
+
+/// Validates the association between coordination identity and RTI ownership.
+fn validate_coordination(document: &DeploymentDocument) -> Result<()> {
+    match document.coordination.backend.as_str() {
+        "local" => {
+            if document.rti.is_some()
+                || document.coordination.identity.is_some()
+                || document.coordination.protocol.is_some()
+            {
+                bail!("local coordination has unexpected RTI or protocol identity");
+            }
+        }
+        "central-rti" => {
+            let rti = document
+                .rti
+                .as_ref()
+                .context("central coordination is missing RTI metadata")?;
+            if !document
+                .coordination
+                .identity
+                .as_deref()
+                .is_some_and(|identity| is_lower_hex(identity, 64))
+            {
+                bail!("central coordination requires a valid RTI deployment identity");
+            }
+            if !document
+                .coordination
+                .protocol
+                .as_deref()
+                .is_some_and(|protocol| !protocol.is_empty())
+            {
+                bail!("central coordination requires an RTI protocol identity");
+            }
+            if rti.target.is_empty() {
+                bail!("RTI compilation target must not be empty");
+            }
+            if let Some(profile) = &rti.profile {
+                validate_segment(profile, "RTI profile")?;
+            }
+        }
+        backend => bail!("unsupported deployment coordination backend {backend}"),
+    }
+    Ok(())
+}
+
 /// Validates schema identity, safe unique paths, and every referenced file hash.
 fn validate_bundle(bundle: &Path, document: &DeploymentDocument) -> Result<()> {
     if document.schema != DEPLOYMENT_SCHEMA {
@@ -651,6 +909,7 @@ fn validate_bundle(bundle: &Path, document: &DeploymentDocument) -> Result<()> {
     }
     validate_fingerprint(&document.fingerprint)?;
     validate_segment(&document.deployment, "deployment")?;
+    validate_coordination(document)?;
     let mut federates = BTreeSet::new();
     for federate in &document.federates {
         validate_segment(&federate.id, "Federate")?;
@@ -670,9 +929,7 @@ fn validate_bundle(bundle: &Path, document: &DeploymentDocument) -> Result<()> {
         .with_context(|| format!("failed to canonicalize {}", bundle.display()))?;
     let mut paths = BTreeSet::new();
     let mut artifact_owners = BTreeSet::new();
-    let mut expected_files = BTreeSet::new();
-    expected_files.insert(PathBuf::from("deployment.json"));
-    let mut expected_directories = BTreeSet::new();
+    let mut files = Vec::new();
     for (category, records) in [
         ("generated", document.generated.as_slice()),
         ("artifacts", document.artifacts.as_slice()),
@@ -681,7 +938,7 @@ fn validate_bundle(bundle: &Path, document: &DeploymentDocument) -> Result<()> {
             bail!("deployment document has no {category} file records");
         }
         for record in records {
-            validate_record(category, record)?;
+            validate_record(category, record, document.rti.is_some())?;
             if !federates.contains(record.federate.as_str()) {
                 bail!(
                     "{category} file is owned by unknown Federate {}",
@@ -694,45 +951,70 @@ fn validate_bundle(bundle: &Path, document: &DeploymentDocument) -> Result<()> {
                     record.federate
                 );
             }
-            if !paths.insert(record.path.as_str()) {
-                bail!("duplicate bundle path {}", record.path);
-            }
-            let relative = join_normalized(Path::new(""), &record.path)?;
-            expected_files.insert(relative.clone());
-            for directory in relative.ancestors().skip(1) {
-                if directory.as_os_str().is_empty() {
-                    break;
-                }
-                expected_directories.insert(directory.to_path_buf());
-            }
-            let path = bundle.join(relative);
-            let metadata = fs::symlink_metadata(&path)
-                .with_context(|| format!("failed to inspect {}", path.display()))?;
-            if !metadata.is_file() || metadata.file_type().is_symlink() {
-                bail!("{} is not a regular bundle file", path.display());
-            }
-            let canonical_path = fs::canonicalize(&path)
-                .with_context(|| format!("failed to canonicalize {}", path.display()))?;
-            if !canonical_path.starts_with(&canonical_bundle) {
-                bail!(
-                    "bundle path {} escapes its fingerprint directory",
-                    record.path
-                );
-            }
-            let actual = hash_file(&path)?;
-            if actual != record.blake3 {
-                bail!("bundle hash mismatch for {}", record.path);
-            }
+            files.push((record.path.as_str(), record.blake3.as_str()));
         }
     }
     if artifact_owners != federates {
         bail!("each compiled Federate must own exactly one artifact record");
     }
+    if let Some(rti) = &document.rti {
+        let artifact = rti
+            .artifact
+            .as_ref()
+            .context("central RTI is missing its artifact record")?;
+        for (category, record) in rti
+            .generated
+            .iter()
+            .map(|record| ("generated", record))
+            .chain(std::iter::once(("artifacts", artifact)))
+        {
+            validate_file_record(category, "rti", &record.path, &record.blake3)?;
+            files.push((record.path.as_str(), record.blake3.as_str()));
+        }
+    }
+    let mut expected_files = BTreeSet::from([PathBuf::from("deployment.json")]);
+    let mut expected_directories = BTreeSet::new();
+    for (relative, digest) in files {
+        if !paths.insert(relative) {
+            bail!("duplicate bundle path {relative}");
+        }
+        let relative_path = join_normalized(Path::new(""), relative)?;
+        for directory in relative_path.ancestors().skip(1) {
+            if directory.as_os_str().is_empty() {
+                break;
+            }
+            expected_directories.insert(directory.to_path_buf());
+        }
+        let path = bundle.join(&relative_path);
+        expected_files.insert(relative_path);
+        let metadata = fs::symlink_metadata(&path)
+            .with_context(|| format!("failed to inspect {}", path.display()))?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            bail!("{} is not a regular bundle file", path.display());
+        }
+        let canonical_path = fs::canonicalize(&path)
+            .with_context(|| format!("failed to canonicalize {}", path.display()))?;
+        if !canonical_path.starts_with(&canonical_bundle) {
+            bail!("bundle path {relative} escapes its fingerprint directory");
+        }
+        if hash_file(&path)? != digest {
+            bail!("bundle hash mismatch for {relative}");
+        }
+    }
     for federate in federates {
+        let directory = federate_directory("generated", federate, document.rti.is_some());
         for relative in ["Cargo.toml", "Cargo.lock", "src/main.rs"] {
-            let path = format!("generated/{federate}/{relative}");
+            let path = format!("{directory}/{relative}");
             if !paths.contains(path.as_str()) {
                 bail!("Federate {federate} is missing generated workspace record {path}");
+            }
+        }
+    }
+    if document.rti.is_some() {
+        for relative in ["Cargo.toml", "Cargo.lock", "src/main.rs"] {
+            let path = format!("generated/rti/{relative}");
+            if !paths.contains(path.as_str()) {
+                bail!("RTI is missing generated workspace record {path}");
             }
         }
     }
@@ -818,21 +1100,25 @@ fn validate_bundle_directory(
 }
 
 /// Validates the category, owner, normalized path, and digest of one file record.
-fn validate_record(category: &str, record: &FileRecord) -> Result<()> {
+fn validate_record(category: &str, record: &FileRecord, central: bool) -> Result<()> {
     validate_segment(&record.federate, "Federate")?;
-    if !is_lower_hex(&record.blake3, 64) {
-        bail!("invalid BLAKE3 hash for {}", record.path);
+    let owner = if central {
+        format!("federates/{}", record.federate)
+    } else {
+        record.federate.to_owned()
+    };
+    validate_file_record(category, &owner, &record.path, &record.blake3)
+}
+
+/// Validates exact role-specific path namespaces before any filesystem access.
+fn validate_file_record(category: &str, owner: &str, path: &str, digest: &str) -> Result<()> {
+    if !is_lower_hex(digest, 64) {
+        bail!("invalid BLAKE3 hash for {path}");
     }
-    let parts = record.path.split('/').collect::<Vec<_>>();
-    if parts.len() < 3 || parts[0] != category || parts[1] != record.federate {
-        bail!(
-            "{} path {} does not belong to Federate {}",
-            category,
-            record.path,
-            record.federate
-        );
+    if !path.starts_with(&format!("{category}/{owner}/")) {
+        bail!("{category} path {path} does not belong to {owner}");
     }
-    join_normalized(Path::new("."), &record.path)?;
+    join_normalized(Path::new("."), path)?;
     Ok(())
 }
 
@@ -960,6 +1246,224 @@ mod tests {
         .unwrap();
         document.fingerprint = deployment_fingerprint(&document).unwrap();
         document
+    }
+
+    fn central_document() -> DeploymentDocument {
+        let mut document = sample_document();
+        document.federates[0].id = "rti".into();
+        document.coordination = CoordinationDocument {
+            backend: "central-rti".into(),
+            protocol: Some("boomerang.coordination.v1".into()),
+            identity: Some("55".repeat(32)),
+        };
+        document.rti = Some(RtiDocument {
+            target: target_lexicon::HOST.to_string(),
+            profile: None,
+            generated: Vec::new(),
+            artifact: None,
+        });
+        document.fingerprint = deployment_fingerprint(&document).unwrap();
+        document
+    }
+
+    /// Changing the RTI target/profile or shared handshake identity invalidates bundle reuse.
+    #[test]
+    fn central_rti_compilation_and_coordination_affect_fingerprint() {
+        let document = central_document();
+        let original = deployment_fingerprint(&document).unwrap();
+        for field in ["target", "profile", "identity", "protocol"] {
+            let mut changed = document.clone();
+            match field {
+                "target" => changed.rti.as_mut().unwrap().target = "other-target".into(),
+                "profile" => changed.rti.as_mut().unwrap().profile = Some("release".into()),
+                "identity" => changed.coordination.identity = Some("66".repeat(32)),
+                "protocol" => changed.coordination.protocol = Some("other-protocol".into()),
+                _ => unreachable!(),
+            }
+            assert_ne!(
+                original,
+                deployment_fingerprint(&changed).unwrap(),
+                "{field}"
+            );
+        }
+    }
+
+    /// A central deployment cannot accidentally publish only its Federate artifacts.
+    #[test]
+    fn central_rti_publication_requires_separate_source() {
+        let target = tempfile::tempdir().unwrap();
+        let inputs = tempfile::tempdir().unwrap();
+        let [manifest, lockfile, source, executable] = write_sample_source_files(inputs.path());
+        let error = publish_bundle(
+            target.path(),
+            central_document(),
+            &[BundleSource {
+                federate: "rti",
+                manifest: &manifest,
+                lockfile: &lockfile,
+                source: &source,
+                executable: &executable,
+            }],
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("RTI source"), "{error:#}");
+    }
+
+    fn publish_central_fixture(target: &Path) -> PublishedBundle {
+        let inputs = tempfile::tempdir().unwrap();
+        let [manifest, lockfile, source, executable] = write_sample_source_files(inputs.path());
+        let rti_executable = inputs.path().join("rti-launcher");
+        fs::write(&rti_executable, b"RTI fixture").unwrap();
+        let mut document = central_document();
+        let mut sensor = document.federates[0].clone();
+        sensor.id = "sensor".into();
+        document.federates.push(sensor);
+        document.fingerprint = deployment_fingerprint(&document).unwrap();
+        let sources = ["rti", "sensor"].map(|federate| BundleSource {
+            federate,
+            manifest: &manifest,
+            lockfile: &lockfile,
+            source: &source,
+            executable: &executable,
+        });
+        publish_bundle_with_rti(
+            target,
+            document,
+            &sources,
+            Some(&RtiBundleSource {
+                manifest: &manifest,
+                lockfile: &lockfile,
+                source: &source,
+                executable: &rti_executable,
+            }),
+        )
+        .unwrap()
+    }
+
+    /// RTI and real Federate rti bytes survive publication, reuse and opened-handle loading.
+    #[test]
+    fn central_rti_bundle_roundtrip_preserves_distinct_executables() {
+        let target = tempfile::tempdir().unwrap();
+        let published = publish_central_fixture(target.path());
+        assert_eq!(published.executables().len(), 2);
+        assert_eq!(published.executables()[0].federate(), "rti");
+        assert!(published.executables()[0]
+            .path()
+            .ends_with("artifacts/federates/rti/launcher"));
+        assert!(published
+            .rti_executable()
+            .unwrap()
+            .ends_with("artifacts/rti/rti-launcher"));
+        let manifest = published.into_manifest();
+        assert_eq!(
+            publish_central_fixture(target.path()).into_manifest(),
+            manifest
+        );
+        let mut loaded = load_published_artifacts(&manifest).unwrap();
+        assert_eq!(loaded.document.federates.len(), 2);
+        assert_eq!(
+            loaded
+                .federates
+                .iter()
+                .map(|artifact| artifact.federate.as_str())
+                .collect::<Vec<_>>(),
+            ["rti", "sensor"]
+        );
+        for artifact in &mut loaded.federates {
+            let mut contents = String::new();
+            artifact.executable.read_to_string(&mut contents).unwrap();
+            assert_eq!(contents, "fixture");
+            assert_eq!(
+                artifact.executable_hash,
+                blake3::hash(b"fixture").to_hex().as_str()
+            );
+        }
+        let rti = loaded.rti.as_mut().unwrap();
+        let mut contents = String::new();
+        rti.executable.read_to_string(&mut contents).unwrap();
+        assert_eq!(contents, "RTI fixture");
+        assert_eq!(
+            rti.executable_hash,
+            blake3::hash(b"RTI fixture").to_hex().as_str()
+        );
+        assert_eq!(loaded.document.rti.as_ref().unwrap().generated.len(), 3);
+        assert!(load_published_artifact(&manifest).is_err());
+    }
+
+    /// Every RTI record is checked before any process can be launched.
+    #[test]
+    fn central_rti_loader_rejects_missing_wrong_duplicate_and_tampered_records() {
+        let cases = [
+            ("missing metadata", "missing RTI metadata"),
+            ("missing executable record", "missing its artifact record"),
+            ("wrong artifact role", "does not belong to rti"),
+            ("duplicate generated", "duplicate bundle path"),
+            ("missing generated", "generated workspace record"),
+            ("unexpected rti", "unexpected RTI"),
+            ("bad identity", "valid RTI deployment identity"),
+            ("bad protocol", "RTI protocol identity"),
+            ("changed target", "semantic fingerprint mismatch"),
+            ("tampered executable", "bundle hash mismatch"),
+            ("absent executable", "failed to inspect"),
+        ];
+        for (case, expected) in cases {
+            let target = tempfile::tempdir().unwrap();
+            let manifest = publish_central_fixture(target.path()).into_manifest();
+            let bundle = manifest.parent().unwrap();
+            let mut document = read_document(bundle).unwrap();
+            match case {
+                "missing metadata" => document.rti = None,
+                "missing executable record" => document.rti.as_mut().unwrap().artifact = None,
+                "wrong artifact role" => {
+                    document
+                        .rti
+                        .as_mut()
+                        .unwrap()
+                        .artifact
+                        .as_mut()
+                        .unwrap()
+                        .path = "artifacts/federates/rti/launcher".into()
+                }
+                "duplicate generated" => {
+                    let rti = document.rti.as_mut().unwrap();
+                    rti.generated.push(rti.generated[0].clone());
+                }
+                "missing generated" => {
+                    let record = document.rti.as_mut().unwrap().generated.remove(0);
+                    fs::remove_file(bundle.join(record.path)).unwrap();
+                }
+                "unexpected rti" => document.coordination.backend = "local".into(),
+                "bad identity" => document.coordination.identity = Some("invalid".into()),
+                "bad protocol" => document.coordination.protocol = None,
+                "changed target" => document.rti.as_mut().unwrap().target = "other-target".into(),
+                "tampered executable" => {
+                    let path = &document
+                        .rti
+                        .as_ref()
+                        .unwrap()
+                        .artifact
+                        .as_ref()
+                        .unwrap()
+                        .path;
+                    fs::write(bundle.join(path), b"tampered").unwrap();
+                }
+                "absent executable" => {
+                    let path = &document
+                        .rti
+                        .as_ref()
+                        .unwrap()
+                        .artifact
+                        .as_ref()
+                        .unwrap()
+                        .path;
+                    fs::remove_file(bundle.join(path)).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            write_document(bundle, &document).unwrap();
+            let error = load_published_artifacts(&manifest).unwrap_err();
+            assert!(format!("{error:#}").contains(expected), "{case}: {error:#}");
+        }
     }
 
     fn write_sample_bundle(root: &Path) -> DeploymentDocument {
@@ -1118,8 +1622,15 @@ mod tests {
         assert_eq!(second, first);
         assert_eq!(fs::read(&first).unwrap(), manifest_before);
         assert_eq!(fs::read(&artifact).unwrap(), artifact_before);
-        let published = read_document(bundle).unwrap();
-        validate_bundle(bundle, &published).unwrap();
+        let mut loaded = load_published_artifact(&first).unwrap();
+        assert_eq!(loaded.document, read_document(bundle).unwrap());
+        let mut loaded_bytes = Vec::new();
+        loaded.executable.read_to_end(&mut loaded_bytes).unwrap();
+        assert_eq!(loaded_bytes, b"fixture");
+        assert_eq!(
+            loaded.executable_hash,
+            blake3::hash(b"fixture").to_hex().as_str()
+        );
         let staging_prefix = format!(".{fingerprint}.staging-");
         assert!(fs::read_dir(bundle.parent().unwrap())
             .unwrap()
@@ -1155,6 +1666,7 @@ mod tests {
             generated_lock_hash: &document.generated_lock_hash,
             generated_source_hash: &document.generated_source_hash,
             federates: &document.federates,
+            rti: document.rti.as_ref().map(RtiFingerprintInput::from),
             execution: &document.execution,
             resources: &document.resources,
             coordination: &document.coordination,
@@ -1241,9 +1753,9 @@ mod tests {
         assert!(error.to_string().contains("directory name"), "{error:#}");
     }
 
-    /// Rejects distributed execution until the compiled central RTI runner lands.
+    /// The compatibility loader never silently discards artifacts in a collection.
     #[test]
-    fn published_loader_rejects_distributed_execution_until_issue_131() {
+    fn single_artifact_loader_rejects_a_collection() {
         let parent = tempfile::tempdir().unwrap();
         let mut document = sample_document();
         let mut sensor = document.federates[0].clone();
@@ -1286,7 +1798,7 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "distributed deployment execution is unsupported until issue #131"
+            "single-artifact loader requires one local Federate"
         );
     }
 

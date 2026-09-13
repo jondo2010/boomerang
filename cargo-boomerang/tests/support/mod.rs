@@ -40,6 +40,28 @@ pub fn copied_fixture_workspace() -> tempfile::TempDir {
     destination
 }
 
+/// Reuses one host-target copy across generated central deployment tests.
+pub fn hosted_fixture_workspace() -> PathBuf {
+    static WORKSPACE: OnceLock<tempfile::TempDir> = OnceLock::new();
+    WORKSPACE
+        .get_or_init(|| {
+            let workspace = copied_fixture_workspace();
+            let manifest = workspace.path().join("Boomerang.toml");
+            let source = std::fs::read_to_string(&manifest).unwrap().replace(
+                "aarch64-unknown-linux-gnu",
+                &target_lexicon::HOST.to_string(),
+            );
+            let source = source.replace(
+                "vehicle_topology::topology",
+                "vehicle_topology::tagged_topology",
+            );
+            std::fs::write(manifest, source).unwrap();
+            workspace
+        })
+        .path()
+        .to_path_buf()
+}
+
 pub fn shared_target(lane: &str) -> PathBuf {
     static ROOT: OnceLock<PathBuf> = OnceLock::new();
     let root = ROOT.get_or_init(|| {

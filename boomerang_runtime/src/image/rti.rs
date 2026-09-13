@@ -178,6 +178,36 @@ impl<'a> RtiRouteImage<'a> {
         }
     }
 
+    /// Returns the end-to-end flow key in its original image domain.
+    #[must_use]
+    pub const fn flow(&self) -> FlowIndex {
+        self.flow
+    }
+
+    /// Returns the optional physical input key in its original image domain.
+    #[must_use]
+    pub const fn physical_input(&self) -> Option<PhysicalBoundaryIndex> {
+        self.physical_input
+    }
+
+    /// Returns the optional physical output key in its original image domain.
+    #[must_use]
+    pub const fn physical_output(&self) -> Option<PhysicalBoundaryIndex> {
+        self.physical_output
+    }
+
+    /// Returns the selected transport capability key in its original image domain.
+    #[must_use]
+    pub const fn transport_capability(&self) -> TransportCapabilityIndex {
+        self.transport_capability
+    }
+
+    /// Returns the selected codec capability key in its original image domain.
+    #[must_use]
+    pub const fn codec_capability(&self) -> CodecCapabilityIndex {
+        self.codec_capability
+    }
+
     /// Returns the dense source Federate.
     #[must_use]
     pub const fn source(&self) -> FederateIndex {
@@ -198,6 +228,24 @@ impl<'a> RtiRouteImage<'a> {
 }
 
 impl RtiMemberImage {
+    /// Returns the original packed direct incoming relationship range.
+    #[must_use]
+    pub const fn direct_incoming_range(&self) -> SliceRange<RtiDependencyImage> {
+        self.direct_incoming
+    }
+
+    /// Returns the original packed transitive incoming relationship range.
+    #[must_use]
+    pub const fn transitive_incoming_range(&self) -> SliceRange<RtiDependencyImage> {
+        self.transitive_incoming
+    }
+
+    /// Returns the original packed affected downstream relationship range.
+    #[must_use]
+    pub const fn affected_downstream_range(&self) -> SliceRange<FederateIndex> {
+        self.affected_downstream
+    }
+
     /// Creates one unchecked member record from flattened table ranges.
     #[must_use]
     pub const fn new(
@@ -297,6 +345,48 @@ macro_rules! member_slice_accessor {
 }
 
 impl<'a> RtiImage<'a> {
+    /// Borrows the original members table for structural rendering.
+    #[must_use]
+    pub const fn members(&self) -> &TinyMapView<'a, FederateIndex, RtiMemberImage> {
+        &self.members
+    }
+
+    /// Borrows the original dependencies table for structural rendering.
+    #[must_use]
+    pub const fn dependencies(&self) -> &'a [RtiDependencyImage] {
+        self.dependencies
+    }
+
+    /// Borrows the original affected downstream entries table for structural rendering.
+    #[must_use]
+    pub const fn affected_downstream_entries(&self) -> &'a [FederateIndex] {
+        self.affected_downstream
+    }
+
+    /// Borrows the original flows table for structural rendering.
+    #[must_use]
+    pub const fn flows(&self) -> &IdentityTable<'a, FlowIndex> {
+        &self.flows
+    }
+
+    /// Borrows the original physical boundaries table for structural rendering.
+    #[must_use]
+    pub const fn physical_boundaries(&self) -> &IdentityTable<'a, PhysicalBoundaryIndex> {
+        &self.physical_boundaries
+    }
+
+    /// Borrows the original transport capabilities table for structural rendering.
+    #[must_use]
+    pub const fn transport_capabilities(&self) -> &IdentityTable<'a, TransportCapabilityIndex> {
+        &self.transport_capabilities
+    }
+
+    /// Borrows the original codec capabilities table for structural rendering.
+    #[must_use]
+    pub const fn codec_capabilities(&self) -> &IdentityTable<'a, CodecCapabilityIndex> {
+        &self.codec_capabilities
+    }
+
     /// Creates an unchecked central RTI image over immutable tables.
     #[must_use]
     #[allow(clippy::too_many_arguments, reason = "flat immutable image schema")]

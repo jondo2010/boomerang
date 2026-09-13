@@ -21,7 +21,7 @@ use tinymap::{IndexSpan, SliceRange};
 use crate::{codegen::LauncherCapabilities, manifest::ExecutionPolicy, DriverOutput};
 
 /// Validates and deterministically formats one complete generated Rust file.
-fn format_rust(tokens: TokenStream) -> Result<String> {
+pub(super) fn format_rust(tokens: TokenStream) -> Result<String> {
     let file = syn::parse2(tokens).context("generated Rust syntax is invalid")?;
     Ok(prettyplease::unparse(&file))
 }
@@ -32,9 +32,10 @@ pub(super) fn render_launcher(
     slice: &FederateSlice<'_>,
     aliases: &BTreeMap<String, String>,
     execution: &ExecutionPolicy,
-    distributed: bool,
+    coordination: Option<TokenStream>,
     capabilities: LauncherCapabilities,
 ) -> Result<String> {
+    let distributed = coordination.is_some();
     let enclaves = slice.enclaves();
     let mut route_bindings = BTreeMap::new();
     let compatibility_checks = render_compatibility_checks(driver, aliases)?;
@@ -50,6 +51,7 @@ pub(super) fn render_launcher(
         slice.enclave_range().start(),
         aliases,
         route_bindings,
+        distributed,
     )?;
     let timeout = execution.logical_horizon.map_or_else(
         || quote!(None),
@@ -66,45 +68,49 @@ pub(super) fn render_launcher(
     let write_execution_summary = capabilities
         .hosted
         .then(|| quote!(boomerang_util::launcher::write_execution_summary(&execution)?;));
-    let main = if distributed {
+    let fast_forward = execution.fast_forward;
+    let keep_alive = execution.keep_alive;
+    let config = quote!(Config {
+        fast_forward: #fast_forward,
+        timeout: #timeout,
+        keep_alive: #keep_alive,
+        physical_event_q_size: 1024,
+    });
+    let execute = if distributed {
         quote! {
-            fn main() -> Result<(), Box<dyn std::error::Error>> {
-                #init_tracing
-                drop(generated_bindings());
-                Err(format!(
-                    "distributed generated launcher execution requires backend injection for {:?}",
-                    FEDERATE_IMAGE.id(),
-                )
-                .into())
-            }
+            use boomerang_central_rti::compiled::{CentralRtiClient, RtiClientBindings, hosted};
+            let timeout = std::time::Duration::from_secs(10);
+            let address = std::env::var("BOOMERANG_RTI_ADDRESS")
+                .map_err(|_| "BOOMERANG_RTI_ADDRESS is required for central-rti execution")?
+                .parse()?;
+            let view = RtiImageView::new(&COORDINATION_IMAGE, COORDINATION_MEMBERS)?;
+            let rti_bindings = RtiClientBindings::from_image(&view, FEDERATE, COORDINATION_IDENTITY)?;
+            let connection = hosted::connect(address, FEDERATE_IMAGE.id().as_str(), timeout)?;
+            let sink = connection.sink();
+            let bindings = generated_bindings(&rti_bindings, sink.clone())?;
+            let execution = boomerang_runtime::execute_owned_federate_with_backend(
+                FEDERATE, &FEDERATE_IMAGE, &ENCLAVES, bindings, #config,
+                |inbound| CentralRtiClient::connect(sink, connection, rti_bindings, inbound, timeout),
+            )?;
         }
     } else {
-        let fast_forward = execution.fast_forward;
-        let keep_alive = execution.keep_alive;
         quote! {
-            fn main() -> Result<(), Box<dyn std::error::Error>> {
-                #init_tracing
-                let bindings = generated_bindings();
-                let execution = execute_owned_federate(
-                    &DEPLOYMENT,
-                    FEDERATE,
-                    bindings,
-                    Config {
-                        fast_forward: #fast_forward,
-                        timeout: #timeout,
-                        keep_alive: #keep_alive,
-                        // Legacy public-API compatibility placeholder.
-                        physical_event_q_size: 1024,
-                    },
-                )?;
-                #write_execution_summary
-                Ok(())
-            }
+            let execution = boomerang_runtime::execute_owned_federate(
+                &DEPLOYMENT, FEDERATE, generated_bindings(), #config,
+            )?;
+        }
+    };
+    let main = quote! {
+        fn main() -> Result<(), Box<dyn std::error::Error>> {
+            #init_tracing
+            #execute
+            #write_execution_summary
+            Ok(())
         }
     };
     let tokens = quote! {
         use boomerang_runtime::{
-            execute_owned_federate, Config, EnclaveBindings, FederateBindings, ReactorData,
+            Config, EnclaveBindings, FederateBindings, ReactorData,
         };
         use boomerang_runtime::image::*;
         use tinymap::{IndexSpan, SliceRange, TinyMapView};
@@ -121,6 +127,7 @@ pub(super) fn render_launcher(
         #compatibility_checks
         #(#enclave_images)*
         #deployment
+        #coordination
         #bindings
         #main
     };
@@ -332,6 +339,8 @@ fn render_deployment(slice: &FederateSlice<'_>, include_local_deployment: bool) 
     let enclave_range = index_span(slice.enclave_range());
     let deployment = include_local_deployment.then(|| {
         quote!(
+            static FEDERATES: [FederateImage; 1] = [FEDERATE_IMAGE];
+            static FEDERATION_MEMBERS: [FederateIndex; 1] = [FEDERATE];
             static DEPLOYMENT: CompiledDeploymentImage<'static> = CompiledDeploymentImage {
                 federation: GlobalFederationImage::new(&FEDERATION_MEMBERS, &[]),
                 federates: TinyMapView::new(&FEDERATES),
@@ -349,8 +358,6 @@ fn render_deployment(slice: &FederateSlice<'_>, include_local_deployment: bool) 
             RuntimeBackendId::new(#runtime),
             #enclave_range,
         );
-        static FEDERATES: [FederateImage; 1] = [FEDERATE_IMAGE];
-        static FEDERATION_MEMBERS: [FederateIndex; 1] = [FEDERATE];
         #deployment
     }
 }
@@ -362,6 +369,7 @@ fn render_bindings(
     enclave_start: usize,
     aliases: &BTreeMap<String, String>,
     route_bindings: RouteBindings,
+    distributed: bool,
 ) -> Result<TokenStream> {
     let mut enclave_bindings = Vec::with_capacity(enclaves.len());
     for (enclave_offset, enclave) in enclaves.iter().enumerate() {
@@ -383,13 +391,19 @@ fn render_bindings(
         ));
     }
     let route_bindings = render_route_bindings(route_bindings);
-    Ok(quote!(
-        fn generated_bindings() -> FederateBindings<'static> {
-            FederateBindings::new()
-                #(#enclave_bindings)*
-                #route_bindings
+    let body = quote!(FederateBindings::new() #(#enclave_bindings)* #route_bindings);
+    Ok(if distributed {
+        quote! {
+            fn generated_bindings(
+                _rti: &boomerang_central_rti::compiled::RtiClientBindings<'static>,
+                _sink: std::sync::Arc<dyn boomerang_central_rti::compiled::RtiRequestSink>,
+            ) -> Result<FederateBindings<'static>, Box<dyn std::error::Error>> {
+                Ok(#body)
+            }
         }
-    ))
+    } else {
+        quote!(fn generated_bindings() -> FederateBindings<'static> { #body })
+    })
 }
 
 /// Accumulated generated payload types for each local scheduler boundary.
@@ -448,18 +462,25 @@ fn collect_route_bindings(
 fn render_route_bindings(routes: RouteBindings) -> TokenStream {
     let mut tokens = TokenStream::new();
     for (boundary, (source_payload, destination_payload)) in routes {
-        let (Some(source_payload), Some(destination_payload)) =
-            (source_payload, destination_payload)
-        else {
-            continue;
-        };
-        tokens.extend(quote!(
-            .bind_route(
-                BoundaryId::new(#boundary),
-                #source_payload,
-                #destination_payload,
-            )
-        ));
+        tokens.extend(match (source_payload, destination_payload) {
+            (Some(source), Some(destination)) => quote! {
+                .bind_route(BoundaryId::new(#boundary), #source, #destination)
+            },
+            (Some(source), None) => quote! {
+                .bind_outbound_route(
+                    BoundaryId::new(#boundary), #source,
+                    boomerang_central_rti::compiled::hosted::encode_json,
+                    _rti.outbound_sink(_sink.clone(), BoundaryId::new(#boundary))?,
+                )
+            },
+            (None, Some(destination)) => quote! {
+                .bind_inbound_route(
+                    BoundaryId::new(#boundary), #destination,
+                    boomerang_central_rti::compiled::hosted::decode_json,
+                )
+            },
+            (None, None) => TokenStream::new(),
+        });
     }
     tokens
 }

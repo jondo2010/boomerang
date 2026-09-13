@@ -145,21 +145,45 @@ fn generated_launcher_manifest_uses_canonical_host_support() {
     launcher.run_locked_offline().unwrap();
 }
 
-/// Rejects distributed execution until the compiled central RTI runner lands.
+/// Builds three independent artifacts and exchanges a typed payload through the generated RTI.
 #[test]
-fn run_rejects_distributed_execution_until_issue_131() {
+fn generated_central_rti_exchanges_tagged_payload() {
     let _guard = support::toolchain_lock();
+    let workspace = support::hosted_fixture_workspace();
+    let directory = tempfile::tempdir().unwrap();
     let target = support::toolchain_target();
     support::reset_deployment_output(&target, "sensor-slice");
-    let error = support::with_target_directory(&target, || {
-        cargo_boomerang::run(support::fixture_workspace(), "sensor-slice")
-    })
-    .unwrap_err();
-
-    assert_eq!(
-        error.to_string(),
-        "distributed deployment execution is unsupported until issue #131"
+    let summary = directory.path().join("summary.json");
+    let output = Command::new(env!("CARGO_BIN_EXE_cargo-boomerang"))
+        .args(["boomerang", "--workspace"])
+        .arg(&workspace)
+        .args(["run", "--deployment", "sensor-slice", "--summary"])
+        .arg(&summary)
+        .env("CARGO_TARGET_DIR", &target)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
     );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("sensor received command 42"));
+    let result: Value = serde_json::from_slice(&fs::read(summary).unwrap()).unwrap();
+    assert_eq!(result["final_tag"]["offset_nanos"], "1000000");
+    assert_eq!(result["final_tag"]["microstep"], "0");
+    let bundle_path = fs::read_dir(target.join("boomerang/sensor-slice"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|e| e.path().join("deployment.json"))
+        .find(|p| p.is_file())
+        .unwrap();
+    let bundle: Value = serde_json::from_slice(&fs::read(&bundle_path).unwrap()).unwrap();
+    assert_eq!(bundle["federates"].as_array().unwrap().len(), 2);
+    assert_eq!(bundle["artifacts"].as_array().unwrap().len(), 2);
+    assert!(bundle["rti"]["artifact"]["path"]
+        .as_str()
+        .unwrap()
+        .starts_with("artifacts/rti/"));
 }
 
 #[test]
@@ -340,4 +364,21 @@ fn run_propagates_the_generated_application_exit_code() {
     support::reset_deployment_output(&target, "runtime-failure");
     let output = run_cli("runtime-failure", &[]);
     assert_eq!(output.status.code(), Some(42));
+}
+
+/// A failed generated Federate terminates the RTI and blocked peers without a success summary.
+#[test]
+fn generated_federate_failure_terminates_the_deployment() {
+    let _guard = support::toolchain_lock();
+    let output = Command::new(env!("CARGO_BIN_EXE_cargo-boomerang"))
+        .args(["boomerang", "--workspace"])
+        .arg(support::hosted_fixture_workspace())
+        .args(["run", "--deployment", "central-failure"])
+        .env("CARGO_TARGET_DIR", support::toolchain_target())
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("central RTI"), "{stderr}");
+    assert!(!stderr.contains("shutdown timed out"), "{stderr}");
 }

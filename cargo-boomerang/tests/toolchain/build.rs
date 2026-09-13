@@ -358,7 +358,13 @@ fn build_publishes_canonical_federate_artifact_collection() {
     let _guard = support::toolchain_lock();
     let target = support::toolchain_target();
     support::reset_deployment_output(&target, "sensor-slice");
-    let result = build_fixture("sensor-slice", &target);
+    let result = Command::new(env!("CARGO_BIN_EXE_cargo-boomerang"))
+        .args(["boomerang", "--workspace"])
+        .arg(support::hosted_fixture_workspace())
+        .args(["build", "--deployment", "sensor-slice"])
+        .env("CARGO_TARGET_DIR", &target)
+        .output()
+        .unwrap();
     assert!(
         result.status.success(),
         "{}",
@@ -420,7 +426,8 @@ fn build_publishes_canonical_federate_artifact_collection() {
             .collect::<Vec<_>>(),
         ["host", "host", "host", "sensor", "sensor", "sensor"]
     );
-    let host_source = fs::read_to_string(bundle.join("generated/host/src/main.rs")).unwrap();
+    let host_source =
+        fs::read_to_string(bundle.join("generated/federates/host/src/main.rs")).unwrap();
     assert!(
         host_source.contains("static FEDERATE: FederateIndex = FederateIndex::new(0);"),
         "{host_source}"
@@ -438,7 +445,8 @@ fn build_publishes_canonical_federate_artifact_collection() {
         2,
         "{host_source}"
     );
-    let sensor_source = fs::read_to_string(bundle.join("generated/sensor/src/main.rs")).unwrap();
+    let sensor_source =
+        fs::read_to_string(bundle.join("generated/federates/sensor/src/main.rs")).unwrap();
     assert!(
         sensor_source.contains("static FEDERATE: FederateIndex = FederateIndex::new(1);"),
         "{sensor_source}"
@@ -475,6 +483,49 @@ fn build_publishes_canonical_federate_artifact_collection() {
             ("sensor", host_target.as_str(), "std")
         ]
     );
+
+    let rti = &document["rti"];
+    assert_eq!(rti["target"], host_target);
+    assert_eq!(rti["profile"], Value::Null);
+    let rti_executable = bundle.join(rti["artifact"]["path"].as_str().unwrap());
+    assert_eq!(
+        rti["artifact"]["blake3"],
+        blake3::hash(&fs::read(rti_executable).unwrap())
+            .to_hex()
+            .to_string()
+    );
+    let metadata = cargo_metadata::MetadataCommand::new()
+        .manifest_path(bundle.join("generated/rti/Cargo.toml"))
+        .other_options(vec![String::from("--locked"), String::from("--offline")])
+        .exec()
+        .unwrap();
+    let packages = metadata
+        .packages
+        .iter()
+        .map(|package| package.name.as_str())
+        .collect::<Vec<_>>();
+    assert!(packages.contains(&"boomerang_central_rti"));
+    for forbidden in [
+        "boomerang_builder",
+        "vehicle-topology",
+        "vehicle-control",
+        "sensor-host",
+        "transitive-host",
+    ] {
+        assert!(
+            !packages.contains(&forbidden),
+            "RTI links {forbidden}: {packages:?}"
+        );
+    }
+    for node in &metadata.resolve.unwrap().nodes {
+        assert!(
+            node.features
+                .iter()
+                .all(|feature| feature.as_str() != "__boomerang_payload"),
+            "RTI activates a payload facet in {}",
+            node.id
+        );
+    }
 }
 
 #[test]

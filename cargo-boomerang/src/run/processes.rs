@@ -169,11 +169,14 @@ mod tests {
         )
         .unwrap();
         observer.write_all(b"S").unwrap();
-        if mode == "failure" {
-            std::process::exit(17);
-        }
-        if mode == "success" {
-            std::process::exit(0);
+        if matches!(mode.as_str(), "failure" | "success") {
+            // Windows may reset this socket on process exit before the parent
+            // receives startup. Wait for acknowledgement before exercising exit.
+            observer.set_read_timeout(Some(OBSERVATION_BOUND)).unwrap();
+            let mut acknowledged = [0];
+            observer.read_exact(&mut acknowledged).unwrap();
+            assert_eq!(acknowledged, *b"A");
+            std::process::exit(if mode == "failure" { 17 } else { 0 });
         }
         let mut readiness = None;
         let mut endpoint = None;
@@ -332,7 +335,8 @@ mod tests {
         processes.spawn(&mut blocked).unwrap();
         let blocked_observer = observe(&blocked_listener);
         processes.spawn(&mut failing).unwrap();
-        let failed_observer = observe(&failed_listener);
+        let mut failed_observer = observe(&failed_listener);
+        failed_observer.write_all(b"A").unwrap();
         let status = processes.wait(Duration::from_millis(50)).unwrap();
         assert_eq!(status.code(), Some(17));
         assert!(processes
@@ -351,7 +355,8 @@ mod tests {
         processes.spawn(&mut blocked).unwrap();
         let observer = observe(&blocked_listener);
         processes.spawn(&mut successful).unwrap();
-        let _successful_observer = observe(&successful_listener);
+        let mut successful_observer = observe(&successful_listener);
+        successful_observer.write_all(b"A").unwrap();
         let error = processes.wait(Duration::from_millis(50)).unwrap_err();
         assert!(error.to_string().contains("shutdown timed out"));
         assert!(processes

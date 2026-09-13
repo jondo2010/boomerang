@@ -1,6 +1,6 @@
 use super::*;
 use boomerang_runtime::{
-    image::{BoundaryId, CompiledDeploymentView, CoordinationProjection, RtiImage},
+    image::{BoundaryId, CompiledDeploymentView, CoordinationProjection, RtiImage, RtiImageView},
     BoundarySubmissionError, CoordinationRevision, FederateAcquisition, FederateCompletion,
     FederateCoordinationBackend, FederateCoordinationError, FederatePublication,
     InboundBoundaryAdapter, OutboundBoundarySink, TaggedPayload,
@@ -43,6 +43,22 @@ impl<'a> RtiClientBindings<'a> {
         }
         Ok(Self {
             image,
+            member,
+            identity,
+        })
+    }
+
+    /// Selects a member from a validated RTI-only projection without retaining remote Enclaves.
+    pub fn from_image(
+        view: &RtiImageView<'a>,
+        member: FederateIndex,
+        identity: CoordinationIdentity,
+    ) -> Result<Self, CentralRtiError> {
+        if view.members().get(member).is_none() {
+            return Err(CentralRtiError::new("unknown compiled Federate key"));
+        }
+        Ok(Self {
+            image: view.image(),
             member,
             identity,
         })

@@ -2,6 +2,49 @@
 use super::*;
 use tinymap::{IndexSpan, Key, SliceRange, TinyMapView};
 
+/// Validated coordination tables and stable members without scheduler payload images.
+///
+/// Deployment compilation separately checks coherence with the authoritative federation.
+/// This view checks the standalone artifact's identities, ranges, and typed references.
+#[derive(Debug)]
+pub struct RtiImageView<'a> {
+    /// Immutable coordination projection whose internal references were checked.
+    image: &'a RtiImage<'a>,
+    /// Canonical stable identities sharing the projection's Federate key domain.
+    members: IdentityTable<'a, FederateIndex>,
+}
+
+impl<'a> RtiImageView<'a> {
+    /// Validates a standalone coordination projection and its member identities.
+    pub fn new(
+        image: &'a RtiImage<'a>,
+        members: IdentityTable<'a, FederateIndex>,
+    ) -> Result<Self, ImageValidationError<'a>> {
+        validate_rti_identity_table("coordination.rti.member_identities", "federate", members)?;
+        validate_rti_member_count(image, members.len())?;
+        validate_rti(image)?;
+        Ok(Self { image, members })
+    }
+
+    /// Returns the checked immutable coordination projection.
+    #[must_use]
+    pub const fn image(&self) -> &'a RtiImage<'a> {
+        self.image
+    }
+
+    /// Returns the canonical dense member identity table.
+    #[must_use]
+    pub const fn members(&self) -> IdentityTable<'a, FederateIndex> {
+        self.members
+    }
+
+    /// Resolves a member key to its stable Federate identity.
+    #[must_use]
+    pub fn member_identity(&self, member: FederateIndex) -> Option<FederateId<'a>> {
+        self.members.get(member).map(|id| FederateId::new(id))
+    }
+}
+
 /// A precise, allocation-free scheduler-image validation failure.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ImageValidationError<'a> {
@@ -608,7 +651,7 @@ fn validate_rti_federate_refs<'a>(
     table: &'static str,
     offset: u32,
     values: impl Iterator<Item = FederateIndex>,
-    federates: TinyMapView<'_, FederateIndex, FederateImage<'_>>,
+    federates: TinyMapView<'_, FederateIndex, RtiMemberImage>,
 ) -> Result<(), ImageValidationError<'a>> {
     let mut previous = None;
     for (position, value) in values.enumerate() {
@@ -627,17 +670,25 @@ fn validate_rti_federate_refs<'a>(
     Ok(())
 }
 
-fn validate_rti<'a>(
-    image: &CompiledDeploymentImage<'a>,
+/// Checks that the member identity and coordination tables share one complete domain.
+fn validate_rti_member_count<'a>(
     rti: &RtiImage<'a>,
+    member_count: usize,
 ) -> Result<(), ImageValidationError<'a>> {
-    if rti.members.len() != image.federates.len() {
+    if rti.members.len() != member_count {
         return Err(ImageValidationError::OwnershipMismatch {
             table: "coordination.rti",
             index: 0,
             field: "members",
         });
     }
+    Ok(())
+}
+
+/// Checks projection-local structure without requiring any Enclave scheduler images.
+fn validate_rti<'a>(rti: &RtiImage<'a>) -> Result<(), ImageValidationError<'a>> {
+    check_len::<FederateIndex>("coordination.rti.members", rti.members.len())?;
+    check_len::<RtiRouteIndex>("coordination.rti.routes", rti.routes.len())?;
     check_len::<FederateIndex>("coordination.rti.dependencies", rti.dependencies.len())?;
     check_len::<FederateIndex>(
         "coordination.rti.affected_downstream",
@@ -673,7 +724,7 @@ fn validate_rti<'a>(
                 "coordination.rti.dependencies",
                 range.start(),
                 dependencies.iter().map(|value| value.source()),
-                image.federates,
+                rti.members,
             )?;
         }
         check_rti_range(
@@ -692,7 +743,7 @@ fn validate_rti<'a>(
             "coordination.rti.affected_downstream",
             member.affected_downstream.start(),
             downstream.iter().copied(),
-            image.federates,
+            rti.members,
         )?;
     }
     for (field, end, len) in [
@@ -751,7 +802,7 @@ fn validate_rti<'a>(
             "source",
             "federates",
             route.source,
-            image.federates,
+            rti.members,
         )?;
         check_ref(
             "coordination.rti.routes",
@@ -759,7 +810,7 @@ fn validate_rti<'a>(
             "target",
             "federates",
             route.target,
-            image.federates,
+            rti.members,
         )?;
         if let Some(value) = route.physical_input {
             check_ref(
@@ -782,6 +833,14 @@ fn validate_rti<'a>(
             )?;
         }
     }
+    Ok(())
+}
+
+/// Checks the projection against the canonical federation produced during compilation.
+fn validate_rti_federation<'a>(
+    image: &CompiledDeploymentImage<'a>,
+    rti: &RtiImage<'a>,
+) -> Result<(), ImageValidationError<'a>> {
     if rti.routes.len() != image.federation.edges.len() {
         return Err(ImageValidationError::OwnershipMismatch {
             table: "coordination.rti",
@@ -911,7 +970,9 @@ fn validate_compiled_deployment<'a>(
     match &image.coordination {
         CoordinationProjection::Local if image.federates.len() == 1 => {}
         CoordinationProjection::CentralRti(rti) => {
-            validate_rti(image, rti)?;
+            validate_rti_member_count(rti, image.federates.len())?;
+            validate_rti(rti)?;
+            validate_rti_federation(image, rti)?;
             if image.federates.len() <= 1 {
                 return Err(ImageValidationError::OwnershipMismatch {
                     table: "coordination",
@@ -2271,6 +2332,74 @@ mod tests {
                 table: "coordination.rti.routes",
                 index: 0,
                 field: "federation"
+            })
+        ));
+    }
+
+    #[test]
+    fn standalone_rti_view_validates_coordination_without_enclave_images() {
+        let members = [RtiMemberImage::new(
+            RecoveryPolicy::FailStop,
+            SliceRange::new(0, 1),
+            SliceRange::new(1, 0),
+            SliceRange::new(0, 0),
+        )];
+        let dependencies = [RtiDependencyImage::new(FederateIndex::new(0), 42)];
+        let image = rti_fixture(&members, &dependencies, &[], &[]);
+        let identities = IdentityTable::new(&["standalone"]);
+        let view = RtiImageView::new(&image, identities).unwrap();
+        assert_eq!(
+            view.member_identity(FederateIndex::new(0))
+                .unwrap()
+                .as_str(),
+            "standalone"
+        );
+        assert!(view.member_identity(FederateIndex::new(1)).is_none());
+        assert_eq!(
+            view.image().direct_incoming(FederateIndex::new(0))[0].delay_nanos(),
+            42
+        );
+        assert_eq!(view.members().len(), 1);
+        assert!(RtiImageView::new(&image, IdentityTable::new(&[])).is_err());
+        assert!(RtiImageView::new(&image, IdentityTable::new(&[""])).is_err());
+
+        let missing_dependencies = rti_fixture(&members, &[], &[], &[]);
+        assert!(RtiImageView::new(&missing_dependencies, identities).is_err());
+        let invalid_routes = [RtiRouteImage::new(
+            BoundaryId::new("route"),
+            FlowIndex::new(0),
+            None,
+            None,
+            BoundaryFailurePolicy::PropagateStop,
+            TransportPolicy::ReliableOrderedFramed,
+            CodecPolicy::CanonicalBounded,
+            TimingPolicy::BestEffort,
+            SecurityPolicy::None,
+            TransportCapabilityIndex::new(0),
+            CodecCapabilityIndex::new(0),
+            FederateIndex::new(0),
+            FederateIndex::new(1),
+            0,
+        )];
+        let invalid_route_image = rti_fixture(&members, &dependencies, &invalid_routes, &["flow"]);
+        assert!(matches!(
+            RtiImageView::new(&invalid_route_image, identities),
+            Err(ImageValidationError::ReferenceOutOfBounds {
+                table: "coordination.rti.routes",
+                field: "target",
+                referenced: 1,
+                ..
+            })
+        ));
+
+        let invalid_dependencies = [RtiDependencyImage::new(FederateIndex::new(1), 42)];
+        let invalid = rti_fixture(&members, &invalid_dependencies, &[], &[]);
+        assert!(matches!(
+            RtiImageView::new(&invalid, identities),
+            Err(ImageValidationError::ReferenceOutOfBounds {
+                table: "coordination.rti.dependencies",
+                referenced: 1,
+                ..
             })
         ));
     }

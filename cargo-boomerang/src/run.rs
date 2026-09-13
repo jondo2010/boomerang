@@ -1,9 +1,13 @@
 //! Host-side execution of one verified generated deployment artifact.
 
+mod processes;
+
+use std::path::PathBuf;
+
 use std::{
     fs::{self, File, OpenOptions},
     io::{self, Seek, SeekFrom, Write as _},
-    path::{Path, PathBuf},
+    path::Path,
     process::{Command, ExitStatus},
 };
 
@@ -13,7 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     build::build_analyzed,
-    bundle::{load_published_artifact, DeploymentDocument},
+    bundle::{load_published_artifacts, DeploymentDocument},
     check::analyze,
     output::{CommandOutput, Phase},
 };
@@ -92,35 +96,41 @@ pub fn run_with_output(
 ) -> Result<RunOutcome> {
     let analyzed = analyze(workspace.as_ref(), deployment_name, output)?;
     let federates = analyzed.compiled.federates();
-    if federates.len() != 1 {
-        bail!("distributed deployment execution is unsupported until issue #131");
+    for federate in federates.values() {
+        let federate_id = federate.id().as_str();
+        let configuration = analyzed
+            .resolved
+            .deployment()
+            .federates
+            .get(federate_id)
+            .ok_or_else(|| {
+                anyhow!("deployment has no configuration for Federate '{federate_id}'")
+            })?;
+        if federate.runtime().as_str() != "std" {
+            bail!(
+                "Federate '{federate_id}' selects unsupported runtime '{}'",
+                federate.runtime()
+            );
+        }
+        if configuration.target_json.is_some() {
+            bail!("Federate '{federate_id}' selects unsupported custom target JSON");
+        }
+        if federate.target().to_string() != target_lexicon::HOST.to_string() {
+            bail!(
+                "Federate '{federate_id}' target '{}' is not the host target '{}'",
+                federate.target(),
+                target_lexicon::HOST
+            );
+        }
     }
-    if analyzed.resolved.deployment().coordination.is_some() {
-        bail!("generated execution does not support coordination selection");
-    }
-    let federate = &federates[boomerang_runtime::image::FederateIndex::new(0)];
-    let federate_id = federate.id().as_str();
-    let configuration = analyzed
-        .resolved
-        .deployment()
-        .federates
-        .get(federate_id)
-        .ok_or_else(|| anyhow!("deployment has no configuration for Federate '{federate_id}'"))?;
-    if federate.runtime().as_str() != "std" {
-        bail!(
-            "Federate '{federate_id}' selects unsupported runtime '{}'",
-            federate.runtime()
-        );
-    }
-    if configuration.target_json.is_some() {
-        bail!("Federate '{federate_id}' selects unsupported custom target JSON");
-    }
-    if federate.target().to_string() != target_lexicon::HOST.to_string() {
-        bail!(
-            "Federate '{federate_id}' target '{}' is not the host target '{}'",
-            federate.target(),
-            target_lexicon::HOST
-        );
+    if let Some(rti) = &analyzed.resolved.deployment().rti {
+        if rti.target != target_lexicon::HOST.to_string() {
+            bail!(
+                "RTI target '{}' is not the host target '{}'",
+                rti.target,
+                target_lexicon::HOST
+            );
+        }
     }
 
     let manifest = build_analyzed(&analyzed, output)?;
@@ -128,33 +138,77 @@ pub fn run_with_output(
         Phase::Validating,
         format_args!("published deployment '{deployment_name}'"),
     )?;
-    let published = load_published_artifact(&manifest)?;
+    let published = load_published_artifacts(&manifest)?;
     validate_published_host_artifact(&published.document)?;
-    let (_directory, summary_path, launcher) = prepare_execution_directory()?;
-    let mut executable = published.executable;
-    copy_verified_executable(&mut executable, &launcher, &published.executable_hash)?;
-    output.status(
-        Phase::Running,
-        format_args!(
-            "{} (deployment '{deployment_name}', Federate '{federate_id}')",
-            launcher.display()
-        ),
-    )?;
-    let status = Command::new(&launcher)
-        .env(EXECUTION_SUMMARY_ENV, &summary_path)
-        .status()
-        .with_context(|| format!("failed to launch {}", launcher.display()))?;
-    if status.success() {
-        Ok(RunOutcome {
-            status,
-            summary: Some(read_execution_summary(&summary_path)?),
-        })
+    let (directory, local_summary, local_launcher) = prepare_execution_directory()?;
+    let mut local_paths = Some((local_summary, local_launcher));
+    let mut processes = processes::Processes::default();
+    let timeout = std::time::Duration::from_secs(10);
+    let address = if let Some(mut rti) = published.rti {
+        let path = directory
+            .path()
+            .join(format!("rti{}", std::env::consts::EXE_SUFFIX));
+        copy_verified_executable(&mut rti.executable, &path, &rti.executable_hash)?;
+        output.status(
+            Phase::Running,
+            format_args!("{} (central RTI)", path.display()),
+        )?;
+        Some(processes.start_rti(
+            Command::new(&path).env("BOOMERANG_RTI_BIND", "127.0.0.1:0"),
+            timeout,
+        )?)
     } else {
-        Ok(RunOutcome {
-            status,
-            summary: None,
-        })
+        None
+    };
+    let mut summaries = Vec::new();
+    for (index, mut artifact) in published.federates.into_iter().enumerate() {
+        let (summary, path) = if address.is_some() {
+            (
+                directory.path().join(format!("summary-{index}.json")),
+                directory
+                    .path()
+                    .join(format!("federate-{index}{}", std::env::consts::EXE_SUFFIX)),
+            )
+        } else {
+            local_paths
+                .take()
+                .expect("validated local deployment has exactly one Federate")
+        };
+        copy_verified_executable(&mut artifact.executable, &path, &artifact.executable_hash)?;
+        output.status(
+            Phase::Running,
+            format_args!(
+                "{} (deployment '{deployment_name}', Federate '{}')",
+                path.display(),
+                artifact.federate
+            ),
+        )?;
+        let mut command = Command::new(&path);
+        command.env(EXECUTION_SUMMARY_ENV, &summary);
+        if let Some(address) = address {
+            command.env("BOOMERANG_RTI_ADDRESS", address.to_string());
+        } else {
+            command.env_remove("BOOMERANG_RTI_ADDRESS");
+        }
+        processes.spawn(&mut command)?;
+        summaries.push(summary);
     }
+    let status = processes.wait(timeout)?;
+    let summary = if status.success() {
+        let mut aggregate = ExecutionSummary {
+            stats: Default::default(),
+            final_tag: boomerang_runtime::Tag::NEVER,
+        };
+        for path in summaries {
+            let summary = read_execution_summary(&path)?;
+            aggregate.stats.saturating_add_assign(summary.stats());
+            aggregate.final_tag = aggregate.final_tag.max(summary.final_tag());
+        }
+        Some(aggregate)
+    } else {
+        None
+    };
+    Ok(RunOutcome { status, summary })
 }
 
 /// Creates one private canonical directory for the summary and executable copy.
@@ -212,30 +266,33 @@ fn copy_verified_executable(
 
 /// Confirms that a validated bundle remains runnable by the local host process.
 fn validate_published_host_artifact(document: &DeploymentDocument) -> Result<()> {
-    if document.federates.len() != 1 {
-        bail!("published artifact requires exactly one local Federate");
-    }
-    if document.coordination.backend != "local" || document.coordination.protocol.is_some() {
+    if document.coordination.backend != "local" && document.coordination.backend != "central-rti" {
         bail!("published artifact selects unsupported coordination");
     }
-    let federate = &document.federates[0];
-    if federate.runtime != "std" {
-        bail!(
-            "published artifact Federate '{}' selects unsupported runtime",
-            federate.id
-        );
+    if let Some(rti) = &document.rti {
+        if rti.target != target_lexicon::HOST.to_string() {
+            bail!("published RTI is not built for the host target");
+        }
     }
-    if federate.target_json_hash.is_some() {
-        bail!(
-            "published artifact Federate '{}' selects custom target JSON",
-            federate.id
-        );
-    }
-    if federate.target != target_lexicon::HOST.to_string() {
-        bail!(
-            "published artifact Federate '{}' is not built for the host target",
-            federate.id
-        );
+    for federate in &document.federates {
+        if federate.runtime != "std" {
+            bail!(
+                "published artifact Federate '{}' selects unsupported runtime",
+                federate.id
+            );
+        }
+        if federate.target_json_hash.is_some() {
+            bail!(
+                "published artifact Federate '{}' selects custom target JSON",
+                federate.id
+            );
+        }
+        if federate.target != target_lexicon::HOST.to_string() {
+            bail!(
+                "published artifact Federate '{}' is not built for the host target",
+                federate.id
+            );
+        }
     }
     Ok(())
 }

@@ -125,7 +125,7 @@ fn generated_sensor_federate_slice_excludes_host_payload_and_preserves_canonical
     launcher.build_locked_offline().unwrap();
     let error = launcher.run_locked_offline().unwrap_err().to_string();
     assert!(
-        error.contains("distributed generated launcher execution requires backend injection"),
+        error.contains("BOOMERANG_RTI_ADDRESS is required"),
         "{error}"
     );
 }
@@ -207,4 +207,66 @@ fn generated_launcher_renders_normalized_deployment_execution_policy() {
         source.contains("boomerang_util::launcher::write_execution_summary(&execution)?"),
         "{source}"
     );
+}
+
+/// Rejects unsupported coordination selections before creating any launcher workspace.
+#[test]
+fn generated_launcher_rejects_unsupported_coordination_before_publication() {
+    let _guard = support::toolchain_lock();
+    let workspace = support::copied_fixture_workspace();
+    let target = tempfile::tempdir().unwrap();
+    let manifest = workspace.path().join("Boomerang.toml");
+    let original = std::fs::read_to_string(&manifest)
+        .unwrap()
+        .parse::<toml::Table>()
+        .unwrap();
+    for (selection, expected) in [
+        (
+            "backend",
+            "distributed coordination projection is not implemented",
+        ),
+        (
+            "transport",
+            "unsupported generated central-rti boundary configuration",
+        ),
+        (
+            "codec",
+            "unsupported generated central-rti boundary configuration",
+        ),
+    ] {
+        let mut changed = original.clone();
+        let deployment = changed["deployments"]["sensor-slice"]
+            .as_table_mut()
+            .unwrap();
+        if selection == "backend" {
+            deployment["coordination"]["backend"] = "peer-to-peer".into();
+            deployment.remove("rti");
+        } else {
+            deployment["boundaries"]["boundary/controller%2Fcommand/sensor%2Fcommand/c0"]
+                [selection] = if selection == "transport" {
+                "udp"
+            } else {
+                "postcard"
+            }
+            .into();
+        }
+        std::fs::write(&manifest, toml::to_string(&changed).unwrap()).unwrap();
+        let result = support::with_target_directory(target.path(), || {
+            cargo_boomerang::generate_launcher(workspace.path(), "sensor-slice", "host")
+        });
+        let error = result
+            .err()
+            .expect("unsupported coordination must be rejected");
+        assert!(
+            format!("{error:#}").contains(expected),
+            "{selection}: {error:#}"
+        );
+        assert!(
+            !target
+                .path()
+                .join("boomerang/generated/v1/launcher")
+                .exists(),
+            "{selection} wrote a generated launcher before validating coordination"
+        );
+    }
 }

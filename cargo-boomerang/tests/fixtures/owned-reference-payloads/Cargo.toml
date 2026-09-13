@@ -8,6 +8,7 @@ publish = false
 default = ["__boomerang_payload", "simulated"]
 __boomerang_payload = []
 simulated = []
+natural-quiescence = []
 
 [dependencies]
 boomerang_macros = { path = "../../../../boomerang_macros" }

@@ -17,6 +17,8 @@ boomerang_runtime = { workspace = true, features = ["federated"] }
 tinymap.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 futures-channel = { version = "0.3", features = ["sink"] }
 futures-util = { version = "0.3", features = ["sink"] }
 tokio = { version = "1.52", features = ["io-util", "macros", "net", "rt-multi-thread", "sync"] }

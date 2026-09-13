@@ -19,6 +19,7 @@
 //! placement in static read-only data; this module must not concatenate identities into a custom
 //! byte blob or generate byte-offset identity ranges.
 
+mod rti;
 mod rust;
 
 use std::{
@@ -405,6 +406,7 @@ pub(crate) fn generate_analyzed_launcher(
     federate_id: &str,
     output: &crate::CommandOutput,
 ) -> Result<GeneratedLauncher> {
+    let coordination = generated_coordination(analyzed)?;
     let federates = analyzed.compiled.federates();
     let (federate_index, federate) = federates
         .iter()
@@ -434,7 +436,7 @@ pub(crate) fn generate_analyzed_launcher(
     configured_files.apply_canonical_paths(&mut configuration);
 
     let slice = analyzed.compiled.federate_slice(federate_index)?;
-    let distributed = federates.len() > 1;
+    let distributed = coordination.is_some();
     let aliases = payload_aliases(&analyzed.resolved, &analyzed.driver, slice.enclaves())?;
     let manifest = render_manifest(&analyzed.resolved, &aliases, distributed, capabilities)?;
     let execution = analyzed
@@ -448,10 +450,34 @@ pub(crate) fn generate_analyzed_launcher(
         &slice,
         &aliases,
         &execution,
-        distributed,
+        coordination,
         capabilities,
     )?;
     let compile_inputs = payload_compile_inputs(&analyzed.resolved, &analyzed.driver, &aliases)?;
+    prepare_launcher(
+        analyzed,
+        configuration,
+        configured_files,
+        aliases,
+        manifest,
+        source,
+        compile_inputs,
+        output,
+    )
+}
+
+/// Reuses locked Cargo workspace validation for either kind of compiled executable.
+#[allow(clippy::too_many_arguments, reason = "one generated workspace request")]
+fn prepare_launcher(
+    analyzed: &AnalyzedDeployment,
+    configuration: ResolvedFederate,
+    configured_files: ConfiguredFiles,
+    aliases: BTreeMap<String, String>,
+    manifest: String,
+    source: String,
+    compile_inputs: Vec<(String, String)>,
+    output: &crate::CommandOutput,
+) -> Result<GeneratedLauncher> {
     let application_workspace = analyzed
         .resolved
         .lockfile()
@@ -894,6 +920,144 @@ fn require_success(phase: &'static str, output: &Output) -> Result<()> {
     }
     diagnostics.push_str(&String::from_utf8_lossy(&output.stderr));
     bail!("generated launcher {phase} failed:\n{}", diagnostics)
+}
+
+/// Protocol contract for the initial hosted projection, separate from the Phase 6 wire protocol.
+pub(crate) const HOSTED_PROTOCOL: &str = "boomerang.compiled-hosted.v1";
+
+/// Validates the selected hosted projection before writing any generated source.
+fn validate_coordination(analyzed: &AnalyzedDeployment) -> Result<bool> {
+    use boomerang_runtime::image::*;
+    for federate in analyzed.compiled.federates().values() {
+        launcher_capabilities(federate.runtime().as_str())?;
+    }
+    analyzed.compiled.with_coordination(|projection| {
+        let image = match projection {
+            CoordinationProjection::Local => return Ok(false),
+            CoordinationProjection::CentralRti(image) => image,
+        };
+        for (key, _) in image.routes().iter() {
+            if image.route_transport_capability(key) != "tcp"
+                || image.route_codec_capability(key) != "serde-json"
+                || image.route_transport_policy(key) != TransportPolicy::ReliableOrderedFramed
+                || image.route_codec_policy(key) != CodecPolicy::CanonicalBounded
+                || image.route_failure_policy(key) != BoundaryFailurePolicy::PropagateStop
+                || image.route_timing_policy(key) != TimingPolicy::BestEffort
+                || image.route_security_policy(key) != SecurityPolicy::None
+            {
+                bail!(
+                    "unsupported generated central-rti boundary configuration for '{}'",
+                    image.route_boundary(key).as_str()
+                );
+            }
+        }
+        for (key, _) in analyzed.compiled.federates().iter() {
+            if image.member_recovery_policy(key) != RecoveryPolicy::FailStop {
+                bail!("unsupported generated central-rti recovery policy");
+            }
+        }
+        Ok(true)
+    })
+}
+
+/// Hashes canonical coordination tables and compatibility descriptors with a protocol domain.
+pub(crate) fn coordination_identity(analyzed: &AnalyzedDeployment) -> Result<Option<blake3::Hash>> {
+    if !validate_coordination(analyzed)? {
+        return Ok(None);
+    }
+    let mut identity = blake3::Hasher::new_derive_key("boomerang.compiled-coordination.v1");
+    identity.update(HOSTED_PROTOCOL.as_bytes());
+    identity.update(&crate::check::COMPILER_SCHEMA.to_le_bytes());
+    identity.update(rust::format_rust(rti::render_coordination(&analyzed.compiled)?)?.as_bytes());
+    for binding in analyzed.driver.bindings() {
+        identity.update(
+            &binding
+                .descriptor()
+                .descriptor_fingerprint_input()
+                .fingerprint()
+                .to_bytes(),
+        );
+    }
+    Ok(Some(identity.finalize()))
+}
+
+/// Emits the same immutable projection and identity into every participating executable.
+fn generated_coordination(
+    analyzed: &AnalyzedDeployment,
+) -> Result<Option<proc_macro2::TokenStream>> {
+    let Some(identity) = coordination_identity(analyzed)? else {
+        return Ok(None);
+    };
+    let image = rti::render_coordination(&analyzed.compiled)?;
+    let bytes = identity.as_bytes().iter();
+    Ok(Some(quote::quote! {
+        #image
+        const COORDINATION_IDENTITY: boomerang_central_rti::compiled::CoordinationIdentity =
+            boomerang_central_rti::compiled::CoordinationIdentity::new([#(#bytes),*]);
+    }))
+}
+
+/// Generates the payload-free coordinator only when canonical lowering selects central RTI.
+pub(crate) fn generate_analyzed_rti(
+    analyzed: &AnalyzedDeployment,
+    output: &crate::CommandOutput,
+) -> Result<Option<GeneratedLauncher>> {
+    let Some(coordination) = generated_coordination(analyzed)? else {
+        return Ok(None);
+    };
+    let selected = analyzed.resolved.deployment().rti.as_ref();
+    let configuration = ResolvedFederate {
+        groups: Vec::new(),
+        target: selected.map(|rti| rti.target.clone()),
+        toolchain: None,
+        profile: selected.and_then(|rti| rti.profile.clone()),
+        runtime: String::from("std"),
+        recovery: boomerang_runtime::image::RecoveryPolicy::FailStop,
+        target_json: None,
+        cargo_config: None,
+    };
+    let aliases = BTreeMap::new();
+    let manifest = render_manifest(
+        &analyzed.resolved,
+        &aliases,
+        true,
+        LauncherCapabilities { hosted: true },
+    )?;
+    let source = rust::format_rust(quote::quote! {
+        use boomerang_runtime::image::*;
+        use tinymap::{TinyMapView, SliceRange};
+        #coordination
+        fn main() -> Result<(), Box<dyn std::error::Error>> {
+            use std::io::Write;
+            boomerang_util::launcher::init_tracing();
+            let view = RtiImageView::new(&COORDINATION_IMAGE, COORDINATION_MEMBERS)?;
+            let rti = boomerang_central_rti::compiled::CompiledRti::from_image(&view, COORDINATION_IDENTITY)?;
+            let bind = std::env::var("BOOMERANG_RTI_BIND").unwrap_or_else(|_| "127.0.0.1:0".into());
+            let listener = std::net::TcpListener::bind(bind)?;
+            if let Ok(ready) = std::env::var("BOOMERANG_RTI_READY_ADDRESS") {
+                let ready: std::net::SocketAddr = ready.parse()?;
+                let mut ready = std::net::TcpStream::connect_timeout(&ready, std::time::Duration::from_secs(10))?;
+                ready.set_write_timeout(Some(std::time::Duration::from_secs(10)))?;
+                writeln!(ready, "BOOMERANG_RTI_READY_V1 {}", listener.local_addr()?)?;
+            } else {
+                println!("BOOMERANG_RTI_READY_V1 {}", listener.local_addr()?);
+            }
+            boomerang_central_rti::compiled::hosted::serve(listener, rti, std::time::Duration::from_secs(10))?;
+            Ok(())
+        }
+    })?;
+    let configured_files = ConfiguredFiles::new(&configuration)?;
+    prepare_launcher(
+        analyzed,
+        configuration,
+        configured_files,
+        aliases,
+        manifest,
+        source,
+        Vec::new(),
+        output,
+    )
+    .map(Some)
 }
 
 #[cfg(test)]

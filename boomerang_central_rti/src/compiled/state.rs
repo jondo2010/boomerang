@@ -1,7 +1,8 @@
 use super::*;
 use boomerang_runtime::image::{
     BoundaryFailurePolicy, CompiledDeploymentView, CoordinationProjection, FederateImage,
-    RecoveryPolicy, RtiImage, SecurityPolicy, TimingPolicy, TinyMapView,
+    IdentityTable, RecoveryPolicy, RtiImage, RtiImageView, SecurityPolicy, TimingPolicy,
+    TinyMapView,
 };
 use std::collections::BTreeSet;
 use tinymap::TinySecondaryMap;
@@ -42,17 +43,26 @@ impl MemberState {
     }
 }
 
+/// Borrowed stable identities supplied by either validated preflight representation.
+enum MemberIdentities<'a> {
+    /// Existing full-deployment preflight representation.
+    Deployment(&'a TinyMapView<'a, FederateIndex, FederateImage<'a>>),
+    /// Standalone RTI artifact's stable names in the same compiled key domain.
+    Projection(IdentityTable<'a, FederateIndex>),
+}
+
 /// Central coordination state borrowing the canonical immutable RTI projection.
 ///
-/// Construction accepts a validated complete deployment for this slice. Only the member
-/// descriptors and RtiImage are retained; no Enclave scheduler image is stored or analyzed.
-/// An I/O owner resolves each authenticated stable member identity once, dispatches ordered
-/// requests, and sends returned deliveries in order. Transport failure must call `abort`.
+/// Construction accepts either a validated complete deployment or a standalone RTI image.
+/// Only stable member identities and the RTI projection are retained; no Enclave scheduler
+/// image is stored or analyzed. The I/O owner binds each stable member identity once,
+/// dispatches ordered requests, and sends returned deliveries in order. Transport failure
+/// must call `abort`.
 pub struct CompiledRti<'a> {
     /// Mechanical precomputed dependency and route projection.
     image: &'a RtiImage<'a>,
     /// Stable member descriptors in the same typed domain as the RTI image.
-    members: &'a TinyMapView<'a, FederateIndex, FederateImage<'a>>,
+    members: MemberIdentities<'a>,
     /// Mutable data for every existing member key; the image owns the key domain.
     states: TinySecondaryMap<FederateIndex, MemberState>,
     /// Shared immutable coordination identity.
@@ -71,9 +81,33 @@ impl<'a> CompiledRti<'a> {
                 "compiled deployment does not select central-rti",
             ));
         };
-        let members = view.federates();
-        let mut states = TinySecondaryMap::with_capacity(members.len());
-        for (key, _) in members.iter() {
+        Self::build_with_identity(
+            image,
+            MemberIdentities::Deployment(view.federates()),
+            identity,
+        )
+    }
+
+    /// Creates coordination state from a validated RTI-only projection without Enclave images.
+    pub fn from_image(
+        view: &RtiImageView<'a>,
+        identity: CoordinationIdentity,
+    ) -> Result<Self, CentralRtiError> {
+        Self::build_with_identity(
+            view.image(),
+            MemberIdentities::Projection(view.members()),
+            identity,
+        )
+    }
+
+    /// Materializes only mutable state while retaining the original immutable identity representation.
+    fn build_with_identity(
+        image: &'a RtiImage<'a>,
+        members: MemberIdentities<'a>,
+        identity: CoordinationIdentity,
+    ) -> Result<Self, CentralRtiError> {
+        let mut states = TinySecondaryMap::with_capacity(image.members().len());
+        for (key, _) in image.members().iter() {
             if image.member_recovery_policy(key) != RecoveryPolicy::FailStop {
                 return Err(CentralRtiError::new("unsupported member recovery policy"));
             }
@@ -98,15 +132,23 @@ impl<'a> CompiledRti<'a> {
 
     /// Resolves a stable connection identity once, before dispatching runtime requests.
     pub fn resolve_member(&self, identity: &str) -> Result<FederateIndex, CentralRtiError> {
-        self.members
-            .iter()
-            .find_map(|(key, member)| (member.id().as_str() == identity).then_some(key))
+        self.states
+            .keys()
+            .find(|key| self.member_identity(*key) == identity)
             .ok_or_else(|| CentralRtiError::new("unknown compiled Federate identity"))
     }
     /// Returns the stable identity used by transport admission and diagnostics.
     pub fn member_identity(&self, member: FederateIndex) -> &str {
-        self.members[member].id().as_str()
+        match &self.members {
+            MemberIdentities::Deployment(members) => members[member].id().as_str(),
+            MemberIdentities::Projection(members) => members[member],
+        }
     }
+    /// Returns the exact compiled membership count for bounded transport admission.
+    pub fn member_count(&self) -> usize {
+        self.states.len()
+    }
+
     /// Reports terminal global stop or failure to the owning I/O loop.
     pub fn is_finished(&self) -> bool {
         self.failure.is_some() || self.states.values().all(|state| state.stopped)
@@ -312,7 +354,7 @@ impl<'a> CompiledRti<'a> {
                 next.is_none() && state.idle_request == Some(revision)
             }) && state.in_transit.is_empty()
         }) {
-            for member in self.members.keys() {
+            for member in self.image.members().keys() {
                 let state = &mut self.states[member];
                 let revision = state.publication.expect("all members published").0;
                 if !state.stopped && state.idle != Some(revision) {

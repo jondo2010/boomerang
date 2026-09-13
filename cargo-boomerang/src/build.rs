@@ -9,12 +9,14 @@ use anyhow::{anyhow, bail, Context, Result};
 
 use crate::{
     bundle::{
-        deployment_fingerprint, publish_bundle, BindingDocument, BundleSource,
+        deployment_fingerprint, publish_bundle_with_rti, BindingDocument, BundleSource,
         CoordinationDocument, DeploymentDocument, DescriptorDocument, ExecutionPolicyDocument,
-        FederateDocument, PackageDocument, DEPLOYMENT_SCHEMA,
+        FederateDocument, PackageDocument, RtiBundleSource, RtiDocument, DEPLOYMENT_SCHEMA,
     },
     check::{analyze, resource_report, AnalyzedDeployment, COMPILER_SCHEMA},
-    codegen::generate_analyzed_launcher,
+    codegen::{
+        coordination_identity, generate_analyzed_launcher, generate_analyzed_rti, HOSTED_PROTOCOL,
+    },
     output::{CommandOutput, Phase},
 };
 
@@ -38,6 +40,7 @@ pub(crate) fn build_analyzed(
     analyzed: &AnalyzedDeployment,
     output: &CommandOutput,
 ) -> Result<PathBuf> {
+    let identity = coordination_identity(analyzed)?;
     let deployment_name = analyzed.resolved.deployment_name();
     let compiled_federates = analyzed.compiled.federates();
     let mut launcher_builds = Vec::with_capacity(compiled_federates.len());
@@ -102,6 +105,16 @@ pub(crate) fn build_analyzed(
         launcher_builds.push((generated, built));
     }
 
+    let rti_build = generate_analyzed_rti(analyzed, output)?
+        .map(|generated| {
+            output.status(
+                Phase::Building,
+                format_args!("central RTI for '{deployment_name}'"),
+            )?;
+            let built = generated.build_locked_offline()?;
+            Ok::<_, anyhow::Error>((generated, built))
+        })
+        .transpose()?;
     output.status(
         Phase::Bundling,
         format_args!("deployment '{deployment_name}'"),
@@ -116,13 +129,23 @@ pub(crate) fn build_analyzed(
         federates
             .iter()
             .zip(&launcher_builds)
-            .map(|(federate, (generated, _))| (federate.id.as_str(), generated.lockfile_path())),
+            .map(|(federate, (generated, _))| (federate.id.as_str(), generated.lockfile_path()))
+            .chain(
+                rti_build
+                    .iter()
+                    .map(|(generated, _)| ("central-rti", generated.lockfile_path())),
+            ),
     )?;
     let generated_source_hash = hash_file_collection(
         federates
             .iter()
             .zip(&launcher_builds)
-            .map(|(federate, (generated, _))| (federate.id.as_str(), generated.source_path())),
+            .map(|(federate, (generated, _))| (federate.id.as_str(), generated.source_path()))
+            .chain(
+                rti_build
+                    .iter()
+                    .map(|(generated, _)| ("central-rti", generated.source_path())),
+            ),
     )?;
     let execution = analyzed
         .resolved
@@ -146,7 +169,8 @@ pub(crate) fn build_analyzed(
                 boomerang_builder::compiler::CoordinationBackend::PeerToPeer => "peer-to-peer",
             })
             .to_owned(),
-        protocol: None,
+        protocol: identity.as_ref().map(|_| HOSTED_PROTOCOL.to_owned()),
+        identity: identity.map(|hash| hash.to_hex().to_string()),
     };
     let mut document = DeploymentDocument {
         schema: DEPLOYMENT_SCHEMA,
@@ -162,6 +186,18 @@ pub(crate) fn build_analyzed(
         execution,
         resources,
         coordination,
+        rti: rti_build.as_ref().map(|_| {
+            let selected = analyzed.resolved.deployment().rti.as_ref();
+            RtiDocument {
+                target: selected.map_or_else(
+                    || target_lexicon::HOST.to_string(),
+                    |rti| rti.target.clone(),
+                ),
+                profile: selected.and_then(|rti| rti.profile.clone()),
+                generated: Vec::new(),
+                artifact: None,
+            }
+        }),
         generated: Vec::new(),
         artifacts: Vec::new(),
     };
@@ -181,7 +217,26 @@ pub(crate) fn build_analyzed(
             executable: built.executable_path(),
         })
         .collect::<Vec<_>>();
-    let published = publish_bundle(analyzed.resolved.target_directory(), document, &sources)?;
+    let rti_source = rti_build
+        .as_ref()
+        .map(|(generated, built)| RtiBundleSource {
+            manifest: generated.manifest_path(),
+            lockfile: generated.lockfile_path(),
+            source: generated.source_path(),
+            executable: built.executable_path(),
+        });
+    let published = publish_bundle_with_rti(
+        analyzed.resolved.target_directory(),
+        document,
+        &sources,
+        rti_source.as_ref(),
+    )?;
+    if let Some(path) = published.rti_executable() {
+        output.status(
+            Phase::Published,
+            format_args!("central RTI executable {}", path.display()),
+        )?;
+    }
     for executable in published.executables() {
         output.status(
             Phase::Published,

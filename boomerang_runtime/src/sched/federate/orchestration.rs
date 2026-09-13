@@ -238,19 +238,22 @@ pub(crate) struct FederateCoordinator<B: FederateCoordinationBackend> {
     commit_window_hook: Option<Box<dyn FnOnce() + Send>>,
 }
 
-impl<B: FederateCoordinationBackend> FederateCoordinator<B> {
-    /// Runs until pure coordination stops or returns its first backend, state, or channel failure.
-    #[cfg(test)]
-    pub(crate) fn run(mut self) -> Result<(), FederateCoordinationError> {
-        self.run_loop()
-    }
+/// Coordinator termination report, retaining participant failure independently of cleanup errors.
+#[derive(Debug)]
+pub(crate) struct CoordinatorExit {
+    /// First backend, state, or channel error; successful handling of participant failure is `Ok`.
+    pub(crate) coordination_result: Result<(), FederateCoordinationError>,
+    /// Authoritative first failing participant, including when backend shutdown also fails.
+    pub(crate) first_failed_participant: Option<EnclaveIndex>,
+}
 
-    /// Returns the authoritative first failing participant after bounded peer release.
-    pub(crate) fn run_with_failure_origin(
-        mut self,
-    ) -> (Result<(), FederateCoordinationError>, Option<EnclaveIndex>) {
-        let result = self.run_loop();
-        (result, self.state.first_failure())
+impl<B: FederateCoordinationBackend> FederateCoordinator<B> {
+    /// Runs coordination to termination and returns its result and retained participant origin.
+    pub(crate) fn run(mut self) -> CoordinatorExit {
+        CoordinatorExit {
+            coordination_result: self.run_loop(),
+            first_failed_participant: self.state.first_failure(),
+        }
     }
 
     /// Serializes reports and backend input until terminal coordination.
@@ -1237,7 +1240,7 @@ mod tests {
                 FederateIdleWait::Aborted
             ));
             assert_eq!(
-                handle.join().unwrap().unwrap_err(),
+                handle.join().unwrap().coordination_result.unwrap_err(),
                 FederateCoordinationError::BackendStop {
                     message: "idle rejected".into()
                 }
@@ -1752,7 +1755,7 @@ mod tests {
                     FederateIdleWait::Aborted
                 ));
                 assert_eq!(
-                    coordinator.join().unwrap().unwrap_err(),
+                    coordinator.join().unwrap().coordination_result.unwrap_err(),
                     FederateCoordinationError::BackendPublish {
                         message: "publication rejected".to_owned(),
                     }
@@ -1786,7 +1789,7 @@ mod tests {
                 FederateIdleWait::Aborted
             ));
             assert_eq!(
-                coordinator.join().unwrap().unwrap_err(),
+                coordinator.join().unwrap().coordination_result.unwrap_err(),
                 FederateCoordinationError::BackendStop {
                     message: "terminal cleanup rejected".to_owned(),
                 }
@@ -1813,7 +1816,7 @@ mod tests {
         let horizon = Tag::new(Duration::seconds(1), 0);
 
         participant.logical_horizon_reached(horizon);
-        let coordinator_error = coordinator.run().unwrap_err();
+        let coordinator_error = coordinator.run().coordination_result.unwrap_err();
         assert_eq!(
             coordinator_error,
             FederateCoordinationError::BackendStop {
@@ -1870,7 +1873,7 @@ mod tests {
         participant.participant_stopped();
         assert!(participant.termination.is_none());
 
-        coordinator.run().unwrap();
+        coordinator.run().coordination_result.unwrap();
         participant.finish_success().unwrap();
 
         assert_eq!(call_rx.into_iter().collect::<Vec<_>>(), [BackendCall::Stop]);
@@ -1918,7 +1921,9 @@ mod tests {
             let coordinator = scope.spawn(move || coordinator.run());
             drop(participant);
             abort_handle.abort();
-            coordinator.join().unwrap().unwrap();
+            let exit = coordinator.join().unwrap();
+            exit.coordination_result.unwrap();
+            assert_eq!(exit.first_failed_participant, None);
         });
 
         assert_eq!(call_rx.into_iter().collect::<Vec<_>>(), [BackendCall::Stop]);
@@ -1989,7 +1994,8 @@ mod tests {
             }
             eventful_handle.join().unwrap();
             peer_handle.join().unwrap();
-            coordinator_handle.join().unwrap().unwrap();
+            let exit = coordinator_handle.join().unwrap();
+            exit.coordination_result.unwrap();
 
             assert_eq!(
                 observations.len(),
@@ -2080,7 +2086,7 @@ mod tests {
                 peer_thread.join().unwrap().unwrap(),
                 FederateIdleWait::Aborted
             ));
-            coordinator.join().unwrap().unwrap();
+            coordinator.join().unwrap().coordination_result.unwrap();
             assert!(
                 progressed.is_ok(),
                 "kept-alive idle coordination must continue backend progress"

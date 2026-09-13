@@ -1021,7 +1021,7 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
         } else {
             std::thread::Builder::new()
                 .name("federate-coordination".to_owned())
-                .spawn_scoped(scope, move || coordinator.run_with_failure_origin())
+                .spawn_scoped(scope, move || coordinator.run())
         };
         let coordinator_thread = match coordinator_thread {
             Ok(handle) => handle,
@@ -1158,10 +1158,11 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
             let origin = coordinator_result
                 .as_ref()
                 .ok()
-                .and_then(|(_, origin)| *origin);
+                .and_then(|exit| exit.first_failed_participant);
             failure = select_scheduler_failure(worker_errors, origin, first_worker);
         }
-        latch_coordinator_result(&mut failure, coordinator_result.map(|(result, _)| result));
+        let coordinator_result = coordinator_result.map(|exit| exit.coordination_result);
+        latch_coordinator_result(&mut failure, coordinator_result);
         (results, failure)
     });
 
@@ -1757,6 +1758,7 @@ mod scoped_spawn_tests {
             barrier_thread.join().unwrap();
             scheduler_thread.join().unwrap().unwrap();
             let mut failure = None;
+            let coordinator_result = coordinator_result.map(|exit| exit.coordination_result);
             latch_coordinator_result(&mut failure, coordinator_result);
             assert!(matches!(
                 failure,

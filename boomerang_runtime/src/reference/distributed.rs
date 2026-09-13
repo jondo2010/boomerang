@@ -9,7 +9,7 @@ use std::sync::Arc;
 /// Installs a type-checked external adapter after all initializer-free validation.
 type InstallRoute<'binding> = dyn for<'image> FnOnce(
         &mut OwnedStorage<'image>,
-        RouteImage<'image>,
+        &'image RouteImage<'image>,
     ) -> Option<InboundBoundaryAdapter>
     + Send
     + 'binding;
@@ -87,7 +87,7 @@ impl<'binding> FederateBindings<'binding> {
 /// Encodes an owned port value and submits the already delay-adjusted logical tag.
 struct EncodedOutbound<'image, T: ReactorData, C> {
     /// Compiled outbound half defining source port, identity, and delay.
-    route: RouteImage<'image>,
+    route: &'image RouteImage<'image>,
     /// Typed encoder selected by direct generated bindings.
     encoder: C,
     /// Concrete port value type accepted by the encoder.
@@ -157,8 +157,8 @@ impl<T: ReactorData, C: PayloadEncoder<T>> crate::storage::owned::OutboundRoute
 /// by local execution. Idle termination additionally requires backend confirmation.
 pub fn execute_owned_federate_with_backend<'image, B: FederateCoordinationBackend>(
     federate: FederateIndex,
-    image: FederateImage<'image>,
-    images: &[EnclaveImage<'image>],
+    image: &FederateImage<'image>,
+    images: &'image [EnclaveImage<'image>],
     mut bindings: FederateBindings<'_>,
     config: Config,
     connect: impl FnOnce(
@@ -201,9 +201,10 @@ pub fn execute_owned_federate_with_backend<'image, B: FederateCoordinationBacken
 
 /// Validates owned layout coordinates before materializing the sparse canonical lookup.
 fn prepare_images<'image>(
-    image: FederateImage<'image>,
-    images: &[EnclaveImage<'image>],
-) -> Result<TinySecondaryMap<EnclaveIndex, EnclaveImage<'image>>, ExecuteOwnedFederateError> {
+    image: &FederateImage<'image>,
+    images: &'image [EnclaveImage<'image>],
+) -> Result<TinySecondaryMap<EnclaveIndex, &'image EnclaveImage<'image>>, ExecuteOwnedFederateError>
+{
     let fail = |message: &str| ExecuteOwnedFederateError::ImageValidation {
         message: message.into(),
     };
@@ -235,32 +236,32 @@ fn prepare_images<'image>(
     }
     Ok((span.start()..end)
         .zip(images)
-        .map(|(key, image)| (EnclaveIndex::from(key), *image))
+        .map(|(key, image)| (EnclaveIndex::from(key), image))
         .collect())
 }
 
 /// Local route pairs plus external coordinates in caller binding order.
 type ResolvedRoutes<'image> = (
     Vec<ResolvedLocalRoute<'image>>,
-    Vec<(EnclaveIndex, RouteImage<'image>)>,
+    Vec<(EnclaveIndex, &'image RouteImage<'image>)>,
 );
 
 /// Matches compiled halves by stable boundary identity without inferring peer key domains.
 fn resolve_routes<'image>(
     federate: FederateIndex,
-    images: &TinySecondaryMap<EnclaveIndex, EnclaveImage<'image>>,
+    images: &TinySecondaryMap<EnclaveIndex, &'image EnclaveImage<'image>>,
     bindings: &FederateBindings<'_>,
 ) -> Result<ResolvedRoutes<'image>, ExecuteOwnedFederateError> {
     let mut halves = BTreeMap::<_, (Option<_>, Option<_>)>::new();
     let invalid = |message: String| ExecuteOwnedFederateError::ImageValidation { message };
-    for (enclave, image) in images.iter() {
+    for (enclave, &image) in images.iter() {
         for (index, route) in image.routes.iter() {
             let pair = halves.entry(route.boundary()).or_default();
             let half = match route.direction() {
                 RouteDirection::Outbound => &mut pair.0,
                 RouteDirection::Inbound => &mut pair.1,
             };
-            if half.replace((enclave, index, *route)).is_some() {
+            if half.replace((enclave, index, route)).is_some() {
                 return Err(invalid(format!(
                     "duplicate {:?} half for {}",
                     route.direction(),

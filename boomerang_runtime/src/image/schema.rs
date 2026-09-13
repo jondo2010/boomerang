@@ -56,7 +56,7 @@ borrowed_id!(
 );
 
 /// A Federate and the contiguous Enclave images it owns.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FederateImage<'a> {
     /// Stable Federate identity.
     id: FederateId<'a>,
@@ -85,28 +85,28 @@ impl<'a> FederateImage<'a> {
     }
 
     /// Returns the stable Federate identity.
-    pub const fn id(self) -> FederateId<'a> {
+    pub const fn id(&self) -> FederateId<'a> {
         self.id
     }
 
     /// Returns the compilation-target identity.
-    pub const fn target(self) -> TargetId<'a> {
+    pub const fn target(&self) -> TargetId<'a> {
         self.target
     }
 
     /// Returns the runtime-backend identity.
-    pub const fn runtime(self) -> RuntimeBackendId<'a> {
+    pub const fn runtime(&self) -> RuntimeBackendId<'a> {
         self.runtime
     }
 
     /// Returns the range of owned Enclave images.
-    pub const fn enclaves(self) -> IndexSpan<EnclaveIndex> {
+    pub const fn enclaves(&self) -> IndexSpan<EnclaveIndex> {
         self.enclaves
     }
 }
 
 /// A backend-neutral cross-Federate boundary edge.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FederationEdgeImage<'a> {
     boundary: BoundaryId<'a>,
     source: FederateIndex,
@@ -131,28 +131,28 @@ impl<'a> FederationEdgeImage<'a> {
     }
 
     /// Returns the stable boundary identity.
-    pub const fn boundary(self) -> BoundaryId<'a> {
+    pub const fn boundary(&self) -> BoundaryId<'a> {
         self.boundary
     }
 
     /// Returns the source Federate.
-    pub const fn source(self) -> FederateIndex {
+    pub const fn source(&self) -> FederateIndex {
         self.source
     }
 
     /// Returns the target Federate.
-    pub const fn target(self) -> FederateIndex {
+    pub const fn target(&self) -> FederateIndex {
         self.target
     }
 
     /// Returns the logical delay in nanoseconds.
-    pub const fn delay_nanos(self) -> u64 {
+    pub const fn delay_nanos(&self) -> u64 {
         self.delay_nanos
     }
 }
 
 /// Backend-neutral immutable federation membership and edges.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct GlobalFederationImage<'a> {
     /// Federates participating in canonical stable-identity order.
     pub members: &'a [FederateIndex],
@@ -168,11 +168,8 @@ impl<'a> GlobalFederationImage<'a> {
 }
 
 /// Selected immutable logical-time coordination projection.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(
-    clippy::large_enum_variant,
-    reason = "zero-allocation Copy image schema"
-)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant, reason = "zero-allocation image schema")]
 pub enum CoordinationProjection<'a> {
     /// No distributed coordinator is required.
     Local,
@@ -181,7 +178,7 @@ pub enum CoordinationProjection<'a> {
 }
 
 /// An unchecked aggregate of one complete compiled deployment.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct CompiledDeploymentImage<'a> {
     /// Backend-neutral global federation structure.
     pub federation: GlobalFederationImage<'a>,
@@ -194,7 +191,7 @@ pub struct CompiledDeploymentImage<'a> {
 }
 
 /// An immutable reactor scheduler record.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReactorImage {
     /// Required binding that initializes this reactor's state.
     state_binding: BindingSlotIndex,
@@ -231,32 +228,32 @@ impl ReactorImage {
     }
 
     /// Returns the required state-initializer binding slot.
-    pub const fn state_binding(self) -> BindingSlotIndex {
+    pub const fn state_binding(&self) -> BindingSlotIndex {
         self.state_binding
     }
 
     /// Returns the dense mutable-state slot.
-    pub const fn state_slot(self) -> StateSlotIndex {
+    pub const fn state_slot(&self) -> StateSlotIndex {
         self.state_slot
     }
 
     /// Returns the reactor's root scope.
-    pub const fn root_scope(self) -> ScopeIndex {
+    pub const fn root_scope(&self) -> ScopeIndex {
         self.root_scope
     }
 
     /// Returns the reactor's canonical mode range.
-    pub const fn modes(self) -> IndexSpan<ModeIndex> {
+    pub const fn modes(&self) -> IndexSpan<ModeIndex> {
         self.modes
     }
 
     /// Returns the initially active mode, if any.
-    pub const fn initial_mode(self) -> Option<ModeIndex> {
+    pub const fn initial_mode(&self) -> Option<ModeIndex> {
         self.initial_mode
     }
 
     /// Returns the reactor's bank position, if it belongs to a bank.
-    pub const fn bank(self) -> Option<BankInfoImage> {
+    pub const fn bank(&self) -> Option<BankInfoImage> {
         self.bank
     }
 }
@@ -295,7 +292,7 @@ pub enum TimingDomain {
 }
 
 /// Immutable scheduling semantics for an action.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ActionTiming {
     /// A user-scheduled action with a canonical minimum delay.
     Standard {
@@ -314,7 +311,7 @@ pub enum ActionTiming {
 }
 
 /// An immutable action scheduler record.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ActionImage {
     /// Stable payload binding for a standard action, or `None` for executor-owned actions.
     binding: Option<BindingSlotIndex>,
@@ -347,33 +344,33 @@ impl ActionImage {
     }
 
     /// Returns the standard action's stable payload binding.
-    pub const fn binding(self) -> Option<BindingSlotIndex> {
+    pub const fn binding(&self) -> Option<BindingSlotIndex> {
         self.binding
     }
 
     /// Returns the action's static scope.
-    pub const fn scope(self) -> ScopeIndex {
+    pub const fn scope(&self) -> ScopeIndex {
         self.scope
     }
 
     /// Returns the dense action-storage slot.
-    pub const fn storage_slot(self) -> ActionSlotIndex {
+    pub const fn storage_slot(&self) -> ActionSlotIndex {
         self.storage_slot
     }
 
     /// Returns the action's immutable scheduling semantics.
-    pub const fn timing(self) -> ActionTiming {
-        self.timing
+    pub const fn timing(&self) -> &ActionTiming {
+        &self.timing
     }
 
     /// Returns the action's flattened trigger range.
-    pub const fn triggers(self) -> SliceRange<LevelReactionImage> {
+    pub const fn triggers(&self) -> SliceRange<LevelReactionImage> {
         self.triggers
     }
 }
 
 /// An immutable port scheduler record.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PortImage {
     /// Stable payload binding used to construct this port.
     binding: BindingSlotIndex,
@@ -398,23 +395,23 @@ impl PortImage {
     }
 
     /// Returns the port's stable payload binding.
-    pub const fn binding(self) -> BindingSlotIndex {
+    pub const fn binding(&self) -> BindingSlotIndex {
         self.binding
     }
 
     /// Returns the port's static scope.
-    pub const fn scope(self) -> ScopeIndex {
+    pub const fn scope(&self) -> ScopeIndex {
         self.scope
     }
 
     /// Returns the port's flattened trigger range.
-    pub const fn triggers(self) -> SliceRange<LevelReactionImage> {
+    pub const fn triggers(&self) -> SliceRange<LevelReactionImage> {
         self.triggers
     }
 }
 
 /// An immutable reaction scheduler record.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReactionImage {
     /// Dense reactor that owns the reaction.
     reactor: ReactorIndex,
@@ -469,47 +466,47 @@ impl ReactionImage {
     }
 
     /// Returns the owning reactor.
-    pub const fn reactor(self) -> ReactorIndex {
+    pub const fn reactor(&self) -> ReactorIndex {
         self.reactor
     }
 
     /// Returns the static execution scope.
-    pub const fn scope(self) -> ScopeIndex {
+    pub const fn scope(&self) -> ScopeIndex {
         self.scope
     }
 
     /// Returns the precomputed dependency level.
-    pub const fn dependency_level(self) -> u32 {
+    pub const fn dependency_level(&self) -> u32 {
         self.dependency_level
     }
 
     /// Returns the required reaction binding slot.
-    pub const fn binding(self) -> BindingSlotIndex {
+    pub const fn binding(&self) -> BindingSlotIndex {
         self.binding
     }
 
     /// Returns the ordered use-port range.
-    pub const fn use_ports(self) -> SliceRange<PortIndex> {
+    pub const fn use_ports(&self) -> SliceRange<PortIndex> {
         self.use_ports
     }
 
     /// Returns the ordered effect-port range.
-    pub const fn effect_ports(self) -> SliceRange<PortIndex> {
+    pub const fn effect_ports(&self) -> SliceRange<PortIndex> {
         self.effect_ports
     }
 
     /// Returns the ordered action-reference range.
-    pub const fn actions(self) -> SliceRange<ActionIndex> {
+    pub const fn actions(&self) -> SliceRange<ActionIndex> {
         self.actions
     }
 
     /// Returns the enabled-mode range.
-    pub const fn enabled_modes(self) -> SliceRange<ModeIndex> {
+    pub const fn enabled_modes(&self) -> SliceRange<ModeIndex> {
         self.enabled_modes
     }
 
     /// Returns the canonical compiled mode transition effect, if declared.
-    pub const fn mode_effect(self) -> Option<crate::CompiledModeEffectRef> {
+    pub const fn mode_effect(&self) -> Option<crate::CompiledModeEffectRef> {
         self.mode_effect
     }
 }
@@ -539,7 +536,7 @@ impl ModeImage {
 }
 
 /// An immutable execution-scope scheduler record.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ScopeImage {
     /// Parent execution scope, or `None` for a reactor root.
     parent: Option<ScopeIndex>,
@@ -589,47 +586,47 @@ impl ScopeImage {
     }
 
     /// Returns the parent scope, if any.
-    pub const fn parent(self) -> Option<ScopeIndex> {
+    pub const fn parent(&self) -> Option<ScopeIndex> {
         self.parent
     }
 
     /// Returns the owning reactor.
-    pub const fn reactor(self) -> ReactorIndex {
+    pub const fn reactor(&self) -> ReactorIndex {
         self.reactor
     }
 
     /// Returns the owning mode for a mode scope.
-    pub const fn mode(self) -> Option<ModeIndex> {
+    pub const fn mode(&self) -> Option<ModeIndex> {
         self.mode
     }
 
     /// Returns the precomputed descendant range.
-    pub const fn descendants(self) -> SliceRange<ScopeIndex> {
+    pub const fn descendants(&self) -> SliceRange<ScopeIndex> {
         self.descendants
     }
 
     /// Returns the precomputed logical-action range.
-    pub const fn logical_actions(self) -> SliceRange<ActionIndex> {
+    pub const fn logical_actions(&self) -> SliceRange<ActionIndex> {
         self.logical_actions
     }
 
     /// Returns the precomputed timer-startup range.
-    pub const fn timer_startups(self) -> SliceRange<TimerStartupImage> {
+    pub const fn timer_startups(&self) -> SliceRange<TimerStartupImage> {
         self.timer_startups
     }
 
     /// Returns the precomputed reset-reaction range.
-    pub const fn reset_reactions(self) -> SliceRange<LevelReactionImage> {
+    pub const fn reset_reactions(&self) -> SliceRange<LevelReactionImage> {
         self.reset_reactions
     }
 
     /// Returns the precomputed startup-reaction range.
-    pub const fn startup_reactions(self) -> SliceRange<LifecycleReactionImage> {
+    pub const fn startup_reactions(&self) -> SliceRange<LifecycleReactionImage> {
         self.startup_reactions
     }
 
     /// Returns the precomputed shutdown-reaction range.
-    pub const fn shutdown_reactions(self) -> SliceRange<LifecycleReactionImage> {
+    pub const fn shutdown_reactions(&self) -> SliceRange<LifecycleReactionImage> {
         self.shutdown_reactions
     }
 }
@@ -719,7 +716,7 @@ pub enum RouteDirection {
 }
 
 /// An immutable scheduler-boundary route without transport state.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RouteImage<'a> {
     boundary: BoundaryId<'a>,
     local_port: PortIndex,
@@ -747,27 +744,27 @@ impl<'a> RouteImage<'a> {
     }
 
     /// Returns the boundary identity.
-    pub const fn boundary(self) -> BoundaryId<'a> {
+    pub const fn boundary(&self) -> BoundaryId<'a> {
         self.boundary
     }
 
     /// Returns the local dense port identity.
-    pub const fn local_port(self) -> PortIndex {
+    pub const fn local_port(&self) -> PortIndex {
         self.local_port
     }
 
     /// Returns the route direction.
-    pub const fn direction(self) -> RouteDirection {
+    pub const fn direction(&self) -> RouteDirection {
         self.direction
     }
 
     /// Returns the clock domain used to interpret the route delay.
-    pub const fn timing_domain(self) -> TimingDomain {
+    pub const fn timing_domain(&self) -> TimingDomain {
         self.timing_domain
     }
 
     /// Returns the route delay in nanoseconds.
-    pub const fn delay_nanos(self) -> u64 {
+    pub const fn delay_nanos(&self) -> u64 {
         self.delay_nanos
     }
 }
@@ -810,7 +807,7 @@ impl<'a> RequiredBindingImage<'a> {
 }
 
 /// Fixed mutable-storage and scheduler-workspace bounds.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StorageBounds {
     state_slots: u32,
     action_slots: u32,
@@ -841,38 +838,38 @@ impl StorageBounds {
     }
 
     /// Returns the state-slot bound.
-    pub const fn state_slots(self) -> u32 {
+    pub const fn state_slots(&self) -> u32 {
         self.state_slots
     }
 
     /// Returns the action-slot bound.
-    pub const fn action_slots(self) -> u32 {
+    pub const fn action_slots(&self) -> u32 {
         self.action_slots
     }
 
     /// Returns the event-queue capacity.
-    pub const fn event_capacity(self) -> u32 {
+    pub const fn event_capacity(&self) -> u32 {
         self.event_capacity
     }
 
     /// Returns the payload-storage bound in bytes.
-    pub const fn payload_bytes(self) -> u64 {
+    pub const fn payload_bytes(&self) -> u64 {
         self.payload_bytes
     }
 
     /// Returns the reactor-state storage bound in bytes.
-    pub const fn state_bytes(self) -> u64 {
+    pub const fn state_bytes(&self) -> u64 {
         self.state_bytes
     }
 
     /// Returns the scheduler scratch-storage bound in bytes.
-    pub const fn scratch_bytes(self) -> u64 {
+    pub const fn scratch_bytes(&self) -> u64 {
         self.scratch_bytes
     }
 }
 
 /// An unchecked aggregate of borrowed immutable scheduler tables.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct EnclaveImage<'a> {
     /// Stable Enclave identity.
     pub enclave_id: EnclaveId<'a>,
@@ -923,5 +920,5 @@ pub struct EnclaveImage<'a> {
     /// Dense required implementation bindings.
     pub required_bindings: TinyMapView<'a, BindingSlotIndex, RequiredBindingImage<'a>>,
     /// Fixed mutable-storage and workspace bounds.
-    pub storage_bounds: StorageBounds,
+    pub storage_bounds: &'a StorageBounds,
 }

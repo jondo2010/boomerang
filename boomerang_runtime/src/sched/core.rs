@@ -1184,7 +1184,7 @@ mod wall_clock_tests {
                 waiter.join().unwrap().unwrap(),
                 WallClockReceive::FederateTerminated(FederateTermination::Abort)
             ));
-            coordinator.join().unwrap().unwrap();
+            coordinator.join().unwrap().coordination_result.unwrap();
         });
     }
 }

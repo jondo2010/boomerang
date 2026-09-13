@@ -38,8 +38,9 @@ fn resolution_returns_exact_package_ids_and_rejects_nonmembers() {
     assert_eq!(resolved.topology().package, "vehicle-topology");
     assert_eq!(resolved.topology().entry, "vehicle_topology::topology");
     let topology = resolved.package("vehicle-topology").unwrap();
+    // Cargo and std may spell the same Windows path with different verbatim prefixes.
     assert_eq!(
-        topology.manifest_path,
+        fs::canonicalize(&topology.manifest_path).unwrap(),
         fs::canonicalize(workspace.join("vehicle-topology/Cargo.toml")).unwrap()
     );
     assert_eq!(
@@ -69,20 +70,12 @@ fn resolution_returns_exact_package_ids_and_rejects_nonmembers() {
     let host = &resolved.deployment().federates["host"];
     assert_eq!(host.target.as_deref(), Some("x86_64-unknown-linux-gnu"));
     assert_eq!(
-        host.target_json.as_deref(),
-        Some(
-            fs::canonicalize(workspace.join("targets/host.json"))
-                .unwrap()
-                .as_path()
-        )
+        fs::canonicalize(host.target_json.as_ref().unwrap()).unwrap(),
+        fs::canonicalize(workspace.join("targets/host.json")).unwrap()
     );
     assert_eq!(
-        host.cargo_config.as_deref(),
-        Some(
-            fs::canonicalize(workspace.join(".cargo/host.toml"))
-                .unwrap()
-                .as_path()
-        )
+        fs::canonicalize(host.cargo_config.as_ref().unwrap()).unwrap(),
+        fs::canonicalize(workspace.join(".cargo/host.toml")).unwrap()
     );
 
     assert_eq!(

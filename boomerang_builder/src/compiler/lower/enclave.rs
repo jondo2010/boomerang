@@ -591,20 +591,21 @@ fn lower_entity_tables(
             action_range,
             mode_range,
         );
-        reaction_images[reaction_indices[*id]] =
-            reaction.options().transition().map_or(image, |transition| {
-                image.with_mode_effect(crate::runtime::CompiledModeEffectRef {
-                    target: mode_indices[transition.target()],
-                    transition: match transition.kind() {
-                        compiler::ModeTransitionKind::Reset => {
-                            crate::runtime::TransitionKind::Reset
-                        }
-                        compiler::ModeTransitionKind::History => {
-                            crate::runtime::TransitionKind::History
-                        }
-                    },
-                })
-            });
+        reaction_images[reaction_indices[*id]] = if let Some(transition) =
+            reaction.options().transition()
+        {
+            image.with_mode_effect(crate::runtime::CompiledModeEffectRef {
+                target: mode_indices[transition.target()],
+                transition: match transition.kind() {
+                    compiler::ModeTransitionKind::Reset => crate::runtime::TransitionKind::Reset,
+                    compiler::ModeTransitionKind::History => {
+                        crate::runtime::TransitionKind::History
+                    }
+                },
+            })
+        } else {
+            image
+        };
     }
     for (id, mode) in modes {
         mode_images[mode_indices[*id]] =

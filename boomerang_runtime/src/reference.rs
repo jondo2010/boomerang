@@ -275,7 +275,7 @@ struct ResolvedLocalRoute<'image> {
 /// Validated owned scheduler images and paired local routes, retaining canonical keys.
 struct PreparedFederate<'image> {
     /// This Federate's subset of the deployment-wide Enclave domain.
-    images: TinySecondaryMap<EnclaveIndex, EnclaveImage<'image>>,
+    images: TinySecondaryMap<EnclaveIndex, &'image EnclaveImage<'image>>,
     /// Routes whose source and destination both belong to this subset.
     endpoints: Vec<ResolvedLocalRoute<'image>>,
 }
@@ -542,6 +542,20 @@ fn panic_message(payload: Box<dyn Any + Send>) -> String {
     }
 }
 
+/// Selects the causally first scheduler error, falling back to result arrival if no origin survived.
+fn select_scheduler_failure(
+    errors: TinySecondaryMap<EnclaveIndex, ExecuteOwnedFederateError>,
+    origin: Option<EnclaveIndex>,
+    first_arrival: Option<EnclaveIndex>,
+) -> Option<ExecuteOwnedFederateError> {
+    let selected = origin
+        .filter(|key| errors.get(*key).is_some())
+        .or(first_arrival)?;
+    errors
+        .into_iter()
+        .find_map(|(key, error)| (key == selected).then_some(error))
+}
+
 /// Retains a joined coordinator failure only when no worker failure was observed first.
 fn latch_coordinator_result(
     failure: &mut Option<ExecuteOwnedFederateError>,
@@ -568,7 +582,7 @@ fn request_federate_shutdown(senders: &[crate::Sender<AsyncEvent>]) {
 
 /// Builds one coordinator from the selected immutable Federate layout and backend.
 fn build_federate_coordination<B: FederateCoordinationBackend>(
-    images: &TinySecondaryMap<EnclaveIndex, EnclaveImage<'_>>,
+    images: &TinySecondaryMap<EnclaveIndex, &EnclaveImage<'_>>,
     channels: impl IntoIterator<
         Item = (
             EnclaveIndex,
@@ -627,9 +641,9 @@ fn federate_shutdown_unblocks_a_full_mailbox_and_blocked_sender() {
 
 /// Resolves every outbound route to its unique inbound half after root validation.
 fn local_route_endpoints<'image>(
-    deployment: &CompiledDeploymentImage<'image>,
+    deployment: &'image CompiledDeploymentImage<'image>,
     selected_federate: FederateIndex,
-    selected: crate::image::FederateImage<'_>,
+    selected: &crate::image::FederateImage<'_>,
 ) -> Result<Vec<ResolvedLocalRoute<'image>>, ExecuteOwnedFederateError> {
     let mut endpoints = Vec::new();
     for (source, source_image) in deployment.enclaves.iter() {
@@ -651,7 +665,7 @@ fn local_route_endpoints<'image>(
                 .find(|(_, _image, route)| {
                     route.direction() == RouteDirection::Inbound && route.boundary() == boundary
                 })
-                .map(|(enclave, _, route)| (enclave, *route))
+                .map(|(enclave, _, route)| (enclave, route))
                 .expect("root validation paired every outbound route");
             let source_selected = selected.enclaves().contains(source);
             let destination_selected = selected.enclaves().contains(destination);
@@ -685,7 +699,7 @@ fn local_route_endpoints<'image>(
 
 /// Validates complete Enclave and route bindings before any user initializer runs.
 fn preflight_owned_federate<'image>(
-    deployment: &CompiledDeploymentImage<'image>,
+    deployment: &'image CompiledDeploymentImage<'image>,
     federate: FederateIndex,
     bindings: &FederateBindings<'_>,
 ) -> Result<PreparedFederate<'image>, ExecuteOwnedFederateError> {
@@ -697,14 +711,12 @@ fn preflight_owned_federate<'image>(
     let selected = deployment
         .federates
         .get(federate)
-        .copied()
         .ok_or(ExecuteOwnedFederateError::FederateNotFound { federate })?;
 
     let images = deployment
         .enclaves
         .iter()
         .filter(|(key, _)| selected.enclaves().contains(*key))
-        .map(|(key, image)| (key, *image))
         .collect();
     preflight_enclave_bindings(federate, &images, bindings)?;
     #[cfg(feature = "federated")]
@@ -722,7 +734,7 @@ fn preflight_owned_federate<'image>(
 /// Checks every owned payload binding without running any user initializer.
 fn preflight_enclave_bindings(
     federate: FederateIndex,
-    images: &TinySecondaryMap<EnclaveIndex, EnclaveImage<'_>>,
+    images: &TinySecondaryMap<EnclaveIndex, &EnclaveImage<'_>>,
     bindings: &FederateBindings<'_>,
 ) -> Result<(), ExecuteOwnedFederateError> {
     if images.is_empty() {
@@ -757,7 +769,7 @@ fn preflight_enclave_bindings(
 /// Checks local route witnesses against the two already validated owned port bindings.
 fn preflight_local_bindings(
     federate: FederateIndex,
-    images: &TinySecondaryMap<EnclaveIndex, EnclaveImage<'_>>,
+    images: &TinySecondaryMap<EnclaveIndex, &EnclaveImage<'_>>,
     endpoints: &[ResolvedLocalRoute<'_>],
     bindings: &FederateBindings<'_>,
 ) -> Result<(), ExecuteOwnedFederateError> {
@@ -808,7 +820,7 @@ fn preflight_local_bindings(
                 endpoint.destination_port,
             ),
         ] {
-            let image = EnclaveImageView::new(&images[enclave])
+            let image = EnclaveImageView::new(images[enclave])
                 .expect("root validation checked endpoint images");
             let slot = image.ports()[port].binding();
             let (found_id, found) = bindings
@@ -905,7 +917,7 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
         .collect::<BTreeMap<_, _>>();
     let mut storages = Vec::with_capacity(enclaves.len());
     for (enclave, owned) in enclaves {
-        let image = EnclaveImageView::new(&images[enclave])
+        let image = EnclaveImageView::new(images[enclave])
             .expect("Federate preflight validated every selected Enclave image");
         let enclave_key = runtime_enclave_key(enclave);
         let storage =
@@ -1103,6 +1115,8 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
         drop(participant_ports);
         drop(result_tx);
 
+        let mut worker_errors = TinySecondaryMap::new();
+        let mut first_worker = None;
         let started_count = handles.len();
         let mut results = TinySecondaryMap::with_capacity(enclave_count);
         for _ in 0..started_count {
@@ -1110,14 +1124,15 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
                 Ok((enclave, Ok(result))) => {
                     results.insert(enclave, result);
                 }
-                Ok((_, Err(error))) => {
-                    if failure.is_none() {
+                Ok((enclave, Err(error))) => {
+                    if first_worker.is_none() && failure.is_none() {
                         abort();
-                        failure = Some(error);
                     }
+                    first_worker.get_or_insert(enclave);
+                    worker_errors.insert(enclave, error);
                 }
                 Err(_) => {
-                    if failure.is_none() {
+                    if failure.is_none() && first_worker.is_none() {
                         abort();
                         failure = Some(ExecuteOwnedFederateError::ResultChannelClosed);
                     }
@@ -1127,7 +1142,7 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
         }
         for (enclave, handle) in handles {
             if let Err(payload) = handle.join() {
-                if failure.is_none() {
+                if failure.is_none() && first_worker.is_none() {
                     abort();
                     failure = Some(ExecuteOwnedFederateError::ThreadPanicked {
                         enclave,
@@ -1136,7 +1151,16 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
                 }
             }
         }
-        latch_coordinator_result(&mut failure, coordinator_thread.join());
+        let coordinator_result = coordinator_thread.join();
+        if failure.is_none() {
+            let origin = coordinator_result
+                .as_ref()
+                .ok()
+                .and_then(|exit| exit.first_failed_participant);
+            failure = select_scheduler_failure(worker_errors, origin, first_worker);
+        }
+        let coordinator_result = coordinator_result.map(|exit| exit.coordination_result);
+        latch_coordinator_result(&mut failure, coordinator_result);
         (results, failure)
     });
 
@@ -1285,7 +1309,7 @@ mod scoped_spawn_tests {
             shutdown_actions: &[],
             routes: TinyMapView::new(&[]),
             required_bindings: TinyMapView::new(&REQUIRED_BINDINGS),
-            storage_bounds: StorageBounds::new(1, 0, 1, 0, 0, 0),
+            storage_bounds: &const { StorageBounds::new(1, 0, 1, 0, 0, 0) },
         }
     }
 
@@ -1301,7 +1325,7 @@ mod scoped_spawn_tests {
         reaction_triggers: &BARRIER_TRIGGERS,
         timer_startup_actions: &BARRIER_STARTUPS,
         required_bindings: TinyMapView::new(&BARRIER_REQUIRED_BINDINGS),
-        storage_bounds: StorageBounds::new(1, 1, 1, 0, 0, 0),
+        storage_bounds: &StorageBounds::new(1, 1, 1, 0, 0, 0),
         ..state_only_image("alpha")
     };
     static FEDERATES: [FederateImage; 1] = [FederateImage::new(
@@ -1438,7 +1462,6 @@ mod scoped_spawn_tests {
                         .enclaves
                         .iter()
                         .filter(|(key, _)| OFFSET_FEDERATES[1].enclaves().contains(*key))
-                        .map(|(key, image)| (key, *image))
                         .collect(),
                     channels,
                     if keep_alive {
@@ -1546,6 +1569,30 @@ mod scoped_spawn_tests {
             ExecuteOwnedFederateError::ThreadSpawn { enclave, source }
                 if enclave == failed_enclave && source.kind() == ErrorKind::Other
         ));
+    }
+
+    /// Coordinator authority wins over a secondary panic that reaches the result channel first.
+    #[test]
+    fn scheduler_failure_selection_uses_origin_with_arrival_fallback() {
+        let source = EnclaveIndex::new(0);
+        let peer = EnclaveIndex::new(1);
+        for origin in [None, Some(source), Some(EnclaveIndex::new(9))] {
+            let mut errors = TinySecondaryMap::new();
+            for enclave in [peer, source] {
+                errors.insert(
+                    enclave,
+                    ExecuteOwnedFederateError::ThreadPanicked {
+                        enclave,
+                        message: "failure".into(),
+                    },
+                );
+            }
+            let selected = select_scheduler_failure(errors, origin, Some(peer)).unwrap();
+            assert!(
+                matches!(selected, ExecuteOwnedFederateError::ThreadPanicked { enclave, .. }
+                if enclave == if origin == Some(source) { source } else { peer })
+            );
+        }
     }
 
     /// Verifies a joined coordinator failure is reported unless a worker failed first.
@@ -1708,6 +1755,7 @@ mod scoped_spawn_tests {
             barrier_thread.join().unwrap();
             scheduler_thread.join().unwrap().unwrap();
             let mut failure = None;
+            let coordinator_result = coordinator_result.map(|exit| exit.coordination_result);
             latch_coordinator_result(&mut failure, coordinator_result);
             assert!(matches!(
                 failure,

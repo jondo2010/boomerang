@@ -76,6 +76,13 @@ pub(crate) enum SchedulerMessage {
         /// Monotonic participant completion tag.
         tag: Tag,
     },
+    /// Confirm a fresh empty mailbox for the current completion fence.
+    CompletionObserved {
+        /// Participant that checked its mailbox while waiting beyond the frontier.
+        enclave: EnclaveIndex,
+        /// Fence generation, independent of candidate revisions.
+        generation: u64,
+    },
     /// Report that a participant has observed terminal stop.
     ParticipantStopped {
         /// Compiled participant reporting stop.
@@ -113,6 +120,13 @@ pub(crate) enum CoordinationAction {
         /// Aggregate monotonic completion frontier.
         FederateCompletion,
     ),
+    /// Check one waiting participant before advancing aggregate completion.
+    CompletionProbe {
+        /// Participant whose old completion needs a fresh mailbox check.
+        enclave: EnclaveIndex,
+        /// Monotonic local fence generation.
+        generation: u64,
+    },
     /// Ask every participant to confirm the candidate revision.
     Probe {
         /// Candidate revision being confirmed.
@@ -176,6 +190,8 @@ struct ParticipantState {
     completed: Option<Tag>,
     /// Whether the candidate participates in the current aggregate publication.
     published: bool,
+    /// Last completion fence acknowledged after checking the mailbox.
+    completion_observed: Option<u64>,
     /// Current phase acknowledgement, if this participant has supplied one.
     observation: Option<Observation>,
 }
@@ -191,6 +207,10 @@ pub(crate) struct FederateCoordinationState {
     pending_publication: Option<FederatePublication>,
     /// Greatest completion frontier emitted for the whole Federate.
     completed_frontier: Option<Tag>,
+    /// Independent generation for completion mailbox checks.
+    completion_generation: u64,
+    /// Completion frontier currently awaiting mailbox checks.
+    completion_probe: Option<Tag>,
     /// Greatest valid backend grant retained across candidate revisions.
     grant_horizon: Option<Tag>,
     /// Typed origin of the first failure when one was supplied.
@@ -227,6 +247,8 @@ impl FederateCoordinationState {
             revision: CoordinationRevision::new(0),
             pending_publication: None,
             completed_frontier: None,
+            completion_generation: 0,
+            completion_probe: None,
             grant_horizon: None,
             first_failure: None,
             lifecycle,
@@ -235,8 +257,7 @@ impl FederateCoordinationState {
         })
     }
 
-    #[cfg(test)]
-    /// Returns the current aggregate candidate revision for state-machine tests.
+    /// Returns the current aggregate revision for publication-fence validation.
     pub(crate) const fn revision(&self) -> CoordinationRevision {
         self.revision
     }
@@ -259,7 +280,6 @@ impl FederateCoordinationState {
     }
 
     /// Returns the typed participant origin retained from the first failure.
-    #[cfg(test)]
     pub(crate) const fn first_failure(&self) -> Option<EnclaveIndex> {
         self.first_failure
     }
@@ -282,7 +302,17 @@ impl FederateCoordinationState {
         &mut self,
         message: SchedulerMessage,
     ) -> Result<Vec<CoordinationAction>, CoordinationStateError> {
-        match message {
+        let mut actions = match message {
+            SchedulerMessage::CompletionObserved {
+                enclave,
+                generation,
+            } => {
+                self.participant(enclave)?;
+                if self.completion_probe.is_some() && generation == self.completion_generation {
+                    self.participants[enclave].completion_observed = Some(generation);
+                }
+                Ok(Vec::new())
+            }
             SchedulerMessage::Active { enclave } => self.activate(enclave),
             SchedulerMessage::Publish {
                 enclave,
@@ -294,7 +324,9 @@ impl FederateCoordinationState {
                 Ok(self.stop())
             }
             SchedulerMessage::Failed { enclave } => self.fail(enclave),
-        }
+        }?;
+        actions.extend(self.advance_completion());
+        Ok(actions)
     }
 
     /// Applies an acquired Federate grant when it matches the current pending revision.
@@ -467,7 +499,9 @@ impl FederateCoordinationState {
         enclave: EnclaveIndex,
     ) -> Result<Vec<CoordinationAction>, CoordinationStateError> {
         self.participant(enclave)?;
-        if self.is_stopped() || self.phase == CoordinationPhase::Active {
+        self.completion_probe = None;
+        self.participants[enclave].published = false;
+        if self.is_stopped() {
             return Ok(Vec::new());
         }
 
@@ -492,6 +526,63 @@ impl FederateCoordinationState {
         self.participants
             .get(enclave)
             .ok_or(CoordinationStateError::UnknownEnclave { enclave })
+    }
+
+    /// Advances beyond inactive siblings only after fresh mailbox acknowledgements.
+    /// A valid grant ensures all external payloads through the frontier were admitted before
+    /// these probes; completed reactions have already submitted their local payloads.
+    fn advance_completion(&mut self) -> Vec<CoordinationAction> {
+        if self.is_stopped() {
+            return Vec::new();
+        }
+        let Some(frontier) = self
+            .participants
+            .values()
+            .filter_map(|p| p.completed)
+            .max()
+            .zip(self.grant_horizon)
+            .map(|(completed, granted)| completed.min(granted))
+        else {
+            return Vec::new();
+        };
+        if self
+            .completed_frontier
+            .is_some_and(|completed| completed >= frontier)
+            || self.participants.values().any(|p| {
+                p.completed.is_none_or(|completed| completed < frontier)
+                    && (!p.published || p.candidate.is_some_and(|candidate| candidate <= frontier))
+            })
+        {
+            self.completion_probe = None;
+            return Vec::new();
+        }
+        if self.completion_probe != Some(frontier) {
+            self.completion_generation = self
+                .completion_generation
+                .checked_add(1)
+                .expect("completion generation exhausted");
+            self.completion_probe = Some(frontier);
+            return self
+                .participants
+                .iter()
+                .filter(|(_, p)| p.completed.is_none_or(|completed| completed < frontier))
+                .map(|(enclave, _)| CoordinationAction::CompletionProbe {
+                    enclave,
+                    generation: self.completion_generation,
+                })
+                .collect();
+        }
+        if self.participants.values().all(|p| {
+            p.completed.is_some_and(|completed| completed >= frontier)
+                || p.completion_observed == Some(self.completion_generation)
+        }) {
+            self.completed_frontier = Some(frontier);
+            self.completion_probe = None;
+            return vec![CoordinationAction::Complete(FederateCompletion::new(
+                frontier,
+            ))];
+        }
+        Vec::new()
     }
 
     /// Advances and emits the monotonic minimum participant completion frontier.
@@ -563,6 +654,7 @@ impl FederateCoordinationState {
         let resume = changed && self.phase != CoordinationPhase::Active;
 
         if changed {
+            self.completion_probe = None;
             self.revision = self.revision.next();
             self.pending_publication = None;
             self.phase = CoordinationPhase::Active;
@@ -1068,6 +1160,102 @@ mod tests {
         assert!(observe(&mut state, first, revision, Observation::Rechecked)
             .unwrap()
             .is_empty());
+    }
+
+    /// New same-tag work cannot consume a stale acquisition without issuing a fresh publication.
+    #[test]
+    fn active_event_invalidates_in_flight_grant_before_same_tag_republication() {
+        let enclave = EnclaveIndex::new(3);
+        let mut state =
+            FederateCoordinationState::new([enclave], LifecyclePolicy::KeepAlive).unwrap();
+        publish(&mut state, enclave, Some(Tag::ZERO));
+        let old = state.revision();
+        state
+            .handle_scheduler(SchedulerMessage::Active { enclave })
+            .unwrap();
+        assert!(state
+            .handle_acquisition(FederateAcquisition::new(old, Tag::ZERO))
+            .unwrap()
+            .is_empty());
+        let actions = publish(&mut state, enclave, Some(Tag::ZERO));
+        assert!(actions
+            .iter()
+            .any(|action| matches!(action, CoordinationAction::Publish(p) if p.revision() != old)));
+        assert!(state
+            .handle_acquisition(FederateAcquisition::new(state.revision(), Tag::ZERO))
+            .unwrap()
+            .iter()
+            .any(|action| matches!(action, CoordinationAction::Grant { .. })));
+    }
+
+    /// Idle and future candidates need fresh generation-bound mailbox observations.
+    #[test]
+    fn completion_fence_checks_idle_and_future_candidates_and_rejects_stale_acknowledgements() {
+        let first = EnclaveIndex::new(3);
+        let second = EnclaveIndex::new(7);
+        let frontier = Tag::new(Duration::seconds(1), 0);
+        for candidate in [None, Some(Tag::new(Duration::seconds(2), 0))] {
+            let mut state =
+                FederateCoordinationState::new([first, second], LifecyclePolicy::KeepAlive)
+                    .unwrap();
+            state.grant_horizon = Some(frontier);
+            assert!(complete(&mut state, first, frontier).is_empty());
+            let actions = publish(&mut state, second, candidate);
+            let generation = actions
+                .iter()
+                .find_map(|action| match action {
+                    CoordinationAction::CompletionProbe {
+                        enclave,
+                        generation,
+                    } if *enclave == second => Some(*generation),
+                    _ => None,
+                })
+                .expect("idle and later candidates require fresh mailbox checks");
+            state
+                .handle_scheduler(SchedulerMessage::Active { enclave: second })
+                .unwrap();
+            assert!(state
+                .handle_scheduler(SchedulerMessage::CompletionObserved {
+                    enclave: second,
+                    generation
+                })
+                .unwrap()
+                .is_empty());
+            let actions = publish(&mut state, second, candidate);
+            let current = actions
+                .iter()
+                .find_map(|action| match action {
+                    CoordinationAction::CompletionProbe { generation, .. } => Some(*generation),
+                    _ => None,
+                })
+                .unwrap();
+            assert!(current > generation);
+            assert!(state
+                .handle_scheduler(SchedulerMessage::CompletionObserved {
+                    enclave: second,
+                    generation
+                })
+                .unwrap()
+                .is_empty());
+            assert_eq!(
+                state
+                    .handle_scheduler(SchedulerMessage::CompletionObserved {
+                        enclave: second,
+                        generation: current
+                    })
+                    .unwrap(),
+                vec![CoordinationAction::Complete(FederateCompletion::new(
+                    frontier
+                ))]
+            );
+            assert!(state
+                .handle_scheduler(SchedulerMessage::CompletionObserved {
+                    enclave: second,
+                    generation: current
+                })
+                .unwrap()
+                .is_empty());
+        }
     }
 
     /// Verifies completion advances only at the monotonic aggregate safe frontier.

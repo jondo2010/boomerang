@@ -75,7 +75,7 @@ fn isolated_slices_execute_encoded_route_halves_at_canonical_enclave_keys() {
         let wire = Arc::new(CaptureSink::default());
         let source = execute_owned_federate_with_backend(
             FederateIndex::new(3),
-            fixture_federate("source", "host", "std", IndexSpan::new(5, 1)),
+            &fixture_federate("source", "host", "std", IndexSpan::new(5, 1)),
             &[ROUTED_SOURCE_IMAGE],
             FederateBindings::new()
                 .bind_enclave(EnclaveIndex::new(5), source_bindings())
@@ -107,7 +107,7 @@ fn isolated_slices_execute_encoded_route_halves_at_canonical_enclave_keys() {
         );
         let sink = execute_owned_federate_with_backend(
             FederateIndex::new(9),
-            fixture_federate("sink", "host", "std", IndexSpan::new(11, 1)),
+            &fixture_federate("sink", "host", "std", IndexSpan::new(11, 1)),
             &[ROUTED_SINK_IMAGE],
             FederateBindings::new()
                 .bind_enclave(EnclaveIndex::new(11), sink_bindings())
@@ -144,7 +144,7 @@ fn slice_backend_failure_wakes_and_joins_an_idle_scheduler() {
     bounded(|| {
         let error = execute_owned_federate_with_backend(
             FederateIndex::new(9),
-            fixture_federate("sink", "host", "std", IndexSpan::new(11, 1)),
+            &fixture_federate("sink", "host", "std", IndexSpan::new(11, 1)),
             &[ROUTED_SINK_IMAGE],
             FederateBindings::new()
                 .bind_enclave(EnclaveIndex::new(11), sink_bindings())
@@ -182,7 +182,7 @@ fn slice_preserves_codec_and_submission_failures_through_scheduler_cleanup() {
         for reject_codec in [true, false] {
             let error = execute_owned_federate_with_backend(
                 FederateIndex::new(3),
-                fixture_federate("source", "host", "std", IndexSpan::new(5, 1)),
+                &fixture_federate("source", "host", "std", IndexSpan::new(5, 1)),
                 &[ROUTED_SOURCE_IMAGE],
                 FederateBindings::new()
                     .bind_enclave(EnclaveIndex::new(5), source_bindings())
@@ -284,7 +284,7 @@ fn slice_preflight_rejects_external_binding_errors_before_initialization_or_conn
         };
         let error = execute_owned_federate_with_backend(
             FederateIndex::new(9),
-            fixture_federate("sink", "host", "std", span),
+            &fixture_federate("sink", "host", "std", span),
             &[ROUTED_SINK_IMAGE],
             bindings,
             Config::default(),

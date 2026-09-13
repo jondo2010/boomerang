@@ -5,6 +5,8 @@
 
 /// Federate-side protocol clients and their scheduler bridge.
 pub mod client;
+/// Image-backed compiled coordination, independent of the legacy action bridge.
+pub mod compiled;
 /// Checked conversions between runtime values and protocol values.
 pub mod runtime_bridge;
 /// Central RTI session coordination over connected transports.

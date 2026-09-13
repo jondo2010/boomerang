@@ -5,7 +5,7 @@ on:
     branches: ["main"]
 
   pull_request:
-    branches: ["main", "codex/deployment-phase4-integration"]
+    branches: ["main", "codex/deployment-phase4-integration", "codex/deployment-phase5-integration"]
 
 permissions:
   contents: read
@@ -92,6 +92,9 @@ jobs:
 
       - name: test workspace except cargo-boomerang
         run: cargo test --workspace --exclude cargo-boomerang --verbose
+
+      - name: test compiled Federate execution with central RTI
+        run: cargo test -p boomerang --features federated --test compiled_reference --offline
 
       - name: smoke test cargo-boomerang toolchain on Windows
         if: matrix.os == 'windows-latest' && matrix.toolchain == 'stable'

@@ -326,7 +326,7 @@ impl OwnedEnclaveImage {
             shutdown_actions: &self.shutdown_actions,
             routes: routes.as_view(),
             required_bindings: bindings.as_view(),
-            storage_bounds: self.storage_bounds,
+            storage_bounds: &self.storage_bounds,
         }
     }
 
@@ -353,8 +353,8 @@ impl OwnedEnclaveImage {
     }
 
     /// Returns this Enclave's declared storage bounds without materializing image rows.
-    pub const fn storage_bounds(&self) -> StorageBounds {
-        self.storage_bounds
+    pub const fn storage_bounds(&self) -> &StorageBounds {
+        &self.storage_bounds
     }
 }
 

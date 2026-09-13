@@ -1,5 +1,6 @@
 //! Scripted transport behavior for bounded client lifecycle checks; never a runtime transport.
 use super::*;
+use boomerang_runtime::image::{RecoveryPolicy, RtiMemberImage, SliceRange, TinyMapView};
 use boomerang_runtime::{CoordinationRevision, FederateCoordinationBackend, FederatePublication};
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -25,6 +26,30 @@ impl RtiReplySource for Replies {
     }
 }
 
+/// Isolates client lifecycle tests with one route-less reference member.
+fn bindings() -> RtiClientBindings<'static> {
+    const IMAGE: RtiImage<'static> = RtiImage::new(
+        TinyMapView::new(&[RtiMemberImage::new(
+            RecoveryPolicy::FailStop,
+            SliceRange::new(0, 0),
+            SliceRange::new(0, 0),
+            SliceRange::new(0, 0),
+        )]),
+        &[],
+        &[],
+        TinyMapView::new(&[]),
+        TinyMapView::new(&[]),
+        TinyMapView::new(&[]),
+        TinyMapView::new(&[]),
+        TinyMapView::new(&[]),
+    );
+    RtiClientBindings {
+        image: IMAGE,
+        member: FederateIndex::new(0),
+        identity: CoordinationIdentity::new([1; 32]),
+    }
+}
+
 /// Expires startup and tells the transport owner to release peers.
 #[test]
 fn admission_timeout_aborts_session() {
@@ -32,7 +57,7 @@ fn admission_timeout_aborts_session() {
     let error = CentralRtiClient::connect(
         requests.clone(),
         Replies(VecDeque::new()),
-        CoordinationIdentity::new([1; 32]),
+        bindings(),
         BTreeMap::new(),
         Duration::from_millis(10),
     )
@@ -58,7 +83,7 @@ fn stop_requires_authority_and_bounded_acknowledgement() {
         let mut client = CentralRtiClient::connect(
             requests.clone(),
             Replies(replies.into()),
-            CoordinationIdentity::new([1; 32]),
+            bindings(),
             BTreeMap::new(),
             Duration::from_millis(10),
         )
@@ -83,4 +108,33 @@ fn stop_requires_authority_and_bounded_acknowledgement() {
             Some(RtiRequest::Abort { .. })
         ));
     }
+}
+
+/// Rejects delivery keys absent from the preflight mapping without indexing a local route domain.
+#[test]
+fn unknown_inbound_route_key_fails_closed() {
+    let requests = Arc::new(Requests::default());
+    let mut client = CentralRtiClient::connect(
+        requests.clone(),
+        Replies(
+            vec![
+                RtiReply::Started,
+                RtiReply::Payload {
+                    route: RtiRouteIndex::new(9),
+                    tag: WireTag::ZERO,
+                    payload: vec![42],
+                },
+            ]
+            .into(),
+        ),
+        bindings(),
+        BTreeMap::new(),
+        Duration::from_millis(10),
+    )
+    .unwrap();
+    assert!(client
+        .progress(Duration::ZERO)
+        .unwrap_err()
+        .to_string()
+        .contains("unknown inbound RTI route key"));
 }

@@ -6,12 +6,10 @@
 mod client;
 pub mod in_memory;
 mod state;
-#[cfg(test)]
-mod tests;
 
 use crate::WireTag;
-use boomerang_runtime::image::FederateIndex;
-pub use client::CentralRtiClient;
+use boomerang_runtime::image::{FederateIndex, RtiRouteIndex};
+pub use client::{CentralRtiClient, RtiClientBindings};
 pub use state::CompiledRti;
 
 /// Opaque compiler-issued identity shared by the RTI and every Federate artifact.
@@ -61,8 +59,8 @@ pub enum RtiRequest {
     },
     /// Submits one encoded route value with delay already applied.
     Payload {
-        /// Stable boundary identity; never an Enclave-local route ordinal.
-        boundary: String,
+        /// Route in the fingerprint-verified coordination image, never an Enclave-local key.
+        route: RtiRouteIndex,
         /// Final destination tag.
         tag: WireTag,
         /// Codec-produced bytes.
@@ -96,8 +94,8 @@ pub enum RtiReply {
     },
     /// Delivers one payload before any grant that could execute it.
     Payload {
-        /// Stable destination boundary binding.
-        boundary: String,
+        /// Shared coordination route resolved to a local inbound adapter during preflight.
+        route: RtiRouteIndex,
         /// Final logical tag; no receiver-side delay is applied.
         tag: WireTag,
         /// Encoded application data.
@@ -120,7 +118,7 @@ pub enum RtiReply {
 /// One server-local delivery selected by the compiled member domain.
 #[derive(Clone, Debug)]
 pub struct RtiDelivery {
-    /// Bound recipient; transport serialization must use its stable member identity.
+    /// Recipient in the fingerprint-verified coordination image member domain.
     pub member: FederateIndex,
     /// Ordered reply for that recipient.
     pub reply: RtiReply,

@@ -1,10 +1,10 @@
 use super::*;
 use boomerang_runtime::image::{
     BoundaryFailurePolicy, CompiledDeploymentView, CoordinationProjection, FederateImage,
-    RecoveryPolicy, RtiImage, RtiRouteIndex, SecurityPolicy, TimingPolicy, TinyMapView,
+    RecoveryPolicy, RtiImage, SecurityPolicy, TimingPolicy, TinyMapView,
 };
-use std::collections::{BTreeMap, BTreeSet};
-use tinymap::TinyMap;
+use std::collections::BTreeSet;
+use tinymap::TinySecondaryMap;
 
 /// Mutable state for one canonical compiled member, allocated only at RTI startup.
 #[derive(Default)]
@@ -53,12 +53,8 @@ pub struct CompiledRti<'a> {
     image: RtiImage<'a>,
     /// Stable member descriptors in the same typed domain as the RTI image.
     members: TinyMapView<'a, FederateIndex, FederateImage<'a>>,
-    /// Startup identity lookup; never used to infer dense ordinals.
-    identities: BTreeMap<&'a str, FederateIndex>,
-    /// Startup route lookup into the distinct deployment-wide RTI route domain.
-    routes: BTreeMap<&'a str, RtiRouteIndex>,
-    /// Mutable member state materialized once at the runtime boundary.
-    states: TinyMap<FederateIndex, MemberState>,
+    /// Mutable data for every existing member key; the image owns the key domain.
+    states: TinySecondaryMap<FederateIndex, MemberState>,
     /// Shared immutable coordination identity.
     identity: CoordinationIdentity,
     /// First terminal session failure.
@@ -76,20 +72,13 @@ impl<'a> CompiledRti<'a> {
             ));
         };
         let members = view.federates();
-        let mut states = TinyMap::new();
-        let mut identities = BTreeMap::new();
-        for (key, member) in members.iter() {
+        let mut states = TinySecondaryMap::with_capacity(members.len());
+        for (key, _) in members.iter() {
             if image.member_recovery_policy(key) != RecoveryPolicy::FailStop {
                 return Err(CentralRtiError::new("unsupported member recovery policy"));
             }
-            let allocated = states.insert(MemberState::default());
-            assert_eq!(
-                allocated, key,
-                "materialization preserves the Federate key domain"
-            );
-            identities.insert(member.id().as_str(), key);
+            states.insert(key, MemberState::default());
         }
-        let mut routes = BTreeMap::new();
         for (key, _) in image.routes().iter() {
             if image.route_failure_policy(key) != BoundaryFailurePolicy::PropagateStop
                 || image.route_timing_policy(key) != TimingPolicy::BestEffort
@@ -97,13 +86,10 @@ impl<'a> CompiledRti<'a> {
             {
                 return Err(CentralRtiError::new("unsupported compiled boundary policy"));
             }
-            routes.insert(image.route_boundary(key).as_str(), key);
         }
         Ok(Self {
             image,
             members,
-            identities,
-            routes,
             states,
             identity,
             failure: None,
@@ -112,9 +98,9 @@ impl<'a> CompiledRti<'a> {
 
     /// Resolves a stable connection identity once, before dispatching runtime requests.
     pub fn resolve_member(&self, identity: &str) -> Result<FederateIndex, CentralRtiError> {
-        self.identities
-            .get(identity)
-            .copied()
+        self.members
+            .iter()
+            .find_map(|(key, member)| (member.id().as_str() == identity).then_some(key))
             .ok_or_else(|| CentralRtiError::new("unknown compiled Federate identity"))
     }
     /// Returns the stable identity used by transport admission and diagnostics.
@@ -226,22 +212,26 @@ impl<'a> CompiledRti<'a> {
                     .retain(|pending| *pending > tag);
             }
             RtiRequest::Payload {
-                boundary,
+                route: route_key,
                 tag,
                 payload,
             } => {
-                let route_key = self
-                    .routes
-                    .get(boundary.as_str())
+                let route = self
+                    .image
+                    .routes()
+                    .get(route_key)
                     .copied()
-                    .ok_or_else(|| CentralRtiError::new("unknown boundary"))?;
-                let route = self.image.routes()[route_key];
+                    .ok_or_else(|| CentralRtiError::new("unknown RTI route key"))?;
+                if route.source() != member {
+                    return Err(CentralRtiError::new(
+                        "payload route belongs to another source",
+                    ));
+                }
                 let lower = delay(
                     state.completed.unwrap_or(WireTag::ZERO),
                     route.delay_nanos(),
                 )?;
-                if route.source() != member
-                    || !finite(tag)
+                if !finite(tag)
                     || state.idle.is_some()
                     || tag < lower
                     || (state.completed.is_some() && route.delay_nanos() == 0 && tag == lower)
@@ -273,7 +263,7 @@ impl<'a> CompiledRti<'a> {
                 deliveries.push(RtiDelivery {
                     member: target,
                     reply: RtiReply::Payload {
-                        boundary,
+                        route: route_key,
                         tag,
                         payload,
                     },

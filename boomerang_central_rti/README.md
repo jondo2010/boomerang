@@ -17,8 +17,16 @@ once to their distinct runtime key domains. `CoordinationIdentity` is the shared
 artifact digest supplied at admission; artifact generation supplies it in the next
 slice.
 
-`compiled::CentralRtiClient` connects prepared compiled boundary adapters to ordered
-request/reply interfaces. Fresh local mailbox fences protect externally published
+`compiled::RtiClientBindings` groups the validated RTI projection, member, and artifact
+identity during preflight. It resolves outbound boundaries and maps all incoming RTI
+routes to prepared Enclave-local adapters before admission. `CentralRtiClient` then
+verifies coordination identity before scheduler startup. Normal payload exchange uses
+`RtiRouteIndex` exclusively: no stable string IDs, string cloning, or name lookup.
+Member and route domains remain distinct; every request checks route existence and
+source ownership. Artifact generation must bind the supplied identity to the exact image.
+
+`compiled::CentralRtiClient` connects these prepared adapters to ordered request/reply
+interfaces. Fresh local mailbox fences protect externally published
 lower bounds and aggregate completion. Payloads precede grants on the reply stream. Grants are
 retained horizons; payload validation uses delay-adjusted bounds, including the
 microstep collapse caused by positive delay. Local idle stays reversible until all

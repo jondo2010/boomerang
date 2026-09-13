@@ -1,6 +1,9 @@
 //! Exercises the compiled executor through a real image-backed RTI, without Cargo or processes.
 use super::*;
-use boomerang::central_rti::compiled::{CentralRtiClient, CompiledRti, CoordinationIdentity};
+use boomerang::central_rti::compiled::{
+    CentralRtiClient, CompiledRti, CoordinationIdentity, RtiClientBindings, RtiReply, RtiRequest,
+};
+use boomerang::central_rti::WireTag;
 use boomerang::runtime::{execute_owned_federate_with_backend, image::*};
 use std::sync::Arc;
 
@@ -90,10 +93,22 @@ fn execute_pair(mismatch: bool, fail_rti: bool, fail_scheduler: bool) {
     bounded(move || {
         let view = CompiledDeploymentView::new(&DEPLOYMENT).unwrap();
         let rti = CompiledRti::new(&view, IDENTITY).unwrap();
+        let source_rti = RtiClientBindings::new(&view, MEMBERS[0], IDENTITY).unwrap();
+        let sink_rti = RtiClientBindings::new(
+            &view,
+            MEMBERS[1],
+            if mismatch {
+                CoordinationIdentity::new([8; 32])
+            } else {
+                IDENTITY
+            },
+        )
+        .unwrap();
         let (source, sink, server) = transport::start(rti, fail_rti);
         let source_thread = std::thread::spawn(move || {
-            let outbound =
-                CentralRtiClient::outbound_sink(source.0.clone(), BoundaryId::new("pipe"));
+            let outbound = source_rti
+                .outbound_sink(source.0.clone(), BoundaryId::new("pipe"))
+                .unwrap();
             execute_owned_federate_with_backend(
                 MEMBERS[0],
                 FEDERATES[0],
@@ -117,7 +132,7 @@ fn execute_pair(mismatch: bool, fail_rti: bool, fail_scheduler: bool) {
                     CentralRtiClient::connect(
                         source.0,
                         source.1,
-                        IDENTITY,
+                        source_rti,
                         inbound,
                         std::time::Duration::from_secs(2),
                     )
@@ -144,11 +159,7 @@ fn execute_pair(mismatch: bool, fail_rti: bool, fail_scheduler: bool) {
                     CentralRtiClient::connect(
                         sink.0,
                         sink.1,
-                        if mismatch {
-                            CoordinationIdentity::new([8; 32])
-                        } else {
-                            IDENTITY
-                        },
+                        sink_rti,
                         inbound,
                         std::time::Duration::from_secs(2),
                     )
@@ -218,7 +229,6 @@ fn rti_failure_releases_both_compiled_federates() {
 
 /// Starts a pure RTI without a transport for protocol-boundary assertions.
 fn admitted_rti() -> CompiledRti<'static> {
-    use boomerang::central_rti::compiled::RtiRequest;
     let view = CompiledDeploymentView::new(&DEPLOYMENT).unwrap();
     let mut rti = CompiledRti::new(&view, IDENTITY).unwrap();
     for member in MEMBERS {
@@ -230,17 +240,13 @@ fn admitted_rti() -> CompiledRti<'static> {
 /// Rejects payload submission after the source exhausted its granted horizon.
 #[test]
 fn completed_source_cannot_emit_late_payload() {
-    use boomerang::central_rti::{
-        compiled::{RtiReply, RtiRequest},
-        WireTag,
-    };
     let mut rti = admitted_rti();
     publish(&mut rti, MEMBERS[0], 0, Some(WireTag::ZERO));
     rti.handle(MEMBERS[0], RtiRequest::Complete { tag: WireTag::ZERO });
     let replies = rti.handle(
         MEMBERS[0],
         RtiRequest::Payload {
-            boundary: "pipe".into(),
+            route: RtiRouteIndex::new(0),
             tag: WireTag::finite(1_000_000, 0),
             payload: vec![42],
         },
@@ -254,10 +260,6 @@ fn completed_source_cannot_emit_late_payload() {
 /// Keeps unknown upstream state and undrained payloads conservative.
 #[test]
 fn unknown_upstream_blocks_and_in_transit_payload_prevents_idle() {
-    use boomerang::central_rti::{
-        compiled::{RtiReply, RtiRequest},
-        WireTag,
-    };
     let mut rti = admitted_rti();
     let destination = WireTag::finite(1_000_000, 0);
     assert!(rti
@@ -277,7 +279,7 @@ fn unknown_upstream_blocks_and_in_transit_payload_prevents_idle() {
     let replies = rti.handle(
         MEMBERS[0],
         RtiRequest::Payload {
-            boundary: "pipe".into(),
+            route: RtiRouteIndex::new(0),
             tag: destination,
             payload: vec![42],
         },
@@ -333,10 +335,6 @@ fn local_idle_is_reversible_without_terminal_participation() {
 /// Keeps positive-delay microstep collapse from granting a destination too early.
 #[test]
 fn positive_delay_completion_does_not_cover_later_source_microsteps() {
-    use boomerang::central_rti::{
-        compiled::{RtiReply, RtiRequest},
-        WireTag,
-    };
     let mut rti = admitted_rti();
     let destination = WireTag::finite(1_000_000, 0);
     publish(&mut rti, MEMBERS[0], 0, Some(WireTag::ZERO));
@@ -350,7 +348,7 @@ fn positive_delay_completion_does_not_cover_later_source_microsteps() {
     let replies = rti.handle(
         MEMBERS[0],
         RtiRequest::Payload {
-            boundary: "pipe".into(),
+            route: RtiRouteIndex::new(0),
             tag: destination,
             payload: vec![42],
         },
@@ -379,17 +377,13 @@ fn scheduler_failure_releases_blocked_peer() {
 /// Preserves authority when local work is discovered below an existing grant.
 #[test]
 fn revised_candidates_preserve_grant_horizons_for_payloads_and_completion() {
-    use boomerang::central_rti::{
-        compiled::{RtiReply, RtiRequest},
-        WireTag,
-    };
     let mut rti = admitted_rti();
     publish(&mut rti, MEMBERS[0], 0, Some(WireTag::finite(10, 0)));
     // An already queued grant can cover earlier work discovered inside the Federate.
     let replies = rti.handle(
         MEMBERS[0],
         RtiRequest::Payload {
-            boundary: "pipe".into(),
+            route: RtiRouteIndex::new(0),
             tag: WireTag::finite(1_000_005, 0),
             payload: vec![42],
         },
@@ -428,4 +422,139 @@ fn publish(
             next_event,
         },
     )
+}
+
+/// Preflight authorizes stable outbound identities and retains only the shared route key.
+#[test]
+fn outbound_preflight_resolves_and_authorizes_typed_routes() {
+    use boomerang::central_rti::compiled::in_memory::InMemorySender;
+    let view = CompiledDeploymentView::new(&DEPLOYMENT).unwrap();
+    assert!(RtiClientBindings::new(&view, FederateIndex::new(9), IDENTITY).is_err());
+    let source = RtiClientBindings::new(&view, MEMBERS[0], IDENTITY).unwrap();
+    let target = RtiClientBindings::new(&view, MEMBERS[1], IDENTITY).unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let sender = Arc::new(InMemorySender::new(MEMBERS[0], tx));
+    assert!(source
+        .outbound_sink(sender.clone(), BoundaryId::new("missing"))
+        .is_err());
+    assert!(target
+        .outbound_sink(sender.clone(), BoundaryId::new("pipe"))
+        .is_err());
+    source
+        .outbound_sink(sender, BoundaryId::new("pipe"))
+        .unwrap()
+        .send(boomerang::runtime::TaggedPayload {
+            tag: Tag::ZERO,
+            payload: vec![42],
+        })
+        .unwrap();
+    assert!(
+        matches!(rx.recv().unwrap(), (member, RtiRequest::Payload { route, tag: WireTag::ZERO, payload })
+        if member == MEMBERS[0] && route == RtiRouteIndex::new(0) && payload == [42])
+    );
+}
+
+/// Missing destination bindings fail before admission and tell the connection owner to abort.
+#[test]
+fn inbound_preflight_requires_complete_member_bindings() {
+    use boomerang::central_rti::compiled::in_memory::{InMemoryReceiver, InMemorySender};
+    let view = CompiledDeploymentView::new(&DEPLOYMENT).unwrap();
+    let bindings = RtiClientBindings::new(&view, MEMBERS[1], IDENTITY).unwrap();
+    let (tx, requests) = std::sync::mpsc::channel();
+    let (_replies, rx) = std::sync::mpsc::channel();
+    let error = CentralRtiClient::connect(
+        Arc::new(InMemorySender::new(MEMBERS[1], tx)),
+        InMemoryReceiver::new(rx),
+        bindings,
+        std::collections::BTreeMap::new(),
+        std::time::Duration::ZERO,
+    )
+    .err()
+    .unwrap();
+    assert!(error
+        .to_string()
+        .contains("missing inbound boundary adapter"));
+    assert!(matches!(
+        requests.try_recv().unwrap().1,
+        RtiRequest::Abort { .. }
+    ));
+    assert!(requests.try_recv().is_err());
+}
+
+/// Dense route keys are range-checked and authorized against the authenticated source binding.
+#[test]
+fn payload_rejects_unknown_and_foreign_route_keys() {
+    for (member, route, message) in [
+        (MEMBERS[0], RtiRouteIndex::new(9), "unknown RTI route key"),
+        (
+            MEMBERS[1],
+            RtiRouteIndex::new(0),
+            "payload route belongs to another source",
+        ),
+    ] {
+        let mut rti = admitted_rti();
+        let replies = rti.handle(
+            member,
+            RtiRequest::Payload {
+                route,
+                tag: WireTag::ZERO,
+                payload: vec![42],
+            },
+        );
+        assert!(replies.iter().all(|reply| matches!(&reply.reply, RtiReply::Failed { message: actual } if actual.contains(message))), "expected {message}, received {replies:?}");
+        assert_eq!(replies.len(), MEMBERS.len());
+        assert!(rti.is_finished());
+    }
+}
+
+/// Extra or foreign inbound adapters are rejected through the executor's real preflight seam.
+#[test]
+fn inbound_preflight_rejects_extra_and_foreign_bindings() {
+    use boomerang::central_rti::compiled::in_memory::{InMemoryReceiver, InMemorySender};
+    for extra in [false, true] {
+        let view = CompiledDeploymentView::new(&DEPLOYMENT).unwrap();
+        let bindings =
+            RtiClientBindings::new(&view, if extra { MEMBERS[1] } else { MEMBERS[0] }, IDENTITY)
+                .unwrap();
+        let (tx, requests) = std::sync::mpsc::channel();
+        let (_replies, rx) = std::sync::mpsc::channel();
+        let error = execute_owned_federate_with_backend(
+            MEMBERS[1],
+            FEDERATES[1],
+            &ENCLAVES[1..],
+            FederateBindings::new()
+                .bind_enclave(EnclaveIndex::new(1), sink_bindings())
+                .bind_enclave(EnclaveIndex::new(2), sink_bindings())
+                .bind_inbound_route(
+                    BoundaryId::new("pipe"),
+                    PayloadType::<u32>::new(),
+                    |bytes: &[u8]| -> Result<u32, std::array::TryFromSliceError> {
+                        Ok(u32::from_le_bytes(bytes.try_into()?))
+                    },
+                ),
+            Config::default().with_fast_forward(true),
+            |mut inbound| {
+                if extra {
+                    let adapter = inbound.values().next().unwrap().clone();
+                    inbound.insert(BoundaryId::new("extra"), adapter);
+                }
+                CentralRtiClient::connect(
+                    Arc::new(InMemorySender::new(MEMBERS[1], tx)),
+                    InMemoryReceiver::new(rx),
+                    bindings,
+                    inbound,
+                    std::time::Duration::ZERO,
+                )
+            },
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("unknown inbound boundary for member"));
+        assert!(matches!(
+            requests.try_recv().unwrap().1,
+            RtiRequest::Abort { .. }
+        ));
+        assert!(requests.try_recv().is_err());
+    }
 }

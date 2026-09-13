@@ -1,7 +1,9 @@
 //! Scripted transport behavior for bounded client lifecycle checks; never a runtime transport.
 use super::*;
-use boomerang_runtime::image::{RecoveryPolicy, RtiMemberImage, SliceRange, TinyMapView};
-use boomerang_runtime::{CoordinationRevision, FederateCoordinationBackend, FederatePublication};
+use boomerang_runtime::{
+    image::{RecoveryPolicy, RtiImage, RtiMemberImage, SliceRange, TinyMapView},
+    CoordinationRevision, FederateCoordinationBackend, FederatePublication,
+};
 use std::{
     collections::{BTreeMap, VecDeque},
     sync::{Arc, Mutex},
@@ -44,7 +46,7 @@ fn bindings() -> RtiClientBindings<'static> {
         TinyMapView::new(&[]),
     );
     RtiClientBindings {
-        image: IMAGE,
+        image: &IMAGE,
         member: FederateIndex::new(0),
         identity: CoordinationIdentity::new([1; 32]),
     }

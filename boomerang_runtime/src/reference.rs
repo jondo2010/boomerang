@@ -275,7 +275,7 @@ struct ResolvedLocalRoute<'image> {
 /// Validated owned scheduler images and paired local routes, retaining canonical keys.
 struct PreparedFederate<'image> {
     /// This Federate's subset of the deployment-wide Enclave domain.
-    images: TinySecondaryMap<EnclaveIndex, EnclaveImage<'image>>,
+    images: TinySecondaryMap<EnclaveIndex, &'image EnclaveImage<'image>>,
     /// Routes whose source and destination both belong to this subset.
     endpoints: Vec<ResolvedLocalRoute<'image>>,
 }
@@ -582,7 +582,7 @@ fn request_federate_shutdown(senders: &[crate::Sender<AsyncEvent>]) {
 
 /// Builds one coordinator from the selected immutable Federate layout and backend.
 fn build_federate_coordination<B: FederateCoordinationBackend>(
-    images: &TinySecondaryMap<EnclaveIndex, EnclaveImage<'_>>,
+    images: &TinySecondaryMap<EnclaveIndex, &EnclaveImage<'_>>,
     channels: impl IntoIterator<
         Item = (
             EnclaveIndex,
@@ -641,9 +641,9 @@ fn federate_shutdown_unblocks_a_full_mailbox_and_blocked_sender() {
 
 /// Resolves every outbound route to its unique inbound half after root validation.
 fn local_route_endpoints<'image>(
-    deployment: &CompiledDeploymentImage<'image>,
+    deployment: &'image CompiledDeploymentImage<'image>,
     selected_federate: FederateIndex,
-    selected: crate::image::FederateImage<'_>,
+    selected: &crate::image::FederateImage<'_>,
 ) -> Result<Vec<ResolvedLocalRoute<'image>>, ExecuteOwnedFederateError> {
     let mut endpoints = Vec::new();
     for (source, source_image) in deployment.enclaves.iter() {
@@ -665,7 +665,7 @@ fn local_route_endpoints<'image>(
                 .find(|(_, _image, route)| {
                     route.direction() == RouteDirection::Inbound && route.boundary() == boundary
                 })
-                .map(|(enclave, _, route)| (enclave, *route))
+                .map(|(enclave, _, route)| (enclave, route))
                 .expect("root validation paired every outbound route");
             let source_selected = selected.enclaves().contains(source);
             let destination_selected = selected.enclaves().contains(destination);
@@ -699,7 +699,7 @@ fn local_route_endpoints<'image>(
 
 /// Validates complete Enclave and route bindings before any user initializer runs.
 fn preflight_owned_federate<'image>(
-    deployment: &CompiledDeploymentImage<'image>,
+    deployment: &'image CompiledDeploymentImage<'image>,
     federate: FederateIndex,
     bindings: &FederateBindings<'_>,
 ) -> Result<PreparedFederate<'image>, ExecuteOwnedFederateError> {
@@ -711,14 +711,12 @@ fn preflight_owned_federate<'image>(
     let selected = deployment
         .federates
         .get(federate)
-        .copied()
         .ok_or(ExecuteOwnedFederateError::FederateNotFound { federate })?;
 
     let images = deployment
         .enclaves
         .iter()
         .filter(|(key, _)| selected.enclaves().contains(*key))
-        .map(|(key, image)| (key, *image))
         .collect();
     preflight_enclave_bindings(federate, &images, bindings)?;
     #[cfg(feature = "federated")]
@@ -736,7 +734,7 @@ fn preflight_owned_federate<'image>(
 /// Checks every owned payload binding without running any user initializer.
 fn preflight_enclave_bindings(
     federate: FederateIndex,
-    images: &TinySecondaryMap<EnclaveIndex, EnclaveImage<'_>>,
+    images: &TinySecondaryMap<EnclaveIndex, &EnclaveImage<'_>>,
     bindings: &FederateBindings<'_>,
 ) -> Result<(), ExecuteOwnedFederateError> {
     if images.is_empty() {
@@ -771,7 +769,7 @@ fn preflight_enclave_bindings(
 /// Checks local route witnesses against the two already validated owned port bindings.
 fn preflight_local_bindings(
     federate: FederateIndex,
-    images: &TinySecondaryMap<EnclaveIndex, EnclaveImage<'_>>,
+    images: &TinySecondaryMap<EnclaveIndex, &EnclaveImage<'_>>,
     endpoints: &[ResolvedLocalRoute<'_>],
     bindings: &FederateBindings<'_>,
 ) -> Result<(), ExecuteOwnedFederateError> {
@@ -822,7 +820,7 @@ fn preflight_local_bindings(
                 endpoint.destination_port,
             ),
         ] {
-            let image = EnclaveImageView::new(&images[enclave])
+            let image = EnclaveImageView::new(images[enclave])
                 .expect("root validation checked endpoint images");
             let slot = image.ports()[port].binding();
             let (found_id, found) = bindings
@@ -919,7 +917,7 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
         .collect::<BTreeMap<_, _>>();
     let mut storages = Vec::with_capacity(enclaves.len());
     for (enclave, owned) in enclaves {
-        let image = EnclaveImageView::new(&images[enclave])
+        let image = EnclaveImageView::new(images[enclave])
             .expect("Federate preflight validated every selected Enclave image");
         let enclave_key = runtime_enclave_key(enclave);
         let storage =
@@ -1311,7 +1309,7 @@ mod scoped_spawn_tests {
             shutdown_actions: &[],
             routes: TinyMapView::new(&[]),
             required_bindings: TinyMapView::new(&REQUIRED_BINDINGS),
-            storage_bounds: StorageBounds::new(1, 0, 1, 0, 0, 0),
+            storage_bounds: &const { StorageBounds::new(1, 0, 1, 0, 0, 0) },
         }
     }
 
@@ -1327,7 +1325,7 @@ mod scoped_spawn_tests {
         reaction_triggers: &BARRIER_TRIGGERS,
         timer_startup_actions: &BARRIER_STARTUPS,
         required_bindings: TinyMapView::new(&BARRIER_REQUIRED_BINDINGS),
-        storage_bounds: StorageBounds::new(1, 1, 1, 0, 0, 0),
+        storage_bounds: &StorageBounds::new(1, 1, 1, 0, 0, 0),
         ..state_only_image("alpha")
     };
     static FEDERATES: [FederateImage; 1] = [FederateImage::new(
@@ -1464,7 +1462,6 @@ mod scoped_spawn_tests {
                         .enclaves
                         .iter()
                         .filter(|(key, _)| OFFSET_FEDERATES[1].enclaves().contains(*key))
-                        .map(|(key, image)| (key, *image))
                         .collect(),
                     channels,
                     if keep_alive {

@@ -111,7 +111,7 @@ fn execute_pair(mismatch: bool, fail_rti: bool, fail_scheduler: bool) {
                 .unwrap();
             execute_owned_federate_with_backend(
                 MEMBERS[0],
-                FEDERATES[0],
+                &FEDERATES[0],
                 &ENCLAVES[..1],
                 FederateBindings::new()
                     .bind_enclave(EnclaveIndex::new(0), source_bindings())
@@ -142,7 +142,7 @@ fn execute_pair(mismatch: bool, fail_rti: bool, fail_scheduler: bool) {
         let sink_thread = std::thread::spawn(move || {
             execute_owned_federate_with_backend(
                 MEMBERS[1],
-                FEDERATES[1],
+                &FEDERATES[1],
                 &ENCLAVES[1..],
                 FederateBindings::new()
                     .bind_enclave(EnclaveIndex::new(1), sink_bindings())
@@ -520,7 +520,7 @@ fn inbound_preflight_rejects_extra_and_foreign_bindings() {
         let (_replies, rx) = std::sync::mpsc::channel();
         let error = execute_owned_federate_with_backend(
             MEMBERS[1],
-            FEDERATES[1],
+            &FEDERATES[1],
             &ENCLAVES[1..],
             FederateBindings::new()
                 .bind_enclave(EnclaveIndex::new(1), sink_bindings())

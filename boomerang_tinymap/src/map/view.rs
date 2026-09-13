@@ -3,10 +3,20 @@ use core::{marker::PhantomData, ops::Index};
 use crate::{IndexSpan, Key};
 
 /// An allocation-free borrowed view of a densely keyed value table.
-#[derive(Clone, Copy, Debug)]
+///
+/// Copying or cloning the view preserves its backing slice without copying or cloning values.
+#[derive(Debug)]
 pub struct TinyMapView<'a, K: Key, V> {
     data: &'a [V],
     _key: PhantomData<K>,
+}
+
+impl<K: Key, V> Copy for TinyMapView<'_, K, V> {}
+
+impl<K: Key, V> Clone for TinyMapView<'_, K, V> {
+    fn clone(&self) -> Self {
+        *self
+    }
 }
 
 impl<'a, K: Key, V> TinyMapView<'a, K, V> {
@@ -112,6 +122,17 @@ mod tests {
             ]
         );
         assert_eq!(VIEW.values().collect::<Vec<_>>(), vec![&10, &20, &30]);
+    }
+
+    #[test]
+    fn borrowed_view_copies_without_copying_or_cloning_values() {
+        let values = [core::sync::atomic::AtomicU32::new(42)];
+        let view = TinyMapView::<TestKey, _>::new(&values);
+        let copies = [view, view];
+        for copy in copies {
+            assert!(core::ptr::eq(&copy[TestKey::new(0)], &values[0]));
+        }
+        assert!(core::ptr::eq(&view[TestKey::new(0)], &values[0]));
     }
 
     #[test]

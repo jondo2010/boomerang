@@ -6,6 +6,8 @@
 mod client;
 pub mod in_memory;
 mod state;
+#[cfg(test)]
+mod tests;
 
 use crate::WireTag;
 use boomerang_runtime::image::{FederateIndex, RtiRouteIndex};

@@ -50,9 +50,9 @@ impl MemberState {
 /// requests, and sends returned deliveries in order. Transport failure must call `abort`.
 pub struct CompiledRti<'a> {
     /// Mechanical precomputed dependency and route projection.
-    image: RtiImage<'a>,
+    image: &'a RtiImage<'a>,
     /// Stable member descriptors in the same typed domain as the RTI image.
-    members: TinyMapView<'a, FederateIndex, FederateImage<'a>>,
+    members: &'a TinyMapView<'a, FederateIndex, FederateImage<'a>>,
     /// Mutable data for every existing member key; the image owns the key domain.
     states: TinySecondaryMap<FederateIndex, MemberState>,
     /// Shared immutable coordination identity.
@@ -216,11 +216,9 @@ impl<'a> CompiledRti<'a> {
                 tag,
                 payload,
             } => {
-                let route = self
-                    .image
-                    .routes()
+                let routes = self.image.routes();
+                let route = routes
                     .get(route_key)
-                    .copied()
                     .ok_or_else(|| CentralRtiError::new("unknown RTI route key"))?;
                 if route.source() != member {
                     return Err(CentralRtiError::new(

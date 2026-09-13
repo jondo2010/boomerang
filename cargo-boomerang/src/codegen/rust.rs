@@ -289,7 +289,7 @@ fn render_enclave_image(index: usize, image: &EnclaveImage<'_>) -> TokenStream {
     let routes = format_ident!("{prefix}_ROUTES");
     let required_bindings = format_ident!("{prefix}_REQUIRED_BINDINGS");
     tokens.extend(quote! {
-        static #image_name: EnclaveImage<'static> = EnclaveImage {
+        const #image_name: EnclaveImage<'static> = EnclaveImage {
             enclave_id: EnclaveId::new(#enclave_id),
             reactors: TinyMapView::new(&#reactors),
             actions: TinyMapView::new(&#actions),
@@ -314,7 +314,7 @@ fn render_enclave_image(index: usize, image: &EnclaveImage<'_>) -> TokenStream {
             shutdown_actions: &#shutdown_actions,
             routes: TinyMapView::new(&#routes),
             required_bindings: TinyMapView::new(&#required_bindings),
-            storage_bounds: #bounds,
+            storage_bounds: &#bounds,
         };
     });
     tokens
@@ -343,7 +343,7 @@ fn render_deployment(slice: &FederateSlice<'_>, include_local_deployment: bool) 
     quote! {
         static ENCLAVES: [EnclaveImage<'static>; #enclave_len] = [#(#enclave_images),*];
         static FEDERATE: FederateIndex = FederateIndex::new(#federate);
-        static FEDERATE_IMAGE: FederateImage<'static> = FederateImage::new(
+        const FEDERATE_IMAGE: FederateImage<'static> = FederateImage::new(
             FederateId::new(#id),
             TargetId::new(#target),
             RuntimeBackendId::new(#runtime),
@@ -414,9 +414,9 @@ fn collect_route_bindings(
     image: &EnclaveImage<'_>,
     aliases: &BTreeMap<String, String>,
 ) -> Result<()> {
-    for route in image.routes.values().copied() {
+    for route in image.routes.values() {
         let boundary = route.boundary().as_str().to_owned();
-        let port = image.ports[route.local_port()];
+        let port = &image.ports[route.local_port()];
         let binding = enclave
             .required_bindings()
             .iter()
@@ -910,13 +910,13 @@ fn optional_bank(value: Option<BankInfoImage>) -> TokenStream {
 }
 
 /// Renders action timing metadata.
-fn action_timing(value: ActionTiming) -> TokenStream {
+fn action_timing(value: &ActionTiming) -> TokenStream {
     match value {
         ActionTiming::Standard {
             domain,
             min_delay_nanos,
         } => {
-            let domain = timing_domain(domain);
+            let domain = timing_domain(*domain);
             quote!(ActionTiming::Standard {
                 domain: #domain,
                 min_delay_nanos: #min_delay_nanos,
@@ -934,7 +934,7 @@ fn action_timing(value: ActionTiming) -> TokenStream {
 }
 
 /// Renders static runtime storage bounds.
-fn storage_bounds(value: StorageBounds) -> TokenStream {
+fn storage_bounds(value: &StorageBounds) -> TokenStream {
     let state_slots = proc_macro2::Literal::u32_unsuffixed(value.state_slots());
     let action_slots = proc_macro2::Literal::u32_unsuffixed(value.action_slots());
     let event_capacity = proc_macro2::Literal::u32_unsuffixed(value.event_capacity());

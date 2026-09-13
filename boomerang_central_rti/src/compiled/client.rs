@@ -13,22 +13,18 @@ use std::{
 
 use tinymap::TinySecondaryMap;
 
-#[cfg(test)]
-#[path = "tests.rs"]
-mod tests;
-
 /// Immutable preflight context for one member of a validated coordination image.
 ///
 /// Artifact generation must bind `identity` to this exact image. Admission verifies agreement
 /// with the RTI before any scheduler starts; execution retains only the resolved typed bindings.
-#[derive(Clone, Copy, Debug)]
+#[derive(Debug)]
 pub struct RtiClientBindings<'a> {
     /// Validated mechanical coordination projection used only during preflight.
-    image: RtiImage<'a>,
+    pub(crate) image: &'a RtiImage<'a>,
     /// Member owning the source and destination bindings being prepared.
-    member: FederateIndex,
+    pub(crate) member: FederateIndex,
     /// Compiler-issued identity embedded alongside this image in the artifact.
-    identity: CoordinationIdentity,
+    pub(crate) identity: CoordinationIdentity,
 }
 impl<'a> RtiClientBindings<'a> {
     /// Selects an existing member from a validated central-RTI deployment without retaining Enclaves.
@@ -111,6 +107,7 @@ pub struct CentralRtiClient {
     /// First observed terminal backend failure.
     failure: Option<String>,
 }
+
 impl CentralRtiClient {
     /// Admits the artifact before any compiled scheduler starts.
     pub fn connect<'image>(
@@ -198,6 +195,7 @@ impl CentralRtiClient {
         }
     }
 }
+
 impl FederateCoordinationBackend for CentralRtiClient {
     fn publish(
         &mut self,

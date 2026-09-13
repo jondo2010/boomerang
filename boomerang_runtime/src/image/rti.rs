@@ -91,7 +91,7 @@ impl RtiDependencyImage {
 }
 
 /// Precomputed coordination ranges owned by one dense Federate entry.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RtiMemberImage {
     /// Explicit recovery policy selected for this Federate.
     pub(super) recovery: RecoveryPolicy,
@@ -108,7 +108,7 @@ pub struct RtiMemberImage {
 /// [`RtiRouteIndex`] selects this deployment-wide record. Every route has its own stable boundary
 /// identity and route-specific settings. Its [`FlowIndex`] may be shared with other sequential or
 /// parallel routes belonging to the same end-to-end application flow.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RtiRouteImage<'a> {
     /// Stable identity of this concrete boundary hop.
     pub(super) boundary: BoundaryId<'a>,
@@ -180,19 +180,19 @@ impl<'a> RtiRouteImage<'a> {
 
     /// Returns the dense source Federate.
     #[must_use]
-    pub const fn source(self) -> FederateIndex {
+    pub const fn source(&self) -> FederateIndex {
         self.source
     }
 
     /// Returns the dense target Federate.
     #[must_use]
-    pub const fn target(self) -> FederateIndex {
+    pub const fn target(&self) -> FederateIndex {
         self.target
     }
 
     /// Returns the route delay in nanoseconds.
     #[must_use]
-    pub const fn delay_nanos(self) -> u64 {
+    pub const fn delay_nanos(&self) -> u64 {
         self.delay_nanos
     }
 }
@@ -221,7 +221,7 @@ impl RtiMemberImage {
 /// the surrounding compiled deployment. The flattened ranges are produced directly
 /// from the already analyzed federation; constructing this image must never rerun
 /// reachability, SCC, shortest-path, or equivalent graph analysis.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct RtiImage<'a> {
     /// Per-Federate ranges in canonical dense-key order.
     pub(super) members: TinyMapView<'a, FederateIndex, RtiMemberImage>,
@@ -273,8 +273,8 @@ macro_rules! route_identity_accessor {
     ($name:ident, $doc:literal, $table:ident, $field:ident) => {
         #[doc = $doc]
         #[must_use]
-        pub fn $name(self, route: RtiRouteIndex) -> &'a str {
-            let route = self.routes[route];
+        pub fn $name(&self, route: RtiRouteIndex) -> &'a str {
+            let route = &self.routes[route];
             self.$table
                 .get(route.$field)
                 .copied()
@@ -287,7 +287,7 @@ macro_rules! member_slice_accessor {
     ($name:ident, $doc:literal, $field:ident, $values:ident, $item:ty) => {
         #[doc = $doc]
         #[must_use]
-        pub fn $name(self, member: FederateIndex) -> &'a [$item] {
+        pub fn $name(&self, member: FederateIndex) -> &'a [$item] {
             self.members[member]
                 .$field
                 .get(self.$values)
@@ -326,8 +326,8 @@ impl<'a> RtiImage<'a> {
     ///
     /// Multiple returned routes may belong to the same end-to-end flow.
     #[must_use]
-    pub const fn routes(self) -> TinyMapView<'a, RtiRouteIndex, RtiRouteImage<'a>> {
-        self.routes
+    pub const fn routes(&self) -> &TinyMapView<'a, RtiRouteIndex, RtiRouteImage<'a>> {
+        &self.routes
     }
 
     /// Returns the number of distinct end-to-end flows referenced by all routes.
@@ -335,14 +335,14 @@ impl<'a> RtiImage<'a> {
     /// This may be smaller than [`Self::routes`]'s length because several routes may share a
     /// flow identity.
     #[must_use]
-    pub const fn flow_count(self) -> usize {
+    pub const fn flow_count(&self) -> usize {
         self.flows.len()
     }
 
     /// Resolves the stable identity of one concrete boundary hop.
     #[must_use]
-    pub fn route_boundary(self, route: RtiRouteIndex) -> BoundaryId<'a> {
-        let route = self.routes[route];
+    pub fn route_boundary(&self, route: RtiRouteIndex) -> BoundaryId<'a> {
+        let route = &self.routes[route];
         route.boundary
     }
 
@@ -350,8 +350,8 @@ impl<'a> RtiImage<'a> {
     ///
     /// Other routes may resolve to the same identity.
     #[must_use]
-    pub fn route_flow(self, route: RtiRouteIndex) -> &'a str {
-        let route = self.routes[route];
+    pub fn route_flow(&self, route: RtiRouteIndex) -> &'a str {
+        let route = &self.routes[route];
         self.flows
             .get(route.flow)
             .copied()
@@ -360,8 +360,8 @@ impl<'a> RtiImage<'a> {
 
     /// Resolves the route's optional physical input identity.
     #[must_use]
-    pub fn route_physical_input(self, route: RtiRouteIndex) -> Option<&'a str> {
-        let route = self.routes[route];
+    pub fn route_physical_input(&self, route: RtiRouteIndex) -> Option<&'a str> {
+        let route = &self.routes[route];
         route.physical_input.map(|index| {
             self.physical_boundaries
                 .get(index)
@@ -372,8 +372,8 @@ impl<'a> RtiImage<'a> {
 
     /// Resolves the route's optional physical output identity.
     #[must_use]
-    pub fn route_physical_output(self, route: RtiRouteIndex) -> Option<&'a str> {
-        let route = self.routes[route];
+    pub fn route_physical_output(&self, route: RtiRouteIndex) -> Option<&'a str> {
+        let route = &self.routes[route];
         route.physical_output.map(|index| {
             self.physical_boundaries
                 .get(index)
@@ -384,37 +384,37 @@ impl<'a> RtiImage<'a> {
 
     /// Returns one Federate's explicit recovery behavior.
     #[must_use]
-    pub fn member_recovery_policy(self, member: FederateIndex) -> RecoveryPolicy {
+    pub fn member_recovery_policy(&self, member: FederateIndex) -> RecoveryPolicy {
         self.members[member].recovery
     }
 
     /// Returns one route's boundary-failure behavior.
     #[must_use]
-    pub fn route_failure_policy(self, route: RtiRouteIndex) -> BoundaryFailurePolicy {
+    pub fn route_failure_policy(&self, route: RtiRouteIndex) -> BoundaryFailurePolicy {
         self.routes[route].failure_policy
     }
 
     /// Returns one route's transport contract.
     #[must_use]
-    pub fn route_transport_policy(self, route: RtiRouteIndex) -> TransportPolicy {
+    pub fn route_transport_policy(&self, route: RtiRouteIndex) -> TransportPolicy {
         self.routes[route].transport_policy
     }
 
     /// Returns one route's codec contract.
     #[must_use]
-    pub fn route_codec_policy(self, route: RtiRouteIndex) -> CodecPolicy {
+    pub fn route_codec_policy(&self, route: RtiRouteIndex) -> CodecPolicy {
         self.routes[route].codec_policy
     }
 
     /// Returns one route's physical-time contract.
     #[must_use]
-    pub fn route_timing_policy(self, route: RtiRouteIndex) -> TimingPolicy {
+    pub fn route_timing_policy(&self, route: RtiRouteIndex) -> TimingPolicy {
         self.routes[route].timing_policy
     }
 
     /// Returns one route's communication security profile.
     #[must_use]
-    pub fn route_security_policy(self, route: RtiRouteIndex) -> SecurityPolicy {
+    pub fn route_security_policy(&self, route: RtiRouteIndex) -> SecurityPolicy {
         self.routes[route].security_policy
     }
     route_identity_accessor!(

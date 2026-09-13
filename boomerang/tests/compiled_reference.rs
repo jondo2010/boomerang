@@ -122,7 +122,7 @@ static REACTORS: [ReactorImage; 1] = [ReactorImage::new(
     None,
     None,
 )];
-static ACTIONS: [ActionImage; 1] = [ActionImage::new(
+const ACTIONS: [ActionImage; 1] = [ActionImage::new(
     ScopeIndex::new(0),
     ActionSlotIndex::new(0),
     ActionTiming::Timer { period_nanos: None },
@@ -130,7 +130,10 @@ static ACTIONS: [ActionImage; 1] = [ActionImage::new(
     None,
 )];
 static COALESCED_ACTIONS: [ActionImage; 2] = [
-    ACTIONS[0],
+    {
+        let [action] = ACTIONS;
+        action
+    },
     ActionImage::new(
         ScopeIndex::new(0),
         ActionSlotIndex::new(1),
@@ -440,7 +443,7 @@ static MODAL_IMAGE: EnclaveImage<'static> = EnclaveImage {
     scope_startup_reactions: &MODAL_SCOPE_STARTUPS,
     timer_startup_actions: &MODAL_TIMER_STARTUPS,
     required_bindings: TinyMapView::new(&MODAL_REQUIRED_BINDINGS),
-    storage_bounds: StorageBounds::new(1, 1, 2, 0, 0, 0),
+    storage_bounds: &StorageBounds::new(1, 1, 2, 0, 0, 0),
     ..IMAGE
 };
 
@@ -500,7 +503,7 @@ static PERIODIC_MODAL_IMAGE: EnclaveImage<'static> = EnclaveImage {
     scope_timer_startups: &PERIODIC_MODAL_STARTUPS,
     timer_startup_actions: &PERIODIC_MODAL_STARTUPS,
     required_bindings: TinyMapView::new(&PERIODIC_MODAL_BINDINGS),
-    storage_bounds: StorageBounds::new(1, 1, 1, 0, 0, 0),
+    storage_bounds: &StorageBounds::new(1, 1, 1, 0, 0, 0),
     ..IMAGE
 };
 
@@ -641,7 +644,7 @@ static LATER_OVERFLOW_PERIOD_IMAGE: EnclaveImage<'static> = EnclaveImage {
     reaction_actions: &[ActionIndex::new(0), ActionIndex::new(1)],
     scope_logical_actions: &COTIMED_LOGICAL_ACTIONS,
     timer_startup_actions: &[TimerStartupImage::new(ActionIndex::new(0), 0)],
-    storage_bounds: StorageBounds::new(1, 2, 3, 0, 0, 0),
+    storage_bounds: &StorageBounds::new(1, 2, 3, 0, 0, 0),
     ..IMAGE
 };
 
@@ -701,7 +704,7 @@ static COTIMED_IMAGE: EnclaveImage<'static> = EnclaveImage {
     reaction_actions: &[ActionIndex::new(0), ActionIndex::new(1)],
     scope_logical_actions: &COTIMED_LOGICAL_ACTIONS,
     timer_startup_actions: &COTIMED_STARTUPS,
-    storage_bounds: StorageBounds::new(1, 2, 4, 0, 0, 0),
+    storage_bounds: &StorageBounds::new(1, 2, 4, 0, 0, 0),
     ..IMAGE
 };
 
@@ -730,14 +733,14 @@ static IMAGE: EnclaveImage<'static> = EnclaveImage {
     shutdown_actions: &[],
     routes: TinyMapView::new(&ROUTES),
     required_bindings: TinyMapView::new(&REQUIRED_BINDINGS),
-    storage_bounds: StorageBounds::new(1, 1, 1, 0, 0, 0),
+    storage_bounds: &StorageBounds::new(1, 1, 1, 0, 0, 0),
 };
 
 static COALESCED_IMAGE: EnclaveImage<'static> = EnclaveImage {
     actions: TinyMapView::new(&COALESCED_ACTIONS),
     reaction_triggers: &COALESCED_REACTION_TRIGGERS,
     startup_actions: &COALESCED_STARTUP_ACTIONS,
-    storage_bounds: StorageBounds::new(1, 2, 1, 0, 0, 0),
+    storage_bounds: &StorageBounds::new(1, 2, 1, 0, 0, 0),
     ..IMAGE
 };
 
@@ -752,12 +755,12 @@ static HORIZON_SHUTDOWN_REACTIONS: [LifecycleReactionImage; 1] = [LifecycleReact
     LevelReactionImage::new(0, ReactionIndex::new(0)),
     ActionIndex::new(0),
 )];
-static HORIZON_WORK_IMAGE: EnclaveImage<'static> = EnclaveImage {
+const HORIZON_WORK_IMAGE: EnclaveImage<'static> = EnclaveImage {
     shutdown_reactions: &HORIZON_SHUTDOWN_REACTIONS,
     ..IMAGE
 };
 
-static HORIZON_IDLE_IMAGE: EnclaveImage<'static> = EnclaveImage {
+const HORIZON_IDLE_IMAGE: EnclaveImage<'static> = EnclaveImage {
     enclave_id: EnclaveId::new("idle"),
     scope_timer_startups: &[],
     timer_startup_actions: &[],
@@ -766,7 +769,7 @@ static HORIZON_IDLE_IMAGE: EnclaveImage<'static> = EnclaveImage {
 };
 
 static HORIZON_ENCLAVES: [EnclaveImage<'static>; 2] = [HORIZON_WORK_IMAGE, HORIZON_IDLE_IMAGE];
-static QUIESCENT_HORIZON_IMAGE: EnclaveImage<'static> = EnclaveImage {
+const QUIESCENT_HORIZON_IMAGE: EnclaveImage<'static> = EnclaveImage {
     scope_timer_startups: &[],
     timer_startup_actions: &[],
     ..HORIZON_WORK_IMAGE
@@ -776,7 +779,7 @@ static QUIESCENT_HORIZON_ENCLAVES: [EnclaveImage<'static>; 2] =
 static HORIZON_FEDERATES: [FederateImage; 1] =
     [fixture_federate("host", "target", "runtime", s!(0, 2))];
 static HORIZON_FEDERATE_MEMBERS: [FederateIndex; 1] = [FederateIndex::new(0)];
-static HORIZON_DEPLOYMENT: CompiledDeploymentImage<'static> = CompiledDeploymentImage {
+const HORIZON_DEPLOYMENT: CompiledDeploymentImage<'static> = CompiledDeploymentImage {
     federation: GlobalFederationImage::new(&HORIZON_FEDERATE_MEMBERS, &[]),
     federates: TinyMapView::new(&HORIZON_FEDERATES),
     enclaves: TinyMapView::new(&HORIZON_ENCLAVES),
@@ -1072,7 +1075,7 @@ static ROUTED_SOURCE_BINDINGS: [RequiredBindingImage; 3] = [
     fixture_binding("b", BindingKind::Reaction),
     fixture_binding("c", BindingKind::Port),
 ];
-static ROUTED_SOURCE_IMAGE: EnclaveImage<'static> = EnclaveImage {
+const ROUTED_SOURCE_IMAGE: EnclaveImage<'static> = EnclaveImage {
     enclave_id: EnclaveId::new("alpha"),
     reactors: TinyMapView::new(&ROUTED_SOURCE_REACTORS),
     actions: TinyMapView::new(&ROUTED_SOURCE_ACTIONS),
@@ -1097,10 +1100,10 @@ static ROUTED_SOURCE_IMAGE: EnclaveImage<'static> = EnclaveImage {
     shutdown_actions: &[],
     routes: TinyMapView::new(&ROUTED_SOURCE_ROUTES),
     required_bindings: TinyMapView::new(&ROUTED_SOURCE_BINDINGS),
-    storage_bounds: StorageBounds::new(1, 1, 8, 0, 0, 0),
+    storage_bounds: &StorageBounds::new(1, 1, 8, 0, 0, 0),
 };
 
-static ROUTED_SINK_REACTORS: [ReactorImage; 1] = ROUTED_SOURCE_REACTORS;
+static ROUTED_SINK_REACTORS: &[ReactorImage; 1] = &ROUTED_SOURCE_REACTORS;
 static ROUTED_SINK_PORTS: [PortImage; 1] = [PortImage::new(
     ScopeIndex::new(0),
     r!(0, 1),
@@ -1132,9 +1135,9 @@ static ROUTED_SINK_BINDINGS: [RequiredBindingImage; 3] = [
     fixture_binding("b", BindingKind::Reaction),
     fixture_binding("c", BindingKind::Port),
 ];
-static ROUTED_SINK_IMAGE: EnclaveImage<'static> = EnclaveImage {
+const ROUTED_SINK_IMAGE: EnclaveImage<'static> = EnclaveImage {
     enclave_id: EnclaveId::new("beta"),
-    reactors: TinyMapView::new(&ROUTED_SINK_REACTORS),
+    reactors: TinyMapView::new(ROUTED_SINK_REACTORS),
     actions: TinyMapView::new(&[]),
     ports: TinyMapView::new(&ROUTED_SINK_PORTS),
     reactions: TinyMapView::new(&ROUTED_SINK_REACTIONS),
@@ -1157,14 +1160,14 @@ static ROUTED_SINK_IMAGE: EnclaveImage<'static> = EnclaveImage {
     shutdown_actions: &[],
     routes: TinyMapView::new(&ROUTED_SINK_ROUTES),
     required_bindings: TinyMapView::new(&ROUTED_SINK_BINDINGS),
-    storage_bounds: StorageBounds::new(1, 0, 8, 0, 0, 0),
+    storage_bounds: &StorageBounds::new(1, 0, 8, 0, 0, 0),
 };
 
 static ROUTED_FEDERATES: [FederateImage; 1] =
     [fixture_federate("host", "target", "runtime", s!(0, 2))];
 static ROUTED_ENCLAVES: [EnclaveImage<'static>; 2] = [ROUTED_SOURCE_IMAGE, ROUTED_SINK_IMAGE];
 static ROUTED_FEDERATE_MEMBERS: [FederateIndex; 1] = [FederateIndex::new(0)];
-static ROUTED_DEPLOYMENT: CompiledDeploymentImage<'static> = CompiledDeploymentImage {
+const ROUTED_DEPLOYMENT: CompiledDeploymentImage<'static> = CompiledDeploymentImage {
     federation: GlobalFederationImage::new(&ROUTED_FEDERATE_MEMBERS, &[]),
     federates: TinyMapView::new(&ROUTED_FEDERATES),
     enclaves: TinyMapView::new(&ROUTED_ENCLAVES),
@@ -1304,7 +1307,7 @@ static MULTI_SINK_BINDINGS: [RequiredBindingImage; 4] = [
     fixture_binding("c", BindingKind::Port),
     fixture_binding("d", BindingKind::Port),
 ];
-static MULTI_SINK_IMAGE: EnclaveImage<'static> = EnclaveImage {
+const MULTI_SINK_IMAGE: EnclaveImage<'static> = EnclaveImage {
     enclave_id: EnclaveId::new("sink"),
     ports: TinyMapView::new(&MULTI_SINK_PORTS),
     reactions: TinyMapView::new(&MULTI_SINK_REACTIONS),
@@ -1864,7 +1867,7 @@ fn owned_federate_preflight_rejects_before_initializers() {
         1_000_000,
     )];
     let rti_members =
-        [RtiMemberImage::new(RecoveryPolicy::FailStop, r!(0, 0), r!(0, 0), r!(0, 0)); 2];
+        [const { RtiMemberImage::new(RecoveryPolicy::FailStop, r!(0, 0), r!(0, 0), r!(0, 0)) }; 2];
     let rti_routes = [RtiRouteImage::new(
         BoundaryId::new("pipe"),
         FlowIndex::new(0),
@@ -1939,7 +1942,7 @@ fn owned_federate_rejects_enclave_without_root_reactor() {
         shutdown_actions: &[],
         routes: TinyMapView::new(&[]),
         required_bindings: TinyMapView::new(&[]),
-        storage_bounds: StorageBounds::new(0, 0, 0, 0, 0, 0),
+        storage_bounds: &StorageBounds::new(0, 0, 0, 0, 0, 0),
     }];
     let rootless_federates = [fixture_federate("host", "target", "runtime", s!(0, 1))];
     let members = [FederateIndex::new(0)];
@@ -2165,7 +2168,7 @@ fn owned_federate_retains_route_failure_before_competing_scheduler_panic() {
     let destination = EnclaveImage {
         enclave_id: EnclaveId::new("delta"),
         routes: TinyMapView::new(&inbound),
-        storage_bounds: StorageBounds::new(1, 1, 0, 0, 0, 0),
+        storage_bounds: &StorageBounds::new(1, 1, 0, 0, 0, 0),
         ..ROUTED_SOURCE_IMAGE
     };
     let enclaves = [source, destination];

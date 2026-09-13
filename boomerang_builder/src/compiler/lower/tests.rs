@@ -1040,7 +1040,8 @@ fn central_rti_projection_preserves_route_identity_and_delay() {
     .unwrap();
     with_central_rti(&compiled, |rti| {
         let route_index = RtiRouteIndex::new(0);
-        let route = rti.routes()[route_index];
+        let routes = rti.routes();
+        let route = &routes[route_index];
         assert_eq!(
             rti.route_boundary(route_index).as_str(),
             "controller-to-sensor"
@@ -1421,12 +1422,12 @@ fn modes_actions_lifecycle_and_scopes_are_fully_lowered() {
             );
             assert_eq!(
                 enclave.actions()[ActionIndex::new(0)].timing(),
-                ActionTiming::Standard {
+                &ActionTiming::Standard {
                     domain: TimingDomain::Logical,
                     min_delay_nanos: 3,
                 }
             );
-            let standard_action = enclave.actions()[ActionIndex::new(0)];
+            let standard_action = &enclave.actions()[ActionIndex::new(0)];
             assert_eq!(
                 enclave.required_bindings()[standard_action.binding().unwrap()].kind(),
                 BindingKind::Action
@@ -1439,7 +1440,7 @@ fn modes_actions_lifecycle_and_scopes_are_fully_lowered() {
             );
             assert_eq!(
                 enclave.actions()[ActionIndex::new(3)].timing(),
-                ActionTiming::Timer {
+                &ActionTiming::Timer {
                     period_nanos: Some(7)
                 }
             );

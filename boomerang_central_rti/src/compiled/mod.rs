@@ -1,9 +1,10 @@
 //! Compiled central-RTI execution over ordered transport interfaces.
 //!
-//! This module contains no in-memory transport. Dense keys are server-local bindings;
-//! transports identify members by their stable compiled identity before dispatch.
+//! Dense keys are server-local bindings; transports identify members by their stable compiled
+//! identity before dispatch. The in-memory adapters serve testing/reference execution.
 //! Image dependencies are authoritative and are never recomputed from a topology.
 mod client;
+pub mod in_memory;
 mod state;
 #[cfg(test)]
 mod tests;

@@ -1,37 +1,13 @@
-//! Test-only channel wiring. This is not the intended production transport or hot path.
+//! Fixture-specific RTI worker and fault injection over the reference in-memory transport.
 use super::*;
 use boomerang::central_rti::compiled::{
-    CentralRtiError, RtiReply, RtiReplySource, RtiRequest, RtiRequestSink,
+    in_memory::{InMemoryReceiver, InMemorySender},
+    RtiRequest, RtiRequestSink,
 };
 use std::{sync::mpsc, time::Duration};
 
-/// Test sender carrying a server-local authenticated member binding.
-struct TestSender {
-    /// Server-local binding resolved once from the stable member identity.
-    member: FederateIndex,
-    /// Test-only request channel shared with the RTI worker.
-    tx: mpsc::Sender<(FederateIndex, RtiRequest)>,
-}
-impl RtiRequestSink for TestSender {
-    fn send(&self, request: RtiRequest) -> Result<(), CentralRtiError> {
-        self.tx
-            .send((self.member, request))
-            .map_err(|error| CentralRtiError::new(error.to_string()))
-    }
-}
-/// Test receiver for one member's ordered replies.
-pub(super) struct TestReceiver(mpsc::Receiver<RtiReply>);
-impl RtiReplySource for TestReceiver {
-    fn receive(&mut self, timeout: Duration) -> Result<Option<RtiReply>, CentralRtiError> {
-        match self.0.recv_timeout(timeout) {
-            Ok(reply) => Ok(Some(reply)),
-            Err(mpsc::RecvTimeoutError::Timeout) => Ok(None),
-            Err(error) => Err(CentralRtiError::new(error.to_string())),
-        }
-    }
-}
-/// One test-only client connection; no channel type appears in production APIs.
-type Connection = (Arc<dyn RtiRequestSink>, TestReceiver);
+/// One reference in-memory client connection.
+type Connection = (Arc<dyn RtiRequestSink>, InMemoryReceiver);
 /// Drives the production RTI transition engine, forwarding every reply in order.
 pub(super) fn start(
     mut rti: CompiledRti<'static>,
@@ -63,15 +39,12 @@ pub(super) fn start(
     });
     (
         (
-            Arc::new(TestSender {
-                member: source,
-                tx: tx.clone(),
-            }),
-            TestReceiver(source_rx),
+            Arc::new(InMemorySender::new(source, tx.clone())),
+            InMemoryReceiver::new(source_rx),
         ),
         (
-            Arc::new(TestSender { member: sink, tx }),
-            TestReceiver(sink_rx),
+            Arc::new(InMemorySender::new(sink, tx)),
+            InMemoryReceiver::new(sink_rx),
         ),
         server,
     )

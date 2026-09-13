@@ -26,9 +26,9 @@ members explicitly participate in terminal quiescence. Admission and stop waits
 are bounded; local failure aborts the session. Graceful stop currently requires
 global quiescence; an early local stop fails the session.
 
-The compiled path contains no in-memory transport. Its channel wiring is isolated
-in `boomerang/tests/compiled_reference/central_rti_transport.rs`, solely for tests,
-and is explicitly outside the intended architecture hot path. The production I/O
+`compiled::in_memory` provides reusable channel adapters for testing and reference
+execution, explicitly outside the intended production hot path. Fixture-specific
+worker setup and fault injection remain in the integration tests. The production I/O
 owner must enforce ordered delivery, report transport loss through `abort`, and
 own connection deadlines. Generated RTI/Federate artifacts, production transport,
 and child-process supervision belong to the final #131 slice. Existing legacy

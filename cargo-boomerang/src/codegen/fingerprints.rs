@@ -1,4 +1,15 @@
-//! Host-computed identity layers; payload schemas are owned by declared contract versions.
+//! Compiler-side inputs for channel compatibility and local image identity.
+//!
+//! Existing descriptor fingerprints establish descriptor/payload ABI compatibility;
+//! bundle fingerprints identify reproducible deployment inputs; artifact digests identify
+//! exact executable bytes. None can admit heterogeneous Federates: changing one private
+//! image or binary must not invalidate otherwise compatible channel peers.
+//!
+//! This module reuses BLAKE3 with separate versioned domains for the dense mapping,
+//! shared coordination semantics, and each local scheduler image. It reuses existing
+//! descriptor fingerprints and the canonical image renderer as inputs. Only shared
+//! coordination and mapping digests participate in channel admission. Declared contract
+//! IDs and versions own payload schemas; local image and artifact claims may differ.
 
 use super::{binding_implementation, rust};
 use anyhow::{Context, Result};

@@ -18,26 +18,31 @@ below retains its Phase 5 framing until that adapter lands. The canonical codec 
 queues, reliability, grant decisions, or executor. It borrows caller-owned buffers and immutable
 member/route tables, preserving their actual typed key domains.
 
-A complete frame begins with a big-endian `u32` body length, then a `u8` message kind, a zero
-flags byte, and zero-valued big-endian `u64` epoch and incarnation fields. Nonzero reserved
-fields fail closed. A tag is 25 bytes: `u8` kind (0 Never, 1 finite, 2 Forever), signed big-endian
-`i128` nanoseconds, and big-endian `u64` microstep. Sentinel padding must be zero. Revisions are
-`u64`, route keys and payload lengths are `u32`, and UTF-8 text lengths are `u16`, all big-endian.
+A complete frame starts with a big-endian `u32` body length, followed by a Serde-derived
+Postcard record: zero flags, then record discriminant 0 (handshake) or 1 (traffic).
+The handshake fields are protocol `u16`, codec `u16`, coordination `[u8;32]`, epoch `u64`,
+incarnation `u64`, mapping `[u8;32]`, and borrowed member text, in that order. Traffic contains
+zero epoch/incarnation values followed by the derived message enum. Nonzero reserved fields fail closed.
+Postcard uses minimal unsigned varints, ZigZag signed integers, and varint string/byte lengths.
+Tags encode Never=0, finite=1 plus `i128` nanoseconds and `u64` microstep, or Forever=2; no padding.
 
-| Kind | Body after the common header |
+| Traffic kind | Fields after the discriminant |
 | --- | --- |
-| 0 handshake | Protocol `u16`, codec `u16`, coordination digest `[u8;32]`, mapping digest `[u8;32]`, member text. |
-| 1 publish / NET | Revision, optional-tag flag, and tag when present. |
-| 2 complete / LTC | Tag. |
-| 3 payload to RTI; 9 payload to Federate | Typed route reference, tag, payload length and bytes. |
-| 4 confirm idle; 10 idle | Revision. |
-| 5 stop; 7 started; 11 stopped | Empty. |
-| 6 abort; 12 failed | Diagnostic text. |
-| 8 grant / TAG | Revision and tag. |
-| 13 PTAG; 14 port ABS | Reserved; rejected without implementing later semantics. |
+| 0 publish / NET | Revision `u64`, optional tag. |
+| 1 complete / LTC | Tag. |
+| 2 payload to RTI; 8 payload to Federate | Route `u32`, tag, borrowed payload bytes. |
+| 3 confirm idle; 9 idle | Revision `u64`. |
+| 4 stop; 6 started; 10 stopped | Empty. |
+| 5 abort; 11 failed | Borrowed diagnostic text. |
+| 7 grant / TAG | Revision `u64` and tag. |
+| 12 PTAG; 13 port ABS | Reserved; rejected. |
+
+Participants always upgrade atomically as a closed world. Protocol, codec, and fingerprint
+matching are exact; there is no backward-compatible decoder or version negotiation. Canonical
+re-serialization is compared directly against input bytes using a Postcard sink; it allocates no buffer.
 
 The baseline profile permits at most 65,535 encoded payload bytes, 1,024 diagnostic bytes,
-255 member-name bytes, and 65,590 total frame bytes. These are encoded-message limits, not
+255 member-name bytes, and 65,582 total frame bytes. These are encoded-message limits, not
 scheduler aggregate storage bounds. Both endpoints match the same compiled channel member, coordination,
 protocol, codec, and mapping before interpreting route references. The RTI echoes the channel's
 Federate identity; it does not acquire an invented Federate key. The hosted adapter enforces

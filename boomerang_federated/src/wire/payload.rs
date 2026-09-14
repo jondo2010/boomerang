@@ -60,23 +60,21 @@ pub struct PostcardCodec<T, const MAX: usize>(
 );
 
 /// Payload failure preserving the original Postcard codec error.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum PayloadError {
     /// Input or configured maximum exceeds the declared protocol limit.
+    #[error("payload exceeds its declared encoded size limit")]
     Oversize,
     /// Caller storage cannot hold the bounded encoded representation.
+    #[error("caller storage is too small for the payload")]
     Storage,
     /// Trailing or alternate encodings are forbidden.
+    #[error("payload encoding is not canonical")]
     NonCanonical,
     /// Original codec error, retained for the hosted adapter to normalize.
-    Codec(postcard::Error),
+    #[error("Postcard codec failed: {0}")]
+    Codec(#[from] postcard::Error),
 }
-impl core::fmt::Display for PayloadError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "payload codec: {self:?}")
-    }
-}
-impl core::error::Error for PayloadError {}
 impl<'de, T: PortableValue<'de>, const MAX: usize> PayloadCodec<'de> for PostcardCodec<T, MAX> {
     type Value = T;
     type Error = PayloadError;
@@ -117,6 +115,7 @@ impl<'de, T: PortableValue<'de>, const MAX: usize> PayloadCodec<'de> for Postcar
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::error::Error as _;
     #[test]
     fn scalar_and_borrowed_payloads_are_canonical_without_owned_decode_storage() {
         let mut output = [0; 8];
@@ -164,9 +163,11 @@ mod tests {
             PostcardCodec::<u32, { MAX_PAYLOAD_BYTES + 1 }>::encode(&0, &mut []),
             Err(PayloadError::Oversize)
         );
-        assert!(matches!(
-            PostcardCodec::<bool, 1>::decode(&[2], &mut [0]),
-            Err(PayloadError::Codec(postcard::Error::DeserializeBadBool))
-        ));
+        let error = PostcardCodec::<bool, 1>::decode(&[2], &mut [0]).unwrap_err();
+        assert_eq!(
+            error,
+            PayloadError::Codec(postcard::Error::DeserializeBadBool)
+        );
+        assert!(error.source().unwrap().is::<postcard::Error>());
     }
 }

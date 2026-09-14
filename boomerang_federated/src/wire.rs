@@ -1,24 +1,31 @@
-//! Bounded canonical Phase 6 wire frames; synchronous and independent of transport I/O.
+//! Bounded canonical coordination frames, independent of transport I/O.
 //!
-//! Every frame starts with a big-endian `u32` body length, then a one-byte kind,
-//! one reserved flags byte, and zero-valued `u64` epoch and incarnation fields.
-//! Tags occupy 25 bytes: kind (never=0, finite=1, forever=2), signed big-endian
-//! `i128` nanoseconds, and big-endian `u64` microstep; sentinel padding is zero.
-//! Dense routes use `u32`, revisions `u64`, payload lengths `u32`, text lengths
-//! `u16`, all big-endian. Kind 0 is preflight; kinds 1..=12 are baseline messages;
-//! 13 (PTAG) and 14 (port ABS) are reserved and rejected. No extension is skipped.
+//! A big-endian `u32` body length precedes a Serde-derived Postcard record. The
+//! body contains a zero flags byte and either a handshake or ordinary traffic.
+//! Record discriminants are handshake=0, traffic=1; traffic kinds are 0..=11 in
+//! [`Message`](crate::wire::Message) declaration order, with 12 (PTAG) and 13 (port ABS) reserved/rejected.
+//! Both records reserve `u64` epoch/incarnation fields, which must be zero.
 //!
-//! Both channel endpoints validate the same compiled member profile: the coordinator
-//! echoes that member's handshake identity without becoming a Federate roster member.
-//! The #134 transport adapter must enforce upstream/downstream message direction
-//! before dispatch; this codec validates canonical bytes and channel membership.
+//! Postcard uses minimal unsigned varints, ZigZag signed integers, little-endian
+//! IEEE floats, and varint sequence lengths. Tags use their enum discriminant:
+//! never=0, finite=1 followed by `i128` nanoseconds and `u64` microstep, forever=2.
+//! Decoding borrows caller bytes, checks bounds, and compares a canonical
+//! re-serialization against those bytes without allocating a second frame.
+//!
+//! This is a closed-world format: every participant upgrades atomically and must
+//! match the exact protocol, codec, and compiled identities. There is no version
+//! negotiation, backward-compatible decoder, or unknown-field extension path.
+//! Both endpoints validate the compiled channel member; the coordinator echoes
+//! that member's identity without becoming a roster member. The transport adapter
+//! enforces upstream/downstream message direction before dispatch.
 use crate::WireTag;
+use serde::{Deserialize, Serialize};
 use tinymap::{Key, TinyMapView};
 
 /// Exact supported coordination protocol revision.
 pub const PROTOCOL_VERSION: u16 = 1;
 /// Exact supported canonical framing revision.
-pub const CODEC_VERSION: u16 = 1;
+pub const CODEC_VERSION: u16 = 2;
 /// Largest application payload, independent of input or storage sizes.
 pub const MAX_PAYLOAD_BYTES: usize = 65_535;
 /// Largest UTF-8 diagnostic.
@@ -26,13 +33,15 @@ pub const MAX_DIAGNOSTIC_BYTES: usize = 1024;
 /// Largest UTF-8 stable preflight member identity.
 pub const MAX_MEMBER_BYTES: usize = 255;
 /// Largest complete frame, including its four-byte length prefix.
-pub const MAX_FRAME_BYTES: usize = 4 + 18 + 4 + 25 + 4 + MAX_PAYLOAD_BYTES;
+// Prefix + flags + record + zero epoch/incarnation + kind + u32 route +
+// finite tag (enum + i128 + u64 varints) + bounded payload length + payload.
+pub const MAX_FRAME_BYTES: usize = 4 + 1 + 1 + 2 + 1 + 5 + 30 + 3 + MAX_PAYLOAD_BYTES;
 
 /// Defines distinct digest claims with an identical fixed byte representation.
 macro_rules! fingerprint {
     ($name:ident, $doc:literal) => {
         #[doc = $doc]
-        #[derive(Debug, PartialEq, Eq)]
+        #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
         pub struct $name(#[doc = "Canonical digest bytes in stable order."] [u8; 32]);
         impl $name {
             /// Wraps the canonical digest without changing its byte order.
@@ -60,7 +69,7 @@ fingerprint!(
 );
 
 /// Compiled channel preflight identity; no stable string is present in ordinary messages.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Handshake<'a> {
     /// Exact protocol revision.
     pub protocol: u16,
@@ -78,59 +87,92 @@ pub struct Handshake<'a> {
     pub member: &'a str,
 }
 
-/// Precise framing or admission failure. Every session error is terminal.
-#[derive(Debug, PartialEq, Eq)]
+/// A rejected frame, incompatible channel profile, or invalid session operation.
+/// Errors from an existing session are terminal: discard that session after failure.
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum WireError {
-    /// Input or output exceeds a protocol bound.
-    Oversize,
-    /// A required byte or caller output byte is unavailable.
-    Truncated,
-    /// The complete frame length or canonical encoding is invalid.
-    Invalid,
-    /// A reserved message or flag has unsupported semantics.
-    Unsupported,
-    /// The protocol revision differs.
-    Protocol,
-    /// The canonical codec revision differs.
-    Codec,
-    /// The semantic coordination identity differs.
-    Coordination,
-    /// A nonzero epoch or incarnation was supplied.
-    Epoch,
-    /// Dense mapping identity or local domain is invalid.
-    Mapping,
-    /// The channel-member identity differs from the immutable expected roster entry.
-    Peer,
-    /// A route is outside the domain or does not belong to the bound peer.
-    Route,
+    /// The frame cannot be represented or decoded by the canonical codec.
+    #[error("wire frame rejected: {0}")]
+    Frame(#[from] FrameError),
+    /// The frame or local image violates the compiled channel contract.
+    #[error("wire admission rejected: {0}")]
+    Admission(#[from] AdmissionError),
     /// Ordinary exchange preceded successful preflight.
+    #[error("channel handshake has not completed")]
     NotAdmitted,
     /// The session previously failed and cannot be reused.
+    #[error("channel session has failed")]
     SessionFailed,
 }
-impl core::fmt::Display for WireError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "wire protocol: {self:?}")
-    }
-}
-impl core::error::Error for WireError {}
 
-/// Baseline traffic on a preflight-bound member channel; payloads borrow caller storage.
-#[derive(Debug, PartialEq, Eq)]
+/// Structural or representational failure in a complete canonical frame.
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+pub enum FrameError {
+    /// Original Postcard failure, retained through the framing boundary.
+    #[error("Postcard record failed: {0}")]
+    Codec(#[from] postcard::Error),
+    /// An alternate representation encoded the same value.
+    #[error("record encoding is not canonical")]
+    NonCanonical,
+
+    /// Input or output exceeds a protocol bound.
+    #[error("encoded value exceeds the protocol size limit")]
+    Oversize,
+    /// Input is incomplete or caller output storage is insufficient.
+    #[error("frame bytes or caller storage are incomplete")]
+    Truncated,
+    /// Length, field representation, or complete consumption is noncanonical.
+    #[error("invalid canonical frame encoding")]
+    Invalid,
+    /// A reserved message or flag has unsupported semantics.
+    #[error("unsupported message kind or reserved flags")]
+    Unsupported,
+    /// A nonzero epoch or incarnation was supplied.
+    #[error("epoch and incarnation must both be zero")]
+    Epoch,
+}
+
+/// A mismatch against the compiler-owned channel profile or typed domains.
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+pub enum AdmissionError {
+    /// The protocol revision differs.
+    #[error("coordination protocol revision mismatch")]
+    Protocol,
+    /// The canonical codec revision differs.
+    #[error("canonical codec revision mismatch")]
+    Codec,
+    /// The semantic coordination identity differs.
+    #[error("coordination fingerprint mismatch")]
+    Coordination,
+    /// Dense mapping identity or local domain is invalid.
+    #[error("dense mapping identity or local table is invalid")]
+    Mapping,
+    /// The channel member differs from the expected immutable roster entry.
+    #[error("unexpected channel member")]
+    Peer,
+    /// A route is outside the domain or does not belong to the bound peer.
+    #[error("route is outside the admitted member's domain")]
+    Route,
+}
+
+/// Traffic on a preflight-bound member channel; payloads borrow caller storage.
+/// Serde describes the record shape; only [`Session`] validates admission and routes.
+/// Session APIs use typed `R: Key`; serialization uses the same record with raw `u32` routes.
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Message<'a, R> {
-    /// NET publication, kind 1.
+    /// NET publication, kind 0.
     Publish {
         /// Monotonic publication revision.
         revision: u64,
         /// Earliest event, or reversible local idle.
         next_event: Option<WireTag>,
     },
-    /// LTC completion, kind 2.
+    /// LTC completion, kind 1.
     Complete {
         /// Greatest completed logical tag.
         tag: WireTag,
     },
-    /// Member payload submission, kind 3.
+    /// Member payload submission, kind 2.
     PayloadToRti {
         /// Validated deployment-wide route key.
         route: R,
@@ -139,28 +181,28 @@ pub enum Message<'a, R> {
         /// Opaque application codec bytes.
         payload: &'a [u8],
     },
-    /// Terminal idle confirmation, kind 4.
+    /// Terminal idle confirmation, kind 3.
     ConfirmIdle {
         /// Publication being confirmed.
         revision: u64,
     },
-    /// Authorized member stop, kind 5.
+    /// Authorized member stop, kind 4.
     Stop,
-    /// Terminal member failure, kind 6.
+    /// Terminal member failure, kind 5.
     Abort {
         /// Bounded original diagnostic.
         message: &'a str,
     },
-    /// All expected members admitted, kind 7.
+    /// All expected members admitted, kind 6.
     Started,
-    /// TAG authorization, kind 8.
+    /// TAG authorization, kind 7.
     Grant {
         /// Publication being authorized.
         revision: u64,
         /// Authorized logical horizon.
         tag: WireTag,
     },
-    /// Coordinator payload delivery, kind 9.
+    /// Coordinator payload delivery, kind 8.
     PayloadToFederate {
         /// Validated deployment-wide route key.
         route: R,
@@ -169,22 +211,99 @@ pub enum Message<'a, R> {
         /// Opaque application codec bytes.
         payload: &'a [u8],
     },
-    /// Global idle confirmation, kind 10.
+    /// Global idle confirmation, kind 9.
     Idle {
         /// Publication being confirmed.
         revision: u64,
     },
-    /// Terminal stop acknowledgement, kind 11.
+    /// Terminal stop acknowledgement, kind 10.
     Stopped,
-    /// Terminal coordinator failure, kind 12.
+    /// Terminal coordinator failure, kind 11.
     Failed {
         /// Bounded original diagnostic.
         message: &'a str,
     },
 }
 
-/// Immutable compiler-owned mapping borrowed from validated member and route domains.
-/// The owning compiler must compute `mapping` from these exact domains and semantics.
+impl<'a, R: Copy> Message<'a, R> {
+    /// Checks field ceilings independently of the complete-frame limit.
+    fn validate_bounds(&self) -> Result<(), FrameError> {
+        let oversized = match self {
+            Self::PayloadToRti { payload, .. } | Self::PayloadToFederate { payload, .. } => {
+                payload.len() > MAX_PAYLOAD_BYTES
+            }
+            Self::Abort { message } | Self::Failed { message } => {
+                message.len() > MAX_DIAGNOSTIC_BYTES
+            }
+            _ => false,
+        };
+        if oversized {
+            Err(FrameError::Oversize)
+        } else {
+            Ok(())
+        }
+    }
+    /// Converts only route representations, preserving borrowed payloads and logical tags.
+    fn map_routes<S>(
+        &self,
+        map: impl Fn(R, bool) -> Result<S, WireError>,
+    ) -> Result<Message<'a, S>, WireError> {
+        Ok(match *self {
+            Self::Publish {
+                revision,
+                next_event,
+            } => Message::Publish {
+                revision,
+                next_event,
+            },
+            Self::Complete { tag } => Message::Complete { tag },
+            Self::PayloadToRti {
+                route,
+                tag,
+                payload,
+            } => Message::PayloadToRti {
+                route: map(route, true)?,
+                tag,
+                payload,
+            },
+            Self::ConfirmIdle { revision } => Message::ConfirmIdle { revision },
+            Self::Stop => Message::Stop,
+            Self::Abort { message } => Message::Abort { message },
+            Self::Started => Message::Started,
+            Self::Grant { revision, tag } => Message::Grant { revision, tag },
+            Self::PayloadToFederate {
+                route,
+                tag,
+                payload,
+            } => Message::PayloadToFederate {
+                route: map(route, false)?,
+                tag,
+                payload,
+            },
+            Self::Idle { revision } => Message::Idle { revision },
+            Self::Stopped => Message::Stopped,
+            Self::Failed { message } => Message::Failed { message },
+        })
+    }
+}
+
+/// The immutable compiled deployment profile against which a channel admits traffic.
+///
+/// A contract borrows the complete member roster and route table; it owns no scheduler,
+/// transport, queues, or mutable coordination state. Multiple [`Session`] values can
+/// share it, each bound to one roster member. The coordinator uses that same member's
+/// profile when accepting or sending traffic on its channel.
+///
+/// `M: Key` identifies members and `R: Key` identifies routes in separate compiler-owned
+/// dense domains. `V` is the existing route-record type: it needs no trait bound because
+/// the supplied `endpoints` function borrows a record and returns its source/destination
+/// as `(M, M)`. No serialization bound or replacement route representation is required.
+///
+/// The compiler must derive `mapping` from these exact ordered tables and endpoint
+/// assignments, and `coordination` from their shared protocol semantics. Construction
+/// does not recompute either digest. [`Session::new`] checks roster ordering, size and
+/// endpoint membership; [`Session::accept_handshake`] checks the remote identities
+/// before any wire route number is converted into the original `R` domain.
 pub struct Contract<'a, M: Key, R: Key, V> {
     /// Shared coordination semantics expected on this channel.
     coordination: CoordinationFingerprint,
@@ -198,7 +317,11 @@ pub struct Contract<'a, M: Key, R: Key, V> {
     endpoints: fn(&V) -> (M, M),
 }
 impl<'a, M: Key, R: Key, V> Contract<'a, M, R, V> {
-    /// Borrows actual dense tables; `endpoints` projects typed source and destination members.
+    /// Borrows the compiler's complete dense tables and records their precomputed identities.
+    /// `members` must contain nonempty unique stable IDs in ascending order. Every pair
+    /// returned by `endpoints` must index `members`; route ordering must match `mapping`.
+    /// [`Session::new`] checks roster and endpoint validity; the compiler remains
+    /// responsible for correspondence between the digests and these exact tables.
     pub const fn new(
         coordination: CoordinationFingerprint,
         mapping: [u8; 32],
@@ -235,17 +358,17 @@ impl<'a, 'image, M: Key, R: Key, V> Session<'a, 'image, M, R, V> {
         expected_peer: M,
     ) -> Result<Self, WireError> {
         if contract.members.get(expected_peer).is_none() {
-            return Err(WireError::Peer);
+            return Err(AdmissionError::Peer.into());
         }
         if u32::try_from(contract.members.len()).is_err()
             || u32::try_from(contract.routes.len()).is_err()
         {
-            return Err(WireError::Mapping);
+            return Err(AdmissionError::Mapping.into());
         }
         let mut previous = None;
         for id in contract.members.values() {
             if id.is_empty() || id.len() > MAX_MEMBER_BYTES || previous.is_some_and(|p| p >= id) {
-                return Err(WireError::Mapping);
+                return Err(AdmissionError::Mapping.into());
             }
             previous = Some(id);
         }
@@ -253,7 +376,7 @@ impl<'a, 'image, M: Key, R: Key, V> Session<'a, 'image, M, R, V> {
             let (source, destination) = (contract.endpoints)(route);
             if contract.members.get(source).is_none() || contract.members.get(destination).is_none()
             {
-                return Err(WireError::Mapping);
+                return Err(AdmissionError::Mapping.into());
             }
         }
         Ok(Self {
@@ -278,30 +401,26 @@ impl<'a, 'image, M: Key, R: Key, V> Session<'a, 'image, M, R, V> {
     pub fn accept_handshake(&mut self, bytes: &[u8]) -> Result<M, WireError> {
         let peer = self.attempt(|s| {
             if s.admitted {
-                return Err(WireError::Invalid);
+                return Err(FrameError::Invalid.into());
             }
-            let (kind, mut d) = Decoder::frame(bytes)?;
-            if kind != 0 {
+            let Record::Handshake(hello) = decode_frame(bytes)? else {
                 return Err(WireError::NotAdmitted);
+            };
+            if hello.protocol != PROTOCOL_VERSION {
+                return Err(AdmissionError::Protocol.into());
             }
-            if u16::from_be_bytes(d.fixed()?) != PROTOCOL_VERSION {
-                return Err(WireError::Protocol);
+            if hello.codec != CODEC_VERSION {
+                return Err(AdmissionError::Codec.into());
             }
-            if u16::from_be_bytes(d.fixed()?) != CODEC_VERSION {
-                return Err(WireError::Codec);
+            if hello.coordination != s.contract.coordination {
+                return Err(AdmissionError::Coordination.into());
             }
-            if d.fixed::<32>()? != s.contract.coordination.bytes() {
-                return Err(WireError::Coordination);
+            if hello.mapping != s.contract.mapping {
+                return Err(AdmissionError::Mapping.into());
             }
-            if d.fixed::<32>()? != s.contract.mapping {
-                return Err(WireError::Mapping);
+            if hello.member != *s.contract.members.get(s.peer).ok_or(AdmissionError::Peer)? {
+                return Err(AdmissionError::Peer.into());
             }
-            if d.text(MAX_MEMBER_BYTES)?
-                != *s.contract.members.get(s.peer).ok_or(WireError::Peer)?
-            {
-                return Err(WireError::Peer);
-            }
-            d.finish()?;
             Ok(s.peer)
         })?;
         self.admitted = true;
@@ -315,73 +434,36 @@ impl<'a, 'image, M: Key, R: Key, V> Session<'a, 'image, M, R, V> {
         }
     }
     fn check_route(&self, route: R, to_rti: bool) -> Result<(), WireError> {
-        let value = self.contract.routes.get(route).ok_or(WireError::Route)?;
+        let value = self
+            .contract
+            .routes
+            .get(route)
+            .ok_or(AdmissionError::Route)?;
         let (source, destination) = (self.contract.endpoints)(value);
         if self.peer == if to_rti { source } else { destination } {
             Ok(())
         } else {
-            Err(WireError::Route)
+            Err(AdmissionError::Route.into())
         }
     }
-    fn route(&self, d: &mut Decoder<'_>, to_rti: bool) -> Result<R, WireError> {
-        // The sole wire-representation adapter: range-check in the actual domain before construction.
-        let index =
-            usize::try_from(u32::from_be_bytes(d.fixed()?)).map_err(|_| WireError::Route)?;
+    /// Range-checks a wire number before constructing a key in the actual route domain.
+    fn route(&self, number: u32, to_rti: bool) -> Result<R, WireError> {
+        let index = usize::try_from(number).map_err(|_| AdmissionError::Route)?;
         if index >= self.contract.routes.len() {
-            return Err(WireError::Route);
+            return Err(AdmissionError::Route.into());
         }
         let key = R::from(index);
         self.check_route(key, to_rti)?;
         Ok(key)
     }
-    /// Decodes one complete frame only after preflight; payloads borrow `bytes` directly.
+    /// Decodes one complete frame after preflight; payloads borrow `bytes` directly.
     pub fn decode<'b>(&mut self, bytes: &'b [u8]) -> Result<Message<'b, R>, WireError> {
         let message = self.attempt(|s| {
             s.ready()?;
-            let (kind, mut d) = Decoder::frame(bytes)?;
-            let message = match kind {
-                1 => Message::Publish {
-                    revision: d.revision()?,
-                    next_event: match d.byte()? {
-                        0 => None,
-                        1 => Some(d.tag()?),
-                        _ => return Err(WireError::Invalid),
-                    },
-                },
-                2 => Message::Complete { tag: d.tag()? },
-                3 => Message::PayloadToRti {
-                    route: s.route(&mut d, true)?,
-                    tag: d.tag()?,
-                    payload: d.payload()?,
-                },
-                4 => Message::ConfirmIdle {
-                    revision: d.revision()?,
-                },
-                5 => Message::Stop,
-                6 => Message::Abort {
-                    message: d.text(MAX_DIAGNOSTIC_BYTES)?,
-                },
-                7 => Message::Started,
-                8 => Message::Grant {
-                    revision: d.revision()?,
-                    tag: d.tag()?,
-                },
-                9 => Message::PayloadToFederate {
-                    route: s.route(&mut d, false)?,
-                    tag: d.tag()?,
-                    payload: d.payload()?,
-                },
-                10 => Message::Idle {
-                    revision: d.revision()?,
-                },
-                11 => Message::Stopped,
-                12 => Message::Failed {
-                    message: d.text(MAX_DIAGNOSTIC_BYTES)?,
-                },
-                _ => return Err(WireError::Unsupported),
+            let Record::Message { message, .. } = decode_frame(bytes)? else {
+                return Err(FrameError::Invalid.into());
             };
-            d.finish()?;
-            Ok(message)
+            message.map_routes(|number, to_rti| s.route(number, to_rti))
         })?;
         self.failed |= matches!(message, Message::Abort { .. } | Message::Failed { .. });
         Ok(message)
@@ -394,249 +476,147 @@ impl<'a, 'image, M: Key, R: Key, V> Session<'a, 'image, M, R, V> {
     ) -> Result<usize, WireError> {
         let result = self.attempt(|s| {
             s.ready()?;
-            let kind = match message {
-                Message::Publish { .. } => 1,
-                Message::Complete { .. } => 2,
-                Message::PayloadToRti { .. } => 3,
-                Message::ConfirmIdle { .. } => 4,
-                Message::Stop => 5,
-                Message::Abort { .. } => 6,
-                Message::Started => 7,
-                Message::Grant { .. } => 8,
-                Message::PayloadToFederate { .. } => 9,
-                Message::Idle { .. } => 10,
-                Message::Stopped => 11,
-                Message::Failed { .. } => 12,
-            };
-            encode_frame(kind, 0, 0, output, |w| {
-                match message {
-                    Message::Publish {
-                        revision,
-                        next_event,
-                    } => {
-                        w.put(&revision.to_be_bytes())?;
-                        w.put(&[u8::from(next_event.is_some())])?;
-                        if let Some(tag) = next_event {
-                            w.tag(tag)?;
-                        }
-                    }
-                    Message::Complete { tag } => w.tag(tag)?,
-                    Message::PayloadToRti {
-                        route,
-                        tag,
-                        payload,
-                    }
-                    | Message::PayloadToFederate {
-                        route,
-                        tag,
-                        payload,
-                    } => {
-                        if payload.len() > MAX_PAYLOAD_BYTES {
-                            return Err(WireError::Oversize);
-                        }
-                        s.check_route(*route, kind == 3)?;
-                        w.put(
-                            &u32::try_from(route.index())
-                                .map_err(|_| WireError::Route)?
-                                .to_be_bytes(),
-                        )?;
-                        w.tag(tag)?;
-                        w.put(
-                            &u32::try_from(payload.len())
-                                .map_err(|_| WireError::Oversize)?
-                                .to_be_bytes(),
-                        )?;
-                        w.put(payload)?;
-                    }
-                    Message::ConfirmIdle { revision } | Message::Idle { revision } => {
-                        w.put(&revision.to_be_bytes())?
-                    }
-                    Message::Grant { revision, tag } => {
-                        w.put(&revision.to_be_bytes())?;
-                        w.tag(tag)?;
-                    }
-                    Message::Abort { message } | Message::Failed { message } => {
-                        w.text(message, MAX_DIAGNOSTIC_BYTES)?
-                    }
-                    Message::Stop | Message::Started | Message::Stopped => (),
-                }
-                Ok(())
-            })
+            message.validate_bounds()?;
+            let message = message.map_routes(|route, to_rti| {
+                s.check_route(route, to_rti)?;
+                u32::try_from(route.index()).map_err(|_| AdmissionError::Route.into())
+            })?;
+            encode_frame(
+                &Record::<Handshake<'_>, _>::Message {
+                    epoch: 0,
+                    incarnation: 0,
+                    message,
+                },
+                output,
+            )
         });
         self.failed |= matches!(message, Message::Abort { .. } | Message::Failed { .. });
         result
     }
 }
 
-/// Encodes a stable preflight record into caller storage, returning the frame length.
-/// Nonbaseline fields may be encoded for interoperability probes; admission rejects them.
+/// Encodes a preflight record into caller storage, returning the complete frame length.
+/// Nonzero reserved fields can be encoded for rejection probes; admission requires zero.
 pub fn encode_handshake(handshake: &Handshake<'_>, output: &mut [u8]) -> Result<usize, WireError> {
-    encode_frame(0, handshake.epoch, handshake.incarnation, output, |w| {
-        w.put(&handshake.protocol.to_be_bytes())?;
-        w.put(&handshake.codec.to_be_bytes())?;
-        w.put(&handshake.coordination.bytes())?;
-        w.put(&handshake.mapping)?;
-        w.text(handshake.member, MAX_MEMBER_BYTES)
-    })
+    if handshake.member.len() > MAX_MEMBER_BYTES {
+        return Err(FrameError::Oversize.into());
+    }
+    encode_frame(&Record::<_, Message<'_, u32>>::Handshake(handshake), output)
 }
 
-/// Bounds-checking sink used first for sizing and then for caller-buffer encoding.
-struct Writer<'a> {
-    /// Caller storage, absent during the sizing pass.
-    output: Option<&'a mut [u8]>,
-    /// Checked number of frame bytes counted or written.
-    length: usize,
+/// Derived envelope; `T` is borrowed for encoding and owned/borrowed-data for decoding.
+#[derive(Serialize, Deserialize)]
+struct Frame<T> {
+    /// Reserved flags; no nonzero value is supported.
+    flags: u8,
+    /// Handshake or traffic record in declaration-defined Postcard order.
+    record: T,
 }
-impl Writer<'_> {
-    fn put(&mut self, bytes: &[u8]) -> Result<(), WireError> {
-        let end = self
-            .length
-            .checked_add(bytes.len())
-            .ok_or(WireError::Oversize)?;
-        if end > MAX_FRAME_BYTES {
-            return Err(WireError::Oversize);
-        }
-        if let Some(output) = &mut self.output {
-            output
-                .get_mut(self.length..end)
-                .ok_or(WireError::Truncated)?
-                .copy_from_slice(bytes);
-        }
-        self.length = end;
+/// Distinguishes preflight from admitted traffic without serializing runtime key types.
+#[derive(Serialize, Deserialize)]
+enum Record<H, M> {
+    /// Closed-world identity claim, including reserved epoch/incarnation fields.
+    Handshake(H),
+    /// Ordinary traffic carries reserved fields before its derived message record.
+    Message {
+        /// Reserved federation epoch; must be zero.
+        epoch: u64,
+        /// Reserved channel-member incarnation; must be zero.
+        incarnation: u64,
+        /// Decoded routes remain raw `u32` until the session validates their domain.
+        message: M,
+    },
+}
+
+/// Sizes a derived record before touching caller output; only the framing prefix is manual.
+fn encode_frame(record: &impl Serialize, output: &mut [u8]) -> Result<usize, WireError> {
+    let frame = Frame { flags: 0, record };
+    let size = postcard::experimental::serialized_size(&frame).map_err(FrameError::Codec)?;
+    if size > MAX_FRAME_BYTES - 4 {
+        return Err(FrameError::Oversize.into());
+    }
+    let output = output.get_mut(..size + 4).ok_or(FrameError::Truncated)?;
+    postcard::to_slice(&frame, &mut output[4..]).map_err(FrameError::Codec)?;
+    output[..4].copy_from_slice(
+        &u32::try_from(size)
+            .map_err(|_| FrameError::Oversize)?
+            .to_be_bytes(),
+    );
+    Ok(output.len())
+}
+
+/// Postcard serialization sink comparing canonical bytes directly with caller input.
+struct Compare<'a>(&'a [u8]);
+impl postcard::ser_flavors::Flavor for Compare<'_> {
+    type Output = ();
+    fn try_push(&mut self, byte: u8) -> postcard::Result<()> {
+        self.try_extend(&[byte])
+    }
+    fn try_extend(&mut self, bytes: &[u8]) -> postcard::Result<()> {
+        self.0 = self
+            .0
+            .strip_prefix(bytes)
+            .ok_or(postcard::Error::SerializeBufferFull)?;
         Ok(())
     }
-    fn text(&mut self, text: &str, bound: usize) -> Result<(), WireError> {
-        if text.len() > bound {
-            return Err(WireError::Oversize);
-        }
-        self.put(
-            &u16::try_from(text.len())
-                .map_err(|_| WireError::Oversize)?
-                .to_be_bytes(),
-        )?;
-        self.put(text.as_bytes())
-    }
-    fn tag(&mut self, tag: &WireTag) -> Result<(), WireError> {
-        let (kind, offset, microstep) = match tag {
-            WireTag::Never => (0, 0, 0),
-            WireTag::Finite {
-                offset_ns,
-                microstep,
-            } => (1, *offset_ns, *microstep),
-            WireTag::Forever => (2, 0, 0),
-        };
-        self.put(&[kind])?;
-        self.put(&offset.to_be_bytes())?;
-        self.put(&microstep.to_be_bytes())
-    }
-}
-/// Sizes and validates the body before emitting a complete frame into caller storage.
-fn encode_frame(
-    kind: u8,
-    epoch: u64,
-    incarnation: u64,
-    output: &mut [u8],
-    body: impl Fn(&mut Writer<'_>) -> Result<(), WireError>,
-) -> Result<usize, WireError> {
-    let mut size = Writer {
-        output: None,
-        length: 22,
-    };
-    body(&mut size)?;
-    if output.len() < size.length {
-        return Err(WireError::Truncated);
-    }
-    let mut w = Writer {
-        output: Some(output),
-        length: 0,
-    };
-    w.put(
-        &u32::try_from(size.length - 4)
-            .map_err(|_| WireError::Oversize)?
-            .to_be_bytes(),
-    )?;
-    w.put(&[kind, 0])?;
-    w.put(&epoch.to_be_bytes())?;
-    w.put(&incarnation.to_be_bytes())?;
-    body(&mut w)?;
-    Ok(w.length)
-}
-/// Borrowed cursor over one exactly bounded canonical frame.
-struct Decoder<'a> {
-    /// Unconsumed bytes; exposed payloads remain borrowed from this same input.
-    remaining: &'a [u8],
-}
-impl<'a> Decoder<'a> {
-    fn frame(bytes: &'a [u8]) -> Result<(u8, Self), WireError> {
-        let mut d = Self { remaining: bytes };
-        let length =
-            usize::try_from(u32::from_be_bytes(d.fixed()?)).map_err(|_| WireError::Oversize)?;
-        if length > MAX_FRAME_BYTES - 4 || bytes.len() > MAX_FRAME_BYTES {
-            return Err(WireError::Oversize);
-        }
-        if length != d.remaining.len() {
-            return Err(if length > d.remaining.len() {
-                WireError::Truncated
-            } else {
-                WireError::Invalid
-            });
-        }
-        let kind = d.byte()?;
-        if d.byte()? != 0 {
-            return Err(WireError::Unsupported);
-        }
-        if d.revision()? != 0 || d.revision()? != 0 {
-            return Err(WireError::Epoch);
-        }
-        Ok((kind, d))
-    }
-    fn take(&mut self, n: usize) -> Result<&'a [u8], WireError> {
-        let bytes = self.remaining.get(..n).ok_or(WireError::Truncated)?;
-        self.remaining = &self.remaining[n..];
-        Ok(bytes)
-    }
-    fn fixed<const N: usize>(&mut self) -> Result<[u8; N], WireError> {
-        self.take(N)?.try_into().map_err(|_| WireError::Truncated)
-    }
-    fn byte(&mut self) -> Result<u8, WireError> {
-        Ok(self.fixed::<1>()?[0])
-    }
-    fn revision(&mut self) -> Result<u64, WireError> {
-        Ok(u64::from_be_bytes(self.fixed()?))
-    }
-    fn text(&mut self, bound: usize) -> Result<&'a str, WireError> {
-        let n = usize::from(u16::from_be_bytes(self.fixed()?));
-        if n > bound {
-            return Err(WireError::Oversize);
-        }
-        core::str::from_utf8(self.take(n)?).map_err(|_| WireError::Invalid)
-    }
-    fn payload(&mut self) -> Result<&'a [u8], WireError> {
-        let n =
-            usize::try_from(u32::from_be_bytes(self.fixed()?)).map_err(|_| WireError::Oversize)?;
-        if n > MAX_PAYLOAD_BYTES {
-            return Err(WireError::Oversize);
-        }
-        self.take(n)
-    }
-    fn tag(&mut self) -> Result<WireTag, WireError> {
-        let kind = self.byte()?;
-        let offset_ns = i128::from_be_bytes(self.fixed()?);
-        let microstep = self.revision()?;
-        match (kind, offset_ns, microstep) {
-            (0, 0, 0) => Ok(WireTag::Never),
-            (1, _, _) => Ok(WireTag::finite(offset_ns, microstep)),
-            (2, 0, 0) => Ok(WireTag::Forever),
-            _ => Err(WireError::Invalid),
-        }
-    }
-    fn finish(self) -> Result<(), WireError> {
-        if self.remaining.is_empty() {
+    fn finalize(self) -> postcard::Result<()> {
+        if self.0.is_empty() {
             Ok(())
         } else {
-            Err(WireError::Invalid)
+            Err(postcard::Error::SerializeBufferFull)
         }
     }
+}
+
+/// Decodes allocation-free records and rejects alternate encodings before session admission.
+fn decode_frame(bytes: &[u8]) -> Result<Record<Handshake<'_>, Message<'_, u32>>, WireError> {
+    let prefix: [u8; 4] = bytes
+        .get(..4)
+        .ok_or(FrameError::Truncated)?
+        .try_into()
+        .map_err(|_| FrameError::Truncated)?;
+    let length = usize::try_from(u32::from_be_bytes(prefix)).map_err(|_| FrameError::Oversize)?;
+    if length > MAX_FRAME_BYTES - 4 || bytes.len() > MAX_FRAME_BYTES {
+        return Err(FrameError::Oversize.into());
+    }
+    let body = &bytes[4..];
+    if length != body.len() {
+        return Err(if length > body.len() {
+            FrameError::Truncated
+        } else {
+            FrameError::Invalid
+        }
+        .into());
+    }
+    let (frame, remaining): (Frame<Record<Handshake<'_>, Message<'_, u32>>>, _) =
+        postcard::take_from_bytes(body).map_err(FrameError::Codec)?;
+    if !remaining.is_empty() {
+        return Err(FrameError::NonCanonical.into());
+    }
+    if frame.flags != 0 {
+        return Err(FrameError::Unsupported.into());
+    }
+    let (epoch, incarnation) = match &frame.record {
+        Record::Handshake(hello) => {
+            if hello.member.len() > MAX_MEMBER_BYTES {
+                return Err(FrameError::Oversize.into());
+            }
+            (hello.epoch, hello.incarnation)
+        }
+        Record::Message {
+            epoch,
+            incarnation,
+            message,
+        } => {
+            message.validate_bounds()?;
+            (*epoch, *incarnation)
+        }
+    };
+    if epoch != 0 || incarnation != 0 {
+        return Err(FrameError::Epoch.into());
+    }
+    postcard::serialize_with_flavor(&frame, Compare(body)).map_err(|_| FrameError::NonCanonical)?;
+    Ok(frame.record)
 }
 
 #[cfg(test)]

@@ -50,7 +50,7 @@ fn generated_wire_contract_conformance() {
     let size = encode_handshake(&handshake, &mut frame).unwrap();
     assert_eq!(
         rejected.accept_handshake(&frame[..size]),
-        Err(WireError::Mapping)
+        Err(WireError::Admission(AdmissionError::Mapping))
     );
     assert!(rejected.decode(&frame[..size]).is_err());
 }

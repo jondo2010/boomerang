@@ -230,7 +230,7 @@ pub(crate) struct CoordinationDocument {
 pub(crate) struct WireProfileDocument {
     /// Portable frame protocol version.
     pub(crate) protocol: u16,
-    /// Canonical payload codec version.
+    /// Canonical wire codec profile version.
     pub(crate) codec: u16,
     /// Inclusive maximum encoded payload bytes, independent of scheduler storage bounds.
     pub(crate) max_payload_bytes: usize,

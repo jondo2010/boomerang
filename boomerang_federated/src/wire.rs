@@ -32,10 +32,15 @@ pub const MAX_PAYLOAD_BYTES: usize = 65_535;
 pub const MAX_DIAGNOSTIC_BYTES: usize = 1024;
 /// Largest UTF-8 stable preflight member identity.
 pub const MAX_MEMBER_BYTES: usize = 255;
-/// Largest complete frame, including its four-byte length prefix.
+/// Integer representation of the big-endian frame body length.
+type FrameLength = u32;
+/// Width of the fixed prefix, derived from its integer representation.
+const FRAME_PREFIX_BYTES: usize = core::mem::size_of::<FrameLength>();
+/// Largest complete frame, including its length prefix.
 // Prefix + flags + record + zero epoch/incarnation + kind + u32 route +
 // finite tag (enum + i128 + u64 varints) + bounded payload length + payload.
-pub const MAX_FRAME_BYTES: usize = 4 + 1 + 1 + 2 + 1 + 5 + 30 + 3 + MAX_PAYLOAD_BYTES;
+pub const MAX_FRAME_BYTES: usize =
+    FRAME_PREFIX_BYTES + 1 + 1 + 2 + 1 + 5 + 30 + 3 + MAX_PAYLOAD_BYTES;
 
 /// Defines distinct digest claims with an identical fixed byte representation.
 macro_rules! fingerprint {
@@ -532,17 +537,18 @@ enum Record<H, M> {
 fn encode_frame(record: &impl Serialize, output: &mut [u8]) -> Result<usize, WireError> {
     let frame = Frame { flags: 0, record };
     let size = postcard::experimental::serialized_size(&frame).map_err(FrameError::Codec)?;
-    if size > MAX_FRAME_BYTES - 4 {
+    if size > MAX_FRAME_BYTES - FRAME_PREFIX_BYTES {
         return Err(FrameError::Oversize.into());
     }
-    let output = output.get_mut(..size + 4).ok_or(FrameError::Truncated)?;
-    postcard::to_slice(&frame, &mut output[4..]).map_err(FrameError::Codec)?;
-    output[..4].copy_from_slice(
-        &u32::try_from(size)
-            .map_err(|_| FrameError::Oversize)?
-            .to_be_bytes(),
-    );
-    Ok(output.len())
+    let (prefix, body) = output
+        .split_first_chunk_mut::<FRAME_PREFIX_BYTES>()
+        .ok_or(FrameError::Truncated)?;
+    let body = body.get_mut(..size).ok_or(FrameError::Truncated)?;
+    postcard::to_slice(&frame, body).map_err(FrameError::Codec)?;
+    *prefix = FrameLength::try_from(size)
+        .map_err(|_| FrameError::Oversize)?
+        .to_be_bytes();
+    Ok(prefix.len() + body.len())
 }
 
 /// Postcard serialization sink comparing canonical bytes directly with caller input.
@@ -570,16 +576,14 @@ impl postcard::ser_flavors::Flavor for Compare<'_> {
 
 /// Decodes allocation-free records and rejects alternate encodings before session admission.
 fn decode_frame(bytes: &[u8]) -> Result<Record<Handshake<'_>, Message<'_, u32>>, WireError> {
-    let prefix: [u8; 4] = bytes
-        .get(..4)
-        .ok_or(FrameError::Truncated)?
-        .try_into()
-        .map_err(|_| FrameError::Truncated)?;
-    let length = usize::try_from(u32::from_be_bytes(prefix)).map_err(|_| FrameError::Oversize)?;
-    if length > MAX_FRAME_BYTES - 4 || bytes.len() > MAX_FRAME_BYTES {
+    let (prefix, body) = bytes
+        .split_first_chunk::<FRAME_PREFIX_BYTES>()
+        .ok_or(FrameError::Truncated)?;
+    let length =
+        usize::try_from(FrameLength::from_be_bytes(*prefix)).map_err(|_| FrameError::Oversize)?;
+    if length > MAX_FRAME_BYTES - FRAME_PREFIX_BYTES || bytes.len() > MAX_FRAME_BYTES {
         return Err(FrameError::Oversize.into());
     }
-    let body = &bytes[4..];
     if length != body.len() {
         return Err(if length > body.len() {
             FrameError::Truncated

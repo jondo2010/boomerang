@@ -1,8 +1,9 @@
 use std::fmt;
 
 /// A protocol tag independent of process-local clocks and architecture-sized integers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub enum WireTag {
     Never,
     Finite { offset_ns: i128, microstep: u64 },

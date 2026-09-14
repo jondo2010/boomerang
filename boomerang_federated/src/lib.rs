@@ -5,3 +5,6 @@
 pub mod protocol;
 
 pub use protocol::{WireDelay, WireTag};
+
+/// Canonical bounded frames and exact closed-world peer admission.
+pub mod wire;

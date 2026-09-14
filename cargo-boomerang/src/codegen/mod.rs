@@ -19,6 +19,7 @@
 //! placement in static read-only data; this module must not concatenate identities into a custom
 //! byte blob or generate byte-offset identity ranges.
 
+mod fingerprints;
 mod rti;
 mod rust;
 
@@ -696,6 +697,9 @@ fn validate_launcher_graph(
         })?;
         pending.push(launcher_support.clone());
     }
+    if let Some(wire) = direct_package("boomerang_federated") {
+        pending.push(wire.clone());
+    }
     if let Some(backend) = direct_package("boomerang_central_rti") {
         pending.push(backend.clone());
     }
@@ -799,6 +803,10 @@ fn render_manifest(
     dependencies.insert(
         String::from("boomerang_runtime"),
         dependency(resolved.runtime(), false, Vec::new())?,
+    );
+    dependencies.insert(
+        String::from("boomerang_federated"),
+        runtime_sibling_dependency(resolved.runtime(), "boomerang_federated", Vec::new())?,
     );
     dependencies.insert(
         String::from("tinymap"),
@@ -960,28 +968,44 @@ fn validate_coordination(analyzed: &AnalyzedDeployment) -> Result<bool> {
     })
 }
 
-/// Hashes canonical coordination tables and compatibility descriptors with a protocol domain.
+/// Hashes shared boundary contracts and canonical coordination semantics with a protocol domain.
 pub(crate) fn coordination_identity(analyzed: &AnalyzedDeployment) -> Result<Option<blake3::Hash>> {
     if !validate_coordination(analyzed)? {
         return Ok(None);
     }
-    let mut identity = blake3::Hasher::new_derive_key("boomerang.compiled-coordination.v1");
-    identity.update(HOSTED_PROTOCOL.as_bytes());
-    identity.update(&crate::check::COMPILER_SCHEMA.to_le_bytes());
-    identity.update(rust::format_rust(rti::render_coordination(&analyzed.compiled)?)?.as_bytes());
-    for binding in analyzed.driver.bindings() {
-        identity.update(
-            &binding
-                .descriptor()
-                .descriptor_fingerprint_input()
-                .fingerprint()
-                .to_bytes(),
-        );
-    }
-    Ok(Some(identity.finalize()))
+    fingerprints::coordination(&analyzed.compiled, analyzed.driver.topology()).map(Some)
 }
 
-/// Emits the same immutable projection and identity into every participating executable.
+/// Computes the local image claim from its actual typed Federate slice.
+pub(crate) fn federate_image_fingerprint(
+    analyzed: &AnalyzedDeployment,
+    federate: boomerang_runtime::image::FederateIndex,
+) -> Result<blake3::Hash> {
+    fingerprints::federate_image(
+        &analyzed.compiled.federate_slice(federate)?,
+        analyzed.driver.bindings(),
+    )
+}
+
+/// Records the baseline canonical protocol independently of the current hosted transport.
+pub(crate) fn wire_profile(
+    analyzed: &AnalyzedDeployment,
+) -> Result<Option<crate::bundle::WireProfileDocument>> {
+    if !validate_coordination(analyzed)? {
+        return Ok(None);
+    }
+    use boomerang_federated::wire::*;
+    Ok(Some(crate::bundle::WireProfileDocument {
+        protocol: PROTOCOL_VERSION,
+        codec: CODEC_VERSION,
+        max_payload_bytes: MAX_PAYLOAD_BYTES,
+        mapping: fingerprints::mapping(&analyzed.compiled)?
+            .to_hex()
+            .to_string(),
+    }))
+}
+
+/// Emits the shared immutable projection, portable admission contract, and codec profile.
 fn generated_coordination(
     analyzed: &AnalyzedDeployment,
 ) -> Result<Option<proc_macro2::TokenStream>> {
@@ -990,10 +1014,32 @@ fn generated_coordination(
     };
     let image = rti::render_coordination(&analyzed.compiled)?;
     let bytes = identity.as_bytes().iter();
+    let mapping = fingerprints::mapping(&analyzed.compiled)?;
+    let mapping_bytes = mapping.as_bytes().iter();
     Ok(Some(quote::quote! {
         #image
+        /// Shared semantic compatibility claim; local image and artifact claims are distinct.
+        pub const WIRE_COORDINATION_FINGERPRINT: boomerang_federated::wire::CoordinationFingerprint =
+            boomerang_federated::wire::CoordinationFingerprint::new([#(#bytes),*]);
         const COORDINATION_IDENTITY: boomerang_central_rti::compiled::CoordinationIdentity =
-            boomerang_central_rti::compiled::CoordinationIdentity::new([#(#bytes),*]);
+            boomerang_central_rti::compiled::CoordinationIdentity::new(WIRE_COORDINATION_FINGERPRINT.bytes());
+        /// Exact dense table mapping shared by the closed roster.
+        pub const WIRE_MAPPING: [u8; 32] = [#(#mapping_bytes),*];
+        /// Baseline canonical codec with the declared route profile's encoded-message bound.
+        pub type WirePayloadCodec<T> = boomerang_federated::wire::PostcardCodec<T, {boomerang_federated::wire::MAX_PAYLOAD_BYTES}>;
+        /// Binds portable admission directly to the generated typed RTI image.
+        pub fn wire_contract() -> boomerang_federated::wire::Contract<'static, FederateIndex, RtiRouteIndex, RtiRouteImage<'static>> {
+            boomerang_federated::wire::Contract::new(WIRE_COORDINATION_FINGERPRINT, WIRE_MAPPING,
+                COORDINATION_MEMBERS, *COORDINATION_IMAGE.routes(), |route| (route.source(), route.target()))
+        }
+        /// Creates the exact baseline handshake for a member of the generated roster.
+        pub fn wire_handshake(member: FederateIndex) -> Option<boomerang_federated::wire::Handshake<'static>> {
+            use boomerang_federated::wire::*;
+            COORDINATION_MEMBERS.get(member).map(|member| Handshake {
+                protocol: PROTOCOL_VERSION, codec: CODEC_VERSION, coordination: WIRE_COORDINATION_FINGERPRINT,
+                epoch: 0, incarnation: 0, mapping: WIRE_MAPPING, member,
+            })
+        }
     }))
 }
 

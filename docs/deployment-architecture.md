@@ -533,8 +533,21 @@ features, Cargo lock resolution, placement-group mapping, target/runtime configu
 coordination backend and protocol version, compiler schema versions, descriptor fingerprints, and
 generated global/per-Federate images.
 
-All Federates and any separate coordinator artifact in one running deployment embed and present the
-same deployment fingerprint. Participants reject mismatches before coordinated execution begins.
+This whole-bundle fingerprint identifies reproducible build inputs and publication. It is not the
+peer-admission identity. Phase 6 refines the earlier shared deployment identity into three layers:
+
+- The **coordination fingerprint** covers shared boundary contracts, protocol and codec versions,
+  canonical dense wire mappings, coordination projection, and shared policies. Every participant
+  must present the same value before dense references or payloads are admitted.
+- Each **Federate-image fingerprint** covers its own compiled scheduler image, local bindings,
+  and storage bounds. Different Federates normally have different fingerprints.
+- Each **artifact digest** hashes the exact produced executable bytes. It is checked by hosted
+  bundle validation, not used as a common peer-compatibility value.
+
+Changes to local implementation internals do not by themselves change shared compatibility.
+Canonical wire table positions are part of the coordination fingerprint; scheduler-local keys
+remain local to their image. This specializes the compatibility model in the
+[federated deployment roadmap](./federated-deployment-roadmap.md#heterogeneous-wire-and-compatibility-model).
 
 The fingerprint is a consistency and compatibility mechanism, not authentication or
 authorization. A secure deployment must authenticate peers and protect configuration through a
@@ -820,9 +833,9 @@ coordinated shutdown, and exit status. It rejects non-host-runnable artifacts.
 
 The initial hosted projection uses `boomerang.compiled-hosted.v1` framing over TCP and the
 `serde-json` payload capability. This is the Phase 5 process transport; the canonical compact
-protocol and broader capability set remain Phase 6 work. A domain-separated coordination digest
-covers the rendered immutable coordination tables, compiler schema, protocol and compatibility
-descriptors. All artifacts embed the same digest. Stable member names are resolved once during
+API is available; its Tokio TCP adoption is Phase 6B. The shared coordination digest covers
+canonical mappings, analyzed dependencies, declared boundary contracts, versions, and policies.
+Local image fingerprints are separate. Stable member names are resolved once during
 admission; payload exchanges carry typed `RtiRouteIndex` values, never boundary strings.
 `RtiImageView` validates the coordinator's borrowed tables without requiring scheduler images.
 The RTI crate owns transport I/O, while `cargo-boomerang` owns filesystem publication and child
@@ -992,7 +1005,7 @@ runnable proof, and compatibility decision.
   algorithm.
 - Recording captures scheduler-admitted logical boundary events, not RTI control traffic or runtime
   keys.
-- Deployment fingerprints establish peer compatibility; boundary-contract fingerprints establish
+- Coordination fingerprints establish peer compatibility; boundary-contract fingerprints establish
   recording compatibility.
 - Unsupported topology, resource, or target semantics are rejected during the earliest phase that
   has enough information to prove the error.

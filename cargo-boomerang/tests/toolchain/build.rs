@@ -375,8 +375,25 @@ fn build_publishes_canonical_federate_artifact_collection() {
     let bundle = manifest.parent().unwrap();
     let document: Value = serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
     let host_target = target_lexicon::HOST.to_string();
+    let mut federate_metadata = document["federates"].clone();
+    let claims = federate_metadata
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .map(|federate| {
+            let claim = federate
+                .as_object_mut()
+                .unwrap()
+                .remove("image_fingerprint")
+                .unwrap();
+            assert_eq!(claim.as_str().unwrap().len(), 64);
+            claim
+        })
+        .collect::<Vec<_>>();
+    assert_ne!(claims[0], claims[1]);
+    verify_generated_wire_contract(bundle, &document, &target);
     assert_eq!(
-        document["federates"],
+        federate_metadata,
         serde_json::json!([
             {
                 "id": "host",
@@ -526,6 +543,50 @@ fn build_publishes_canonical_federate_artifact_collection() {
             node.id
         );
     }
+}
+
+/// Executes the portable codec/admission contract compiled with the actual generated RTI tables.
+fn verify_generated_wire_contract(bundle: &Path, document: &Value, target: &Path) {
+    let scratch = tempfile::tempdir().unwrap();
+    fs::create_dir(scratch.path().join("src")).unwrap();
+    for file in ["Cargo.toml", "Cargo.lock", "src/main.rs"] {
+        fs::copy(
+            bundle.join("generated/rti").join(file),
+            scratch.path().join(file),
+        )
+        .unwrap();
+    }
+    let source_path = scratch.path().join("src/main.rs");
+    let source = fs::read_to_string(&source_path).unwrap();
+    fs::write(
+        &source_path,
+        format!("{source}\n{}", include_str!("wire_contract.rs")),
+    )
+    .unwrap();
+    let result = Command::new("cargo")
+        .args(["test", "--locked", "--offline", "--manifest-path"])
+        .arg(scratch.path().join("Cargo.toml"))
+        .arg("--target-dir")
+        .arg(target.join("wire-contract"))
+        .current_dir(fixture_workspace())
+        .env(
+            "EXPECTED_COORDINATION",
+            document["coordination"]["identity"].as_str().unwrap(),
+        )
+        .env(
+            "EXPECTED_MAPPING",
+            document["coordination"]["wire"]["mapping"]
+                .as_str()
+                .unwrap(),
+        )
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
 }
 
 #[test]

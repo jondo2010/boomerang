@@ -10,6 +10,54 @@ See [runtime internals](./federated-runtime.md) for crate ownership.
 The hosted framing is experimental and versioned. It is not a stable public
 protocol or a guarantee of compatibility between Boomerang versions.
 
+## Canonical bounded protocol (Phase 6A)
+
+[`boomerang_federated::wire`](../boomerang_federated/src/wire.rs) defines the transport-independent
+protocol consumed by the subsequent Phase 6B Tokio `Framed` adapter. The current hosted TCP path
+below retains its Phase 5 framing until that adapter lands. The canonical codec owns no I/O,
+queues, reliability, grant decisions, or executor. It borrows caller-owned buffers and immutable
+member/route tables, preserving their actual typed key domains.
+
+A complete frame starts with a big-endian `u32` body length, followed by a Serde-derived
+Postcard record: zero flags, then record discriminant 0 (handshake) or 1 (traffic).
+The handshake fields are protocol `u16`, codec `u16`, coordination `[u8;32]`, epoch `u64`,
+incarnation `u64`, mapping `[u8;32]`, and borrowed member text, in that order. Traffic contains
+zero epoch/incarnation values followed by the derived message enum. Nonzero reserved fields fail closed.
+Postcard uses minimal unsigned varints, ZigZag signed integers, and varint string/byte lengths.
+Tags encode Never=0, finite=1 plus `i128` nanoseconds and `u64` microstep, or Forever=2; no padding.
+
+| Traffic kind | Fields after the discriminant |
+| --- | --- |
+| 0 publish / NET | Revision `u64`, optional tag. |
+| 1 complete / LTC | Tag. |
+| 2 payload to RTI; 8 payload to Federate | Route `u32`, tag, borrowed payload bytes. |
+| 3 confirm idle; 9 idle | Revision `u64`. |
+| 4 stop; 6 started; 10 stopped | Empty. |
+| 5 abort; 11 failed | Borrowed diagnostic text. |
+| 7 grant / TAG | Revision `u64` and tag. |
+| 12 PTAG; 13 port ABS | Reserved; rejected. |
+
+Participants always upgrade atomically as a closed world. Protocol, codec, and fingerprint
+matching are exact; there is no backward-compatible decoder or version negotiation. Canonical
+re-serialization is compared directly against input bytes using a Postcard sink; it allocates no buffer.
+
+The baseline profile permits at most 65,535 encoded payload bytes, 1,024 diagnostic bytes,
+255 member-name bytes, and 65,582 total frame bytes. These are encoded-message limits, not
+scheduler aggregate storage bounds. Both endpoints match the same compiled channel member, coordination,
+protocol, codec, and mapping before interpreting route references. The RTI echoes the channel's
+Federate identity; it does not acquire an invented Federate key. The hosted adapter enforces
+upstream/downstream message direction before dispatch. Unknown routes, wrong route
+ownership, malformed or trailing bytes, and protocol errors terminate the session. Stable names
+appear only during preflight; normal route resolution uses the borrowed typed table.
+
+[`PostcardCodec`](../boomerang_federated/src/wire/payload.rs) derives value encoding through Serde
+and Postcard 1.x: minimal integer varints, ZigZag signed integers, little-endian IEEE floats,
+and UTF-8 strings. Supported values are sealed allocation-free scalars, borrowed strings/bytes,
+fixed arrays, and pairs. Architecture-sized integers and allocating collections are excluded.
+Each codec declares a compile-time maximum. Decoding checks the byte limit before deserialization,
+requires exact consumption, and re-encodes into caller scratch to reject alternate encodings.
+The original Postcard error remains available until the hosted adapter normalizes it.
+
 ## Participants, images, and transport
 
 A Federate may contain multiple Enclaves. Each distributed Federate has one
@@ -36,7 +84,7 @@ ordered interfaces for testing and reference execution only.
 
 ## Tags and delays
 
-The pure `boomerang_federated` crate contains `WireTag` and `WireDelay` only.
+The portable `boomerang_federated` crate also owns `WireTag` and `WireDelay`.
 `WireTag` orders `Never` before finite `{ offset_ns, microstep }` tags and
 `Forever` after them. Executable events use finite nonnegative tags. Checked
 conversions preserve sentinels and reject runtime or wire values outside the

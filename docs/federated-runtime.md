@@ -16,7 +16,7 @@ For deployment artifacts and compiler responsibilities, see
 current backend messages and timing rules, see
 [Compiled Central RTI Protocol](./federated-protocol.md).
 
-## Ownership
+## Crate ownership
 
 - `boomerang_builder::compiler` owns stable source identities, resolved placement,
   canonical graph analysis, compiled images, and coordination projections. Its
@@ -50,16 +50,60 @@ it does not rediscover graph reachability. Hosted sockets bind a stable member
 name once. Admission then verifies the compiler-issued `CoordinationIdentity`
 before interpreting dense route keys.
 
+### Artifact and process ownership
+
+An executable embeds immutable images and implementation code. Its mutable state
+is allocated when the process starts; that live state is not shipped in the
+artifact. For the current generated `central-rti` deployment:
+
+| Artifact or host component | Metadata and code | Mutable state |
+| --- | --- | --- |
+| Host compiler | Complete application model, resolved deployment, canonical analysis, and lowered images used for code generation. | Build-time compiler state; absent from the deployed processes. |
+| Each independently built Federate executable | Its `FederateImage`, local `EnclaveImage` tables, selected payload code and bindings, plus coordination metadata described below. | Reactor/port/action storage, Enclave scheduler queues and mode state, Federate coordination frontier/revisions, `CentralRtiClient`, preflighted inbound adapters, and local connection queues. |
+| Separate RTI executable | `RtiImage`, canonical member identity table, shared `CoordinationIdentity`, and central backend implementation. | `CompiledRti` member admission/publication/grant/completion state, in-transit tags, idle/stop/failure state, and server connection queues. |
+| Host bundle and `cargo boomerang run` | Published artifact records, paths, and digests used to locate and validate the executables. | Supervisor child handles, readiness tracking, exit/failure handling, and child reaping. |
+
+The current generator embeds the same immutable `RtiImage`, canonical member
+identity table, and `CoordinationIdentity` in the RTI executable and every
+participating Federate executable. Each process has its own instance of that
+metadata. A Federate uses it to preflight its client and route bindings; only
+the RTI process owns the global mutable member and in-transit state. Reactor
+payload code and mutable reactor state belong to the corresponding Federate.
+
+In this diagram, boxes group data by executable and the process it starts.
+Dotted arrows represent generation; solid arrows represent runtime use or
+communication.
+
 ```mermaid
 flowchart TD
-    Compiler["Canonical compiler"] --> Images["Federate / Enclave images"]
-    Compiler --> Projection["RtiImage + coordination identity"]
-    Images --> Runtime["Compiled schedulers + typed boundary adapters"]
-    Projection --> Client["CentralRtiClient"]
-    Projection --> RTI["CompiledRti"]
-    Runtime <--> Client
-    Client <-->|ordered transport| RTI
+    subgraph Host["Host compiler - build time"]
+        Compiler["Complete model + resolved deployment<br/>canonical analysis"]
+    end
+
+    subgraph Federate["Each Federate executable / process"]
+        FMetadata["Embedded: Federate + local Enclave images<br/>payload code + bindings<br/>coordination metadata"]
+        FRuntime["Runtime: reactor storage + Enclave schedulers<br/>Federate coordination state"]
+        FClient["Runtime: CentralRtiClient<br/>inbound adapters + connection queues"]
+        FMetadata --> FRuntime
+        FMetadata --> FClient
+        FRuntime <--> FClient
+    end
+
+    subgraph RTI["Separate RTI executable / process"]
+        RMetadata["Embedded: RtiImage + member identities<br/>CoordinationIdentity"]
+        RState["Runtime: CompiledRti member state<br/>in-transit tags + connection queues"]
+        RMetadata --> RState
+    end
+
+    Compiler -.-> FMetadata
+    Compiler -.-> RMetadata
+    FClient <-->|ordered transport| RState
 ```
+
+The local one-Federate projection embeds its local deployment images and payload
+bindings without the RTI metadata, client, or separate RTI executable. The host
+reference execution functions allocate the corresponding live state inside the
+calling process rather than launching these independent executables.
 
 `execute_owned_federate` exercises a compiled local Federate with owned host
 storage. `execute_owned_federate_with_backend` adds preflighted external routes

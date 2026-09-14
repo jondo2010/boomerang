@@ -11,6 +11,7 @@ use crate::{compiled::CoordinationIdentity, WireTag};
 use boomerang_federated::{channel::Class, wire as canonical};
 use boomerang_runtime::image::{FederateIndex, RtiRouteIndex};
 use channel::{Envelope, Sender};
+use futures_util::StreamExt;
 use std::{
     io::Write,
     net::{SocketAddr, TcpListener},
@@ -188,10 +189,11 @@ impl RtiRequestSink for HostedSink {
         })
     }
 }
-/// Owns one Tokio worker and the synchronous scheduler's reply bridge.
-///
-/// Call these synchronous entrypoints outside an async executor. Dropping the owner closes
-/// admission, bounds accepted output draining, and joins even when sink clones remain alive.
+/// Owns one socket worker and bounded synchronous scheduler queues.
+/// Retain [`Self::sink`], then pass this owner to `CentralRtiClient::connect`.
+/// Dropping the owner drains accepted requests within one deadline and joins the worker,
+/// even when producers retain sink handles. Waiting occurs only on the synchronous owner.
+/// Call these synchronous entrypoints outside an async executor.
 pub struct HostedConnection {
     /// Shared nonblocking request producer and ordered reply state.
     sink: Arc<HostedSink>,
@@ -402,8 +404,8 @@ async fn client_loop(
                         terminal_sent = matches!(request, RtiRequest::Abort { .. });
                     }
                 }
-                bytes = reader.receive(), if !terminal_sent && incoming.is_none() && !received_terminal => {
-                    let bytes = bytes?;
+                bytes = reader.next(), if !terminal_sent && incoming.is_none() && !received_terminal => {
+                    let bytes = bytes.ok_or_else(|| failure("hosted socket disconnected"))??;
                     if awaiting_echo {
                         session.accept_handshake(&bytes).map_err(HostedError::from)?;
                         awaiting_echo = false;

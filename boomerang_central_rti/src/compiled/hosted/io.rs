@@ -9,9 +9,9 @@ use boomerang_federated::wire::{self, FRAME_PREFIX_BYTES, MAX_FRAME_BYTES};
 use bytes::{Bytes, BytesMut};
 use futures_util::{SinkExt, Stream};
 use std::{
-    future::{poll_fn, Future},
+    future::Future,
     pin::Pin,
-    task::Poll,
+    task::{ready, Context, Poll},
     time::Duration,
 };
 use tokio::{
@@ -54,12 +54,14 @@ impl Decoder for CanonicalFrameDecoder {
     }
 }
 
-/// Owns incremental decoding and its cancellation-safe partial-frame timer.
+/// Streams bounded frames with a cancellation-safe partial-frame deadline; EOF or error ends it.
 pub(super) struct Reader {
     /// Socket read ownership, buffered bytes, and canonical frame assembly state.
     framed: FramedRead<OwnedReadHalf, CanonicalFrameDecoder>,
     /// Wakeup polled for the decoder's partial deadline, retained across receive cancellation.
     timer: Pin<Box<Sleep>>,
+    /// Prevents further reads after EOF or the first terminal error.
+    done: bool,
 }
 /// Owns ordered writes; bytes already contain their authoritative canonical prefix.
 pub(super) struct Writer {
@@ -84,46 +86,46 @@ pub(super) fn split(stream: TcpStream, timeout: Duration) -> (Reader, Writer) {
         Reader {
             framed: FramedRead::new(read, decoder),
             timer: Box::pin(sleep(timeout)),
+            done: false,
         },
         Writer {
             framed: FramedWrite::new(write, BytesCodec::new()),
         },
     )
 }
-impl Reader {
-    /// Receives one complete frame. Healthy idle sockets have no operation deadline.
-    pub(super) async fn receive(&mut self) -> Result<BytesMut, HostedError> {
-        poll_fn(|cx| {
-            if self
-                .framed
-                .decoder()
-                .partial_deadline
-                .is_some_and(|deadline| Instant::now() >= deadline)
-            {
-                return Poll::Ready(Err(HostedError::Lifecycle(
+impl Stream for Reader {
+    type Item = Result<BytesMut, HostedError>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        if this.done {
+            return Poll::Ready(None);
+        }
+        let deadline = this.framed.decoder().partial_deadline;
+        // Buffered bytes must not complete a frame after its existing deadline has expired.
+        let frame = if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            Poll::Pending
+        } else {
+            Pin::new(&mut this.framed).poll_next(cx)
+        };
+        let result = match frame {
+            Poll::Pending => {
+                let Some(deadline) = this.framed.decoder().partial_deadline else {
+                    return Poll::Pending;
+                };
+                this.timer.as_mut().reset(deadline);
+                ready!(this.timer.as_mut().poll(cx));
+                Poll::Ready(Some(Err(HostedError::Lifecycle(
                     "hosted partial frame timed out",
-                )));
+                ))))
             }
-            match Pin::new(&mut self.framed).poll_next(cx) {
-                Poll::Ready(Some(result)) => Poll::Ready(result),
-                Poll::Ready(None) => {
-                    Poll::Ready(Err(HostedError::Lifecycle("hosted socket disconnected")))
-                }
-                Poll::Pending => {
-                    if let Some(deadline) = self.framed.decoder().partial_deadline {
-                        self.timer.as_mut().reset(deadline);
-                        if self.timer.as_mut().poll(cx).is_ready() {
-                            return Poll::Ready(Err(HostedError::Lifecycle(
-                                "hosted partial frame timed out",
-                            )));
-                        }
-                    }
-                    Poll::Pending
-                }
-            }
-        })
-        .await
+            ready => ready,
+        };
+        this.done = matches!(result, Poll::Ready(None | Some(Err(_))));
+        result
     }
+}
+impl Reader {
     /// Discards remaining bytes without reusing terminal protocol state, until EOF or deadline.
     pub(super) async fn drain(self, deadline: Instant) -> Result<(), HostedError> {
         if Instant::now() >= deadline {
@@ -172,6 +174,7 @@ impl Writer {
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
+    use futures_util::{StreamExt, TryStreamExt};
     use tokio::{io::AsyncWriteExt, net::TcpListener, time::timeout};
 
     /// Connected Tokio loopback sockets for framed I/O and supervisor tests.
@@ -195,14 +198,15 @@ pub(super) mod tests {
         let (mut reader, _) = split(stream, Duration::from_secs(1));
         let first = frame(b"first");
         peer.write_all(&first[..2]).await.unwrap();
-        assert!(timeout(Duration::from_millis(10), reader.receive())
+        assert!(timeout(Duration::from_millis(10), reader.next())
             .await
             .is_err());
         let mut rest = first[2..].to_vec();
-        rest.extend(frame(b"second"));
+        let second = frame(b"second");
+        rest.extend_from_slice(&second);
         peer.write_all(&rest).await.unwrap();
-        assert_eq!(reader.receive().await.unwrap().as_ref(), first);
-        assert_eq!(reader.receive().await.unwrap().as_ref(), frame(b"second"));
+        assert_eq!(reader.next().await.unwrap().unwrap().as_ref(), first);
+        assert_eq!(reader.next().await.unwrap().unwrap().as_ref(), second);
     }
 
     #[tokio::test]
@@ -210,11 +214,11 @@ pub(super) mod tests {
         let (stream, mut peer) = sockets().await;
         let operation = Duration::from_millis(80);
         let (mut reader, _) = split(stream, operation);
-        assert!(timeout(operation * 2, reader.receive()).await.is_err());
+        assert!(timeout(operation * 2, reader.next()).await.is_err());
         peer.write_all(&[0]).await.unwrap();
-        assert!(timeout(operation / 2, reader.receive()).await.is_err());
+        assert!(timeout(operation / 2, reader.next()).await.is_err());
         tokio::time::sleep(operation).await;
-        let error = timeout(operation / 2, reader.receive())
+        let error = timeout(operation / 2, reader.try_next())
             .await
             .unwrap()
             .unwrap_err();
@@ -222,6 +226,7 @@ pub(super) mod tests {
             error,
             HostedError::Lifecycle("hosted partial frame timed out")
         ));
+        assert!(reader.next().await.is_none());
     }
 
     #[tokio::test]
@@ -230,7 +235,7 @@ pub(super) mod tests {
         let (mut reader, _) = split(stream, Duration::from_secs(1));
         let capacity = reader.framed.read_buffer().capacity();
         peer.write_all(&u32::MAX.to_be_bytes()).await.unwrap();
-        assert!(matches!(reader.receive().await, Err(HostedError::Wire(_))));
+        assert!(matches!(reader.try_next().await, Err(HostedError::Wire(_))));
         assert_eq!(reader.framed.read_buffer().capacity(), capacity);
     }
 
@@ -242,12 +247,10 @@ pub(super) mod tests {
         let bytes = frame(&vec![7; MAX_FRAME_BYTES - FRAME_PREFIX_BYTES]);
         let deadline = Instant::now() + Duration::from_secs(1);
         writer.send(bytes.clone(), deadline).await.unwrap();
-        assert_eq!(peer_reader.receive().await.unwrap().as_ref(), bytes);
+        assert_eq!(peer_reader.next().await.unwrap().unwrap().as_ref(), bytes);
         writer.close(deadline).await.unwrap();
-        assert!(matches!(
-            peer_reader.receive().await,
-            Err(HostedError::Lifecycle("hosted socket disconnected"))
-        ));
+        assert!(peer_reader.next().await.is_none());
+        assert!(peer_reader.next().await.is_none());
         peer_writer
             .send(frame(b"remaining"), deadline)
             .await

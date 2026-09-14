@@ -51,7 +51,7 @@ fn receive(
         let frame = tokio::select! {
             biased;
             _ = cancel.cancelled() => None,
-            frame = reader.receive() => Some(frame),
+            frame = reader.next() => Some(frame.unwrap_or(Err(HostedError::Lifecycle("hosted socket disconnected")))),
         };
         Input {
             member,

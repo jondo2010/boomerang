@@ -151,7 +151,7 @@ fn fingerprint_mismatch_releases_other_admitted_peer() {
             identity: CoordinationIdentity::new([2; 32]),
         })
         .unwrap();
-    let bytes = rt.block_on(source.receive()).unwrap();
+    let bytes = rt.block_on(source.next()).unwrap().unwrap();
     assert!(
         matches!(session.decode(&bytes).unwrap(), canonical::Message::Reply(Reply::Failed { message }) if message.contains("fingerprint mismatch"))
     );

@@ -26,7 +26,7 @@ use tinymap::{Key, TinyMapView};
 /// Exact supported coordination protocol revision.
 pub const PROTOCOL_VERSION: u16 = 1;
 /// Exact supported canonical framing revision.
-pub const CODEC_VERSION: u16 = 3;
+pub const CODEC_VERSION: u16 = 1;
 /// Largest application payload, independent of input or storage sizes.
 pub const MAX_PAYLOAD_BYTES: usize = 65_535;
 /// Largest UTF-8 diagnostic.

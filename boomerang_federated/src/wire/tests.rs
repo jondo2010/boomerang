@@ -144,7 +144,7 @@ fn handshake_vector_and_every_identity_mismatch_fail_closed() {
     let n = encode_handshake(&hello("alpha"), &mut buffer).unwrap();
     let expected = frame(
         &[
-            &[0, 0, 1, 3][..],
+            &[0, 0, 1, 1][..],
             &[1; 32],
             &[0, 0],
             &[2; 32],

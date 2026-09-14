@@ -4,8 +4,6 @@
 //! `boomerang_runtime` data, including static dependency maps and derived scheduler indexes. The
 //! runtime receives those data structures ready to execute.
 
-#[cfg(feature = "federated")]
-use crate::connection::{FederatedDecoderAdapter, FederatedEncoderAdapter};
 use crate::{
     connection::{ConnectionSpec, ErasedConnectionSpec, PortBindings},
     port::Contained,
@@ -25,11 +23,6 @@ use super::{
 use itertools::Itertools;
 use petgraph::{prelude::DiGraphMap, EdgeDirection};
 use slotmap::{Key, SecondaryMap, SlotMap};
-#[cfg(feature = "federated")]
-use std::{
-    any::{type_name, Any, TypeId},
-    sync::Arc,
-};
 use std::{collections::HashMap, convert::TryInto};
 
 mod build;
@@ -37,15 +30,7 @@ mod debug;
 #[cfg(test)]
 mod tests;
 
-#[cfg(feature = "federated")]
-pub use build::LoweredFederation;
 pub use build::{DeferredRuntimeFactory, EnclaveDep, PartitionMap, RuntimeAssembly};
-
-#[cfg(feature = "federated")]
-type FederatedCodecPair<T> = (
-    Box<dyn runtime::PayloadEncoder<T, Error = runtime::PayloadCodecError>>,
-    Box<dyn runtime::PayloadDecoder<T, Error = runtime::PayloadCodecError>>,
-);
 
 mod util {
     use petgraph::visit::{IntoNeighborsDirected, IntoNodeIdentifiers, Visitable};
@@ -84,29 +69,6 @@ mod util {
 #[cfg(feature = "replay")]
 type ReplayFunctionFactory = dyn FnOnce(&RuntimeAssembly) -> Box<dyn runtime::replay::ReplayFn>;
 
-#[cfg(feature = "federated")]
-type LegacyInboundActionAdapterFactory = dyn FnOnce(
-    &RuntimeAssembly,
-    &mut boomerang_central_rti::FederatedRuntimeConnections,
-) -> Result<(), AssemblyError>;
-
-#[cfg(feature = "federated")]
-type FederatedCodecEntry = dyn Any + Send + Sync;
-
-#[cfg(feature = "federated")]
-struct FederatedCodecRegistration<T: runtime::ReactorData> {
-    encoder_factory: Box<
-        dyn Fn() -> Box<dyn runtime::PayloadEncoder<T, Error = runtime::PayloadCodecError>>
-            + Send
-            + Sync,
-    >,
-    decoder_factory: Box<
-        dyn Fn() -> Box<dyn runtime::PayloadDecoder<T, Error = runtime::PayloadCodecError>>
-            + Send
-            + Sync,
-    >,
-}
-
 #[derive(Debug)]
 pub struct ModeSpec {
     pub name: String,
@@ -128,12 +90,6 @@ pub struct Assembly {
     pub(super) reactor_specs: SlotMap<AssemblyReactorKey, ReactorSpec>,
     /// Connection specifications.
     pub(super) connection_specs: Vec<Box<dyn ErasedConnectionSpec>>,
-    #[cfg(feature = "federated")]
-    /// Assembly-scoped payload codec policy for inferred cross-federate connections.
-    federated_codecs: HashMap<TypeId, Box<FederatedCodecEntry>>,
-    #[cfg(feature = "federated")]
-    /// Factories for runtime handlers attached to inbound federated routes.
-    pub(super) federated_inbound_endpoint_factories: Vec<Box<LegacyInboundActionAdapterFactory>>,
     #[cfg(feature = "replay")]
     /// Factories for replay functions.
     pub(super) replay_factories: SecondaryMap<AssemblyActionKey, Box<ReplayFunctionFactory>>,
@@ -631,150 +587,6 @@ impl Assembly {
         });
 
         Ok(())
-    }
-
-    #[cfg(feature = "federated")]
-    pub fn register_federated_codec<T, C>(&mut self, codec: C) -> Result<(), AssemblyError>
-    where
-        T: runtime::ReactorData,
-        C: boomerang_federated::PayloadEncoder<T>
-            + boomerang_federated::PayloadDecoder<T>
-            + Send
-            + Sync
-            + 'static,
-    {
-        let type_id = TypeId::of::<T>();
-        if self.federated_codecs.contains_key(&type_id) {
-            return Err(AssemblyError::UnsupportedFederationTopology {
-                what: format!(
-                    "federated codec for payload type '{}' is already registered",
-                    type_name::<T>()
-                ),
-            });
-        }
-
-        let codec = Arc::new(codec);
-        let encoder_codec = Arc::clone(&codec);
-        let decoder_codec = Arc::clone(&codec);
-
-        self.federated_codecs.insert(
-            type_id,
-            Box::new(FederatedCodecRegistration::<T> {
-                encoder_factory: Box::new(move || {
-                    Box::new(FederatedEncoderAdapter {
-                        codec: Arc::clone(&encoder_codec),
-                    })
-                }),
-                decoder_factory: Box::new(move || {
-                    Box::new(FederatedDecoderAdapter {
-                        codec: Arc::clone(&decoder_codec),
-                    })
-                }),
-            }),
-        );
-
-        Ok(())
-    }
-
-    #[cfg(feature = "federated")]
-    pub(super) fn federated_codec_for<T>(
-        &self,
-        source_key: AssemblyPortKey,
-        target_key: AssemblyPortKey,
-    ) -> Result<FederatedCodecPair<T>, AssemblyError>
-    where
-        T: runtime::ReactorData,
-    {
-        let source_fqn = self.fqn_for(source_key, false)?;
-        let target_fqn = self.fqn_for(target_key, false)?;
-        let entry = self.federated_codecs.get(&TypeId::of::<T>()).ok_or_else(|| {
-            AssemblyError::UnsupportedFederationTopology {
-                what: format!(
-                    "cross-federate connection '{}' -> '{}' requires a federated codec for payload type '{}'; register one on Assembly with register_federated_codec::<T, _>(...)",
-                    source_fqn,
-                    target_fqn,
-                    type_name::<T>(),
-                ),
-            }
-        })?;
-
-        let registration = entry
-            .downcast_ref::<FederatedCodecRegistration<T>>()
-            .ok_or_else(|| {
-                AssemblyError::InternalError(format!(
-                    "federated codec registry type mismatch for payload type '{}'",
-                    type_name::<T>()
-                ))
-            })?;
-
-        Ok((
-            (registration.encoder_factory)(),
-            (registration.decoder_factory)(),
-        ))
-    }
-
-    #[cfg(feature = "federated")]
-    pub(super) fn add_federated_inbound_endpoint<T>(
-        &mut self,
-        endpoint: boomerang_federated::EndpointId,
-        target_partition: AssemblyReactorKey,
-        target_action_key: AssemblyActionKey,
-        decoder: Box<dyn runtime::PayloadDecoder<T, Error = runtime::PayloadCodecError>>,
-    ) where
-        T: runtime::ReactorData,
-    {
-        self.federated_inbound_endpoint_factories.push(Box::new(
-            move |runtime_assembly, connections| {
-                let (enclave_key, runtime_action_key) = *runtime_assembly
-                    .aliases
-                    .action_aliases
-                    .get(target_action_key)
-                    .ok_or_else(|| {
-                        AssemblyError::InternalError(format!(
-                            "missing runtime action alias for federated endpoint {endpoint}"
-                        ))
-                    })?;
-                let expected_enclave_key =
-                    runtime_assembly.aliases.enclave_aliases[target_partition];
-                if enclave_key != expected_enclave_key {
-                    return Err(AssemblyError::InternalError(format!(
-                        "federated endpoint {endpoint} resolved to wrong target enclave"
-                    )));
-                }
-
-                let enclave = &runtime_assembly.enclaves[enclave_key];
-                let context = enclave.create_send_context(enclave_key);
-                let action_ref = enclave.create_async_action_ref(runtime_action_key);
-                let target_federate = runtime_assembly
-                    .federation
-                    .as_ref()
-                    .ok_or_else(|| {
-                        AssemblyError::InternalError(format!(
-                            "missing lowered federation for inbound endpoint {endpoint}"
-                        ))
-                    })?
-                    .plan
-                    .federates
-                    .iter()
-                    .find(|federate| federate.reactor == target_partition)
-                    .ok_or_else(|| {
-                        AssemblyError::InternalError(format!(
-                            "missing target federate for inbound endpoint {endpoint}"
-                        ))
-                    })?;
-                connections
-                    .register_inbound(
-                        &boomerang_federated::FederateId::new(target_federate.id.clone()),
-                        endpoint,
-                        context,
-                        action_ref,
-                        decoder,
-                    )
-                    .map_err(|error| AssemblyError::UnsupportedFederationTopology {
-                        what: error.to_string(),
-                    })
-            },
-        ));
     }
 
     /// Get a fully-qualified name for a given key

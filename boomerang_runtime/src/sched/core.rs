@@ -11,8 +11,6 @@ use super::{
     modal::EventManager,
     Config, Stats,
 };
-#[cfg(feature = "federated")]
-use super::{FederatedBarrierOutcome, FederatedTimeBarrier};
 use crate::{
     event::{AsyncEvent, AsyncEventTarget},
     keepalive,
@@ -201,9 +199,6 @@ where
     pub(super) upstream_enclaves: &'a mut tinymap::TinySecondaryMap<EnclaveKey, LogicalTimeBarrier>,
     /// Existing local downstream wake senders.
     pub(super) downstream_enclaves: &'a tinymap::TinySecondaryMap<EnclaveKey, SendContext>,
-    /// Existing feature-gated federated time barrier installed only by live schedulers.
-    #[cfg(feature = "federated")]
-    pub(super) federated_time_barrier: Option<&'a mut dyn FederatedTimeBarrier>,
     /// Accumulated runtime statistics.
     pub(super) stats: &'a mut Stats,
     /// Reusable enabled-reaction scratch.
@@ -219,7 +214,7 @@ where
 /// Failure from concrete time coordination or mutable execution storage.
 #[derive(Debug)]
 pub(crate) enum SchedulerError<E> {
-    /// Existing local or federated logical-time coordination failed.
+    /// Local Enclave logical-time coordination failed.
     Coordination(RuntimeError),
     /// The compiled Federate coordination port failed with a closed typed error.
     FederateCoordination(FederateCoordinationError),
@@ -668,30 +663,6 @@ where
         Ok(None)
     }
 
-    /// Acquires the next tag from the legacy federated barrier.
-    #[cfg(feature = "federated")]
-    fn acquire_legacy_federated_tag(
-        &mut self,
-        next_tag: Tag,
-    ) -> Result<Option<bool>, SchedulerError<E::Error>> {
-        if self.federate_coordination.is_none() {
-            if let Some(barrier) = self.federated_time_barrier.as_deref_mut() {
-                match barrier
-                    .acquire_tag(next_tag, self.event_rx)
-                    .map_err(|error| SchedulerError::Coordination(error.into()))?
-                {
-                    FederatedBarrierOutcome::Granted => {}
-                    FederatedBarrierOutcome::Interrupted(async_event) => {
-                        self.handle_async_event(async_event)
-                            .map_err(SchedulerError::Execution)?;
-                        return Ok(Some(true));
-                    }
-                }
-            }
-        }
-        Ok(None)
-    }
-
     /// Synchronizes the next tag with the scheduler wall clock.
     fn synchronize_next_tag(
         &mut self,
@@ -782,13 +753,6 @@ where
             {
                 return Err(self.report_federate_failure(error));
             }
-        } else {
-            #[cfg(feature = "federated")]
-            if let Some(barrier) = self.federated_time_barrier.as_deref_mut() {
-                barrier
-                    .logical_tag_complete(*self.current_tag)
-                    .map_err(|error| SchedulerError::Coordination(error.into()))?;
-            }
         }
 
         self.stats.increment_processed_tags();
@@ -869,11 +833,6 @@ where
                 return Ok(keep_running);
             }
             if let Some(keep_running) = self.wait_for_upstream_release(next_tag)? {
-                return Ok(keep_running);
-            }
-
-            #[cfg(feature = "federated")]
-            if let Some(keep_running) = self.acquire_legacy_federated_tag(next_tag)? {
                 return Ok(keep_running);
             }
 

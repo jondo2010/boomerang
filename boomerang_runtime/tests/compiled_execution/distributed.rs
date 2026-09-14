@@ -1,6 +1,6 @@
 //! Compiled network route adapters reuse the owned execution fixture and scheduler.
 use super::*;
-use boomerang::runtime::{
+use boomerang_runtime::{
     execute_owned_federate_with_backend, BoundaryAdmissionError, BoundarySubmissionError,
     CoordinationRevision, FederateAcquisition, FederateCompletion, FederateCoordinationBackend,
     FederateCoordinationError, FederatePublication, OutboundBoundarySink, PayloadCodecError,

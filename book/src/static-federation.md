@@ -1,75 +1,39 @@
 # Static Federation
 
-Boomerang has an experimental `federated` feature for static federated
-reactors. A federate is a reactor instance placed behind
-`add_child_federate`; cross-federate logical messages are serialized with a
-registered payload codec and coordinated by a runtime infrastructure loop
-(RTI).
+Federates are an unconditional part of Boomerang's compiled deployment model,
+including a local deployment with one Federate. There is no `federated` feature
+to enable. A Federate groups one or more Enclaves under a stable deployment
+identity; Federates, Enclaves, processes, and hosts remain separate concepts.
 
-The in-memory and TCP runners execute persistent static federates with the same
-logical-time scheduler hooks used by the protocol client. A typical setup
-registers a codec, builds runtime parts, and then selects a runner:
+Use `cargo boomerang` with a deployment manifest to generate, build, and run a
+compiled deployment. The `central-rti` projection produces a separate RTI
+executable and independently built Federate executables. The launcher waits for
+readiness, supervises their execution, and bounds shutdown and child reaping.
+The RTI coordinates logical tags and forwards encoded payloads over the hosted
+transport. Generated images carry the shared coordination identity used to
+validate membership before execution.
 
-```rust,ignore
-let mut assembly = Assembly::new();
-assembly.register_federated_codec::<u32, _>(boomerang::federated::SerdeJsonCodec)?;
-let config = runtime::Config::default().with_fast_forward(true);
-let parts = assembly.into_runtime_assembly(&config)?;
-let envs = execute_federation_in_memory(parts, config)?;
-```
+The compiler remains authoritative for membership, route analysis, and timing
+constraints. Runtime preflight resolves stable identities to typed dense keys;
+normal coordination and payload exchange use those keys. Transport or decoding
+failure terminates execution rather than authorizing a logical tag.
 
-Static federation currently requires fast-forward execution because a common
-physical start is not implemented. Omitting `.with_fast_forward(true)` returns
-an unsupported-configuration error instead of running schedulers against
-independently initialized wall clocks.
+The local projection does not need the central RTI dependency. Ordinary local
+`Assembly` examples remain supported during migration, but Assembly no longer
+constructs federations or exposes `execute_federation_*` runners. Public
+compiled authoring improvements and a high-level hosted runner are tracked in
+[#234](https://github.com/jondo2010/boomerang/issues/234) and
+[#235](https://github.com/jondo2010/boomerang/issues/235); example migration is
+tracked in [#138](https://github.com/jondo2010/boomerang/issues/138).
 
-The TCP runner is also synchronous and single-process. It starts a static RTI
-listener, connects every federate scheduler through the shared TCP protocol
-transport, and returns the same final runtime environments:
-
-```rust,ignore
-let config = runtime::Config::default().with_fast_forward(true);
-let parts = assembly.into_runtime_assembly(&config)?;
-let envs = execute_federation_over_tcp(
-    parts,
-    config,
-    TcpStaticFederationConfig::default(),
-)?;
-```
-
-The default TCP configuration binds `127.0.0.1:0`, so the operating system
-selects an unused localhost port. This runner proves real framed transport; it
-does not launch separate processes or provide dynamic federation membership.
-Socket arrival order does not establish identity: each accepted peer declares
-its preconfigured federate id in `Hello`, while membership remains static.
-
-Payload encoding, transport, RTI protocol, and outbound delivery failures are
-returned to the runner's caller. They are not treated as permission to process
-a logical tag.
-
-The supported subset is deliberately conservative. It supports static
-persistent federates, one runtime enclave per federate, logical
-cross-federate messages routed through the RTI, same-tag messages,
-same-timestamp microsteps, fanout, multi-hop topologies, shutdown/no-future
-coordination, and positive-delay distributed cycles.
-
-The implementation rejects cross-federate physical connections, transient
-federates, mixed local/federated boundaries, and distributed zero-delay cycles.
-It does not implement `PTAG` or `ABS`, dynamic federate join/leave, reconnect
-behavior, authentication, or direct federate-to-federate payload channels.
-
-Run the public in-memory federation proof with:
+Compiled contracts live in the crates that implement them:
 
 ```sh
-cargo test -p boomerang --features federated public_api_runs_static_in_memory_federation
+cargo test -p boomerang_runtime --test compiled_execution --offline
+cargo test -p boomerang_central_rti --test compiled_execution --offline
+cargo test -p cargo-boomerang --test toolchain run::generated_central_rti_exchanges_tagged_payload --offline -- --exact
 ```
 
-Run the ignored localhost TCP proof with:
-
-```sh
-cargo test -p boomerang --features federated tcp_static -- --ignored
-```
-
-If a sandbox reports `Operation not permitted` while binding localhost, rerun
-that focused command with socket permission. The failure is environmental; the
-non-network in-memory tests remain the primary correctness suite.
+The RTI crate also provides an in-memory transport for testing and reference
+use. It is isolated from the generated deployment transport and is not the
+intended production hot path.

@@ -1,6 +1,6 @@
 [package]
 name = "boomerang_federated"
-description = "Federated protocol and RTI coordination primitives for Boomerang."
+description = "Portable wire tag and delay primitives for Boomerang."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,15 +12,13 @@ readme = "README.md"
 exclude.workspace = true
 
 [features]
-default = ["serde", "serde-json-codec"]
+default = ["serde"]
 
-## Serde derives for wire protocol and topology types
+## Serde derives for portable wire tags and delays
 serde = ["dep:serde"]
-
-## JSON-backed serde payload codec for tests and first adapters
-serde-json-codec = ["serde", "dep:serde_json"]
 
 [dependencies]
 serde = { workspace = true, optional = true, features = ["derive"] }
-serde_json = { workspace = true, optional = true }
-thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

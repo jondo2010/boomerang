@@ -132,25 +132,6 @@ impl<S: runtime::ReactorData> ReactorContext<'_, S> {
         )
     }
 
-    #[cfg(feature = "federated")]
-    pub fn add_child_federate<ChildState, R>(
-        &mut self,
-        reactor: R,
-        name: &str,
-        state: ChildState,
-    ) -> Result<R::Ports, AssemblyError>
-    where
-        ChildState: runtime::ReactorData,
-        R: Reactor<ChildState>,
-    {
-        self.add_child_reactor_with_placement(
-            reactor,
-            name,
-            state,
-            ReactorPlacement::federate(name),
-        )
-    }
-
     pub fn add_child_reactors<R, ChildState, const N: usize>(
         &mut self,
         reactor: R,

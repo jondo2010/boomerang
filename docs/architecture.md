@@ -2,7 +2,9 @@
 
 This document defines the target architecture for composing, partitioning, and
 executing Boomerang reactor graphs. It is normative design guidance, not a
-description of the current implementation and not a migration plan.
+complete description of the current implementation or a migration plan. Current compiled
+execution and protocol details are documented in [runtime internals](./federated-runtime.md)
+and the [compiled central protocol](./federated-protocol.md).
 
 The [Static Federate Deployment Architecture](./deployment-architecture.md) specializes this
 logical model into build-time implementation binding, compiled scheduler images, one binary per
@@ -15,7 +17,7 @@ choose how that graph is deployed. The same graph must support:
 
 - execution as one local enclave;
 - execution as multiple local enclaves;
-- execution as multiple federates connected in memory or over a transport;
+- execution as multiple Federates over a selected transport, with in-memory reference testing;
 - execution on one CI host using the production partitioning; and
 - partial replay, including replacement of a federate or enclave with recorded
   boundary data.
@@ -55,8 +57,8 @@ create or split Enclaves. One Federate may own one or more Enclaves and may then
 be assigned to a process or host.
 
 `ExecutionPlan` selects how the deployment is exercised. It can choose live or
-replayed execution per partition, select an in-memory or network transport,
-and enable recording or validation at selected boundaries.
+replayed execution per partition, select a network transport or in-memory reference
+test transport, and enable recording or validation at selected boundaries.
 
 `RuntimePlan` is the fully lowered, executable result. It contains runtime
 keys and objects, but no unresolved assembly identities or placement policy.
@@ -103,9 +105,10 @@ same-tag ordering. Transport and serialization are implementation details and
 must not introduce observable logical behavior.
 
 The assembly layer owns all graph analysis and lowering. It validates partition
-boundaries, derives endpoint identities, creates source and target bridge
-reactions, resolves runtime aliases, and emits a protocol-neutral runtime
-description. Protocol topology and wire types are not assembly output.
+boundaries, derives stable endpoint identities, and emits immutable compiled images
+and typed boundary metadata. Backend projections contain precomputed coordination
+tables. Target startup binds payload symbols and adapters without repeating graph
+analysis or constructing legacy bridge reactions.
 
 ## Deterministic Equivalence
 
@@ -168,8 +171,8 @@ The architecture supports several backends without changing the graph:
 
 - **Single enclave:** lowest-overhead semantic reference execution.
 - **Local partitioned:** multiple scheduler enclaves in one process.
-- **Federated in memory:** production federation topology and RTI behavior on
-  one host without network variability.
+- **Federated reference testing:** compiled topology and RTI behavior over in-memory
+  channels for deterministic tests.
 - **Federated transport:** the same lowered federation over TCP or another
   reliable ordered transport.
 - **Hybrid replay:** any supported deployment with selected partitions
@@ -180,53 +183,40 @@ assembly lowering.
 
 ## Crate Boundaries
 
-`boomerang_builder` owns the logical graph model, stable graph identities,
-deployment and execution plans, validation, partition analysis, connection
-lowering, codec registration against runtime-facing interfaces, and production
-of protocol-neutral runtime plans. It must not depend on federated protocol or
-transport types.
+`boomerang_builder::compiler` owns the canonical logical graph, stable identities,
+resolved deployment, validation, global analysis, compiled images, and selected
+coordination projections. Its graph model is protocol-neutral.
 
-`boomerang_runtime` owns scheduler behavior and protocol-neutral execution
-interfaces: endpoint identities, payload encoder and decoder contracts,
-outbound sinks, inbound registries, logical-time coordination hooks, replay
-injection, and enclave execution. It must remain independent of Tokio, RTI
-state, wire frames, and federated protocol types.
+`boomerang_runtime` owns compiled image views, scheduler behavior, storage,
+typed boundary adapters, replay admission, and protocol-neutral Federate
+coordination. It does not depend on RTI wire types or distributed transport.
 
-`boomerang_federated` owns protocol concerns only: wire-safe identities and
-tags, topology, RTI state and sessions, federate protocol clients, framing, and
-transports. It must not own assembly lowering or scheduler thread lifecycle.
+`boomerang_federated` contains only pure `WireTag` and `WireDelay` primitives.
+`boomerang_central_rti` owns the compiled central state machine, client, checked
+tag conversions, and hosted and reference transports. It consumes `RtiImage`
+and runtime coordination interfaces without depending on the host compiler.
 
-`boomerang_federated_runtime` is the explicit integration adapter. It may
-depend on assembly, runtime, and protocol crates. It maps a lowered runtime plan
-to protocol topology and routes, converts runtime tags and delays to wire
-representations, implements runtime coordination using federate clients, and
-owns in-memory and network federation orchestration. Mixed runtime/protocol
-code belongs here by design.
-
-The top-level `boomerang` crate is the public facade. It selects optional
-backends and re-exports their APIs, but does not own lowering or orchestration
-logic.
-
-The intended dependency direction is:
+`cargo-boomerang` selects and generates backend-specific artifacts and their
+package dependencies. The top-level `boomerang` facade re-exports application
+and runtime interfaces; it does not select a central backend implicitly.
 
 ```mermaid
 flowchart LR
-    Facade["boomerang"]
-    AssemblyLayer["boomerang_builder"]
-    Runtime["boomerang_runtime"]
-    Adapter["boomerang_federated_runtime"]
-    Protocol["boomerang_federated"]
-
-    Facade --> AssemblyLayer
-    AssemblyLayer --> Runtime
-    Facade -. selected coordination backend .-> Adapter
-    Adapter --> AssemblyLayer
-    Adapter --> Runtime
-    Adapter --> Protocol
+    Facade["boomerang"] --> Builder["boomerang_builder"]
+    Facade --> Runtime["boomerang_runtime"]
+    Builder --> Runtime
+    Generated["Generated central deployment"] --> Central["boomerang_central_rti"]
+    Generated --> Runtime
+    Central --> Runtime
+    Central --> Wire["boomerang_federated: wire primitives"]
 ```
 
-No dependency points from runtime or protocol crates back into the assembly layer or
-facade.
+Ordinary local `Assembly::into_runtime_assembly` remains during caller migration.
+Its live local Enclave construction is separate from compiled deployment execution;
+it no longer constructs federations. Public application authoring and hosted
+compiled runner follow-ups are tracked in
+[#234](https://github.com/jondo2010/boomerang/issues/234) and
+[#235](https://github.com/jondo2010/boomerang/issues/235).
 
 ## Feature Model
 
@@ -234,11 +224,10 @@ Federate identity and compiled Federate structure are unconditional, including
 for a wholly local application. A multi-Federate deployment selects a
 coordination backend; a one-Federate deployment selects none.
 
-Lower crates may use internal capability features for the selected coordination
-backend, protocol, transport, or trace container, but those features are not
-part of the user-facing placement model. `cargo-boomerang` selects a complete,
-internally consistent stack without requiring users to coordinate assembly,
-runtime, protocol, or codec feature flags.
+Compiled Federate, boundary, and backend interfaces are always available. The
+central backend is opt-in through an explicit package dependency and a selected
+coordination projection. `cargo-boomerang` generates the required dependencies;
+there is no user-facing `federated` feature or backend feature-flag choreography.
 
 Replay is orthogonal to Federate placement. Concrete recording and replay
 containers may remain optional hosted capabilities.

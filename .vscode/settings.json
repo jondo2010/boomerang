@@ -1,7 +1,4 @@
 {
     "lldb.verboseLogging": true,
-    "rust-analyzer.check.command": "clippy",
-    "rust-analyzer.cargo.features": [
-        "federated",
-    ]
+    "rust-analyzer.check.command": "clippy"
 }

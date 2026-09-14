@@ -1157,8 +1157,7 @@ fn test_is_enclave_compatibility_with_reactor_placement() {
     assert_eq!(reactor.placement(), &ReactorPlacement::Enclave);
 }
 
-#[cfg(feature = "federated")]
-mod federated;
+mod local_partition;
 
 pub struct PingPong {
     pub assembly: Assembly,

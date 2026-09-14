@@ -1,8 +1,6 @@
 //! Standard-library reference implementation for synchronously executing validated compiled enclave images as a behavioral baseline for target executors.
 
-#[cfg(feature = "federated")]
 mod distributed;
-#[cfg(feature = "federated")]
 pub use distributed::execute_owned_federate_with_backend;
 
 use std::{
@@ -158,7 +156,6 @@ pub struct FederateBindings<'binding> {
     duplicate_enclaves: TinySecondaryMap<EnclaveIndex, ()>,
     /// Statically typed route adapters retained until image preflight resolves their endpoints.
     routes: Vec<Box<dyn RouteBinding + 'binding>>,
-    #[cfg(feature = "federated")]
     /// Typed adapters for route halves whose peer is outside this Federate.
     external_routes: Vec<distributed::ExternalRoute<'binding>>,
 }
@@ -719,7 +716,6 @@ fn preflight_owned_federate<'image>(
         .filter(|(key, _)| selected.enclaves().contains(*key))
         .collect();
     preflight_enclave_bindings(federate, &images, bindings)?;
-    #[cfg(feature = "federated")]
     if let Some(route) = bindings.external_routes.first() {
         return Err(ExecuteOwnedFederateError::UnexpectedRouteBinding {
             boundary: route.boundary.as_str().to_owned(),

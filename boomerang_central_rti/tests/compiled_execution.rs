@@ -1,13 +1,21 @@
 //! Exercises the compiled executor through a real image-backed RTI, without Cargo or processes.
-use super::*;
-use boomerang::central_rti::compiled::{
+use boomerang_runtime::{
+    CompiledModeEffectRef, Config, Context, Duration, EnclaveBindings, FederateBindings, InputRef,
+    OutputRef, PayloadType, ReactionBindingError, ReactionRefs, ReactorData, Tag,
+};
+
+#[path = "compiled_execution/source_sink.rs"]
+mod source_sink;
+use source_sink::*;
+
+use boomerang_central_rti::compiled::{
     CentralRtiClient, CompiledRti, CoordinationIdentity, RtiClientBindings, RtiReply, RtiRequest,
 };
-use boomerang::central_rti::WireTag;
-use boomerang::runtime::{execute_owned_federate_with_backend, image::*};
+use boomerang_central_rti::WireTag;
+use boomerang_runtime::{execute_owned_federate_with_backend, image::*};
 use std::sync::Arc;
 
-#[path = "central_rti_transport.rs"]
+#[path = "compiled_execution/transport.rs"]
 mod transport;
 
 /// Shared compiler-issued identity for this immutable test deployment.
@@ -317,7 +325,7 @@ fn unknown_upstream_blocks_and_in_transit_payload_prevents_idle() {
 /// Preserves wakeable idle for members that have not requested termination.
 #[test]
 fn local_idle_is_reversible_without_terminal_participation() {
-    use boomerang::central_rti::{compiled::RtiReply, WireTag};
+    use boomerang_central_rti::{compiled::RtiReply, WireTag};
     let mut rti = admitted_rti();
     for member in MEMBERS {
         let replies = publish(&mut rti, member, 0, None);
@@ -413,11 +421,11 @@ fn publish(
     rti: &mut CompiledRti<'_>,
     member: FederateIndex,
     revision: u64,
-    next_event: Option<boomerang::central_rti::WireTag>,
-) -> Vec<boomerang::central_rti::compiled::RtiDelivery> {
+    next_event: Option<boomerang_central_rti::WireTag>,
+) -> Vec<boomerang_central_rti::compiled::RtiDelivery> {
     rti.handle(
         member,
-        boomerang::central_rti::compiled::RtiRequest::Publish {
+        boomerang_central_rti::compiled::RtiRequest::Publish {
             revision,
             next_event,
         },
@@ -427,7 +435,7 @@ fn publish(
 /// Preflight authorizes stable outbound identities and retains only the shared route key.
 #[test]
 fn outbound_preflight_resolves_and_authorizes_typed_routes() {
-    use boomerang::central_rti::compiled::in_memory::InMemorySender;
+    use boomerang_central_rti::compiled::in_memory::InMemorySender;
     let view = CompiledDeploymentView::new(&DEPLOYMENT).unwrap();
     assert!(RtiClientBindings::new(&view, FederateIndex::new(9), IDENTITY).is_err());
     let source = RtiClientBindings::new(&view, MEMBERS[0], IDENTITY).unwrap();
@@ -443,7 +451,7 @@ fn outbound_preflight_resolves_and_authorizes_typed_routes() {
     source
         .outbound_sink(sender, BoundaryId::new("pipe"))
         .unwrap()
-        .send(boomerang::runtime::TaggedPayload {
+        .send(boomerang_runtime::TaggedPayload {
             tag: Tag::ZERO,
             payload: vec![42],
         })
@@ -457,7 +465,7 @@ fn outbound_preflight_resolves_and_authorizes_typed_routes() {
 /// Missing destination bindings fail before admission and tell the connection owner to abort.
 #[test]
 fn inbound_preflight_requires_complete_member_bindings() {
-    use boomerang::central_rti::compiled::in_memory::{InMemoryReceiver, InMemorySender};
+    use boomerang_central_rti::compiled::in_memory::{InMemoryReceiver, InMemorySender};
     let view = CompiledDeploymentView::new(&DEPLOYMENT).unwrap();
     let bindings = RtiClientBindings::new(&view, MEMBERS[1], IDENTITY).unwrap();
     let (tx, requests) = std::sync::mpsc::channel();
@@ -510,7 +518,7 @@ fn payload_rejects_unknown_and_foreign_route_keys() {
 /// Extra or foreign inbound adapters are rejected through the executor's real preflight seam.
 #[test]
 fn inbound_preflight_rejects_extra_and_foreign_bindings() {
-    use boomerang::central_rti::compiled::in_memory::{InMemoryReceiver, InMemorySender};
+    use boomerang_central_rti::compiled::in_memory::{InMemoryReceiver, InMemorySender};
     for extra in [false, true] {
         let view = CompiledDeploymentView::new(&DEPLOYMENT).unwrap();
         let bindings =
@@ -558,3 +566,30 @@ fn inbound_preflight_rejects_extra_and_foreign_bindings() {
         assert!(requests.try_recv().is_err());
     }
 }
+
+/// Bounds deadlock detection to one second outside Miri and 30 seconds under Miri, whose
+/// interpreter overhead would otherwise cause false watchdog failures.
+fn owned_federate_watchdog_timeout() -> std::time::Duration {
+    #[cfg(miri)]
+    {
+        std::time::Duration::from_secs(30)
+    }
+
+    #[cfg(not(miri))]
+    {
+        std::time::Duration::from_secs(1)
+    }
+}
+
+fn bounded<T: Send + 'static>(run: impl FnOnce() -> T + Send + 'static) -> T {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || tx.send(run()).unwrap());
+    let result = rx
+        .recv_timeout(owned_federate_watchdog_timeout())
+        .expect("owned Federate execution must complete within the watchdog timeout");
+    worker.join().unwrap();
+    result
+}
+
+#[path = "compiled_execution/client.rs"]
+mod client;

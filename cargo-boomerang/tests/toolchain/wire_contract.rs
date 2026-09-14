@@ -29,15 +29,15 @@ fn generated_wire_contract_conformance() {
     let mut value_bytes = [0; 5];
     let size = WirePayloadCodec::<u32>::encode(&300, &mut value_bytes).unwrap();
     assert_eq!(&value_bytes[..size], &[0xac, 0x02]);
-    let message = Message::PayloadToRti {
+    let message = Message::Request(Request::Payload {
         route: route_key,
         tag: WireTag::finite(1_000_000, 7),
         payload: &value_bytes[..size],
-    };
+    });
     let size = session.encode(&message, &mut frame).unwrap();
     let decoded = session.decode(&frame[..size]).unwrap();
     assert_eq!(decoded, message);
-    let Message::PayloadToRti { payload, .. } = decoded else {
+    let Message::Request(Request::Payload { payload, .. }) = decoded else {
         panic!("wrong message")
     };
     assert_eq!(

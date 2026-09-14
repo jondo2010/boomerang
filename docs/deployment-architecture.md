@@ -831,9 +831,9 @@ for `central-rti`, it launches the generated RTI followed by independent Federat
 future peer-to-peer runner launches the Federates without an RTI. It supervises startup, logs,
 coordinated shutdown, and exit status. It rejects non-host-runnable artifacts.
 
-The initial hosted projection uses `boomerang.compiled-hosted.v1` framing over TCP and the
-`serde-json` payload capability. This is the Phase 5 process transport; the canonical compact
-API is available; its Tokio TCP adoption is Phase 6B. The shared coordination digest covers
+The hosted projection uses `boomerang.canonical.v1` framing over TCP and the declared
+`serde-json` payload capability. Frames use the portable Serde/Postcard envelope and an exact
+echoed handshake before typed routes are admitted. The shared coordination digest covers
 canonical mappings, analyzed dependencies, declared boundary contracts, versions, and policies.
 Local image fingerprints are separate. Stable member names are resolved once during
 admission; payload exchanges carry typed `RtiRouteIndex` values, never boundary strings.
@@ -844,7 +844,11 @@ processes. The in-memory transport remains solely a testing/reference implementa
 For hosted `run`, readiness uses a private loopback connection with a ten-second deadline.
 Federates start only after the RTI reports its bound data address. Admission, partial frames,
 stalled writes and terminal flushing have ten-second bounds; healthy inactive sessions may wait
-indefinitely. Frames are limited to one MiB and queues to sixteen frames per stage. The supervisor
+indefinitely. Complete frames are limited to 65,583 bytes and opaque payloads to 65,535 bytes.
+Each stage has sixteen fixed queue entries; payloads may consume only twelve, reserving four
+for coordination. All accepted traffic remains FIFO, so completion and grants cannot overtake
+preceding payloads. Queue exhaustion closes the link and preserves the original failure.
+The synchronous socket worker is temporary pending the Tokio projection in #134. The supervisor
 allows ten seconds for peers to exit after the first successful child exit, or one second after a
 failure, then kills outstanding children and reaps all of them. It forwards application streams,
 returns a failing child status, and exports a summary only when every child succeeds (saturated

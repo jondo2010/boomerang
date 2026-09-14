@@ -87,7 +87,7 @@ pub(super) fn render_launcher(
                 .parse()?;
             let view = RtiImageView::new(&COORDINATION_IMAGE, COORDINATION_MEMBERS)?;
             let rti_bindings = RtiClientBindings::from_image(&view, FEDERATE, COORDINATION_IDENTITY)?;
-            let connection = hosted::connect(address, FEDERATE_IMAGE.id().as_str(), timeout)?;
+            let connection = hosted::connect(address, FEDERATE, wire_contract(), timeout)?;
             let sink = connection.sink();
             let bindings = generated_bindings(&rti_bindings, sink.clone())?;
             let execution = boomerang_runtime::execute_owned_federate_with_backend(

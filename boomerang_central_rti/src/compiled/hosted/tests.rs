@@ -174,18 +174,27 @@ fn socket_members_admit_and_stop_using_core_authority() {
 fn fingerprint_mismatch_releases_other_admitted_peer() {
     let timeout = Duration::from_secs(1);
     let (address, server) = server(timeout);
-    let mut source = connect(address, "source", timeout).unwrap();
+    let contract = test_contract();
+    let (source, mut session) = admitted_peer(address, timeout, &contract);
+    let mut source = FramedSocket::new(source, timeout).unwrap();
     let target = connect(address, "target", timeout).unwrap();
-    hello(&source);
     target
         .sink()
         .send(RtiRequest::Hello {
             identity: CoordinationIdentity::new([2; 32]),
         })
         .unwrap();
-    assert!(
-        matches!(source.receive(timeout).unwrap(), Some(RtiReply::Failed { message }) if message.contains("fingerprint mismatch"))
-    );
+    let start = Instant::now();
+    loop {
+        if let Some(bytes) = source.receive().unwrap() {
+            assert!(
+                matches!(session.decode(&bytes).unwrap(), canonical::Message::Reply(Reply::Failed { message }) if message.contains("fingerprint mismatch"))
+            );
+            break;
+        }
+        assert!(start.elapsed() < timeout);
+        thread::sleep(POLL);
+    }
     assert!(server
         .join()
         .unwrap()
@@ -448,12 +457,29 @@ fn test_contract() -> boomerang_federated::wire::Contract<
 
 #[test]
 fn actual_hosted_server_echoes_exact_canonical_preflight() {
-    use boomerang_federated::wire;
     let timeout = Duration::from_secs(1);
     let (address, server) = server(timeout);
+    let contract = test_contract();
+    let (mut peer, mut session) = admitted_peer(address, timeout, &contract);
+    peer.write_all(&encode(&mut session, &canonical::Message::Reply(Reply::Started)).unwrap())
+        .unwrap();
+    assert!(server
+        .join()
+        .unwrap()
+        .unwrap_err()
+        .to_string()
+        .contains("channel direction"));
+}
+
+/// Waits for the exact handshake echo before returning an admitted source peer.
+fn admitted_peer<'a>(
+    address: SocketAddr,
+    timeout: Duration,
+    contract: &'a WireContract<'static>,
+) -> (TcpStream, WireSession<'a, 'static>) {
+    use boomerang_federated::wire;
     let mut peer = TcpStream::connect(address).unwrap();
     peer.set_read_timeout(Some(timeout)).unwrap();
-    let contract = test_contract();
     let hello = contract.handshake(FederateIndex::new(0)).unwrap();
     let mut bytes = vec![0; wire::MAX_FRAME_BYTES];
     let count = wire::encode_handshake(&hello, &mut bytes).unwrap();
@@ -462,18 +488,9 @@ fn actual_hosted_server_echoes_exact_canonical_preflight() {
     let mut echo = vec![0; count];
     peer.read_exact(&mut echo).unwrap();
     assert_eq!(echo, bytes);
-    let mut session = WireSession::new(&contract, FederateIndex::new(0)).unwrap();
+    let mut session = WireSession::new(contract, FederateIndex::new(0)).unwrap();
     session.accept_handshake(&echo).unwrap();
-    let count = session
-        .encode(&canonical::Message::Reply(Reply::Started), &mut bytes)
-        .unwrap();
-    peer.write_all(&bytes[..count]).unwrap();
-    assert!(server
-        .join()
-        .unwrap()
-        .unwrap_err()
-        .to_string()
-        .contains("channel direction"));
+    (peer, session)
 }
 
 /// Binds a test roster name once at the hosted adapter entrypoint.
@@ -661,6 +678,7 @@ fn abort_drains_a_stalled_socket_despite_inbound_coordination() {
             message: "drained cause"
         })
     ));
+    peer.shutdown(std::net::Shutdown::Write).unwrap();
     worker.join().unwrap().unwrap();
 }
 

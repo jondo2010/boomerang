@@ -414,6 +414,29 @@ fn client_loop(
                     .stream
                     .shutdown(std::net::Shutdown::Write)
                     .map_err(failure)?;
+                drop(state);
+                // Drain without decoding after Abort: closing with unread bytes can reset TCP.
+                if terminal_sent {
+                    loop {
+                        if deadline.unwrap().elapsed() >= socket.timeout {
+                            return Err(failure("hosted shutdown receive drain timed out"));
+                        }
+                        match socket.stream.read(&mut [0; 8192]) {
+                            Ok(0) => break,
+                            Ok(_) => {}
+                            Err(error)
+                                if matches!(
+                                    error.kind(),
+                                    std::io::ErrorKind::WouldBlock
+                                        | std::io::ErrorKind::Interrupted
+                                ) =>
+                            {
+                                thread::sleep(POLL)
+                            }
+                            Err(error) => return Err(failure(error)),
+                        }
+                    }
+                }
                 return Ok(());
             }
             drop(state);

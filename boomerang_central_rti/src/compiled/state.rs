@@ -178,6 +178,7 @@ impl<'a> CompiledRti<'a> {
         }
         match self.apply(member, request) {
             Ok(deliveries) => deliveries,
+            Err(CentralRtiError::Coordination(message)) => self.abort(message),
             Err(error) => self.abort(error.to_string()),
         }
     }

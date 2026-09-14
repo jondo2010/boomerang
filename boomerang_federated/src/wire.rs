@@ -2,8 +2,9 @@
 //!
 //! A big-endian `u32` body length precedes a Serde-derived Postcard record. The
 //! body contains a zero flags byte and either a handshake or ordinary traffic.
-//! Record discriminants are handshake=0, traffic=1; traffic kinds are 0..=11 in
-//! [`Message`](crate::wire::Message) declaration order, with 12 (PTAG) and 13 (port ABS) reserved/rejected.
+//! Record discriminants are handshake=0, traffic=1. Traffic carries direction (request=0,
+//! reply=1), then its directional opcode in declaration order. Reply opcodes 6 (PTAG)
+//! and 7 (port ABS) are reserved and rejected. Local Request::Hello is never serialized.
 //! Both records reserve `u64` epoch/incarnation fields, which must be zero.
 //!
 //! Postcard uses minimal unsigned varints, ZigZag signed integers, little-endian
@@ -25,7 +26,7 @@ use tinymap::{Key, TinyMapView};
 /// Exact supported coordination protocol revision.
 pub const PROTOCOL_VERSION: u16 = 1;
 /// Exact supported canonical framing revision.
-pub const CODEC_VERSION: u16 = 2;
+pub const CODEC_VERSION: u16 = 1;
 /// Largest application payload, independent of input or storage sizes.
 pub const MAX_PAYLOAD_BYTES: usize = 65_535;
 /// Largest UTF-8 diagnostic.
@@ -35,18 +36,18 @@ pub const MAX_MEMBER_BYTES: usize = 255;
 /// Integer representation of the big-endian frame body length.
 type FrameLength = u32;
 /// Width of the fixed prefix, derived from its integer representation.
-const FRAME_PREFIX_BYTES: usize = core::mem::size_of::<FrameLength>();
+pub const FRAME_PREFIX_BYTES: usize = core::mem::size_of::<FrameLength>();
 /// Largest complete frame, including its length prefix.
-// Prefix + flags + record + zero epoch/incarnation + kind + u32 route +
+// Prefix + flags + record + zero epoch/incarnation + direction + kind + u32 route +
 // finite tag (enum + i128 + u64 varints) + bounded payload length + payload.
 pub const MAX_FRAME_BYTES: usize =
-    FRAME_PREFIX_BYTES + 1 + 1 + 2 + 1 + 5 + 30 + 3 + MAX_PAYLOAD_BYTES;
+    FRAME_PREFIX_BYTES + 1 + 1 + 2 + 1 + 1 + 5 + 30 + 3 + MAX_PAYLOAD_BYTES;
 
 /// Defines distinct digest claims with an identical fixed byte representation.
 macro_rules! fingerprint {
     ($name:ident, $doc:literal) => {
         #[doc = $doc]
-        #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
         pub struct $name(#[doc = "Canonical digest bytes in stable order."] [u8; 32]);
         impl $name {
             /// Wraps the canonical digest without changing its byte order.
@@ -160,84 +161,205 @@ pub enum AdmissionError {
     Route,
 }
 
-/// Traffic on a preflight-bound member channel; payloads borrow caller storage.
-/// Serde describes the record shape; only [`Session`] validates admission and routes.
-/// Session APIs use typed `R: Key`; serialization uses the same record with raw `u32` routes.
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Message<'a, R> {
-    /// NET publication, kind 0.
+/// Upstream coordination vocabulary shared by runtime and wire adapters.
+/// `R` is the route domain, `P` stores payload bytes and `D` stores diagnostic text.
+/// Hosted aliases own `Vec<u8>`/`String`; wire aliases borrow `&[u8]`/`&str`.
+/// Hello is local admission input and cannot be serialized as ordinary traffic.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Request<R, P, D> {
+    /// Publishes a reversible local candidate; `None` permits later inbound work.
     Publish {
-        /// Monotonic publication revision.
+        /// Revision owned by the compiled Federate coordinator.
         revision: u64,
-        /// Earliest event, or reversible local idle.
+        /// Current earliest local event, or local idle.
         next_event: Option<WireTag>,
     },
-    /// LTC completion, kind 1.
+    /// Reports completion after all payload submissions at this tag.
     Complete {
-        /// Greatest completed logical tag.
+        /// Greatest completed local tag.
         tag: WireTag,
     },
-    /// Member payload submission, kind 2.
-    PayloadToRti {
-        /// Validated deployment-wide route key.
+    /// Submits one encoded route value with delay already applied.
+    Payload {
+        /// Route in the fingerprint-verified coordination image, never an Enclave-local key.
         route: R,
-        /// Final destination tag; delay is already applied.
+        /// Final destination tag.
         tag: WireTag,
-        /// Opaque application codec bytes.
-        payload: &'a [u8],
+        /// Codec-produced bytes.
+        payload: P,
     },
-    /// Terminal idle confirmation, kind 3.
+    /// Participates in terminal quiescence for a current local-idle revision.
     ConfirmIdle {
-        /// Publication being confirmed.
+        /// Revision awaiting a final fixed-point check.
         revision: u64,
     },
-    /// Authorized member stop, kind 4.
+    /// Commits the globally authorized idle stop.
     Stop,
-    /// Terminal member failure, kind 5.
+    /// Fails the session after a local scheduler or transport failure.
     Abort {
-        /// Bounded original diagnostic.
-        message: &'a str,
+        /// Diagnostic retained as the session failure cause.
+        message: D,
     },
-    /// All expected members admitted, kind 6.
-    Started,
-    /// TAG authorization, kind 7.
-    Grant {
-        /// Publication being authorized.
-        revision: u64,
-        /// Authorized logical horizon.
-        tag: WireTag,
-    },
-    /// Coordinator payload delivery, kind 8.
-    PayloadToFederate {
-        /// Validated deployment-wide route key.
-        route: R,
-        /// Final destination tag; receiver applies no further delay.
-        tag: WireTag,
-        /// Opaque application codec bytes.
-        payload: &'a [u8],
-    },
-    /// Global idle confirmation, kind 9.
-    Idle {
-        /// Publication being confirmed.
-        revision: u64,
-    },
-    /// Terminal stop acknowledgement, kind 10.
-    Stopped,
-    /// Terminal coordinator failure, kind 11.
-    Failed {
-        /// Bounded original diagnostic.
-        message: &'a str,
+    /// Admits this connection against the shared compiled coordination identity.
+    #[serde(skip)]
+    Hello {
+        /// Identity embedded in the connecting artifact.
+        identity: CoordinationFingerprint,
     },
 }
 
+/// Downstream coordination vocabulary with the same route and storage roles as [`Request`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Reply<R, P, D> {
+    /// Every expected artifact passed identity admission.
+    Started,
+    /// Authorizes one publication after all preceding payloads were delivered.
+    Grant {
+        /// Publication revision being authorized.
+        revision: u64,
+        /// Logical execution horizon.
+        tag: WireTag,
+    },
+    /// Delivers one payload before any grant that could execute it.
+    Payload {
+        /// Shared coordination route resolved to a local inbound adapter during preflight.
+        route: R,
+        /// Final logical tag; no receiver-side delay is applied.
+        tag: WireTag,
+        /// Encoded application data.
+        payload: P,
+    },
+    /// Confirms global quiescence for the named local publication.
+    Idle {
+        /// Locally idle revision for which no future inbound work remains.
+        revision: u64,
+    },
+    /// Acknowledges terminal member stop.
+    Stopped,
+    /// Terminates all execution after a session failure.
+    Failed {
+        /// Original terminal failure diagnostic.
+        message: D,
+    },
+}
+
+impl<R: Copy, P, D> Request<R, P, D> {
+    /// Maps route and storage representations without changing message semantics.
+    /// Only `route` is fallible, so typed-domain admission remains explicit at the boundary.
+    pub fn try_map<'a, S, Q, T, E>(
+        &'a self,
+        route: impl Fn(R) -> Result<S, E>,
+        payload: impl Fn(&'a P) -> Q,
+        text: impl Fn(&'a D) -> T,
+    ) -> Result<Request<S, Q, T>, E> {
+        Ok(match self {
+            Self::Publish {
+                revision,
+                next_event,
+            } => Request::Publish {
+                revision: *revision,
+                next_event: *next_event,
+            },
+            Self::Complete { tag } => Request::Complete { tag: *tag },
+            Self::Payload {
+                route: key,
+                tag,
+                payload: data,
+            } => Request::Payload {
+                route: route(*key)?,
+                tag: *tag,
+                payload: payload(data),
+            },
+            Self::ConfirmIdle { revision } => Request::ConfirmIdle {
+                revision: *revision,
+            },
+            Self::Stop => Request::Stop,
+            Self::Abort { message } => Request::Abort {
+                message: text(message),
+            },
+            Self::Hello { identity } => Request::Hello {
+                identity: *identity,
+            },
+        })
+    }
+}
+impl<R: Copy, P: AsRef<[u8]>, D: AsRef<str>> Request<R, P, D> {
+    /// Borrows message storage for serialization without allocating or copying payloads.
+    pub fn borrowed(&self) -> Request<R, &[u8], &str> {
+        self.try_map(
+            Ok::<_, core::convert::Infallible>,
+            AsRef::as_ref,
+            AsRef::as_ref,
+        )
+        .unwrap()
+    }
+}
+
+impl<R: Copy, P, D> Reply<R, P, D> {
+    /// Maps route and storage representations without changing message semantics.
+    /// Only `route` is fallible, so typed-domain admission remains explicit at the boundary.
+    pub fn try_map<'a, S, Q, T, E>(
+        &'a self,
+        route: impl Fn(R) -> Result<S, E>,
+        payload: impl Fn(&'a P) -> Q,
+        text: impl Fn(&'a D) -> T,
+    ) -> Result<Reply<S, Q, T>, E> {
+        Ok(match self {
+            Self::Started => Reply::Started,
+            Self::Grant { revision, tag } => Reply::Grant {
+                revision: *revision,
+                tag: *tag,
+            },
+            Self::Payload {
+                route: key,
+                tag,
+                payload: data,
+            } => Reply::Payload {
+                route: route(*key)?,
+                tag: *tag,
+                payload: payload(data),
+            },
+            Self::Idle { revision } => Reply::Idle {
+                revision: *revision,
+            },
+            Self::Stopped => Reply::Stopped,
+            Self::Failed { message } => Reply::Failed {
+                message: text(message),
+            },
+        })
+    }
+}
+impl<R: Copy, P: AsRef<[u8]>, D: AsRef<str>> Reply<R, P, D> {
+    /// Borrows message storage for serialization without allocating or copying payloads.
+    pub fn borrowed(&self) -> Reply<R, &[u8], &str> {
+        self.try_map(
+            Ok::<_, core::convert::Infallible>,
+            AsRef::as_ref,
+            AsRef::as_ref,
+        )
+        .unwrap()
+    }
+}
+
+/// A borrowed directional record on an admitted channel.
+/// Both runtime-owned and wire-borrowed data use the same [`Request`] and [`Reply`] definitions.
+/// The envelope identifies direction; [`Session`] validates routes and the hosted endpoint
+/// rejects messages sent in the wrong direction before dispatch.
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Message<'a, R> {
+    /// Member-to-coordinator traffic.
+    Request(#[serde(borrow)] Request<R, &'a [u8], &'a str>),
+    /// Coordinator-to-member traffic.
+    Reply(#[serde(borrow)] Reply<R, &'a [u8], &'a str>),
+}
 impl<'a, R: Copy> Message<'a, R> {
-    /// Checks field ceilings independently of the complete-frame limit.
-    fn validate_bounds(&self) -> Result<(), FrameError> {
+    /// Checks owned-field ceilings before retention or serialization.
+    pub fn validate_bounds(&self) -> Result<(), FrameError> {
         let oversized = match self {
-            Self::PayloadToRti { payload, .. } | Self::PayloadToFederate { payload, .. } => {
-                payload.len() > MAX_PAYLOAD_BYTES
-            }
-            Self::Abort { message } | Self::Failed { message } => {
+            Self::Request(Request::Hello { .. }) => return Err(FrameError::Unsupported),
+            Self::Request(Request::Payload { payload, .. })
+            | Self::Reply(Reply::Payload { payload, .. }) => payload.len() > MAX_PAYLOAD_BYTES,
+            Self::Request(Request::Abort { message }) | Self::Reply(Reply::Failed { message }) => {
                 message.len() > MAX_DIAGNOSTIC_BYTES
             }
             _ => false,
@@ -248,46 +370,22 @@ impl<'a, R: Copy> Message<'a, R> {
             Ok(())
         }
     }
-    /// Converts only route representations, preserving borrowed payloads and logical tags.
+    /// Converts only route domains using the shared record mapper, preserving borrowed storage.
     fn map_routes<S>(
         &self,
         map: impl Fn(R, bool) -> Result<S, WireError>,
     ) -> Result<Message<'a, S>, WireError> {
-        Ok(match *self {
-            Self::Publish {
-                revision,
-                next_event,
-            } => Message::Publish {
-                revision,
-                next_event,
-            },
-            Self::Complete { tag } => Message::Complete { tag },
-            Self::PayloadToRti {
-                route,
-                tag,
-                payload,
-            } => Message::PayloadToRti {
-                route: map(route, true)?,
-                tag,
-                payload,
-            },
-            Self::ConfirmIdle { revision } => Message::ConfirmIdle { revision },
-            Self::Stop => Message::Stop,
-            Self::Abort { message } => Message::Abort { message },
-            Self::Started => Message::Started,
-            Self::Grant { revision, tag } => Message::Grant { revision, tag },
-            Self::PayloadToFederate {
-                route,
-                tag,
-                payload,
-            } => Message::PayloadToFederate {
-                route: map(route, false)?,
-                tag,
-                payload,
-            },
-            Self::Idle { revision } => Message::Idle { revision },
-            Self::Stopped => Message::Stopped,
-            Self::Failed { message } => Message::Failed { message },
+        Ok(match self {
+            Self::Request(request) => Message::Request(request.try_map(
+                |route| map(route, true),
+                |bytes| *bytes,
+                |text| *text,
+            )?),
+            Self::Reply(reply) => Message::Reply(reply.try_map(
+                |route| map(route, false),
+                |bytes| *bytes,
+                |text| *text,
+            )?),
         })
     }
 }
@@ -322,6 +420,18 @@ pub struct Contract<'a, M: Key, R: Key, V> {
     endpoints: fn(&V) -> (M, M),
 }
 impl<'a, M: Key, R: Key, V> Contract<'a, M, R, V> {
+    /// Builds the exact local preflight claim for one compiler-owned channel member.
+    pub fn handshake(&self, member: M) -> Result<Handshake<'a>, WireError> {
+        Ok(Handshake {
+            protocol: PROTOCOL_VERSION,
+            codec: CODEC_VERSION,
+            coordination: CoordinationFingerprint::new(self.coordination.bytes()),
+            mapping: self.mapping,
+            epoch: 0,
+            incarnation: 0,
+            member: self.members.get(member).ok_or(AdmissionError::Peer)?,
+        })
+    }
     /// Borrows the compiler's complete dense tables and records their precomputed identities.
     /// `members` must contain nonempty unique stable IDs in ascending order. Every pair
     /// returned by `endpoints` must index `members`; route ordering must match `mapping`.
@@ -470,7 +580,10 @@ impl<'a, 'image, M: Key, R: Key, V> Session<'a, 'image, M, R, V> {
             };
             message.map_routes(|number, to_rti| s.route(number, to_rti))
         })?;
-        self.failed |= matches!(message, Message::Abort { .. } | Message::Failed { .. });
+        self.failed |= matches!(
+            message,
+            Message::Request(Request::Abort { .. }) | Message::Reply(Reply::Failed { .. })
+        );
         Ok(message)
     }
     /// Encodes into caller storage after preflight; returns the complete frame length.
@@ -495,12 +608,42 @@ impl<'a, 'image, M: Key, R: Key, V> Session<'a, 'image, M, R, V> {
                 output,
             )
         });
-        self.failed |= matches!(message, Message::Abort { .. } | Message::Failed { .. });
+        self.failed |= matches!(
+            message,
+            Message::Request(Request::Abort { .. }) | Message::Reply(Reply::Failed { .. })
+        );
         result
     }
 }
 
 /// Encodes a preflight record into caller storage, returning the complete frame length.
+/// Inspects only a stream prefix, rejecting an impossible size before body storage is reserved.
+/// Returns the total frame size, including the prefix, or `None` for an incomplete prefix.
+pub fn frame_length(bytes: &[u8]) -> Result<Option<usize>, FrameError> {
+    let Some((prefix, _)) = bytes.split_first_chunk::<FRAME_PREFIX_BYTES>() else {
+        return Ok(None);
+    };
+    let length =
+        usize::try_from(FrameLength::from_be_bytes(*prefix)).map_err(|_| FrameError::Oversize)?;
+    if length > MAX_FRAME_BYTES - FRAME_PREFIX_BYTES {
+        return Err(FrameError::Oversize);
+    }
+    if length == 0 {
+        return Err(FrameError::Invalid);
+    }
+    Ok(Some(length + FRAME_PREFIX_BYTES))
+}
+
+/// Reads a bounded canonical preflight record without admitting its claimed identity.
+/// Resolve its stable member in the compiled roster, then call [`Session::accept_handshake`]
+/// to validate every profile field before receiving or transmitting ordinary messages.
+pub fn decode_handshake(bytes: &[u8]) -> Result<Handshake<'_>, WireError> {
+    match decode_frame(bytes)? {
+        Record::Handshake(hello) => Ok(hello),
+        _ => Err(WireError::NotAdmitted),
+    }
+}
+
 /// Nonzero reserved fields can be encoded for rejection probes; admission requires zero.
 pub fn encode_handshake(handshake: &Handshake<'_>, output: &mut [u8]) -> Result<usize, WireError> {
     if handshake.member.len() > MAX_MEMBER_BYTES {

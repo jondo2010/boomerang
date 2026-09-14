@@ -930,8 +930,8 @@ fn require_success(phase: &'static str, output: &Output) -> Result<()> {
     bail!("generated launcher {phase} failed:\n{}", diagnostics)
 }
 
-/// Protocol contract for the initial hosted projection, separate from the Phase 6 wire protocol.
-pub(crate) const HOSTED_PROTOCOL: &str = "boomerang.compiled-hosted.v1";
+/// Bundle protocol identity for the canonical framed channel used by hosted deployments.
+pub(crate) const HOSTED_PROTOCOL: &str = "boomerang.canonical.v1";
 
 /// Validates the selected hosted projection before writing any generated source.
 fn validate_coordination(analyzed: &AnalyzedDeployment) -> Result<bool> {
@@ -1022,7 +1022,7 @@ fn generated_coordination(
         pub const WIRE_COORDINATION_FINGERPRINT: boomerang_federated::wire::CoordinationFingerprint =
             boomerang_federated::wire::CoordinationFingerprint::new([#(#bytes),*]);
         const COORDINATION_IDENTITY: boomerang_central_rti::compiled::CoordinationIdentity =
-            boomerang_central_rti::compiled::CoordinationIdentity::new(WIRE_COORDINATION_FINGERPRINT.bytes());
+            WIRE_COORDINATION_FINGERPRINT;
         /// Exact dense table mapping shared by the closed roster.
         pub const WIRE_MAPPING: [u8; 32] = [#(#mapping_bytes),*];
         /// Baseline canonical codec with the declared route profile's encoded-message bound.
@@ -1088,7 +1088,7 @@ pub(crate) fn generate_analyzed_rti(
             } else {
                 println!("BOOMERANG_RTI_READY_V1 {}", listener.local_addr()?);
             }
-            boomerang_central_rti::compiled::hosted::serve(listener, rti, std::time::Duration::from_secs(10))?;
+            boomerang_central_rti::compiled::hosted::serve(listener, rti, wire_contract(), std::time::Duration::from_secs(10))?;
             Ok(())
         }
     })?;

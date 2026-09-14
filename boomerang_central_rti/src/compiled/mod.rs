@@ -15,108 +15,35 @@ use boomerang_runtime::image::{FederateIndex, RtiRouteIndex};
 pub use client::{CentralRtiClient, RtiClientBindings};
 pub use state::CompiledRti;
 
-/// Opaque compiler-issued identity shared by the RTI and every Federate artifact.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CoordinationIdentity([u8; 32]);
-impl CoordinationIdentity {
-    /// Embeds the same deployment coordination digest in all participating artifacts.
-    pub const fn new(digest: [u8; 32]) -> Self {
-        Self(digest)
-    }
-    /// Returns the digest for transport encoding.
-    pub const fn bytes(self) -> [u8; 32] {
-        self.0
-    }
-}
+/// Compiler-issued shared coordination digest, identical at the core and wire boundary.
+pub use boomerang_federated::wire::CoordinationFingerprint as CoordinationIdentity;
 
 /// Terminal compiled session or transport failure at a hosted interface boundary.
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("central RTI: {0}")]
-pub struct CentralRtiError(String);
+#[derive(Clone, Debug, thiserror::Error)]
+pub enum CentralRtiError {
+    /// A terminal coordination diagnostic independent of any transport implementation.
+    #[error("central RTI: {0}")]
+    Coordination(String),
+    /// Original hosted failure shared with all observers of the terminated connection.
+    #[error("central RTI: {0}")]
+    Hosted(#[source] std::sync::Arc<hosted::HostedError>),
+}
 impl CentralRtiError {
-    /// Retains an actionable diagnostic without exposing a transport implementation.
+    /// Records a coordination diagnostic at the core boundary.
     pub fn new(message: impl Into<String>) -> Self {
-        Self(message.into())
+        Self::Coordination(message.into())
+    }
+}
+impl From<hosted::HostedError> for CentralRtiError {
+    fn from(error: hosted::HostedError) -> Self {
+        Self::Hosted(std::sync::Arc::new(error))
     }
 }
 
-/// Ordered requests from one connection bound to a stable compiled Federate identity.
-#[derive(Clone, Debug)]
-pub enum RtiRequest {
-    /// Admits this connection against the shared compiled coordination identity.
-    Hello {
-        /// Identity embedded in the connecting artifact.
-        identity: CoordinationIdentity,
-    },
-    /// Publishes a reversible local candidate; `None` permits later inbound work.
-    Publish {
-        /// Revision owned by the compiled Federate coordinator.
-        revision: u64,
-        /// Current earliest local event, or local idle.
-        next_event: Option<WireTag>,
-    },
-    /// Reports completion after all payload submissions at this tag.
-    Complete {
-        /// Greatest completed local tag.
-        tag: WireTag,
-    },
-    /// Submits one encoded route value with delay already applied.
-    Payload {
-        /// Route in the fingerprint-verified coordination image, never an Enclave-local key.
-        route: RtiRouteIndex,
-        /// Final destination tag.
-        tag: WireTag,
-        /// Codec-produced bytes.
-        payload: Vec<u8>,
-    },
-    /// Participates in terminal quiescence for a current local-idle revision.
-    ConfirmIdle {
-        /// Revision awaiting a final fixed-point check.
-        revision: u64,
-    },
-    /// Commits the globally authorized idle stop.
-    Stop,
-    /// Fails the session after a local scheduler or transport failure.
-    Abort {
-        /// Diagnostic retained as the session failure cause.
-        message: String,
-    },
-}
-
-/// Ordered replies to a bound Federate connection.
-#[derive(Clone, Debug)]
-pub enum RtiReply {
-    /// Every expected artifact passed identity admission.
-    Started,
-    /// Authorizes one publication after all preceding payloads were delivered.
-    Grant {
-        /// Publication revision being authorized.
-        revision: u64,
-        /// Logical execution horizon.
-        tag: WireTag,
-    },
-    /// Delivers one payload before any grant that could execute it.
-    Payload {
-        /// Shared coordination route resolved to a local inbound adapter during preflight.
-        route: RtiRouteIndex,
-        /// Final logical tag; no receiver-side delay is applied.
-        tag: WireTag,
-        /// Encoded application data.
-        payload: Vec<u8>,
-    },
-    /// Confirms global quiescence for the named local publication.
-    Idle {
-        /// Locally idle revision for which no future inbound work remains.
-        revision: u64,
-    },
-    /// Acknowledges terminal member stop.
-    Stopped,
-    /// Terminates all execution after a session failure.
-    Failed {
-        /// Original terminal failure diagnostic.
-        message: String,
-    },
-}
+/// Owned upstream records in the compiler's original route-key domain.
+pub type RtiRequest = boomerang_federated::wire::Request<RtiRouteIndex, Vec<u8>, String>;
+/// Owned downstream records; their definition is shared with borrowed wire messages.
+pub type RtiReply = boomerang_federated::wire::Reply<RtiRouteIndex, Vec<u8>, String>;
 
 /// One server-local delivery selected by the compiled member domain.
 #[derive(Clone, Debug)]

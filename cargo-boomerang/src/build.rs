@@ -45,7 +45,7 @@ pub(crate) fn build_analyzed(
     let compiled_federates = analyzed.compiled.federates();
     let mut launcher_builds = Vec::with_capacity(compiled_federates.len());
     let mut federates = Vec::with_capacity(compiled_federates.len());
-    for compiled_federate in compiled_federates.values() {
+    for (federate_index, compiled_federate) in compiled_federates.iter() {
         let federate_id = compiled_federate.id().as_str();
         let configuration = analyzed
             .resolved
@@ -93,6 +93,11 @@ pub(crate) fn build_analyzed(
         groups.sort();
         groups.dedup();
         federates.push(FederateDocument {
+            image_fingerprint: Some(
+                crate::codegen::federate_image_fingerprint(analyzed, federate_index)?
+                    .to_hex()
+                    .to_string(),
+            ),
             id: federate_id.to_owned(),
             groups,
             target: compiled_federate.target().to_string(),
@@ -171,6 +176,7 @@ pub(crate) fn build_analyzed(
             .to_owned(),
         protocol: identity.as_ref().map(|_| HOSTED_PROTOCOL.to_owned()),
         identity: identity.map(|hash| hash.to_hex().to_string()),
+        wire: crate::codegen::wire_profile(analyzed)?,
     };
     let mut document = DeploymentDocument {
         schema: DEPLOYMENT_SCHEMA,

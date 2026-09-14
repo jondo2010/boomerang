@@ -15,10 +15,12 @@ exclude.workspace = true
 default = ["serde"]
 
 ## Serde derives for portable wire tags and delays
-serde = ["dep:serde"]
+serde = []
 
 [dependencies]
-serde = { workspace = true, optional = true, features = ["derive"] }
+tinymap = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+postcard = { version = "1.1.3", default-features = false }
 
 [dev-dependencies]
 serde_json.workspace = true

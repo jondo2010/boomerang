@@ -10,6 +10,49 @@ See [runtime internals](./federated-runtime.md) for crate ownership.
 The hosted framing is experimental and versioned. It is not a stable public
 protocol or a guarantee of compatibility between Boomerang versions.
 
+## Canonical bounded protocol (Phase 6A)
+
+[`boomerang_federated::wire`](../boomerang_federated/src/wire.rs) defines the transport-independent
+protocol consumed by the subsequent Phase 6B Tokio `Framed` adapter. The current hosted TCP path
+below retains its Phase 5 framing until that adapter lands. The canonical codec owns no I/O,
+queues, reliability, grant decisions, or executor. It borrows caller-owned buffers and immutable
+member/route tables, preserving their actual typed key domains.
+
+A complete frame begins with a big-endian `u32` body length, then a `u8` message kind, a zero
+flags byte, and zero-valued big-endian `u64` epoch and incarnation fields. Nonzero reserved
+fields fail closed. A tag is 25 bytes: `u8` kind (0 Never, 1 finite, 2 Forever), signed big-endian
+`i128` nanoseconds, and big-endian `u64` microstep. Sentinel padding must be zero. Revisions are
+`u64`, route keys and payload lengths are `u32`, and UTF-8 text lengths are `u16`, all big-endian.
+
+| Kind | Body after the common header |
+| --- | --- |
+| 0 handshake | Protocol `u16`, codec `u16`, coordination digest `[u8;32]`, mapping digest `[u8;32]`, member text. |
+| 1 publish / NET | Revision, optional-tag flag, and tag when present. |
+| 2 complete / LTC | Tag. |
+| 3 payload to RTI; 9 payload to Federate | Typed route reference, tag, payload length and bytes. |
+| 4 confirm idle; 10 idle | Revision. |
+| 5 stop; 7 started; 11 stopped | Empty. |
+| 6 abort; 12 failed | Diagnostic text. |
+| 8 grant / TAG | Revision and tag. |
+| 13 PTAG; 14 port ABS | Reserved; rejected without implementing later semantics. |
+
+The baseline profile permits at most 65,535 encoded payload bytes, 1,024 diagnostic bytes,
+255 member-name bytes, and 65,590 total frame bytes. These are encoded-message limits, not
+scheduler aggregate storage bounds. Both endpoints match the same compiled channel member, coordination,
+protocol, codec, and mapping before interpreting route references. The RTI echoes the channel's
+Federate identity; it does not acquire an invented Federate key. The hosted adapter enforces
+upstream/downstream message direction before dispatch. Unknown routes, wrong route
+ownership, malformed or trailing bytes, and protocol errors terminate the session. Stable names
+appear only during preflight; normal route resolution uses the borrowed typed table.
+
+[`PostcardCodec`](../boomerang_federated/src/wire/payload.rs) derives value encoding through Serde
+and Postcard 1.x: minimal integer varints, ZigZag signed integers, little-endian IEEE floats,
+and UTF-8 strings. Supported values are sealed allocation-free scalars, borrowed strings/bytes,
+fixed arrays, and pairs. Architecture-sized integers and allocating collections are excluded.
+Each codec declares a compile-time maximum. Decoding checks the byte limit before deserialization,
+requires exact consumption, and re-encodes into caller scratch to reject alternate encodings.
+The original Postcard error remains available until the hosted adapter normalizes it.
+
 ## Participants, images, and transport
 
 A Federate may contain multiple Enclaves. Each distributed Federate has one
@@ -36,7 +79,7 @@ ordered interfaces for testing and reference execution only.
 
 ## Tags and delays
 
-The pure `boomerang_federated` crate contains `WireTag` and `WireDelay` only.
+The portable `boomerang_federated` crate also owns `WireTag` and `WireDelay`.
 `WireTag` orders `Never` before finite `{ offset_ns, microstep }` tags and
 `Forever` after them. Executable events use finite nonnegative tags. Checked
 conversions preserve sentinels and reject runtime or wire values outside the

@@ -5,7 +5,7 @@ on:
     branches: ["main"]
 
   pull_request:
-    branches: ["main", "codex/deployment-phase4-integration", "codex/deployment-phase5-integration"]
+    branches: ["main", "codex/deployment-phase4-integration", "codex/deployment-phase5-integration", "codex/deployment-phase6-integration"]
 
 permissions:
   contents: read

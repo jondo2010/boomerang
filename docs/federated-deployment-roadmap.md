@@ -272,6 +272,10 @@ authenticated Federate identity when the selected security profile requires auth
 mismatch fails closed. Participants do not require identical Federate-image fingerprints or
 artifact digests because those values describe different deployment slices.
 
+Payload schema compatibility follows the declared component contract ID and version; changing a
+payload schema requires a contract-version change. The compiler does not infer wire schemas from
+Rust type layouts or reaction bodies.
+
 Every boundary selects a codec and maximum encoded size. Generated codecs use a canonical,
 architecture-independent representation with specified endianness and field widths; native struct
 layout is never transferred. Encoding and decoding use bounded caller-provided storage.

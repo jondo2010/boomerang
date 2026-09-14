@@ -18,7 +18,7 @@ time = { version = "0.3", features = [] }
 document-features = "0.2"
 erased-serde = "0.4"
 fs2 = "0.4"
-itertools = "0.14"
+itertools = "0.15"
 humantime = "2.3"
 rayon = "1.10"
 serde = "1.0"
@@ -33,8 +33,8 @@ tracing-subscriber = { version = "0.3", features = [
     "json",
     "env-filter",
 ] }
-tracing-tracy = { version = "0.11", features = ["flush-on-exit"] }
-variadics_please = "1.1"
+tracing-tracy = { version = "0.12", features = ["flush-on-exit"] }
+variadics_please = "2.0"
 
 # Local crates
 boomerang = { path = "boomerang", version = "0.3.0" }

@@ -38,8 +38,9 @@ fn resolution_returns_exact_package_ids_and_rejects_nonmembers() {
     assert_eq!(resolved.topology().package, "vehicle-topology");
     assert_eq!(resolved.topology().entry, "vehicle_topology::topology");
     let topology = resolved.package("vehicle-topology").unwrap();
+    // Cargo and std may spell the same Windows path with different verbatim prefixes.
     assert_eq!(
-        topology.manifest_path,
+        fs::canonicalize(&topology.manifest_path).unwrap(),
         fs::canonicalize(workspace.join("vehicle-topology/Cargo.toml")).unwrap()
     );
     assert_eq!(
@@ -69,20 +70,12 @@ fn resolution_returns_exact_package_ids_and_rejects_nonmembers() {
     let host = &resolved.deployment().federates["host"];
     assert_eq!(host.target.as_deref(), Some("x86_64-unknown-linux-gnu"));
     assert_eq!(
-        host.target_json.as_deref(),
-        Some(
-            fs::canonicalize(workspace.join("targets/host.json"))
-                .unwrap()
-                .as_path()
-        )
+        fs::canonicalize(host.target_json.as_ref().unwrap()).unwrap(),
+        fs::canonicalize(workspace.join("targets/host.json")).unwrap()
     );
     assert_eq!(
-        host.cargo_config.as_deref(),
-        Some(
-            fs::canonicalize(workspace.join(".cargo/host.toml"))
-                .unwrap()
-                .as_path()
-        )
+        fs::canonicalize(host.cargo_config.as_ref().unwrap()).unwrap(),
+        fs::canonicalize(workspace.join(".cargo/host.toml")).unwrap()
     );
 
     assert_eq!(
@@ -92,9 +85,9 @@ fn resolution_returns_exact_package_ids_and_rejects_nonmembers() {
     assert_eq!(
         resolved.lockfile().digest,
         [
-            0x6c, 0x35, 0xdf, 0xd6, 0x84, 0x92, 0x0c, 0x25, 0x3f, 0x27, 0xd0, 0x7d, 0x68, 0x11,
-            0xc6, 0x61, 0xaf, 0xea, 0xfe, 0x02, 0x33, 0x17, 0x69, 0xa2, 0xc2, 0x2f, 0xf7, 0x36,
-            0xdf, 0xff, 0xc9, 0xea,
+            0x96, 0xd8, 0x6b, 0xe7, 0x76, 0x90, 0x57, 0x16, 0x04, 0x45, 0x4c, 0x32, 0xbf, 0x78,
+            0x65, 0x48, 0x12, 0xff, 0xb0, 0x1c, 0xb1, 0x5d, 0x57, 0x12, 0x00, 0x65, 0xf5, 0x87,
+            0x1e, 0xea, 0x8a, 0xd0,
         ]
     );
 

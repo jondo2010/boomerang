@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 
-use cargo_boomerang::{load_manifest, parse_manifest, CoordinationBackend, ExecutionPolicy};
+use cargo_boomerang::{
+    load_manifest, parse_manifest, CoordinationBackend, ExecutionPolicy, RecoveryPolicy,
+};
 
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -20,6 +22,7 @@ entry = "vehicle::topology"
 [deployments.production.federates.host]
 groups = ["vehicle"]
 runtime = "std"
+recovery = "fail-stop"
 
 [deployments.production.coordination]
 backend = "central-rti"
@@ -37,6 +40,7 @@ entry = "vehicle::topology"
 [deployments.production.federates.host]
 groups = ["vehicle"]
 runtime = "std"
+recovery = "fail-stop"
 "#
 }
 
@@ -58,6 +62,7 @@ fn valid_manifest_preserves_the_complete_schema() {
     assert_eq!(edge.toolchain.as_deref(), Some("nightly-2026-08-01"));
     assert_eq!(edge.profile.as_deref(), Some("release"));
     assert_eq!(edge.runtime, "bare-metal");
+    assert_eq!(edge.recovery, RecoveryPolicy::FailStop);
     assert_eq!(edge.target_json.as_deref(), Some("targets/sensor.json"));
     assert_eq!(
         edge.cargo_config.as_deref(),
@@ -76,6 +81,11 @@ fn valid_manifest_preserves_the_complete_schema() {
         production.rti.as_ref().unwrap().target,
         "aarch64-unknown-linux-gnu"
     );
+    let boundary = &production.boundaries["controller-to-sensor"];
+    assert_eq!(boundary.flow, "sensor-control");
+    assert_eq!(boundary.physical_input.as_deref(), Some("plant/sensor"));
+    assert_eq!(boundary.physical_output.as_deref(), Some("plant/actuator"));
+    assert_eq!(boundary.security_policy.as_str(), "none");
 
     let future = manifest.deployment("future-p2p").unwrap();
     assert_eq!(
@@ -83,6 +93,22 @@ fn valid_manifest_preserves_the_complete_schema() {
         CoordinationBackend::PeerToPeer
     );
     assert!(future.rti.is_none());
+}
+
+#[test]
+fn manifest_policy_vocabulary_rejects_unknown_names_during_parsing() {
+    let source = one_federate_without_coordination().replace(
+        "recovery = \"fail-stop\"",
+        "recovery = \"mystery-recovery\"",
+    );
+    let error = parse_manifest(&source).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("deployments.production.federates.host.recovery"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -136,10 +162,12 @@ fn remaining_manifest_consistency_rules_share_one_validation_boundary() {
 [deployments.production.federates.left]
 groups = ["left"]
 runtime = "std"
+recovery = "fail-stop"
 
 [deployments.production.federates.right]
 groups = ["right"]
 runtime = "std"
+recovery = "fail-stop"
 "#;
     let cases = [
         (
@@ -159,7 +187,7 @@ runtime = "std"
             "deployments.production.rti is not valid with peer-to-peer",
         ),
         (
-            "schema = 1\n[topology]\npackage = \"topology\"\nentry = \"topology\"\n[deployments.production.federates.host]\ngroups = [\"host\"]\nruntime = \"std\"\n[deployments.production.rti]\ntarget = \"host\"".to_owned(),
+            "schema = 1\n[topology]\npackage = \"topology\"\nentry = \"topology\"\n[deployments.production.federates.host]\ngroups = [\"host\"]\nruntime = \"std\"\nrecovery = \"fail-stop\"\n[deployments.production.rti]\ntarget = \"host\"".to_owned(),
             "deployments.production.rti is valid only with central-rti",
         ),
         (
@@ -167,7 +195,7 @@ runtime = "std"
             "deployments.production.federates must contain at least one Federate",
         ),
         (
-            "schema = 1\n[topology]\npackage = \"topology\"\nentry = \"topology\"\n[deployments.\"../escape\".federates.host]\ngroups = [\"host\"]\nruntime = \"std\"".to_owned(),
+            "schema = 1\n[topology]\npackage = \"topology\"\nentry = \"topology\"\n[deployments.\"../escape\".federates.host]\ngroups = [\"host\"]\nruntime = \"std\"\nrecovery = \"fail-stop\"".to_owned(),
             "invalid deployment ../escape: deployment names must be non-empty and contain only ASCII letters, digits, '-', '_', or '.'; '.' and '..' are reserved",
         ),
     ];
@@ -184,8 +212,8 @@ runtime = "std"
 #[test]
 fn schema_one_accepts_deployment_execution_policy_and_rejects_schema_two() {
     let schema_one = one_federate_without_coordination().replace(
-        "runtime = \"std\"",
-        "runtime = \"std\"\n\n[deployments.production.execution]\nfast-forward = true",
+        "runtime = \"std\"\nrecovery = \"fail-stop\"",
+        "runtime = \"std\"\nrecovery = \"fail-stop\"\n\n[deployments.production.execution]\nfast-forward = true",
     );
     parse_manifest(&schema_one).unwrap();
 
@@ -205,8 +233,8 @@ fn execution_policy_rejects_invalid_logical_horizons_at_the_manifest_boundary() 
     for duration in ["not-a-duration", "-1ns", "0.1ns", "18446744073709551616ns"] {
         let source = one_federate_without_coordination()
             .replace(
-                "runtime = \"std\"",
-                &format!("runtime = \"std\"\n\n[deployments.production.execution]\nlogical-horizon = {duration:?}"),
+                "runtime = \"std\"\nrecovery = \"fail-stop\"",
+                &format!("runtime = \"std\"\nrecovery = \"fail-stop\"\n\n[deployments.production.execution]\nlogical-horizon = {duration:?}"),
             );
         let error = parse_manifest(&source).unwrap_err();
         assert!(
@@ -218,8 +246,8 @@ fn execution_policy_rejects_invalid_logical_horizons_at_the_manifest_boundary() 
     }
 
     let zero = one_federate_without_coordination().replace(
-        "runtime = \"std\"",
-        "runtime = \"std\"\n\n[deployments.production.execution]\nlogical-horizon = \"0ns\"",
+        "runtime = \"std\"\nrecovery = \"fail-stop\"",
+        "runtime = \"std\"\nrecovery = \"fail-stop\"\n\n[deployments.production.execution]\nlogical-horizon = \"0ns\"",
     );
     parse_manifest(&zero).unwrap();
 }

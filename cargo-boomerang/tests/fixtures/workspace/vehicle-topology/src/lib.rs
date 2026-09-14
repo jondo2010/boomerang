@@ -45,6 +45,16 @@ fn SensorTopology(#[input] command: u32) -> impl Reactor {
 
 /// Builds the fixture's canonical logical topology without constructing a runtime graph.
 pub fn topology() -> Result<ApplicationTopology, TopologyBuildError> {
+    topology_with_delay(None)
+}
+
+/// Uses a nonzero route tag for independent-process transport verification.
+pub fn tagged_topology() -> Result<ApplicationTopology, TopologyBuildError> {
+    topology_with_delay(Some(Duration::milliseconds(1)))
+}
+
+/// Builds the shared fixture with the requested logical boundary delay.
+fn topology_with_delay(delay: Option<Duration>) -> Result<ApplicationTopology, TopologyBuildError> {
     let mut assembly = Assembly::new();
     let controller = ControllerTopology()
         .build("controller", (), None, None, None, true, &mut assembly)
@@ -56,7 +66,7 @@ pub fn topology() -> Result<ApplicationTopology, TopologyBuildError> {
         .build("sensor", (), None, None, None, true, &mut assembly)
         .expect("fixture sensor Assembly is valid");
     assembly
-        .add_port_connection::<u32, _, _>(controller.command, sensor.command, None, false)
+        .add_port_connection::<u32, _, _>(controller.command, sensor.command, delay, false)
         .expect("fixture route is valid");
     Ok(assembly
         .application_topology()

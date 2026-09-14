@@ -1,10 +1,21 @@
-//! Explicit deployment selections supplied to the compiler.
+//! Explicit deployment selections resolved before canonical analysis and projection.
+//!
+//! A [`FederateConfig`] supplies build/runtime capabilities plus an explicit recovery policy.
+//! Each [`BoundaryBinding`] attaches one topology boundary to a stable end-to-end flow, optional
+//! physical input/output endpoints, concrete codec and transport implementations, and five
+//! safety-relevant typed policies. A single flow may span multiple boundary identities. No policy
+//! default is invented here: manifest parsing rejects unknown values, while compilation rejects
+//! known-but-unsupported selections before target images escape.
 
 use crate::descriptor::ComponentDescriptor;
 
 use super::{
     BoundaryId, CodecCapabilityId, ComponentInstanceId, FederateId, ImplementationId,
     PlacementGroupId, RuntimeBackendId, TargetTriple, TransportCapabilityId,
+};
+use crate::runtime::image::{
+    BoundaryFailurePolicy, CodecPolicy, RecoveryPolicy, SecurityPolicy, TimingPolicy,
+    TransportPolicy,
 };
 
 /// One selected implementation for a logical component instance.
@@ -86,15 +97,23 @@ pub struct FederateConfig {
     target: TargetTriple,
     /// Runtime backend capability selected for the Federate.
     runtime: RuntimeBackendId,
+    /// Explicit recovery behavior selected for this closed-world member.
+    recovery: RecoveryPolicy,
 }
 
 impl FederateConfig {
     /// Creates the deployment configuration for one Federate.
-    pub fn new(id: FederateId, target: TargetTriple, runtime: RuntimeBackendId) -> Self {
+    pub fn new(
+        id: FederateId,
+        target: TargetTriple,
+        runtime: RuntimeBackendId,
+        recovery: RecoveryPolicy,
+    ) -> Self {
         Self {
             id,
             target,
             runtime,
+            recovery,
         }
     }
 
@@ -112,6 +131,25 @@ impl FederateConfig {
     pub fn runtime(&self) -> &RuntimeBackendId {
         &self.runtime
     }
+
+    /// Returns the selected recovery policy.
+    pub fn recovery(&self) -> RecoveryPolicy {
+        self.recovery
+    }
+}
+
+/// Closed distributed coordination backend vocabulary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(
+    feature = "host-interchange",
+    derive(serde::Deserialize, serde::Serialize)
+)]
+#[cfg_attr(feature = "host-interchange", serde(rename_all = "kebab-case"))]
+pub enum CoordinationBackend {
+    /// Federates coordinate through a generated central RTI artifact.
+    CentralRti,
+    /// Reserved RTI-free peer coordination; compilation support is deferred.
+    PeerToPeer,
 }
 
 /// Coordination backend selected for the deployment.
@@ -121,39 +159,144 @@ pub enum CoordinationSelection {
     Local,
     /// Federates coordinate through the selected distributed backend.
     Distributed {
-        /// Stable identity of the coordination backend capability.
-        backend: super::CoordinationBackendId,
+        /// Selected coordination backend.
+        backend: CoordinationBackend,
     },
 }
 
-/// Codec and transport selections for one logical boundary.
+/// Optional identities that delimit an end-to-end physical response interval.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PhysicalBoundaryMetadata {
+    /// Physical input where external data enters Boomerang.
+    input: Option<super::PhysicalBoundaryId>,
+    /// Physical output where Boomerang commits an external effect.
+    output: Option<super::PhysicalBoundaryId>,
+}
+
+impl PhysicalBoundaryMetadata {
+    /// Creates physical endpoint metadata; either role may be absent.
+    pub fn new(
+        input: Option<super::PhysicalBoundaryId>,
+        output: Option<super::PhysicalBoundaryId>,
+    ) -> Self {
+        Self { input, output }
+    }
+
+    /// Returns the physical input identity, when this route admits external data.
+    pub fn input(&self) -> Option<&super::PhysicalBoundaryId> {
+        self.input.as_ref()
+    }
+
+    /// Returns the physical output identity, when this route commits an external effect.
+    pub fn output(&self) -> Option<&super::PhysicalBoundaryId> {
+        self.output.as_ref()
+    }
+}
+
+/// Explicit policies selected for one cross-Federate boundary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BoundaryPolicies {
+    failure: BoundaryFailurePolicy,
+    transport: TransportPolicy,
+    codec: CodecPolicy,
+    timing: TimingPolicy,
+    security: SecurityPolicy,
+}
+
+impl BoundaryPolicies {
+    /// Creates one complete boundary policy selection without implicit defaults.
+    pub fn new(
+        failure: BoundaryFailurePolicy,
+        transport: TransportPolicy,
+        codec: CodecPolicy,
+        timing: TimingPolicy,
+        security: SecurityPolicy,
+    ) -> Self {
+        Self {
+            failure,
+            transport,
+            codec,
+            timing,
+            security,
+        }
+    }
+
+    /// Returns the selected source-loss behavior.
+    pub fn failure(&self) -> BoundaryFailurePolicy {
+        self.failure
+    }
+    /// Returns the selected transport contract.
+    pub fn transport(&self) -> TransportPolicy {
+        self.transport
+    }
+    /// Returns the selected codec contract.
+    pub fn codec(&self) -> CodecPolicy {
+        self.codec
+    }
+    /// Returns the selected timing class.
+    pub fn timing(&self) -> TimingPolicy {
+        self.timing
+    }
+    /// Returns the selected security profile.
+    pub fn security(&self) -> SecurityPolicy {
+        self.security
+    }
+}
+
+/// Flow, physical endpoint, capability, and policy selections for one boundary.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BoundaryBinding {
     /// Logical boundary receiving the selections.
     boundary: BoundaryId,
+    /// End-to-end application flow grouping this boundary with related route hops.
+    ///
+    /// Multiple boundary bindings may share one flow identity.
+    flow: super::FlowId,
+    /// Optional physical input and output endpoint identities.
+    physical: PhysicalBoundaryMetadata,
     /// Payload codec capability selected for the boundary.
     codec: CodecCapabilityId,
     /// Transport capability selected for the boundary.
     transport: TransportCapabilityId,
+    /// Explicit safety-relevant policy selections.
+    policies: BoundaryPolicies,
 }
 
 impl BoundaryBinding {
     /// Creates the deployment selections for one logical boundary.
     pub fn new(
         boundary: BoundaryId,
+        flow: super::FlowId,
+        physical: PhysicalBoundaryMetadata,
         codec: CodecCapabilityId,
         transport: TransportCapabilityId,
+        policies: BoundaryPolicies,
     ) -> Self {
         Self {
             boundary,
+            flow,
+            physical,
             codec,
             transport,
+            policies,
         }
     }
 
     /// Returns the logical boundary identity.
     pub fn boundary(&self) -> &BoundaryId {
         &self.boundary
+    }
+
+    /// Returns the end-to-end flow grouping this boundary with related route hops.
+    ///
+    /// Multiple boundary bindings may return the same flow identity.
+    pub fn flow(&self) -> &super::FlowId {
+        &self.flow
+    }
+
+    /// Returns optional physical input and output endpoint metadata.
+    pub fn physical(&self) -> &PhysicalBoundaryMetadata {
+        &self.physical
     }
 
     /// Returns the selected payload codec capability.
@@ -164,5 +307,10 @@ impl BoundaryBinding {
     /// Returns the selected transport capability.
     pub fn transport(&self) -> &TransportCapabilityId {
         &self.transport
+    }
+
+    /// Returns the complete explicit boundary policy selection.
+    pub fn policies(&self) -> &BoundaryPolicies {
+        &self.policies
     }
 }

@@ -1,4 +1,5 @@
-pub use tinymap::{TableRange, TinyMapView};
+//! Immutable dense image records consumed by compiled runtime execution.
+pub use tinymap::{IndexSpan, SliceRange, TinyMapView};
 
 tinymap::key_type!(pub ReactorIndex);
 tinymap::key_type!(pub ActionIndex);
@@ -9,7 +10,15 @@ tinymap::key_type!(pub ScopeIndex);
 tinymap::key_type!(pub StateSlotIndex);
 tinymap::key_type!(pub ActionSlotIndex);
 tinymap::key_type!(pub BindingSlotIndex);
-tinymap::key_type!(pub RouteIndex);
+tinymap::key_type!(
+    /// Dense index of one enclave-local scheduler route half.
+    ///
+    /// A connection crossing an Enclave boundary is represented by separate outbound and inbound
+    /// route records in the participating Enclave images. This domain is therefore not
+    /// interchangeable with [`crate::image::RtiRouteIndex`], which identifies one deployment-wide
+    /// cross-Federate hop in a central RTI image.
+    pub RouteIndex
+);
 tinymap::key_type!(pub FederateIndex);
 tinymap::key_type!(pub EnclaveIndex);
 
@@ -46,53 +55,26 @@ borrowed_id!(
     "A stable borrowed implementation-binding identity."
 );
 
-/// A byte range into an Enclave image's UTF-8 identity blob.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct IdentityRange {
-    start: u32,
-    len: u32,
-}
-
-impl IdentityRange {
-    /// Creates an unchecked identity range.
-    pub const fn new(start: u32, len: u32) -> Self {
-        Self { start, len }
-    }
-
-    /// Returns the first byte offset.
-    pub const fn start(self) -> u32 {
-        self.start
-    }
-
-    /// Returns the byte length.
-    #[allow(clippy::len_without_is_empty)]
-    pub const fn len(self) -> u32 {
-        self.len
-    }
-
-    /// Returns the referenced UTF-8 substring when the byte range is valid.
-    pub fn get(self, value: &str) -> Option<&str> {
-        let end = self.start.checked_add(self.len)?;
-        value.get(self.start as usize..end as usize)
-    }
-}
-
 /// A Federate and the contiguous Enclave images it owns.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct FederateImage {
-    id: IdentityRange,
-    target: IdentityRange,
-    runtime: IdentityRange,
-    enclaves: TableRange<EnclaveIndex>,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FederateImage<'a> {
+    /// Stable Federate identity.
+    id: FederateId<'a>,
+    /// Selected compilation-target identity.
+    target: TargetId<'a>,
+    /// Selected runtime-backend identity.
+    runtime: RuntimeBackendId<'a>,
+    /// Deployment-wide dense Enclave span owned by this Federate.
+    enclaves: IndexSpan<EnclaveIndex>,
 }
 
-impl FederateImage {
+impl<'a> FederateImage<'a> {
     /// Creates an unchecked Federate record.
     pub const fn new(
-        id: IdentityRange,
-        target: IdentityRange,
-        runtime: IdentityRange,
-        enclaves: TableRange<EnclaveIndex>,
+        id: FederateId<'a>,
+        target: TargetId<'a>,
+        runtime: RuntimeBackendId<'a>,
+        enclaves: IndexSpan<EnclaveIndex>,
     ) -> Self {
         Self {
             id,
@@ -102,40 +84,40 @@ impl FederateImage {
         }
     }
 
-    /// Returns the stable Federate identity range.
-    pub const fn id(self) -> IdentityRange {
+    /// Returns the stable Federate identity.
+    pub const fn id(&self) -> FederateId<'a> {
         self.id
     }
 
-    /// Returns the compilation-target identity range.
-    pub const fn target(self) -> IdentityRange {
+    /// Returns the compilation-target identity.
+    pub const fn target(&self) -> TargetId<'a> {
         self.target
     }
 
-    /// Returns the runtime-backend identity range.
-    pub const fn runtime(self) -> IdentityRange {
+    /// Returns the runtime-backend identity.
+    pub const fn runtime(&self) -> RuntimeBackendId<'a> {
         self.runtime
     }
 
     /// Returns the range of owned Enclave images.
-    pub const fn enclaves(self) -> TableRange<EnclaveIndex> {
+    pub const fn enclaves(&self) -> IndexSpan<EnclaveIndex> {
         self.enclaves
     }
 }
 
 /// A backend-neutral cross-Federate boundary edge.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct FederationEdgeImage {
-    boundary: IdentityRange,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FederationEdgeImage<'a> {
+    boundary: BoundaryId<'a>,
     source: FederateIndex,
     target: FederateIndex,
     delay_nanos: u64,
 }
 
-impl FederationEdgeImage {
+impl<'a> FederationEdgeImage<'a> {
     /// Creates an unchecked federation edge.
     pub const fn new(
-        boundary: IdentityRange,
+        boundary: BoundaryId<'a>,
         source: FederateIndex,
         target: FederateIndex,
         delay_nanos: u64,
@@ -148,73 +130,80 @@ impl FederationEdgeImage {
         }
     }
 
-    /// Returns the stable boundary identity range.
-    pub const fn boundary(self) -> IdentityRange {
+    /// Returns the stable boundary identity.
+    pub const fn boundary(&self) -> BoundaryId<'a> {
         self.boundary
     }
 
     /// Returns the source Federate.
-    pub const fn source(self) -> FederateIndex {
+    pub const fn source(&self) -> FederateIndex {
         self.source
     }
 
     /// Returns the target Federate.
-    pub const fn target(self) -> FederateIndex {
+    pub const fn target(&self) -> FederateIndex {
         self.target
     }
 
     /// Returns the logical delay in nanoseconds.
-    pub const fn delay_nanos(self) -> u64 {
+    pub const fn delay_nanos(&self) -> u64 {
         self.delay_nanos
     }
 }
 
 /// Backend-neutral immutable federation membership and edges.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct GlobalFederationImage<'a> {
     /// Federates participating in canonical stable-identity order.
     pub members: &'a [FederateIndex],
     /// Canonically ordered cross-Federate boundary edges.
-    pub edges: &'a [FederationEdgeImage],
+    pub edges: &'a [FederationEdgeImage<'a>],
 }
 
 impl<'a> GlobalFederationImage<'a> {
     /// Creates an unchecked global federation image.
-    pub const fn new(members: &'a [FederateIndex], edges: &'a [FederationEdgeImage]) -> Self {
+    pub const fn new(members: &'a [FederateIndex], edges: &'a [FederationEdgeImage<'a>]) -> Self {
         Self { members, edges }
     }
 }
 
 /// Selected immutable logical-time coordination projection.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CoordinationProjection {
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant, reason = "zero-allocation image schema")]
+pub enum CoordinationProjection<'a> {
     /// No distributed coordinator is required.
     Local,
+    /// A generated central RTI consumes the enclosed dense immutable image.
+    CentralRti(super::RtiImage<'a>),
 }
 
 /// An unchecked aggregate of one complete compiled deployment.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct CompiledDeploymentImage<'a> {
-    /// UTF-8 storage for deployment-level stable identities.
-    pub identity_data: &'a str,
     /// Backend-neutral global federation structure.
     pub federation: GlobalFederationImage<'a>,
     /// Dense Federate ownership records.
-    pub federates: TinyMapView<'a, FederateIndex, FederateImage>,
+    pub federates: TinyMapView<'a, FederateIndex, FederateImage<'a>>,
     /// Federate-grouped Enclave scheduler images.
     pub enclaves: TinyMapView<'a, EnclaveIndex, EnclaveImage<'a>>,
     /// Selected backend-specific coordination projection.
-    pub coordination: CoordinationProjection,
+    pub coordination: CoordinationProjection<'a>,
 }
 
 /// An immutable reactor scheduler record.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReactorImage {
+    /// Required binding that initializes this reactor's state.
     state_binding: BindingSlotIndex,
+    /// Dense mutable-state storage slot.
     state_slot: StateSlotIndex,
+    /// Root execution scope owned by this reactor.
     root_scope: ScopeIndex,
-    modes: TableRange<ModeIndex>,
+    /// Contiguous dense mode span allocated for this reactor.
+    modes: IndexSpan<ModeIndex>,
+    /// Initially active mode, when the reactor is modal.
     initial_mode: Option<ModeIndex>,
+    /// Static reactor-bank position, when banked.
     bank: Option<BankInfoImage>,
 }
 
@@ -224,7 +213,7 @@ impl ReactorImage {
         state_binding: BindingSlotIndex,
         state_slot: StateSlotIndex,
         root_scope: ScopeIndex,
-        modes: TableRange<ModeIndex>,
+        modes: IndexSpan<ModeIndex>,
         initial_mode: Option<ModeIndex>,
         bank: Option<BankInfoImage>,
     ) -> Self {
@@ -239,32 +228,32 @@ impl ReactorImage {
     }
 
     /// Returns the required state-initializer binding slot.
-    pub const fn state_binding(self) -> BindingSlotIndex {
+    pub const fn state_binding(&self) -> BindingSlotIndex {
         self.state_binding
     }
 
     /// Returns the dense mutable-state slot.
-    pub const fn state_slot(self) -> StateSlotIndex {
+    pub const fn state_slot(&self) -> StateSlotIndex {
         self.state_slot
     }
 
     /// Returns the reactor's root scope.
-    pub const fn root_scope(self) -> ScopeIndex {
+    pub const fn root_scope(&self) -> ScopeIndex {
         self.root_scope
     }
 
     /// Returns the reactor's canonical mode range.
-    pub const fn modes(self) -> TableRange<ModeIndex> {
+    pub const fn modes(&self) -> IndexSpan<ModeIndex> {
         self.modes
     }
 
     /// Returns the initially active mode, if any.
-    pub const fn initial_mode(self) -> Option<ModeIndex> {
+    pub const fn initial_mode(&self) -> Option<ModeIndex> {
         self.initial_mode
     }
 
     /// Returns the reactor's bank position, if it belongs to a bank.
-    pub const fn bank(self) -> Option<BankInfoImage> {
+    pub const fn bank(&self) -> Option<BankInfoImage> {
         self.bank
     }
 }
@@ -303,7 +292,7 @@ pub enum TimingDomain {
 }
 
 /// Immutable scheduling semantics for an action.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ActionTiming {
     /// A user-scheduled action with a canonical minimum delay.
     Standard {
@@ -322,14 +311,18 @@ pub enum ActionTiming {
 }
 
 /// An immutable action scheduler record.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ActionImage {
     /// Stable payload binding for a standard action, or `None` for executor-owned actions.
     binding: Option<BindingSlotIndex>,
+    /// Static execution scope containing the action.
     scope: ScopeIndex,
+    /// Dense mutable action-storage slot.
     storage_slot: ActionSlotIndex,
+    /// Immutable scheduling semantics.
     timing: ActionTiming,
-    triggers: TableRange<LevelReactionImage>,
+    /// Range of reactions triggered by this action.
+    triggers: SliceRange<LevelReactionImage>,
 }
 
 impl ActionImage {
@@ -338,7 +331,7 @@ impl ActionImage {
         scope: ScopeIndex,
         storage_slot: ActionSlotIndex,
         timing: ActionTiming,
-        triggers: TableRange<LevelReactionImage>,
+        triggers: SliceRange<LevelReactionImage>,
         binding: Option<BindingSlotIndex>,
     ) -> Self {
         Self {
@@ -351,45 +344,47 @@ impl ActionImage {
     }
 
     /// Returns the standard action's stable payload binding.
-    pub const fn binding(self) -> Option<BindingSlotIndex> {
+    pub const fn binding(&self) -> Option<BindingSlotIndex> {
         self.binding
     }
 
     /// Returns the action's static scope.
-    pub const fn scope(self) -> ScopeIndex {
+    pub const fn scope(&self) -> ScopeIndex {
         self.scope
     }
 
     /// Returns the dense action-storage slot.
-    pub const fn storage_slot(self) -> ActionSlotIndex {
+    pub const fn storage_slot(&self) -> ActionSlotIndex {
         self.storage_slot
     }
 
     /// Returns the action's immutable scheduling semantics.
-    pub const fn timing(self) -> ActionTiming {
-        self.timing
+    pub const fn timing(&self) -> &ActionTiming {
+        &self.timing
     }
 
     /// Returns the action's flattened trigger range.
-    pub const fn triggers(self) -> TableRange<LevelReactionImage> {
+    pub const fn triggers(&self) -> SliceRange<LevelReactionImage> {
         self.triggers
     }
 }
 
 /// An immutable port scheduler record.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PortImage {
     /// Stable payload binding used to construct this port.
     binding: BindingSlotIndex,
+    /// Static execution scope containing the port.
     scope: ScopeIndex,
-    triggers: TableRange<LevelReactionImage>,
+    /// Range of reactions triggered by this port.
+    triggers: SliceRange<LevelReactionImage>,
 }
 
 impl PortImage {
     /// Creates an unchecked port record.
     pub const fn new(
         scope: ScopeIndex,
-        triggers: TableRange<LevelReactionImage>,
+        triggers: SliceRange<LevelReactionImage>,
         binding: BindingSlotIndex,
     ) -> Self {
         Self {
@@ -400,32 +395,40 @@ impl PortImage {
     }
 
     /// Returns the port's stable payload binding.
-    pub const fn binding(self) -> BindingSlotIndex {
+    pub const fn binding(&self) -> BindingSlotIndex {
         self.binding
     }
 
     /// Returns the port's static scope.
-    pub const fn scope(self) -> ScopeIndex {
+    pub const fn scope(&self) -> ScopeIndex {
         self.scope
     }
 
     /// Returns the port's flattened trigger range.
-    pub const fn triggers(self) -> TableRange<LevelReactionImage> {
+    pub const fn triggers(&self) -> SliceRange<LevelReactionImage> {
         self.triggers
     }
 }
 
 /// An immutable reaction scheduler record.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReactionImage {
+    /// Dense reactor that owns the reaction.
     reactor: ReactorIndex,
+    /// Static execution scope containing the reaction.
     scope: ScopeIndex,
+    /// Precomputed dependency level within the scope.
     dependency_level: u32,
+    /// Required callback binding.
     binding: BindingSlotIndex,
-    use_ports: TableRange<PortIndex>,
-    effect_ports: TableRange<PortIndex>,
-    actions: TableRange<ActionIndex>,
-    enabled_modes: TableRange<ModeIndex>,
+    /// Ordered immutable input ports.
+    use_ports: SliceRange<PortIndex>,
+    /// Ordered mutable output ports.
+    effect_ports: SliceRange<PortIndex>,
+    /// Ordered mutable action effects.
+    actions: SliceRange<ActionIndex>,
+    /// Modes in which the reaction is enabled.
+    enabled_modes: SliceRange<ModeIndex>,
     /// Canonical transition effect supplied to the owned compiled reaction adapter.
     mode_effect: Option<crate::CompiledModeEffectRef>,
 }
@@ -438,10 +441,10 @@ impl ReactionImage {
         scope: ScopeIndex,
         dependency_level: u32,
         binding: BindingSlotIndex,
-        use_ports: TableRange<PortIndex>,
-        effect_ports: TableRange<PortIndex>,
-        actions: TableRange<ActionIndex>,
-        enabled_modes: TableRange<ModeIndex>,
+        use_ports: SliceRange<PortIndex>,
+        effect_ports: SliceRange<PortIndex>,
+        actions: SliceRange<ActionIndex>,
+        enabled_modes: SliceRange<ModeIndex>,
     ) -> Self {
         Self {
             reactor,
@@ -463,47 +466,47 @@ impl ReactionImage {
     }
 
     /// Returns the owning reactor.
-    pub const fn reactor(self) -> ReactorIndex {
+    pub const fn reactor(&self) -> ReactorIndex {
         self.reactor
     }
 
     /// Returns the static execution scope.
-    pub const fn scope(self) -> ScopeIndex {
+    pub const fn scope(&self) -> ScopeIndex {
         self.scope
     }
 
     /// Returns the precomputed dependency level.
-    pub const fn dependency_level(self) -> u32 {
+    pub const fn dependency_level(&self) -> u32 {
         self.dependency_level
     }
 
     /// Returns the required reaction binding slot.
-    pub const fn binding(self) -> BindingSlotIndex {
+    pub const fn binding(&self) -> BindingSlotIndex {
         self.binding
     }
 
     /// Returns the ordered use-port range.
-    pub const fn use_ports(self) -> TableRange<PortIndex> {
+    pub const fn use_ports(&self) -> SliceRange<PortIndex> {
         self.use_ports
     }
 
     /// Returns the ordered effect-port range.
-    pub const fn effect_ports(self) -> TableRange<PortIndex> {
+    pub const fn effect_ports(&self) -> SliceRange<PortIndex> {
         self.effect_ports
     }
 
     /// Returns the ordered action-reference range.
-    pub const fn actions(self) -> TableRange<ActionIndex> {
+    pub const fn actions(&self) -> SliceRange<ActionIndex> {
         self.actions
     }
 
     /// Returns the enabled-mode range.
-    pub const fn enabled_modes(self) -> TableRange<ModeIndex> {
+    pub const fn enabled_modes(&self) -> SliceRange<ModeIndex> {
         self.enabled_modes
     }
 
     /// Returns the canonical compiled mode transition effect, if declared.
-    pub const fn mode_effect(self) -> Option<crate::CompiledModeEffectRef> {
+    pub const fn mode_effect(&self) -> Option<crate::CompiledModeEffectRef> {
         self.mode_effect
     }
 }
@@ -533,17 +536,26 @@ impl ModeImage {
 }
 
 /// An immutable execution-scope scheduler record.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ScopeImage {
+    /// Parent execution scope, or `None` for a reactor root.
     parent: Option<ScopeIndex>,
+    /// Dense reactor that owns the scope.
     reactor: ReactorIndex,
+    /// Dense mode represented by this scope, when nested.
     mode: Option<ModeIndex>,
-    descendants: TableRange<ScopeIndex>,
-    logical_actions: TableRange<ActionIndex>,
-    timer_startups: TableRange<TimerStartupImage>,
-    reset_reactions: TableRange<LevelReactionImage>,
-    startup_reactions: TableRange<LifecycleReactionImage>,
-    shutdown_reactions: TableRange<LifecycleReactionImage>,
+    /// Packed transitive descendants in canonical order.
+    descendants: SliceRange<ScopeIndex>,
+    /// Packed logical actions contained by this scope.
+    logical_actions: SliceRange<ActionIndex>,
+    /// Packed timer startup records contained by this scope.
+    timer_startups: SliceRange<TimerStartupImage>,
+    /// Packed reset reactions contained by this scope.
+    reset_reactions: SliceRange<LevelReactionImage>,
+    /// Packed startup reactions contained by this scope.
+    startup_reactions: SliceRange<LifecycleReactionImage>,
+    /// Packed shutdown reactions contained by this scope.
+    shutdown_reactions: SliceRange<LifecycleReactionImage>,
 }
 
 impl ScopeImage {
@@ -553,12 +565,12 @@ impl ScopeImage {
         parent: Option<ScopeIndex>,
         reactor: ReactorIndex,
         mode: Option<ModeIndex>,
-        descendants: TableRange<ScopeIndex>,
-        logical_actions: TableRange<ActionIndex>,
-        timer_startups: TableRange<TimerStartupImage>,
-        reset_reactions: TableRange<LevelReactionImage>,
-        startup_reactions: TableRange<LifecycleReactionImage>,
-        shutdown_reactions: TableRange<LifecycleReactionImage>,
+        descendants: SliceRange<ScopeIndex>,
+        logical_actions: SliceRange<ActionIndex>,
+        timer_startups: SliceRange<TimerStartupImage>,
+        reset_reactions: SliceRange<LevelReactionImage>,
+        startup_reactions: SliceRange<LifecycleReactionImage>,
+        shutdown_reactions: SliceRange<LifecycleReactionImage>,
     ) -> Self {
         Self {
             parent,
@@ -574,47 +586,47 @@ impl ScopeImage {
     }
 
     /// Returns the parent scope, if any.
-    pub const fn parent(self) -> Option<ScopeIndex> {
+    pub const fn parent(&self) -> Option<ScopeIndex> {
         self.parent
     }
 
     /// Returns the owning reactor.
-    pub const fn reactor(self) -> ReactorIndex {
+    pub const fn reactor(&self) -> ReactorIndex {
         self.reactor
     }
 
     /// Returns the owning mode for a mode scope.
-    pub const fn mode(self) -> Option<ModeIndex> {
+    pub const fn mode(&self) -> Option<ModeIndex> {
         self.mode
     }
 
     /// Returns the precomputed descendant range.
-    pub const fn descendants(self) -> TableRange<ScopeIndex> {
+    pub const fn descendants(&self) -> SliceRange<ScopeIndex> {
         self.descendants
     }
 
     /// Returns the precomputed logical-action range.
-    pub const fn logical_actions(self) -> TableRange<ActionIndex> {
+    pub const fn logical_actions(&self) -> SliceRange<ActionIndex> {
         self.logical_actions
     }
 
     /// Returns the precomputed timer-startup range.
-    pub const fn timer_startups(self) -> TableRange<TimerStartupImage> {
+    pub const fn timer_startups(&self) -> SliceRange<TimerStartupImage> {
         self.timer_startups
     }
 
     /// Returns the precomputed reset-reaction range.
-    pub const fn reset_reactions(self) -> TableRange<LevelReactionImage> {
+    pub const fn reset_reactions(&self) -> SliceRange<LevelReactionImage> {
         self.reset_reactions
     }
 
     /// Returns the precomputed startup-reaction range.
-    pub const fn startup_reactions(self) -> TableRange<LifecycleReactionImage> {
+    pub const fn startup_reactions(&self) -> SliceRange<LifecycleReactionImage> {
         self.startup_reactions
     }
 
     /// Returns the precomputed shutdown-reaction range.
-    pub const fn shutdown_reactions(self) -> TableRange<LifecycleReactionImage> {
+    pub const fn shutdown_reactions(&self) -> SliceRange<LifecycleReactionImage> {
         self.shutdown_reactions
     }
 }
@@ -704,19 +716,19 @@ pub enum RouteDirection {
 }
 
 /// An immutable scheduler-boundary route without transport state.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct RouteImage {
-    boundary: IdentityRange,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RouteImage<'a> {
+    boundary: BoundaryId<'a>,
     local_port: PortIndex,
     direction: RouteDirection,
     timing_domain: TimingDomain,
     delay_nanos: u64,
 }
 
-impl RouteImage {
+impl<'a> RouteImage<'a> {
     /// Creates an unchecked route record.
     pub const fn new(
-        boundary: IdentityRange,
+        boundary: BoundaryId<'a>,
         local_port: PortIndex,
         direction: RouteDirection,
         timing_domain: TimingDomain,
@@ -731,28 +743,28 @@ impl RouteImage {
         }
     }
 
-    /// Returns the boundary identity's blob range.
-    pub const fn boundary(self) -> IdentityRange {
+    /// Returns the boundary identity.
+    pub const fn boundary(&self) -> BoundaryId<'a> {
         self.boundary
     }
 
     /// Returns the local dense port identity.
-    pub const fn local_port(self) -> PortIndex {
+    pub const fn local_port(&self) -> PortIndex {
         self.local_port
     }
 
     /// Returns the route direction.
-    pub const fn direction(self) -> RouteDirection {
+    pub const fn direction(&self) -> RouteDirection {
         self.direction
     }
 
     /// Returns the clock domain used to interpret the route delay.
-    pub const fn timing_domain(self) -> TimingDomain {
+    pub const fn timing_domain(&self) -> TimingDomain {
         self.timing_domain
     }
 
     /// Returns the route delay in nanoseconds.
-    pub const fn delay_nanos(self) -> u64 {
+    pub const fn delay_nanos(&self) -> u64 {
         self.delay_nanos
     }
 }
@@ -772,19 +784,19 @@ pub enum BindingKind {
 
 /// A required stable implementation-binding slot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct RequiredBindingImage {
-    id: IdentityRange,
+pub struct RequiredBindingImage<'a> {
+    id: BindingSlotId<'a>,
     kind: BindingKind,
 }
 
-impl RequiredBindingImage {
+impl<'a> RequiredBindingImage<'a> {
     /// Creates an unchecked required-binding record.
-    pub const fn new(id: IdentityRange, kind: BindingKind) -> Self {
+    pub const fn new(id: BindingSlotId<'a>, kind: BindingKind) -> Self {
         Self { id, kind }
     }
 
-    /// Returns the binding identity's blob range.
-    pub const fn id(self) -> IdentityRange {
+    /// Returns the binding identity.
+    pub const fn id(self) -> BindingSlotId<'a> {
         self.id
     }
 
@@ -795,7 +807,7 @@ impl RequiredBindingImage {
 }
 
 /// Fixed mutable-storage and scheduler-workspace bounds.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StorageBounds {
     state_slots: u32,
     action_slots: u32,
@@ -826,43 +838,41 @@ impl StorageBounds {
     }
 
     /// Returns the state-slot bound.
-    pub const fn state_slots(self) -> u32 {
+    pub const fn state_slots(&self) -> u32 {
         self.state_slots
     }
 
     /// Returns the action-slot bound.
-    pub const fn action_slots(self) -> u32 {
+    pub const fn action_slots(&self) -> u32 {
         self.action_slots
     }
 
     /// Returns the event-queue capacity.
-    pub const fn event_capacity(self) -> u32 {
+    pub const fn event_capacity(&self) -> u32 {
         self.event_capacity
     }
 
     /// Returns the payload-storage bound in bytes.
-    pub const fn payload_bytes(self) -> u64 {
+    pub const fn payload_bytes(&self) -> u64 {
         self.payload_bytes
     }
 
     /// Returns the reactor-state storage bound in bytes.
-    pub const fn state_bytes(self) -> u64 {
+    pub const fn state_bytes(&self) -> u64 {
         self.state_bytes
     }
 
     /// Returns the scheduler scratch-storage bound in bytes.
-    pub const fn scratch_bytes(self) -> u64 {
+    pub const fn scratch_bytes(&self) -> u64 {
         self.scratch_bytes
     }
 }
 
 /// An unchecked aggregate of borrowed immutable scheduler tables.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct EnclaveImage<'a> {
-    /// UTF-8 storage for all stable identities referenced by this image.
-    pub identity_data: &'a str,
-    /// Stable Enclave identity range.
-    pub enclave_id: IdentityRange,
+    /// Stable Enclave identity.
+    pub enclave_id: EnclaveId<'a>,
     /// Dense reactor records.
     pub reactors: TinyMapView<'a, ReactorIndex, ReactorImage>,
     /// Dense action records.
@@ -906,9 +916,9 @@ pub struct EnclaveImage<'a> {
     /// Unique actions populated before global shutdown reactions execute.
     pub shutdown_actions: &'a [ActionIndex],
     /// Dense scheduler-boundary routes.
-    pub routes: TinyMapView<'a, RouteIndex, RouteImage>,
+    pub routes: TinyMapView<'a, RouteIndex, RouteImage<'a>>,
     /// Dense required implementation bindings.
-    pub required_bindings: TinyMapView<'a, BindingSlotIndex, RequiredBindingImage>,
+    pub required_bindings: TinyMapView<'a, BindingSlotIndex, RequiredBindingImage<'a>>,
     /// Fixed mutable-storage and workspace bounds.
-    pub storage_bounds: StorageBounds,
+    pub storage_bounds: &'a StorageBounds,
 }

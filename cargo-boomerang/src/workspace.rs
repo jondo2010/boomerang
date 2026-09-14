@@ -7,7 +7,9 @@ use std::{
 use anyhow::{anyhow, bail, Context, Result};
 use cargo_metadata::{Metadata, MetadataCommand, Package, PackageId};
 
-use crate::{load_manifest, Binding, CommandOutput, Deployment, Federate, Topology};
+use crate::{
+    load_manifest, Binding, CommandOutput, Deployment, Federate, RecoveryPolicy, Topology,
+};
 
 const DESCRIPTOR_FEATURE: &str = "__boomerang_descriptor";
 const PAYLOAD_FEATURE: &str = "__boomerang_payload";
@@ -42,6 +44,8 @@ pub struct ResolvedFederate {
     pub profile: Option<String>,
     /// Runtime backend required by the generated Federate.
     pub runtime: String,
+    /// Explicit recovery behavior selected for the Federate.
+    pub recovery: RecoveryPolicy,
     /// Workspace-relative target JSON resolved to an absolute path.
     pub target_json: Option<PathBuf>,
     /// Workspace-relative Cargo configuration resolved to an absolute path.
@@ -218,6 +222,7 @@ pub(crate) fn resolve_workspace_with_output(
             coordination: deployment.coordination.clone(),
             rti: deployment.rti.clone(),
             execution: deployment.execution.clone(),
+            boundaries: deployment.boundaries.clone(),
         },
         packages,
         host_builder,
@@ -340,6 +345,39 @@ fn resolve_package(
     Ok(cargo_package(package))
 }
 
+/// Simplifies legacy-safe Windows verbatim disk paths reported by Cargo metadata.
+fn normalize_metadata_manifest_path(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt as _;
+        use std::path::{Component, Prefix};
+        let mut components = path.components();
+        let illegal = |c| c < b' ' || br#"<>:"/\|?*"#.contains(&c);
+        let safe = |component: Component<'_>| {
+            let value = component.as_os_str().to_str().unwrap_or("");
+            let stem = value.split('.').next().unwrap_or("");
+            let stem = str::to_ascii_uppercase(stem.trim_end_matches([' ', '.']));
+            matches!(component, Component::Normal(_))
+                && !value.ends_with(['.', ' '])
+                && !value.bytes().any(illegal)
+                && !matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+                && !(stem.chars().count() == 4
+                    && (stem.starts_with("COM") || stem.starts_with("LPT"))
+                    && stem.ends_with(|c| matches!(c, '1'..='9' | '¹' | '²' | '³')))
+        };
+        let verbatim_disk = matches!(
+            (components.next(), components.next()),
+            (Some(Component::Prefix(prefix)), Some(Component::RootDir))
+                if matches!(prefix.kind(), Prefix::VerbatimDisk(_))
+        );
+        let short = path.as_os_str().encode_wide().count() < 260;
+        if short && verbatim_disk && components.all(safe) {
+            return path.to_str().map_or_else(|| path.into(), |p| p[4..].into());
+        }
+    }
+    path.into()
+}
+
 /// Copies the Cargo identity fields required by generated dependency declarations.
 fn cargo_package(package: &Package) -> CargoPackage {
     CargoPackage {
@@ -357,7 +395,7 @@ fn cargo_package(package: &Package) -> CargoPackage {
             })
             .map(|target| target.name.clone()),
         id: package.id.clone(),
-        manifest_path: package.manifest_path.clone().into_std_path_buf(),
+        manifest_path: normalize_metadata_manifest_path(package.manifest_path.as_std_path()),
     }
 }
 
@@ -397,6 +435,7 @@ fn resolve_federate(workspace_root: &Path, federate: &Federate) -> ResolvedFeder
         toolchain: federate.toolchain.clone(),
         profile: federate.profile.clone(),
         runtime: federate.runtime.clone(),
+        recovery: federate.recovery,
         target_json: resolve_optional_path(workspace_root, federate.target_json.as_deref()),
         cargo_config: resolve_optional_path(workspace_root, federate.cargo_config.as_deref()),
     }

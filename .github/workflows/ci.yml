@@ -5,7 +5,7 @@ on:
     branches: ["main"]
 
   pull_request:
-    branches: ["main", "codex/deployment-phase4-integration"]
+    branches: ["main", "codex/deployment-phase4-integration", "codex/deployment-phase5-integration"]
 
 permissions:
   contents: read
@@ -46,7 +46,7 @@ jobs:
       - name: Check with Clippy
         run: |
           cargo clippy --workspace --exclude boomerang --all-targets --all-features -- -D warnings
-          cargo clippy -p boomerang --all-targets --features hosted,serde,parallel,replay,federated -- -D warnings
+          cargo clippy -p boomerang --all-targets --features hosted,serde,parallel,replay -- -D warnings
           cargo clippy -p boomerang --lib --no-default-features --features __boomerang_payload -- -D warnings
           cargo clippy -p boomerang --lib --no-default-features --features __boomerang_descriptor -- -D warnings
 
@@ -127,4 +127,4 @@ jobs:
       - name: Test with Miri
         env:
           MIRIFLAGS: -Zmiri-disable-isolation
-        run: cargo +nightly miri nextest run -p boomerang -E 'kind(test)'
+        run: cargo +nightly miri nextest run -p boomerang -p boomerang_runtime -E 'kind(test)'

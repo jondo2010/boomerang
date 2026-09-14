@@ -10,8 +10,6 @@ pub mod binding;
 mod context;
 mod env;
 mod event;
-#[cfg(feature = "federated")]
-mod federated;
 pub mod image;
 pub mod keepalive;
 mod key_set;
@@ -40,22 +38,20 @@ pub use env::{
     ScopeKey, TransitionKind,
 };
 pub use event::{AsyncEvent, AsyncEventTarget};
-#[cfg(feature = "federated")]
-pub use federated::{
-    FederatedEndpointError, FederatedFaultState, FederatedInboundEndpoint,
-    FederatedOutboundCommand, FederatedOutboundMessage, FederatedOutboundSink,
-    FederatedPayloadDecoder, FederatedPayloadEncoder,
+mod boundary;
+pub use boundary::{
+    BoundaryAdmissionError, BoundarySubmissionError, InboundBoundaryAdapter, OutboundBoundarySink,
+    PayloadCodecError, PayloadDecoder, PayloadEncoder, TaggedPayload,
 };
 pub use kanal::{Receiver, Sender};
 pub use key_set::KeySetLimits as ReactionSetLimits;
 pub use port::{DynPortRef, DynPortRefMut, *};
-#[cfg(feature = "federated")]
-pub use reaction::FederatedSenderReactionFn;
 pub use reaction::{
     BoxedReactionFn, ConnectionReceiverReactionFn, ConnectionSenderReactionFn, Deadline,
     EnclaveSenderReactionFn, FromRefs, Reaction, ReactionFn, ReactionKey,
 };
 pub use reactor::*;
+pub use reference::execute_owned_federate_with_backend;
 pub use reference::{
     execute_owned, execute_owned_federate, EnclaveExecution, ExecuteOwnedError,
     ExecuteOwnedFederateError, FederateBindings, FederateExecution, StateAccessError,
@@ -120,10 +116,6 @@ pub enum RuntimeError {
     #[cfg(feature = "replay")]
     #[error(transparent)]
     ReplayError(#[from] replay::ReplayError),
-
-    #[cfg(feature = "federated")]
-    #[error(transparent)]
-    FederatedBarrier(#[from] FederatedBarrierError),
 }
 
 pub mod fmt_utils {

@@ -1,6 +1,11 @@
 use std::{collections::BTreeMap, path::PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
+pub use boomerang_builder::compiler::CoordinationBackend;
+pub use boomerang_runtime::image::{
+    BoundaryFailurePolicy, CodecPolicy, RecoveryPolicy, SecurityPolicy, TimingPolicy,
+    TransportPolicy,
+};
 use serde::{Deserialize, Deserializer};
 
 const SUPPORTED_SCHEMA: u32 = 1;
@@ -75,6 +80,9 @@ pub struct Deployment<F = Federate> {
     pub rti: Option<Rti>,
     /// Deployment-wide execution behavior.
     pub execution: Option<ExecutionPolicy>,
+    /// Cross-Federate boundary capabilities and explicit policies by stable boundary identity.
+    #[serde(default)]
+    pub boundaries: BTreeMap<String, Boundary>,
 }
 
 impl Deployment<Federate> {
@@ -179,10 +187,40 @@ pub struct Federate {
     pub profile: Option<String>,
     /// Runtime backend required by the generated Federate.
     pub runtime: String,
+    /// Explicit recovery behavior compiled for this Federate.
+    pub recovery: RecoveryPolicy,
     /// Optional path to a custom target JSON file.
     pub target_json: Option<String>,
     /// Optional Cargo configuration file used for this Federate invocation.
     pub cargo_config: Option<String>,
+}
+
+/// Explicit manifest selections for one cross-Federate boundary.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct Boundary {
+    /// End-to-end application flow grouping this boundary with related route hops.
+    ///
+    /// Multiple boundary entries may select the same flow identity.
+    pub flow: String,
+    /// Optional physical input identity where external data enters Boomerang.
+    pub physical_input: Option<String>,
+    /// Optional physical output identity where Boomerang commits an effect.
+    pub physical_output: Option<String>,
+    /// Selected codec implementation capability.
+    pub codec: String,
+    /// Selected transport implementation capability.
+    pub transport: String,
+    /// Source-loss behavior for this boundary.
+    pub failure_policy: BoundaryFailurePolicy,
+    /// Reliable channel contract for this boundary.
+    pub transport_policy: TransportPolicy,
+    /// Architecture-independent encoding contract for this boundary.
+    pub codec_policy: CodecPolicy,
+    /// End-to-end physical-time class for this boundary's flow.
+    pub timing_policy: TimingPolicy,
+    /// Communication security profile for this boundary.
+    pub security_policy: SecurityPolicy,
 }
 
 /// Distributed coordination configuration for a deployment.
@@ -191,16 +229,6 @@ pub struct Federate {
 pub struct Coordination {
     /// Selected coordination backend.
     pub backend: CoordinationBackend,
-}
-
-/// Coordination backends reserved by the deployment manifest schema.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "kebab-case")]
-pub enum CoordinationBackend {
-    /// Federates coordinate through a generated central RTI artifact.
-    CentralRti,
-    /// Reserved RTI-free peer coordination; compilation support is deferred.
-    PeerToPeer,
 }
 
 /// Cargo build configuration for the central RTI artifact.

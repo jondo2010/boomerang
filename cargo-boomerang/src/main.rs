@@ -82,6 +82,9 @@ enum BoomerangCommand {
         /// Deployment name declared in `Boomerang.toml`.
         #[arg(long)]
         deployment: String,
+        /// Write the completed execution summary as JSON.
+        #[arg(short, long)]
+        summary: Option<PathBuf>,
     },
 }
 
@@ -106,8 +109,14 @@ fn main() -> Result<()> {
         BoomerangCommand::Check { deployment } => {
             cargo_boomerang::check_with_output(workspace, &deployment, &output)?;
         }
-        BoomerangCommand::Run { deployment } => {
+        BoomerangCommand::Run {
+            deployment,
+            summary,
+        } => {
             let outcome = cargo_boomerang::run_with_output(workspace, &deployment, &output)?;
+            if let (Some(path), Some(summary)) = (summary, outcome.summary()) {
+                summary.write_json(path)?;
+            }
             std::process::exit(numeric_exit_code(outcome.status())?);
         }
     }

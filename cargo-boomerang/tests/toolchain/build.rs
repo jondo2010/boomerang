@@ -29,6 +29,19 @@ fn build_fixture_with_options(deployment: &str, target: &Path, options: &[&str])
         .unwrap()
 }
 
+/// Resolves the sole executable recorded by a single-Federate build result.
+fn published_executable(stdout: &str) -> PathBuf {
+    let manifest = PathBuf::from(stdout.trim());
+    let artifacts = manifest.parent().unwrap().join("artifacts").join("host");
+    let mut entries = fs::read_dir(artifacts)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect::<Vec<_>>();
+    entries.sort();
+    assert_eq!(entries.len(), 1, "unexpected published artifacts");
+    entries.pop().unwrap()
+}
+
 fn assert_no_staging_residue(path: &Path) {
     for entry in fs::read_dir(path).unwrap() {
         let entry = entry.unwrap();
@@ -54,6 +67,15 @@ fn build_reports_cargo_style_progress_without_polluting_stdout() {
 
     assert!(output.status.success(), "{stderr}");
     assert_eq!(stdout.lines().count(), 1, "unexpected stdout: {stdout:?}");
+    let executable = published_executable(&stdout);
+    assert!(executable.is_absolute(), "{}", executable.display());
+    assert!(
+        support::without_ansi(&stderr).contains(&format!(
+            "Published Federate 'host' executable {}",
+            executable.display()
+        )),
+        "{stderr}"
+    );
     assert!(stderr.contains("Building"), "{stderr}");
     assert!(stderr.contains("Bundling"), "{stderr}");
     support::assert_progress_phases(
@@ -67,6 +89,7 @@ fn build_reports_cargo_style_progress_without_polluting_stdout() {
             "Building",
             "Bundling",
             "Publishing",
+            "Published",
         ],
     );
 }
@@ -83,6 +106,11 @@ fn quiet_build_keeps_its_machine_readable_result_without_progress() {
 
     assert!(output.status.success(), "{stderr}");
     assert_eq!(stdout.lines().count(), 1, "unexpected stdout: {stdout:?}");
+    let executable = published_executable(&stdout);
+    assert!(
+        !support::without_ansi(&stderr).contains(executable.to_string_lossy().as_ref()),
+        "unexpected published path on quiet stderr: {stderr:?}"
+    );
     support::assert_progress_phases(&stderr, &[]);
     assert!(!stderr.contains('\u{1b}'), "unexpected color: {stderr:?}");
 }
@@ -124,6 +152,7 @@ fn verbose_build_forwards_nested_cargo_output_between_progress_phases() {
             "Building",
             "Bundling",
             "Publishing",
+            "Published",
         ],
     );
     let plain_stderr = support::without_ansi(&stderr);
@@ -321,6 +350,182 @@ fn build_publishes_a_valid_fingerprinted_bundle() {
             .all(|enclave| enclave.get("event_capacity").is_some()),
         "each Enclave resource record must retain its authoritative event capacity: {resources:?}"
     );
+}
+
+/// Publishes one canonical generated workspace and artifact per compiled Federate.
+#[test]
+fn build_publishes_canonical_federate_artifact_collection() {
+    let _guard = support::toolchain_lock();
+    let target = support::toolchain_target();
+    support::reset_deployment_output(&target, "sensor-slice");
+    let result = Command::new(env!("CARGO_BIN_EXE_cargo-boomerang"))
+        .args(["boomerang", "--workspace"])
+        .arg(support::hosted_fixture_workspace())
+        .args(["build", "--deployment", "sensor-slice"])
+        .env("CARGO_TARGET_DIR", &target)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+
+    let manifest = PathBuf::from(String::from_utf8(result.stdout).unwrap().trim());
+    let bundle = manifest.parent().unwrap();
+    let document: Value = serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
+    let host_target = target_lexicon::HOST.to_string();
+    assert_eq!(
+        document["federates"],
+        serde_json::json!([
+            {
+                "id": "host",
+                "groups": ["placement/backup", "placement/controller"],
+                "target": host_target,
+                "toolchain": null,
+                "profile": null,
+                "runtime": "std",
+                "target_json_hash": null,
+                "cargo_config_hash": null,
+            },
+            {
+                "id": "sensor",
+                "groups": ["placement/sensor"],
+                "target": target_lexicon::HOST.to_string(),
+                "toolchain": null,
+                "profile": null,
+                "runtime": "std",
+                "target_json_hash": null,
+                "cargo_config_hash": blake3::hash(
+                    &fs::read(fixture_workspace().join(".cargo/sensor-slice.toml")).unwrap()
+                ).to_hex().to_string(),
+            }
+        ])
+    );
+
+    let artifacts = document["artifacts"].as_array().unwrap();
+    assert_eq!(artifacts.len(), 2);
+    assert_eq!(artifacts[0]["federate"], "host");
+    assert_eq!(artifacts[1]["federate"], "sensor");
+    assert_ne!(artifacts[0]["path"], artifacts[1]["path"]);
+    assert_ne!(artifacts[0]["blake3"], artifacts[1]["blake3"]);
+    for artifact in artifacts {
+        let path = bundle.join(artifact["path"].as_str().unwrap());
+        assert_eq!(
+            artifact["blake3"],
+            blake3::hash(&fs::read(path).unwrap()).to_hex().to_string()
+        );
+    }
+
+    let generated = document["generated"].as_array().unwrap();
+    assert_eq!(generated.len(), 6);
+    assert_eq!(
+        generated
+            .iter()
+            .map(|record| record["federate"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["host", "host", "host", "sensor", "sensor", "sensor"]
+    );
+    let host_source =
+        fs::read_to_string(bundle.join("generated/federates/host/src/main.rs")).unwrap();
+    assert!(
+        host_source.contains("static FEDERATE: FederateIndex = FederateIndex::new(0);"),
+        "{host_source}"
+    );
+    assert!(!host_source.contains("FederateSliceImage"), "{host_source}");
+    assert!(!host_source.contains("FederateSliceView"), "{host_source}");
+    assert!(
+        host_source.contains("IndexSpan::new(0, 2)"),
+        "{host_source}"
+    );
+    assert_eq!(
+        host_source
+            .matches("StorageBounds::new(1, 2, 16, 1024, 512, 256)")
+            .count(),
+        2,
+        "{host_source}"
+    );
+    let sensor_source =
+        fs::read_to_string(bundle.join("generated/federates/sensor/src/main.rs")).unwrap();
+    assert!(
+        sensor_source.contains("static FEDERATE: FederateIndex = FederateIndex::new(1);"),
+        "{sensor_source}"
+    );
+    assert!(
+        !sensor_source.contains("FederateSliceImage"),
+        "{sensor_source}"
+    );
+    assert!(
+        !sensor_source.contains("FederateSliceView"),
+        "{sensor_source}"
+    );
+    assert!(
+        sensor_source.contains("IndexSpan::new(2, 1)"),
+        "{sensor_source}"
+    );
+    assert!(
+        sensor_source.contains("StorageBounds::new(1, 2, 8, 512, 256, 128)"),
+        "{sensor_source}"
+    );
+    assert_eq!(
+        document["resources"]["federates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|federate| (
+                federate["id"].as_str().unwrap(),
+                federate["target"].as_str().unwrap(),
+                federate["runtime"].as_str().unwrap(),
+            ))
+            .collect::<Vec<_>>(),
+        [
+            ("host", host_target.as_str(), "std"),
+            ("sensor", host_target.as_str(), "std")
+        ]
+    );
+
+    let rti = &document["rti"];
+    assert_eq!(rti["target"], host_target);
+    assert_eq!(rti["profile"], Value::Null);
+    let rti_executable = bundle.join(rti["artifact"]["path"].as_str().unwrap());
+    assert_eq!(
+        rti["artifact"]["blake3"],
+        blake3::hash(&fs::read(rti_executable).unwrap())
+            .to_hex()
+            .to_string()
+    );
+    let metadata = cargo_metadata::MetadataCommand::new()
+        .manifest_path(bundle.join("generated/rti/Cargo.toml"))
+        .other_options(vec![String::from("--locked"), String::from("--offline")])
+        .exec()
+        .unwrap();
+    let packages = metadata
+        .packages
+        .iter()
+        .map(|package| package.name.as_str())
+        .collect::<Vec<_>>();
+    assert!(packages.contains(&"boomerang_central_rti"));
+    for forbidden in [
+        "boomerang_builder",
+        "vehicle-topology",
+        "vehicle-control",
+        "sensor-host",
+        "transitive-host",
+    ] {
+        assert!(
+            !packages.contains(&forbidden),
+            "RTI links {forbidden}: {packages:?}"
+        );
+    }
+    for node in &metadata.resolve.unwrap().nodes {
+        assert!(
+            node.features
+                .iter()
+                .all(|feature| feature.as_str() != "__boomerang_payload"),
+            "RTI activates a payload facet in {}",
+            node.id
+        );
+    }
 }
 
 #[test]

@@ -38,34 +38,10 @@ impl From<bool> for ModeKind {
     }
 }
 
-#[cfg(feature = "federated")]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FederateSpec {
-    pub id: String,
-    pub transient: bool,
-}
-
-#[cfg(feature = "federated")]
-impl FederateSpec {
-    pub fn new(id: impl Into<String>) -> Self {
-        Self {
-            id: id.into(),
-            transient: false,
-        }
-    }
-
-    pub fn transient(mut self, transient: bool) -> Self {
-        self.transient = transient;
-        self
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReactorPlacement {
     Local,
     Enclave,
-    #[cfg(feature = "federated")]
-    Federate(FederateSpec),
 }
 
 impl ReactorPlacement {
@@ -73,21 +49,6 @@ impl ReactorPlacement {
         match self {
             ReactorPlacement::Local => false,
             ReactorPlacement::Enclave => true,
-            #[cfg(feature = "federated")]
-            ReactorPlacement::Federate(_) => true,
-        }
-    }
-
-    #[cfg(feature = "federated")]
-    pub fn federate(id: impl Into<String>) -> Self {
-        ReactorPlacement::Federate(FederateSpec::new(id))
-    }
-
-    #[cfg(feature = "federated")]
-    pub fn federate_spec(&self) -> Option<&FederateSpec> {
-        match self {
-            ReactorPlacement::Federate(spec) => Some(spec),
-            _ => None,
         }
     }
 }
@@ -245,11 +206,6 @@ impl ReactorSpec {
 
     pub fn is_enclave(&self) -> bool {
         self.is_enclave
-    }
-
-    #[cfg(feature = "federated")]
-    pub fn federate_spec(&self) -> Option<&FederateSpec> {
-        self.placement.federate_spec()
     }
 
     #[allow(dead_code)] // TODO: use or remove this

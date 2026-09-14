@@ -3,8 +3,6 @@
 //! Non-port-binding connections are connections with a specified delay or between enclaves.
 
 use std::collections::{BTreeSet, HashMap};
-#[cfg(feature = "federated")]
-use std::sync::Arc;
 
 use slotmap::SecondaryMap;
 
@@ -13,42 +11,6 @@ use crate::{
     AssemblyPortKey, AssemblyReactorKey, Input, Output, ParentReactorSpec, PartitionMap, PortType,
     TriggerMode, TypedActionKey, TypedPortKey,
 };
-
-#[cfg(feature = "federated")]
-pub(crate) struct FederatedEncoderAdapter<C> {
-    pub(crate) codec: Arc<C>,
-}
-
-#[cfg(feature = "federated")]
-impl<T, C> runtime::FederatedPayloadEncoder<T> for FederatedEncoderAdapter<C>
-where
-    T: runtime::ReactorData,
-    C: boomerang_federated::PayloadEncoder<T> + Send + Sync + 'static,
-{
-    fn encode(&self, value: &T) -> Result<Vec<u8>, runtime::FederatedEndpointError> {
-        self.codec
-            .encode(value)
-            .map_err(|error| runtime::FederatedEndpointError::codec(error.to_string()))
-    }
-}
-
-#[cfg(feature = "federated")]
-pub(crate) struct FederatedDecoderAdapter<C> {
-    pub(crate) codec: Arc<C>,
-}
-
-#[cfg(feature = "federated")]
-impl<T, C> runtime::FederatedPayloadDecoder<T> for FederatedDecoderAdapter<C>
-where
-    T: runtime::ReactorData,
-    C: boomerang_federated::PayloadDecoder<T> + Send + Sync + 'static,
-{
-    fn decode(&self, bytes: &[u8]) -> Result<T, runtime::FederatedEndpointError> {
-        self.codec
-            .decode(bytes)
-            .map_err(|error| runtime::FederatedEndpointError::codec(error.to_string()))
-    }
-}
 
 #[derive(Default)]
 pub struct PortBindings {
@@ -306,65 +268,6 @@ impl<T: runtime::ReactorData + Clone, Q: ActionTag> ErasedConnectionSpec for Con
                 port_bindings.bind(self.source_key, self.target_key, assembly)?;
             }
         } else {
-            #[cfg(feature = "federated")]
-            if partitions_are_both_federated(assembly, source_partition, target_partition)? {
-                if !Q::IS_LOGICAL {
-                    return Err(AssemblyError::UnsupportedFederationTopology {
-                        what: format!(
-                            "cross-federate physical connection '{}' -> '{}' is reserved for a later milestone",
-                            assembly.fqn_for(self.source_key, false)?,
-                            assembly.fqn_for(self.target_key, false)?,
-                        ),
-                    });
-                }
-
-                let (encoder, decoder) =
-                    assembly.federated_codec_for::<T>(self.source_key, self.target_key)?;
-                let endpoint = federated_endpoint_id(assembly, self.source_key, self.target_key)?;
-
-                let target_parent_reactor_key =
-                    assembly.reactor_specs[target_reactor_key].parent_reactor_key();
-
-                let EnclaveConnectionTarget {
-                    reactor_key,
-                    output_port,
-                    action_key,
-                } = build_enclave_connection_target::<T, Q>(
-                    assembly,
-                    target_parent_reactor_key,
-                    self.scope_mode,
-                    self.after,
-                )?;
-                partition_map.insert(reactor_key, target_partition);
-                port_bindings.bind(output_port.into(), self.target_key, assembly)?;
-
-                assembly.add_federated_inbound_endpoint::<T>(
-                    endpoint.clone(),
-                    target_partition,
-                    action_key.into(),
-                    decoder,
-                );
-
-                let source_parent_reactor_key =
-                    assembly.reactor_specs[source_reactor_key].parent_reactor_key();
-                let EnclaveConnectionSource {
-                    reactor_key,
-                    input_port,
-                } = build_federated_connection_source::<T>(
-                    assembly,
-                    source_parent_reactor_key,
-                    self.scope_mode,
-                    target_partition,
-                    action_key.into(),
-                    endpoint,
-                    encoder,
-                )?;
-                partition_map.insert(reactor_key, source_partition);
-                port_bindings.bind(self.source_key, input_port.into(), assembly)?;
-
-                return Ok(());
-            }
-
             // The connection is between two different partitions, so we need to build a pair of Reactions that trigger
             // and react to an Action.
             let target_parent_reactor_key =
@@ -400,39 +303,6 @@ impl<T: runtime::ReactorData + Clone, Q: ActionTag> ErasedConnectionSpec for Con
         }
         Ok(())
     }
-}
-
-#[cfg(feature = "federated")]
-fn partitions_are_both_federated(
-    assembly: &Assembly,
-    source_partition: AssemblyReactorKey,
-    target_partition: AssemblyReactorKey,
-) -> Result<bool, AssemblyError> {
-    let source_federate = assembly.reactor_specs[source_partition].federate_spec();
-    let target_federate = assembly.reactor_specs[target_partition].federate_spec();
-
-    match (source_federate.is_some(), target_federate.is_some()) {
-        (true, true) => Ok(true),
-        (false, false) => Ok(false),
-        _ => Err(AssemblyError::UnsupportedFederationTopology {
-            what:
-                "connection crosses a federated boundary, but both enclave roots are not federates"
-                    .to_owned(),
-        }),
-    }
-}
-
-#[cfg(feature = "federated")]
-fn federated_endpoint_id(
-    assembly: &Assembly,
-    source_key: AssemblyPortKey,
-    target_key: AssemblyPortKey,
-) -> Result<boomerang_federated::EndpointId, AssemblyError> {
-    let source_port_fqn = assembly.fqn_for(source_key, false)?.to_string();
-    let target_port_fqn = assembly.fqn_for(target_key, false)?.to_string();
-    Ok(boomerang_federated::EndpointId::new(format!(
-        "{source_port_fqn}->{target_port_fqn}"
-    )))
 }
 
 /// Build a delayed or physical connection between two ports.
@@ -520,60 +390,6 @@ fn build_enclave_connection_source<T: runtime::ReactorData + Clone>(
             let remote_action_ref = enclave.create_async_action_ref(*runtime_action_key);
             runtime::EnclaveSenderReactionFn::<T>::new(remote_context, remote_action_ref, None)
                 .into()
-        })
-        .finish()?;
-    let reactor_key = source_ctx.finish()?;
-    Ok(EnclaveConnectionSource {
-        reactor_key,
-        input_port,
-    })
-}
-
-#[cfg(feature = "federated")]
-fn build_federated_connection_source<T: runtime::ReactorData + Clone>(
-    assembly: &mut Assembly,
-    parent_key: Option<AssemblyReactorKey>,
-    scope_mode: Option<AssemblyModeKey>,
-    target_partition: AssemblyReactorKey,
-    target_action_key: AssemblyActionKey,
-    endpoint: boomerang_federated::EndpointId,
-    encoder: Box<dyn runtime::FederatedPayloadEncoder<T>>,
-) -> Result<EnclaveConnectionSource<T>, AssemblyError> {
-    let mut source_ctx = assembly.add_reactor("con_reactor_src", parent_key, None, (), false);
-    if let Some(scope_mode) = scope_mode {
-        source_ctx.set_scope_mode(scope_mode)?;
-    }
-    let input_port = source_ctx.add_input_port::<T>("con_in")?;
-    source_ctx
-        .add_reaction(None)
-        .with_trigger(input_port)
-        .with_deferred_reaction_factory(move |runtime_assembly| {
-            let (enclave_key, runtime_action_key) = runtime_assembly
-                .aliases
-                .action_aliases
-                .get(target_action_key)
-                .expect("Action key");
-            let enclave = &runtime_assembly.enclaves[*enclave_key];
-
-            let enclave_key2 = runtime_assembly.aliases.enclave_aliases[target_partition];
-            assert_eq!(enclave_key, &enclave_key2, "Temporary cross-check");
-
-            let remote_action_ref = enclave.create_async_action_ref(*runtime_action_key);
-            let (outbound, faults) = runtime_assembly
-                .federation
-                .as_ref()
-                .expect("federated sender exists only in a lowered federation")
-                .runtime
-                .connections()
-                .outbound_endpoint(&endpoint)
-                .expect("federated endpoint sink was validated before deferred lowering");
-            runtime::FederatedSenderReactionFn::<T>::new(
-                remote_action_ref,
-                encoder,
-                outbound,
-                faults,
-            )
-            .into()
         })
         .finish()?;
     let reactor_key = source_ctx.finish()?;

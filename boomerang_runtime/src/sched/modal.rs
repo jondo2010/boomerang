@@ -1,3 +1,5 @@
+//! Modal-scope event management and logical-clock rebasing for the scheduler.
+
 use std::collections::BinaryHeap;
 
 use super::{
@@ -224,6 +226,11 @@ impl<S: Schedule> EventManager<S> {
         self.record_nonterminal_push(terminal);
     }
 
+    /// Pushes a root-level provisional event that advances only local barrier control state.
+    pub(super) fn push_control_event(&mut self, tag: Tag) {
+        self.root.push_control_event(tag);
+    }
+
     pub(super) fn push_action_event<I>(
         &mut self,
         action_key: S::Action,
@@ -310,6 +317,16 @@ impl<S: Schedule> EventManager<S> {
             (None, Some(local)) => Some(local),
             (None, None) => None,
         }
+    }
+
+    /// Returns whether every contribution at the next global tag is control-only.
+    pub(super) fn peek_is_control_only(&mut self) -> bool {
+        let Some(tag) = self.peek_tag() else {
+            return false;
+        };
+        self.root.peek_tag() == Some(tag)
+            && self.root.peek_is_control_only()
+            && (!self.has_local_scopes || self.peek_frontier_tag() != Some(tag))
     }
 
     /// Whether any queue retains work other than terminal shutdown processing.

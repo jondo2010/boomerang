@@ -1,7 +1,28 @@
 //! Target-neutral application compiler models.
+//!
+//! # Representation boundary
+//!
+//! Semantic compiler data—topology, deployment selections, resolution, and analysis—uses stable
+//! typed identities. Those models do not retain runtime table keys, dense-key spans, or packed
+//! slice coordinates. Stable identities remain meaningful across compiler runs and at diagnostic,
+//! configuration, and interchange boundaries.
+//!
+//! [`ResolvedDeployment::lower`](crate::compiler::ResolvedDeployment::lower) is the one-way
+//! transition into the runtime image domain:
+//!
+//! ```text
+//! ApplicationTopology + deployment selections
+//!                    -> ResolvedDeployment
+//! ResolvedDeployment::lower()
+//!                    -> OwnedCompiledDeployment
+//! ```
+//!
+//! Lowering may temporarily map stable identities to runtime keys while resolving references, but
+//! that state is private to image materialization. It must not leak back into semantic models.
 #![deny(missing_docs)]
 
 mod compiled;
+mod coordination;
 mod debug;
 /// Explicit deployment selections supplied to the compiler.
 mod deployment;
@@ -11,25 +32,27 @@ mod from_assembly;
 mod identity;
 mod lower;
 mod model;
+mod packed;
 /// Canonical implementation and placement resolution.
 mod resolved;
 
 pub use compiled::{
-    direct_binding_symbol, CompiledDeploymentValidationError, GlobalFederationImage,
+    direct_binding_symbol, CompiledDeploymentValidationError, FederateSlice, GlobalFederationImage,
     OwnedCompiledDeployment, OwnedEnclaveImage, OwnedFederateImage, RequiredBinding,
     RequiredBindings,
 };
+pub use coordination::{CoordinationProjectionError, OwnedCoordinationProjection, OwnedRtiImage};
 pub use deployment::{
-    BoundaryBinding, CoordinationSelection, FederateConfig, ImplementationBinding,
-    PlacementAssignment,
+    BoundaryBinding, BoundaryPolicies, CoordinationBackend, CoordinationSelection, FederateConfig,
+    ImplementationBinding, PhysicalBoundaryMetadata, PlacementAssignment,
 };
 pub use identity::{
     ActionId, ApplicationId, BindingSlotId, BoundaryId, CodecCapabilityId, ComponentInstanceId,
-    ContractId, CoordinationBackendId, FederateId, ImplementationId, InvalidStableId, ModeId,
+    ContractId, FederateId, FlowId, ImplementationId, InvalidStableId, ModeId, PhysicalBoundaryId,
     PlacementGroupId, PortId, ReactionId, ReactorId, RuntimeBackendId, StableEnclaveId, StablePath,
     StablePathSegment, StableText, TargetTriple, TransportCapabilityId,
 };
-pub use lower::{lower, CompileError};
+pub use lower::CompileError;
 pub use model::{
     Action, ActionKind, ApplicationTopology, ApplicationTopologyBuilder, BankMember,
     ComponentInstance, Connection, ConnectionSemantics, Enclave, InvalidBankMember, Mode,
@@ -42,14 +65,6 @@ pub use resolved::{ResolveError, ResolvedDeployment};
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn component_instance_preserves_explicit_contract_requirement() {
-        let component = ComponentInstance::new("vehicle/sensor", "sensor", 7).unwrap();
-        assert_eq!(component.id().to_string(), "vehicle/sensor");
-        assert_eq!(component.contract().as_str(), "sensor");
-        assert_eq!(component.contract_version(), 7);
-    }
 
     #[test]
     fn topology_builder_rejects_duplicate_component_ids() {

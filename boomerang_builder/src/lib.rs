@@ -10,8 +10,6 @@ mod assembly;
 pub mod compiler;
 mod connection;
 mod descriptor;
-#[cfg(feature = "federated")]
-mod federation;
 mod fqn;
 #[cfg(feature = "host-interchange")]
 pub mod host_interchange;
@@ -31,8 +29,6 @@ pub use action::*;
 pub use assembly::*;
 pub use compiler::{ModeTransitionKind, PortDirection};
 pub use descriptor::*;
-#[cfg(feature = "federated")]
-pub use federation::*;
 pub use fqn::*;
 pub use inter_partition::*;
 pub use port::{
@@ -114,20 +110,6 @@ pub enum AssemblyError {
     #[error("Port connection length mismatch: {from} -> {to}")]
     PortConnectionLengthMismatch { from: usize, to: usize },
 
-    #[error("Unsupported federation topology: {what}")]
-    UnsupportedFederationTopology { what: String },
-
-    #[error("Federation bridge error: {what}")]
-    FederationBridgeError { what: String },
-
-    #[cfg(feature = "federated")]
-    #[error("Invalid federation topology: {0}")]
-    FederationTopology(#[from] boomerang_federated::RtiError),
-
-    #[cfg(feature = "federated")]
-    #[error("Invalid federate placement: {0}")]
-    FederatePlacement(#[from] boomerang_federated::FederatePlacementError),
-
     #[error("Error declaring Reaction: {0}")]
     ReactionDeclarationError(String),
 
@@ -147,23 +129,5 @@ pub enum AssemblyError {
 impl From<std::convert::Infallible> for AssemblyError {
     fn from(_: std::convert::Infallible) -> Self {
         unreachable!()
-    }
-}
-
-#[cfg(feature = "federated")]
-impl From<boomerang_federated::RuntimeBridgeError> for AssemblyError {
-    fn from(error: boomerang_federated::RuntimeBridgeError) -> Self {
-        Self::FederationBridgeError {
-            what: error.to_string(),
-        }
-    }
-}
-
-#[cfg(feature = "federated")]
-impl From<boomerang_federated::FederateClientError> for AssemblyError {
-    fn from(error: boomerang_federated::FederateClientError) -> Self {
-        Self::FederationBridgeError {
-            what: error.to_string(),
-        }
     }
 }

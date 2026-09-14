@@ -1,3 +1,12 @@
+//! Stable identity domains used before compiled-image densification.
+//!
+//! Source models, manifests, durable configuration, wire negotiation, and diagnostics use these
+//! validated textual identities. They deliberately distinguish logical boundaries, end-to-end
+//! flows, physical input/output endpoints, implementation capabilities, and each policy category
+//! so values from unrelated domains cannot be exchanged accidentally. Backend projection assigns
+//! deployment-local typed dense keys exactly once; numeric casts and stringify/reparse bridges are
+//! not part of that conversion.
+
 use std::{
     cmp::Ordering,
     fmt,
@@ -405,16 +414,16 @@ text_id!(
     RuntimeBackendId
 );
 text_id!(
-    /// Stable identity of a distributed coordination backend.
-    CoordinationBackendId
-);
-text_id!(
     /// Stable identity of a payload codec capability.
     CodecCapabilityId
 );
 text_id!(
     /// Stable identity of a transport capability.
     TransportCapabilityId
+);
+text_id!(
+    /// Stable identity grouping one or more concrete boundary routes into an end-to-end flow.
+    FlowId
 );
 path_id!(
     /// Stable identity of a logical component instance.
@@ -451,6 +460,10 @@ path_id!(
 path_id!(
     /// Stable identity of a logical recording or routing boundary.
     BoundaryId
+);
+path_id!(
+    /// Stable identity of a physical input or output boundary.
+    PhysicalBoundaryId
 );
 
 /// Stable identity of a generated implementation binding slot.

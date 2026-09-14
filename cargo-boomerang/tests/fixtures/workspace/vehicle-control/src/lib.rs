@@ -20,6 +20,13 @@ compile_error!("profile-config probe requires the release profile");
 ))]
 compile_error!("profile-config probe requires Cargo configuration rustflags");
 
+/// Rejects compiling the controller payload under the sensor Federate's Cargo configuration.
+#[cfg(feature = "__boomerang_payload")]
+const _: () = assert!(
+    option_env!("BOOMERANG_SENSOR_SLICE_SENTINEL").is_none(),
+    "sensor slice compiled the vehicle-control payload"
+);
+
 use boomerang::prelude::*;
 
 #[cfg(all(feature = "warning-diagnostic", feature = "__boomerang_payload"))]

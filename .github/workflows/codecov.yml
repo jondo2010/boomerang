@@ -42,11 +42,39 @@ jobs:
       - name: Generate code coverage
         run: |
           cargo llvm-cov --no-report --all-features --workspace --exclude boomerang --exclude cargo-boomerang
-          cargo llvm-cov --no-clean -p boomerang --features hosted,serde,parallel,replay,federated
+          cargo llvm-cov --no-clean -p boomerang --features hosted,serde,parallel,replay
           cargo llvm-cov --no-clean -p boomerang --lib --no-default-features --features __boomerang_payload
           cargo llvm-cov --no-clean -p boomerang --lib --no-default-features --features __boomerang_descriptor
           cargo llvm-cov --no-clean --all-features -p cargo-boomerang --lib --bins --test manifest --test workspace
-          cargo llvm-cov report --lcov --output-path lcov.info
+          # Instrument the independent launcher's root crate as well as helpers;
+          # the default wrapper only instruments original workspace members.
+          # Preserve the fixture's Cargo flags when coverage sets RUSTFLAGS.
+          fixture_rustflags=$(python3 - <<'PY'
+          import tomllib
+          with open("cargo-boomerang/tests/fixtures/workspace/.cargo/config.toml", "rb") as config:
+              print("\x1f".join(tomllib.load(config)["build"]["rustflags"]))
+          PY
+          )
+          CARGO_ENCODED_RUSTFLAGS="$fixture_rustflags" cargo llvm-cov --no-clean --no-rustc-wrapper -p cargo-boomerang --test toolchain -- run::generated_monolith_matches_owned_reference_execution_summary --exact
+          # The launcher lives in an independent generated workspace, outside
+          # cargo-llvm-cov's object discovery. Include its instrumented helpers.
+          launchers=(target/llvm-cov-target/tmp/cargo-boomerang-fixtures/toolchain/boomerang/production/*/artifacts/host/boomerang-static-launcher)
+          test "${#launchers[@]}" -eq 1
+          test -f "${launchers[0]}"
+          LLVM_COV_FLAGS="-object=${launchers[0]}" cargo llvm-cov report --lcov --output-path lcov.info
+          python3 - <<'PY'
+          from pathlib import Path
+          records = Path("lcov.info").read_text().split("end_of_record")
+          launcher = next(record for record in records if any(
+              line.startswith("SF:") and line.endswith("/boomerang_util/src/launcher.rs")
+              for line in record.splitlines()
+          ))
+          for symbol in ("init_tracing", "write_execution_summary"):
+              counts = [int(line.split(",")[0][5:]) for line in launcher.splitlines()
+                        if line.startswith("FNDA:") and symbol in line]
+              assert any(count > 0 for count in counts), f"Missing launcher coverage: {symbol}"
+              print(f"Generated launcher coverage verified: {symbol}")
+          PY
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v7

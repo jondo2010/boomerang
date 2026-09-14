@@ -1,5 +1,25 @@
 //! Cached static launcher generation for one compiled Federate.
+//!
+//! # Compiled-image data flow
+//!
+//! ```text
+//! ResolvedDeployment::lower()
+//!     -> OwnedCompiledDeployment
+//!     -> FederateSlice
+//!     -> generated Rust static tables
+//!     -> CompiledDeploymentImage
+//!     -> runtime validation and execution
+//! ```
+//!
+//! Code generation is a renderer for an already-lowered image. It preserves deployment-wide typed
+//! keys, `IndexSpan` ownership, and `SliceRange` relationship coordinates assigned by the host
+//! compiler; it must not renumber tables or allocate a second key domain.
+//!
+//! Stable identities are emitted as ordinary Rust string literals. Rust and the linker own their
+//! placement in static read-only data; this module must not concatenate identities into a custom
+//! byte blob or generate byte-offset identity ranges.
 
+mod rti;
 mod rust;
 
 use std::{
@@ -18,7 +38,7 @@ use cargo_metadata::{Message, Metadata, PackageId};
 
 use crate::{
     check::{analyze, AnalyzedDeployment},
-    generated::dependency,
+    generated::{dependency, runtime_sibling_dependency},
     generated_cache::{
         artifact_matches, copy_private_artifact, generated_cargo_program,
         resolve_generated_workspace, GeneratedRole, GeneratedWorkspace, GeneratedWorkspaceRequest,
@@ -60,6 +80,21 @@ struct ConfiguredFiles {
     target_json: Option<(PathBuf, Vec<u8>)>,
     /// Optional Cargo configuration included in launcher identity and Cargo arguments.
     cargo_config: Option<(PathBuf, Vec<u8>)>,
+}
+
+/// Host-process facilities selected by a configured runtime backend.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct LauncherCapabilities {
+    /// Whether generated code links hosted launcher support.
+    hosted: bool,
+}
+
+/// Resolves launcher facilities from the runtime backend without target inference.
+fn launcher_capabilities(runtime: &str) -> Result<LauncherCapabilities> {
+    match runtime {
+        "std" => Ok(LauncherCapabilities { hosted: true }),
+        unsupported => bail!("unsupported runtime '{unsupported}'"),
+    }
 }
 
 impl ConfiguredFiles {
@@ -371,10 +406,10 @@ pub(crate) fn generate_analyzed_launcher(
     federate_id: &str,
     output: &crate::CommandOutput,
 ) -> Result<GeneratedLauncher> {
+    let coordination = generated_coordination(analyzed)?;
     let federates = analyzed.compiled.federates();
     let (federate_index, federate) = federates
         .iter()
-        .enumerate()
         .find(|(_, federate)| federate.id().as_str() == federate_id)
         .ok_or_else(|| {
             anyhow!(
@@ -382,15 +417,12 @@ pub(crate) fn generate_analyzed_launcher(
                 analyzed.resolved.deployment_name()
             )
         })?;
-    if federates.len() != 1 {
-        bail!("static launcher generation currently supports one local Federate");
-    }
-    if federate.runtime().as_str() != "std" {
-        bail!(
+    let capabilities = launcher_capabilities(federate.runtime().as_str()).map_err(|_| {
+        anyhow!(
             "Federate '{federate_id}' selects unsupported runtime '{}'",
             federate.runtime()
-        );
-    }
+        )
+    })?;
     let mut configuration = analyzed
         .resolved
         .deployment()
@@ -403,8 +435,10 @@ pub(crate) fn generate_analyzed_launcher(
     let configured_files = ConfiguredFiles::new(&configuration)?;
     configured_files.apply_canonical_paths(&mut configuration);
 
-    let aliases = payload_aliases(&analyzed.resolved, &analyzed.driver, federate)?;
-    let manifest = render_manifest(&analyzed.resolved, &aliases)?;
+    let slice = analyzed.compiled.federate_slice(federate_index)?;
+    let distributed = coordination.is_some();
+    let aliases = payload_aliases(&analyzed.resolved, &analyzed.driver, slice.enclaves())?;
+    let manifest = render_manifest(&analyzed.resolved, &aliases, distributed, capabilities)?;
     let execution = analyzed
         .resolved
         .deployment()
@@ -413,12 +447,37 @@ pub(crate) fn generate_analyzed_launcher(
         .unwrap_or_default();
     let source = rust::render_launcher(
         &analyzed.driver,
-        &analyzed.compiled,
-        federate_index,
+        &slice,
         &aliases,
         &execution,
+        coordination,
+        capabilities,
     )?;
-    let compile_inputs = payload_compile_inputs(&analyzed.resolved, &analyzed.driver)?;
+    let compile_inputs = payload_compile_inputs(&analyzed.resolved, &analyzed.driver, &aliases)?;
+    prepare_launcher(
+        analyzed,
+        configuration,
+        configured_files,
+        aliases,
+        manifest,
+        source,
+        compile_inputs,
+        output,
+    )
+}
+
+/// Reuses locked Cargo workspace validation for either kind of compiled executable.
+#[allow(clippy::too_many_arguments, reason = "one generated workspace request")]
+fn prepare_launcher(
+    analyzed: &AnalyzedDeployment,
+    configuration: ResolvedFederate,
+    configured_files: ConfiguredFiles,
+    aliases: BTreeMap<String, String>,
+    manifest: String,
+    source: String,
+    compile_inputs: Vec<(String, String)>,
+    output: &crate::CommandOutput,
+) -> Result<GeneratedLauncher> {
     let application_workspace = analyzed
         .resolved
         .lockfile()
@@ -462,8 +521,8 @@ pub(crate) fn generate_analyzed_launcher(
                 directory,
                 &configuration,
                 &compile_inputs,
+                &aliases,
                 &analyzed.resolved,
-                &application_workspace,
                 &cargo_program,
                 output,
             )
@@ -577,11 +636,17 @@ fn validate_launcher_graph(
     directory: &Path,
     federate: &ResolvedFederate,
     compile_inputs: &[(String, String)],
+    aliases: &BTreeMap<String, String>,
     resolved: &ResolvedWorkspace,
-    application_workspace: &Path,
     cargo_program: &OsStr,
     progress: &crate::CommandOutput,
 ) -> Result<PackageId> {
+    let capabilities = launcher_capabilities(federate.runtime.as_str())?;
+    let application_workspace = resolved
+        .lockfile()
+        .path
+        .parent()
+        .expect("canonical workspace lockfile has a parent");
     let mut arguments = configured_metadata_arguments(federate, &directory.join("Cargo.toml"));
     arguments.push(OsString::from("--locked"));
     let mut command = launcher_command(
@@ -610,21 +675,30 @@ fn validate_launcher_graph(
         .iter()
         .find(|node| node.id == root.id)
         .expect("Cargo resolve graph contains its root");
-    let tracing_package = root_node
-        .deps
-        .iter()
-        .map(|dependency| &dependency.pkg)
-        .find(|package| {
-            metadata.packages.iter().any(|candidate| {
-                candidate.id == **package && candidate.name == "tracing-subscriber"
+    let direct_package = |name: &str| {
+        root_node
+            .deps
+            .iter()
+            .map(|dependency| &dependency.pkg)
+            .find(|package| {
+                metadata
+                    .packages
+                    .iter()
+                    .any(|candidate| candidate.id == **package && candidate.name == name)
             })
-        })
-        .ok_or_else(|| {
-            anyhow!("generated launcher does not depend directly on tracing-subscriber")
-        })?;
-    // The generated manifest owns this one direct dependency and therefore its complete closure.
+    };
+    // The generated manifest owns these direct dependencies and therefore their complete closures.
     let mut launcher_dependencies = BTreeSet::new();
-    let mut pending = vec![tracing_package.clone()];
+    let mut pending = Vec::new();
+    if capabilities.hosted {
+        let launcher_support = direct_package("boomerang_util").ok_or_else(|| {
+            anyhow!("generated hosted launcher does not depend directly on boomerang_util")
+        })?;
+        pending.push(launcher_support.clone());
+    }
+    if let Some(backend) = direct_package("boomerang_central_rti") {
+        pending.push(backend.clone());
+    }
     while let Some(package) = pending.pop() {
         if !launcher_dependencies.insert(package.clone()) {
             continue;
@@ -636,8 +710,37 @@ fn validate_launcher_graph(
             .expect("Cargo resolve graph contains every dependency");
         pending.extend(node.deps.iter().map(|dependency| dependency.pkg.clone()));
     }
+    let implementation_ids = resolved
+        .deployment()
+        .bindings
+        .values()
+        .map(|binding| {
+            &resolved
+                .package(&binding.package)
+                .expect("resolved implementation package is retained")
+                .id
+        })
+        .collect::<BTreeSet<_>>();
+    let selected_ids = aliases
+        .keys()
+        .map(|implementation| {
+            &resolved
+                .package(implementation)
+                .expect("selected implementation package is retained")
+                .id
+        })
+        .collect::<BTreeSet<_>>();
     for node in graph.nodes.iter().filter(|node| node.id != root.id) {
         let id = node.id.to_string();
+        if node
+            .features
+            .iter()
+            .any(|feature| *feature == "__boomerang_payload")
+            && implementation_ids.contains(&node.id)
+            && !selected_ids.contains(&node.id)
+        {
+            bail!("unselected implementation package {id} activates reserved payload facet");
+        }
         if !resolved.locked_package_ids().contains(&id) && !launcher_dependencies.contains(&node.id)
         {
             bail!("generated launcher package {id} was absent from source metadata");
@@ -650,10 +753,9 @@ fn validate_launcher_graph(
 fn payload_aliases(
     resolved: &ResolvedWorkspace,
     driver: &DriverOutput,
-    federate: &boomerang_builder::compiler::OwnedFederateImage,
+    enclaves: &[boomerang_builder::compiler::OwnedEnclaveImage],
 ) -> Result<BTreeMap<String, String>> {
-    let required = federate
-        .enclaves()
+    let required = enclaves
         .iter()
         .flat_map(|enclave| enclave.required_bindings().iter())
         .map(binding_implementation)
@@ -690,6 +792,8 @@ fn binding_implementation(binding: &boomerang_builder::compiler::RequiredBinding
 fn render_manifest(
     resolved: &ResolvedWorkspace,
     aliases: &BTreeMap<String, String>,
+    distributed: bool,
+    capabilities: LauncherCapabilities,
 ) -> Result<String> {
     let mut dependencies = BTreeMap::new();
     dependencies.insert(
@@ -700,22 +804,22 @@ fn render_manifest(
         String::from("tinymap"),
         dependency(resolved.table_store(), false, Vec::new())?,
     );
-    dependencies.insert(
-        String::from("tracing-subscriber"),
-        toml::Table::from_iter([
-            ("version".into(), "=0.3.23".into()),
-            ("default-features".into(), false.into()),
-            (
-                "features".into(),
-                vec!["ansi", "env-filter", "fmt"]
-                    .into_iter()
-                    .map(toml::Value::from)
-                    .collect::<Vec<_>>()
-                    .into(),
-            ),
-        ])
-        .into(),
-    );
+    if capabilities.hosted {
+        dependencies.insert(
+            String::from("boomerang_util"),
+            runtime_sibling_dependency(
+                resolved.runtime(),
+                "boomerang_util",
+                vec![String::from("launcher")],
+            )?,
+        );
+    }
+    if distributed {
+        dependencies.insert(
+            String::from("boomerang_central_rti"),
+            runtime_sibling_dependency(resolved.runtime(), "boomerang_central_rti", Vec::new())?,
+        );
+    }
     for (implementation, alias) in aliases {
         let package = resolved
             .package(implementation)
@@ -753,12 +857,17 @@ fn render_manifest(
 fn payload_compile_inputs(
     resolved: &ResolvedWorkspace,
     driver: &DriverOutput,
+    aliases: &BTreeMap<String, String>,
 ) -> Result<Vec<(String, String)>> {
     let mut inputs = vec![(
         PAYLOAD_MACRO_ABI_COMPILE_INPUT.to_owned(),
         boomerang_runtime::binding::COMPONENT_DESCRIPTOR_MACRO_ABI.to_string(),
     )];
-    for binding in driver.bindings() {
+    for binding in driver
+        .bindings()
+        .iter()
+        .filter(|binding| aliases.contains_key(binding.implementation().as_str()))
+    {
         let package = resolved
             .package(binding.implementation().as_str())
             .expect("descriptor implementation package is resolved");
@@ -813,14 +922,159 @@ fn require_success(phase: &'static str, output: &Output) -> Result<()> {
     bail!("generated launcher {phase} failed:\n{}", diagnostics)
 }
 
+/// Protocol contract for the initial hosted projection, separate from the Phase 6 wire protocol.
+pub(crate) const HOSTED_PROTOCOL: &str = "boomerang.compiled-hosted.v1";
+
+/// Validates the selected hosted projection before writing any generated source.
+fn validate_coordination(analyzed: &AnalyzedDeployment) -> Result<bool> {
+    use boomerang_runtime::image::*;
+    for federate in analyzed.compiled.federates().values() {
+        launcher_capabilities(federate.runtime().as_str())?;
+    }
+    analyzed.compiled.with_coordination(|projection| {
+        let image = match projection {
+            CoordinationProjection::Local => return Ok(false),
+            CoordinationProjection::CentralRti(image) => image,
+        };
+        for (key, _) in image.routes().iter() {
+            if image.route_transport_capability(key) != "tcp"
+                || image.route_codec_capability(key) != "serde-json"
+                || image.route_transport_policy(key) != TransportPolicy::ReliableOrderedFramed
+                || image.route_codec_policy(key) != CodecPolicy::CanonicalBounded
+                || image.route_failure_policy(key) != BoundaryFailurePolicy::PropagateStop
+                || image.route_timing_policy(key) != TimingPolicy::BestEffort
+                || image.route_security_policy(key) != SecurityPolicy::None
+            {
+                bail!(
+                    "unsupported generated central-rti boundary configuration for '{}'",
+                    image.route_boundary(key).as_str()
+                );
+            }
+        }
+        for (key, _) in analyzed.compiled.federates().iter() {
+            if image.member_recovery_policy(key) != RecoveryPolicy::FailStop {
+                bail!("unsupported generated central-rti recovery policy");
+            }
+        }
+        Ok(true)
+    })
+}
+
+/// Hashes canonical coordination tables and compatibility descriptors with a protocol domain.
+pub(crate) fn coordination_identity(analyzed: &AnalyzedDeployment) -> Result<Option<blake3::Hash>> {
+    if !validate_coordination(analyzed)? {
+        return Ok(None);
+    }
+    let mut identity = blake3::Hasher::new_derive_key("boomerang.compiled-coordination.v1");
+    identity.update(HOSTED_PROTOCOL.as_bytes());
+    identity.update(&crate::check::COMPILER_SCHEMA.to_le_bytes());
+    identity.update(rust::format_rust(rti::render_coordination(&analyzed.compiled)?)?.as_bytes());
+    for binding in analyzed.driver.bindings() {
+        identity.update(
+            &binding
+                .descriptor()
+                .descriptor_fingerprint_input()
+                .fingerprint()
+                .to_bytes(),
+        );
+    }
+    Ok(Some(identity.finalize()))
+}
+
+/// Emits the same immutable projection and identity into every participating executable.
+fn generated_coordination(
+    analyzed: &AnalyzedDeployment,
+) -> Result<Option<proc_macro2::TokenStream>> {
+    let Some(identity) = coordination_identity(analyzed)? else {
+        return Ok(None);
+    };
+    let image = rti::render_coordination(&analyzed.compiled)?;
+    let bytes = identity.as_bytes().iter();
+    Ok(Some(quote::quote! {
+        #image
+        const COORDINATION_IDENTITY: boomerang_central_rti::compiled::CoordinationIdentity =
+            boomerang_central_rti::compiled::CoordinationIdentity::new([#(#bytes),*]);
+    }))
+}
+
+/// Generates the payload-free coordinator only when canonical lowering selects central RTI.
+pub(crate) fn generate_analyzed_rti(
+    analyzed: &AnalyzedDeployment,
+    output: &crate::CommandOutput,
+) -> Result<Option<GeneratedLauncher>> {
+    let Some(coordination) = generated_coordination(analyzed)? else {
+        return Ok(None);
+    };
+    let selected = analyzed.resolved.deployment().rti.as_ref();
+    let configuration = ResolvedFederate {
+        groups: Vec::new(),
+        target: selected.map(|rti| rti.target.clone()),
+        toolchain: None,
+        profile: selected.and_then(|rti| rti.profile.clone()),
+        runtime: String::from("std"),
+        recovery: boomerang_runtime::image::RecoveryPolicy::FailStop,
+        target_json: None,
+        cargo_config: None,
+    };
+    let aliases = BTreeMap::new();
+    let manifest = render_manifest(
+        &analyzed.resolved,
+        &aliases,
+        true,
+        LauncherCapabilities { hosted: true },
+    )?;
+    let source = rust::format_rust(quote::quote! {
+        use boomerang_runtime::image::*;
+        use tinymap::{TinyMapView, SliceRange};
+        #coordination
+        fn main() -> Result<(), Box<dyn std::error::Error>> {
+            use std::io::Write;
+            boomerang_util::launcher::init_tracing();
+            let view = RtiImageView::new(&COORDINATION_IMAGE, COORDINATION_MEMBERS)?;
+            let rti = boomerang_central_rti::compiled::CompiledRti::from_image(&view, COORDINATION_IDENTITY)?;
+            let bind = std::env::var("BOOMERANG_RTI_BIND").unwrap_or_else(|_| "127.0.0.1:0".into());
+            let listener = std::net::TcpListener::bind(bind)?;
+            if let Ok(ready) = std::env::var("BOOMERANG_RTI_READY_ADDRESS") {
+                let ready: std::net::SocketAddr = ready.parse()?;
+                let mut ready = std::net::TcpStream::connect_timeout(&ready, std::time::Duration::from_secs(10))?;
+                ready.set_write_timeout(Some(std::time::Duration::from_secs(10)))?;
+                writeln!(ready, "BOOMERANG_RTI_READY_V1 {}", listener.local_addr()?)?;
+            } else {
+                println!("BOOMERANG_RTI_READY_V1 {}", listener.local_addr()?);
+            }
+            boomerang_central_rti::compiled::hosted::serve(listener, rti, std::time::Duration::from_secs(10))?;
+            Ok(())
+        }
+    })?;
+    let configured_files = ConfiguredFiles::new(&configuration)?;
+    prepare_launcher(
+        analyzed,
+        configuration,
+        configured_files,
+        aliases,
+        manifest,
+        source,
+        Vec::new(),
+        output,
+    )
+    .map(Some)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        configured_metadata_arguments, configured_path_argument, launcher_command,
-        launcher_request_identity, rendered_compiler_diagnostics, ConfiguredFiles,
+        configured_metadata_arguments, configured_path_argument, launcher_capabilities,
+        launcher_command, launcher_request_identity, rendered_compiler_diagnostics,
+        ConfiguredFiles,
     };
-    use crate::ResolvedFederate;
+    use crate::{RecoveryPolicy, ResolvedFederate};
     use std::{ffi::OsStr, path::Path};
+
+    #[test]
+    fn launcher_capabilities_depend_only_on_the_runtime_backend() {
+        assert!(launcher_capabilities("std").unwrap().hosted);
+        assert!(launcher_capabilities("embedded").is_err());
+    }
 
     #[test]
     fn metadata_reconciliation_preserves_federate_toolchain_and_cargo_config() {
@@ -830,6 +1084,7 @@ mod tests {
             toolchain: Some(String::from("nightly-test")),
             profile: None,
             runtime: String::from("std"),
+            recovery: RecoveryPolicy::FailStop,
             target_json: None,
             cargo_config: Some(std::path::PathBuf::from("/tmp/cargo-config.toml")),
         };
@@ -883,6 +1138,7 @@ mod tests {
                 toolchain: None,
                 profile: None,
                 runtime: String::from("std"),
+                recovery: RecoveryPolicy::FailStop,
                 target_json: Some(target_json.to_path_buf()),
                 cargo_config: Some(cargo_config.to_path_buf()),
             };
@@ -920,6 +1176,7 @@ mod tests {
                 toolchain: None,
                 profile: None,
                 runtime: String::from("std"),
+                recovery: RecoveryPolicy::FailStop,
                 target_json: None,
                 cargo_config: None,
             };

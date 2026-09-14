@@ -1,10 +1,20 @@
 //! Crate-private scheduler coordination boundaries for owned Federates.
 
+pub(crate) mod backend;
 mod dependencies;
-mod quiescence;
+mod orchestration;
+pub(crate) mod state;
 
-pub(crate) use dependencies::EnclaveDependencies;
-pub(crate) use quiescence::{
-    FederateQuiescence, FederateQuiescenceCoordinator, FederateQuiescenceHandle, QuiescenceControl,
-    QuiescenceParticipant,
+pub(crate) use backend::LocalFederateCoordinationBackend;
+pub use backend::{
+    CoordinationRevision, FederateAcquisition, FederateCompletion, FederateCoordinationBackend,
+    FederateCoordinationError, FederatePublication,
 };
+pub(crate) use dependencies::EnclaveDependencies;
+#[allow(unused_imports)]
+pub(crate) use orchestration::{
+    EnclaveCoordinationPort, FederateAbortHandle, FederateControlAuthorization,
+    FederateCoordinationParts, FederateCoordinator, FederateIdleWait,
+    FederateSchedulerCoordination, FederateTagAcquisition, FederateTermination,
+};
+pub(crate) use state::LifecyclePolicy;

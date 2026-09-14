@@ -43,6 +43,7 @@ boomerang_tinymap = { path = "boomerang_tinymap", version = "0.3.0" }
 boomerang_util = { path = "boomerang_util", version = "0.3.0" }
 boomerang_builder = { path = "boomerang_builder", version = "0.3.0" }
 boomerang_federated = { path = "boomerang_federated", version = "0.3.0" }
+boomerang_central_rti = { path = "boomerang_central_rti", version = "0.3.0" }
 boomerang_macros = { path = "boomerang_macros", version = "0.3.0" }
 tinymap = { package = "boomerang_tinymap", path = "boomerang_tinymap", version = "0.3.0" }
 
@@ -51,6 +52,7 @@ members = [
     "boomerang",
     "boomerang_builder",
     "boomerang_federated",
+    "boomerang_central_rti",
     "boomerang_macros",
     "boomerang_runtime",
     "boomerang_tinymap",

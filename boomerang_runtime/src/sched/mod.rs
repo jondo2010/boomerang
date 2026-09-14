@@ -1,3 +1,8 @@
+//! Live and compiled scheduler composition over one key-generic execution core.
+//!
+//! Compiled execution injects backend-neutral Federate coordination, while the
+//! live schedulers retain local Enclave coordination during migration.
+
 use std::pin::Pin;
 
 mod barrier;
@@ -19,10 +24,10 @@ use core::{ReactionOutcome, SchedulerCore};
 
 use barrier::LogicalTimeBarrier;
 pub use barrier::LogicalTimeBarrierError;
-#[cfg(feature = "federated")]
-use barrier::NoFederatedTimeBarrier;
-#[cfg(feature = "federated")]
-pub use barrier::{FederatedBarrierError, FederatedBarrierOutcome, FederatedTimeBarrier};
+pub use federate::{
+    CoordinationRevision, FederateAcquisition, FederateCompletion, FederateCoordinationBackend,
+    FederateCoordinationError, FederatePublication,
+};
 use modal::EventManager;
 
 use crate::{
@@ -107,7 +112,10 @@ impl Config {
     }
 }
 
+/// Scheduler-work counters accumulated by one execution or saturating aggregate.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(deny_unknown_fields))]
 pub struct Stats {
     /// Scheduler tag-processing steps, including terminal tags.
     processed_tags: usize,
@@ -150,7 +158,7 @@ impl Stats {
     }
 
     /// Adds every scheduler counter from `other`, saturating at [`usize::MAX`].
-    pub(crate) fn saturating_add_assign(&mut self, other: &Self) {
+    pub fn saturating_add_assign(&mut self, other: &Self) {
         self.processed_tags = self.processed_tags.saturating_add(other.processed_tags);
         self.processed_reactions = self
             .processed_reactions
@@ -478,9 +486,6 @@ pub struct Scheduler {
     upstream_enclaves: tinymap::TinySecondaryMap<EnclaveKey, LogicalTimeBarrier>,
     /// The senders for downstream enclaves
     downstream_enclaves: tinymap::TinySecondaryMap<EnclaveKey, SendContext>,
-    /// Federated logical-time coordination hook
-    #[cfg(feature = "federated")]
-    federated_time_barrier: Box<dyn FederatedTimeBarrier>,
     /// Runtime statistics
     stats: Stats,
     /// Reusable buffer for reaction keys to avoid allocations in hot loops
@@ -557,8 +562,6 @@ impl Scheduler {
             shutdown_tx,
             upstream_enclaves,
             downstream_enclaves,
-            #[cfg(feature = "federated")]
-            federated_time_barrier: Box::new(NoFederatedTimeBarrier),
             stats: Stats::default(),
             reaction_buffer: Vec::with_capacity(reaction_capacity),
             transition_buffer: Vec::with_capacity(reaction_capacity),
@@ -567,24 +570,8 @@ impl Scheduler {
         }
     }
 
-    /// Create a new Scheduler instance with a federated time barrier.
-    ///
-    /// This constructor is the opt-in path for federated time coordination.
-    /// [`Scheduler::new`] and [`execute_enclaves`] keep the local-only behavior.
-    #[cfg(feature = "federated")]
-    pub fn new_with_federated_time_barrier(
-        key: EnclaveKey,
-        enclave: Enclave,
-        config: Config,
-        federated_time_barrier: impl FederatedTimeBarrier + 'static,
-    ) -> Self {
-        let mut scheduler = Self::new(key, enclave, config);
-        scheduler.federated_time_barrier = Box::new(federated_time_barrier);
-        scheduler
-    }
-
     /// Borrow the live scheduler fields as the two capability concerns and concrete coordination.
-    fn core(&mut self) -> SchedulerCore<'_, ReactionGraph, Pin<Box<Store>>> {
+    fn core(&mut self) -> SchedulerCore<'_, '_, ReactionGraph, Pin<Box<Store>>> {
         let Self {
             key,
             config,
@@ -598,8 +585,6 @@ impl Scheduler {
             shutdown_tx,
             upstream_enclaves,
             downstream_enclaves,
-            #[cfg(feature = "federated")]
-            federated_time_barrier,
             stats,
             reaction_buffer,
             transition_buffer,
@@ -613,7 +598,8 @@ impl Scheduler {
             schedule: reaction_graph,
             storage: store,
             event_rx,
-            quiescence: None,
+            federate_coordination: None,
+            federate_shutdown_tag: None,
             events,
             start_time,
             current_tag,
@@ -622,8 +608,6 @@ impl Scheduler {
             shutdown_tx,
             upstream_enclaves,
             downstream_enclaves,
-            #[cfg(feature = "federated")]
-            federated_time_barrier,
             stats,
             reaction_buffer,
             transition_buffer,
@@ -677,7 +661,13 @@ fn live_scheduler_result<T>(
     match result {
         Ok(value) => Ok(value),
         Err(SchedulerError::Coordination(error)) => Err(error),
+        Err(SchedulerError::FederateCoordination(_)) => {
+            unreachable!("live schedulers do not install compiled Federate coordination")
+        }
         Err(SchedulerError::Execution(error)) => Err(error),
+        Err(SchedulerError::FederateFailureReported { source }) => {
+            live_scheduler_result(Err(*source))
+        }
     }
 }
 
@@ -765,125 +755,12 @@ fn panic_payload_message(payload: Box<dyn std::any::Any + Send + 'static>) -> St
     }
 }
 
-#[cfg(all(test, feature = "federated"))]
+#[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
     use crate::{image::PortIndex, reaction_closure, ActionKey, Level, PortKey, Reaction, Reactor};
-
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    enum HookCall {
-        Acquire(Tag),
-        Reaction(Tag),
-        Ltc(Tag),
-    }
-
-    #[derive(Debug)]
-    struct RecordingBarrier {
-        log: Arc<Mutex<Vec<HookCall>>>,
-        interrupt: Option<AsyncEvent>,
-        acquire_error: Option<String>,
-        completion_error: Option<String>,
-    }
-
-    impl RecordingBarrier {
-        fn granting(log: Arc<Mutex<Vec<HookCall>>>) -> Self {
-            Self {
-                log,
-                interrupt: None,
-                acquire_error: None,
-                completion_error: None,
-            }
-        }
-
-        fn interrupting(log: Arc<Mutex<Vec<HookCall>>>, event: AsyncEvent) -> Self {
-            Self {
-                log,
-                interrupt: Some(event),
-                acquire_error: None,
-                completion_error: None,
-            }
-        }
-
-        fn failing_acquire(log: Arc<Mutex<Vec<HookCall>>>, message: &str) -> Self {
-            Self {
-                log,
-                interrupt: None,
-                acquire_error: Some(message.into()),
-                completion_error: None,
-            }
-        }
-
-        fn failing_completion(log: Arc<Mutex<Vec<HookCall>>>, message: &str) -> Self {
-            Self {
-                log,
-                interrupt: None,
-                acquire_error: None,
-                completion_error: Some(message.into()),
-            }
-        }
-    }
-
-    impl FederatedTimeBarrier for RecordingBarrier {
-        fn acquire_tag(
-            &mut self,
-            tag: Tag,
-            _event_rx: &crate::Receiver<AsyncEvent>,
-        ) -> Result<FederatedBarrierOutcome, FederatedBarrierError> {
-            self.log.lock().unwrap().push(HookCall::Acquire(tag));
-            if let Some(message) = self.acquire_error.take() {
-                return Err(FederatedBarrierError::new(message));
-            }
-            Ok(match self.interrupt.take() {
-                Some(event) => FederatedBarrierOutcome::Interrupted(event),
-                None => FederatedBarrierOutcome::Granted,
-            })
-        }
-
-        fn logical_tag_complete(&mut self, tag: Tag) -> Result<(), FederatedBarrierError> {
-            self.log.lock().unwrap().push(HookCall::Ltc(tag));
-            if let Some(message) = self.completion_error.take() {
-                return Err(FederatedBarrierError::new(message));
-            }
-            Ok(())
-        }
-    }
-
-    fn scheduler_with_recording_reaction(
-        log: Arc<Mutex<Vec<HookCall>>>,
-        barrier: impl FederatedTimeBarrier + 'static,
-    ) -> (Scheduler, ReactionKey) {
-        let mut enclave = Enclave::default();
-        let reactor = enclave.insert_reactor(Reactor::new("root", ()).boxed(), None);
-        let scope = enclave.root_scope(reactor);
-        let reaction_log = Arc::clone(&log);
-        let reaction = enclave.insert_reaction(
-            Reaction::new(
-                "record",
-                reaction_closure!(ctx, _reactor, _refs => {
-                    reaction_log
-                        .lock()
-                        .unwrap()
-                        .push(HookCall::Reaction(ctx.get_tag()));
-                }),
-                None,
-            ),
-            reactor,
-            std::iter::empty::<PortKey>(),
-            std::iter::empty::<PortKey>(),
-            std::iter::empty::<ActionKey>(),
-            scope,
-            None,
-        );
-        let scheduler = Scheduler::new_with_federated_time_barrier(
-            EnclaveKey::from(0),
-            enclave,
-            Config::default().with_fast_forward(true),
-            barrier,
-        );
-        (scheduler, reaction)
-    }
 
     fn scheduler_recording_start_origin(
         seen_origin: Arc<Mutex<Option<std::time::Instant>>>,
@@ -936,157 +813,55 @@ mod tests {
     }
 
     #[test]
-    fn federated_time_barrier_wraps_processed_logical_tag() {
-        let log = Arc::new(Mutex::new(Vec::new()));
-        let barrier = RecordingBarrier::granting(Arc::clone(&log));
-        let (mut scheduler, reaction) =
-            scheduler_with_recording_reaction(Arc::clone(&log), barrier);
-        let tag = Tag::ZERO;
-
-        scheduler.startup();
-        scheduler
-            .events
-            .push_event(tag, std::iter::once((Level::from(0), reaction)), false);
-
-        assert!(scheduler.try_next().unwrap());
-        assert_eq!(scheduler.current_tag, tag);
-
-        let calls = log.lock().unwrap().clone();
-        assert_eq!(
-            calls,
-            vec![
-                HookCall::Acquire(tag),
-                HookCall::Reaction(tag),
-                HookCall::Ltc(tag)
-            ]
-        );
-    }
-
-    #[test]
-    fn federated_time_barrier_can_interrupt_wait_with_inbound_event() {
-        let log = Arc::new(Mutex::new(Vec::new()));
-        let future_tag = Tag::new(Duration::seconds(1), 0);
-        let inbound_tag = Tag::ZERO;
-        let barrier = RecordingBarrier::interrupting(
-            Arc::clone(&log),
-            AsyncEvent::TagReleaseProvisional {
-                enclave: EnclaveKey::from(1),
-                tag: inbound_tag,
-            },
-        );
-        let mut scheduler = Scheduler::new_with_federated_time_barrier(
-            EnclaveKey::from(0),
-            Enclave::default(),
-            Config::default().with_fast_forward(true),
-            barrier,
-        );
-
-        scheduler.startup();
-        let before_wait = scheduler.current_tag;
-        scheduler.events.push_event(
-            future_tag,
-            std::iter::empty::<(Level, ReactionKey)>(),
-            false,
-        );
-
-        assert!(scheduler.try_next().unwrap());
-        assert_eq!(scheduler.current_tag, before_wait);
-        assert_eq!(scheduler.events.peek_tag(), Some(inbound_tag));
-
-        let calls = log.lock().unwrap().clone();
-        assert_eq!(calls, vec![HookCall::Acquire(future_tag)]);
-    }
-
-    #[test]
     fn live_scheduler_rejects_async_boundary_ports() {
-        let log = Arc::new(Mutex::new(Vec::new()));
-        let future_tag = Tag::new(Duration::seconds(1), 0);
+        let enclave = Enclave::default();
+        let event_tx = enclave.event_tx.clone();
         let boundary = PortIndex::new(7);
-        let barrier = RecordingBarrier::interrupting(
-            Arc::clone(&log),
-            AsyncEvent::Logical {
+        let mut scheduler = Scheduler::new(
+            EnclaveKey::from(0),
+            enclave,
+            Config::default().with_fast_forward(true),
+        );
+        scheduler.startup();
+        event_tx
+            .send(AsyncEvent::Logical {
                 tag: Tag::ZERO,
                 target: crate::AsyncEventTarget::BoundaryPort(boundary),
                 value: Box::new(42_u32),
-            },
-        );
-        let mut scheduler = Scheduler::new_with_federated_time_barrier(
-            EnclaveKey::from(0),
-            Enclave::default(),
-            Config::default().with_fast_forward(true),
-            barrier,
-        );
-
-        scheduler.startup();
-        scheduler.events.push_event(
-            future_tag,
-            std::iter::empty::<(Level, ReactionKey)>(),
-            false,
-        );
-
+            })
+            .unwrap();
         assert!(matches!(
             scheduler.try_next(),
             Err(RuntimeError::AsyncBoundaryPortUnsupported(key)) if key == boundary
         ));
-        assert_eq!(*log.lock().unwrap(), vec![HookCall::Acquire(future_tag)]);
-    }
-
-    #[test]
-    fn federated_barrier_error_prevents_reaction_execution() {
-        let log = Arc::new(Mutex::new(Vec::new()));
-        let barrier = RecordingBarrier::failing_acquire(Arc::clone(&log), "denied");
-        let (mut scheduler, reaction) =
-            scheduler_with_recording_reaction(Arc::clone(&log), barrier);
-        let tag = Tag::ZERO;
-
-        scheduler.startup();
-        let before_wait = scheduler.current_tag;
-        scheduler
-            .events
-            .push_event(tag, std::iter::once((Level::from(0), reaction)), false);
-
-        assert!(matches!(
-            scheduler.try_next(),
-            Err(RuntimeError::FederatedBarrier(_))
-        ));
-        assert_eq!(scheduler.current_tag, before_wait);
-        assert_eq!(scheduler.events.peek_tag(), Some(tag));
-        assert!(!log
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|call| matches!(call, HookCall::Reaction(_))));
-    }
-
-    #[test]
-    fn federated_completion_error_is_returned() {
-        let log = Arc::new(Mutex::new(Vec::new()));
-        let barrier = RecordingBarrier::failing_completion(Arc::clone(&log), "ltc failed");
-        let (mut scheduler, reaction) =
-            scheduler_with_recording_reaction(Arc::clone(&log), barrier);
-        let tag = Tag::ZERO;
-
-        scheduler.startup();
-        scheduler
-            .events
-            .push_event(tag, std::iter::once((Level::from(0), reaction)), false);
-
-        assert!(matches!(
-            scheduler.try_next(),
-            Err(RuntimeError::FederatedBarrier(_))
-        ));
-        assert_eq!(scheduler.current_tag, tag);
-        assert!(log
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|call| matches!(call, HookCall::Reaction(reaction_tag) if *reaction_tag == tag)));
     }
 }
 
 #[cfg(test)]
 mod stats_tests {
     use super::*;
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn stats_serde_round_trips_numeric_counters() {
+        let stats = Stats {
+            processed_tags: 1,
+            processed_reactions: 2,
+            processed_events: 3,
+            set_ports: 4,
+            scheduled_actions: 5,
+        };
+
+        let expected = serde_json::json!({
+            "processed_tags": 1,
+            "processed_reactions": 2,
+            "processed_events": 3,
+            "set_ports": 4,
+            "scheduled_actions": 5,
+        });
+        assert_eq!(serde_json::to_value(stats).unwrap(), expected);
+        assert_eq!(serde_json::from_value::<Stats>(expected).unwrap(), stats);
+    }
 
     #[test]
     fn stats_aggregation_saturates_every_counter() {

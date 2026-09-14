@@ -22,8 +22,11 @@ pub fn Sensor(#[input] command: u32) -> impl Reactor {
             #[cfg(feature = "runtime-failure")]
             std::process::exit(42);
             println!("sensor received command 42");
-            eprintln!("sensor scheduling shutdown");
-            ctx.schedule_shutdown(None);
+            #[cfg(not(feature = "natural-quiescence"))]
+            {
+                eprintln!("sensor scheduling shutdown");
+                ctx.schedule_shutdown(None);
+            }
         }
     }
 }

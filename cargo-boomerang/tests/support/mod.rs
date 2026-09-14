@@ -7,20 +7,11 @@ use std::{
 };
 
 use boomerang_builder::compiler::{
-    lower, CoordinationBackendId, CoordinationSelection, FederateConfig, FederateId,
-    ImplementationBinding, PlacementAssignment, PlacementGroupId, ResolvedDeployment,
-    RuntimeBackendId, TargetTriple,
+    CoordinationSelection, FederateConfig, FederateId, ImplementationBinding, PlacementAssignment,
+    PlacementGroupId, ResolvedDeployment, RuntimeBackendId, TargetTriple,
 };
-use boomerang_runtime::{
-    execute_owned_federate,
-    image::{
-        CompiledDeploymentImage, EnclaveImage, FederateImage, FederateIndex, GlobalFederationImage,
-        IdentityRange,
-    },
-    Config,
-};
+use boomerang_runtime::{execute_owned_federate, image::FederateIndex, Config};
 use serde_json::{json, Value};
-use tinymap::{TableRange, TinyMapView};
 
 pub fn fixture_workspace() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/workspace")
@@ -47,6 +38,28 @@ pub fn copied_fixture_workspace() -> tempfile::TempDir {
     let destination = tempfile::tempdir_in(source.parent().unwrap()).unwrap();
     copy_tree(&source, destination.path());
     destination
+}
+
+/// Reuses one host-target copy across generated central deployment tests.
+pub fn hosted_fixture_workspace() -> PathBuf {
+    static WORKSPACE: OnceLock<tempfile::TempDir> = OnceLock::new();
+    WORKSPACE
+        .get_or_init(|| {
+            let workspace = copied_fixture_workspace();
+            let manifest = workspace.path().join("Boomerang.toml");
+            let source = std::fs::read_to_string(&manifest).unwrap().replace(
+                "aarch64-unknown-linux-gnu",
+                &target_lexicon::HOST.to_string(),
+            );
+            let source = source.replace(
+                "vehicle_topology::topology",
+                "vehicle_topology::tagged_topology",
+            );
+            std::fs::write(manifest, source).unwrap();
+            workspace
+        })
+        .path()
+        .to_path_buf()
 }
 
 pub fn shared_target(lane: &str) -> PathBuf {
@@ -134,6 +147,7 @@ pub fn owned_reference_summary(deployment_name: &str) -> Value {
                 FederateId::new(id.as_str())?,
                 TargetTriple::new(target)?,
                 RuntimeBackendId::new(config.runtime.as_str())?,
+                config.recovery,
             ))
         })
         .collect::<anyhow::Result<Vec<_>>>()
@@ -141,87 +155,41 @@ pub fn owned_reference_summary(deployment_name: &str) -> Value {
     let coordination = match resolved.deployment().coordination.as_ref() {
         None => CoordinationSelection::Local,
         Some(coordination) => CoordinationSelection::Distributed {
-            backend: CoordinationBackendId::new(match coordination.backend {
-                cargo_boomerang::CoordinationBackend::CentralRti => "central-rti",
-                cargo_boomerang::CoordinationBackend::PeerToPeer => "peer-to-peer",
-            })
-            .unwrap(),
+            backend: coordination.backend,
         },
     };
-    let compiled = lower(
-        &ResolvedDeployment::new(
-            driver.topology().clone(),
-            bindings,
-            placements,
-            federates,
-            coordination,
-            [],
-        )
-        .unwrap(),
+    let compiled = ResolvedDeployment::new(
+        driver.topology().clone(),
+        bindings,
+        placements,
+        federates,
+        coordination,
+        [],
     )
+    .unwrap()
+    .lower()
     .unwrap();
     compiled.validate().unwrap();
 
-    let mut identity_data = String::new();
-    let mut federate_images = Vec::new();
-    let mut enclave_images = Vec::<EnclaveImage<'_>>::new();
-    for federate in compiled.federates() {
-        let enclave_start = u32::try_from(enclave_images.len()).unwrap();
-        enclave_images.extend(federate.enclaves().iter().map(|enclave| enclave.image()));
-        let enclave_len = u32::try_from(federate.enclaves().len()).unwrap();
-        let mut append_identity = |value: &dyn std::fmt::Display| {
-            let start = u32::try_from(identity_data.len()).unwrap();
-            let value = value.to_string();
-            let len = u32::try_from(value.len()).unwrap();
-            identity_data.push_str(&value);
-            IdentityRange::new(start, len)
-        };
-        let id = append_identity(federate.id());
-        let target = append_identity(federate.target());
-        let runtime = append_identity(federate.runtime());
-        federate_images.push(FederateImage::new(
-            id,
-            target,
-            runtime,
-            TableRange::new(enclave_start, enclave_len),
-        ));
-    }
-    let members = compiled
-        .federation()
-        .members()
-        .iter()
-        .map(|member| {
-            let index = compiled
-                .federates()
-                .iter()
-                .position(|federate| federate.id() == member)
-                .unwrap();
-            FederateIndex::new(u32::try_from(index).unwrap())
-        })
-        .collect::<Vec<_>>();
-    let image = CompiledDeploymentImage {
-        identity_data: &identity_data,
-        federation: GlobalFederationImage::new(&members, &[]),
-        federates: TinyMapView::new(&federate_images),
-        enclaves: TinyMapView::new(&enclave_images),
-        coordination: compiled.coordination(),
-    };
-    let execution = execute_owned_federate(
-        &image,
-        FederateIndex::new(0),
-        owned_reference_payloads::bindings(),
-        Config::default(),
-    )
-    .unwrap();
+    let selected = FederateIndex::new(0);
+    let execution = compiled.with_image(|image| {
+        execute_owned_federate(
+            &image,
+            selected,
+            owned_reference_payloads::bindings(),
+            Config::default(),
+        )
+        .unwrap()
+    });
     let stats = execution.stats();
     json!({
         "schema": 1,
         "stats": {
-            "processed_tags": stats.processed_tags().to_string(),
-            "processed_reactions": stats.processed_reactions().to_string(),
-            "processed_events": stats.processed_events().to_string(),
-            "set_ports": stats.set_ports().to_string(),
-            "scheduled_actions": stats.scheduled_actions().to_string(),
+            "processed_tags": stats.processed_tags(),
+            "processed_reactions": stats.processed_reactions(),
+            "processed_events": stats.processed_events(),
+            "set_ports": stats.set_ports(),
+            "scheduled_actions": stats.scheduled_actions(),
         },
         "final_tag": {
             "offset_nanos": execution.final_tag().offset().whole_nanoseconds().to_string(),
@@ -237,19 +205,27 @@ pub fn without_ansi(output: &str) -> String {
 
 /// Asserts the complete ordered sequence of cargo-boomerang progress labels.
 pub fn assert_progress_phases(stderr: &str, expected: &[&str]) {
-    const PHASES: [&str; 7] = [
+    const PHASES: [&str; 8] = [
         "Analyzing",
         "Generating",
         "Building",
         "Validating",
         "Bundling",
         "Publishing",
+        "Published",
         "Running",
     ];
     let plain_stderr = without_ansi(stderr);
     let actual = plain_stderr
         .lines()
-        .filter_map(|line| line.split_whitespace().next())
+        .filter_map(|line| {
+            let mut words = line.split_whitespace();
+            let phase = words.next()?;
+            if phase == "Running" && words.next().is_some_and(|word| word.starts_with('`')) {
+                return None;
+            }
+            Some(phase)
+        })
         .filter(|word| PHASES.contains(word))
         .collect::<Vec<_>>();
     assert_eq!(actual, expected, "unexpected progress sequence:\n{stderr}");

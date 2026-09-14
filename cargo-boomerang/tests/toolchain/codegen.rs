@@ -78,6 +78,75 @@ fn generated_single_federate_launcher_executes_typed_local_route_without_builder
     assert!(package_names.contains(&"vehicle-control"));
 }
 
+/// Proves a generated distributed slice preserves canonical keys and excludes sibling payloads.
+#[test]
+fn generated_sensor_federate_slice_excludes_host_payload_and_preserves_canonical_keys() {
+    let _guard = support::toolchain_lock();
+    let target = tempfile::tempdir().unwrap();
+    let launcher = support::with_target_directory(target.path(), || {
+        cargo_boomerang::generate_launcher(fixture_workspace(), "sensor-slice", "sensor")
+    })
+    .unwrap();
+
+    let source = std::fs::read_to_string(launcher.source_path()).unwrap();
+    assert!(
+        source.contains("static FEDERATE: FederateIndex = FederateIndex::new(1);"),
+        "{source}"
+    );
+    assert!(!source.contains("FederateSliceImage"), "{source}");
+    assert!(!source.contains("FederateSliceView"), "{source}");
+    assert!(source.contains("IndexSpan::new(2, 1)"), "{source}");
+    assert!(source.contains(".bind_enclave("), "{source}");
+    assert!(source.contains("EnclaveIndex::new(2)"), "{source}");
+    assert!(
+        source.contains("boundary/controller%2Fcommand/sensor%2Fcommand/c0"),
+        "{source}"
+    );
+    assert!(!source.contains("IdentityRange"), "{source}");
+    assert!(!source.contains("IDENTITIES"), "{source}");
+    assert!(source.contains("FederateImage::new("), "{source}");
+    assert!(source.contains("FederateId::new(\"sensor\")"), "{source}");
+    let metadata = MetadataCommand::new()
+        .manifest_path(launcher.manifest_path())
+        .other_options(vec![String::from("--locked"), String::from("--offline")])
+        .exec()
+        .unwrap();
+    let package_names = metadata
+        .packages
+        .iter()
+        .map(|package| package.name.as_str())
+        .collect::<Vec<_>>();
+    assert!(package_names.contains(&"sensor-host"));
+    assert!(package_names.contains(&"boomerang_central_rti"));
+    assert!(!package_names.contains(&"vehicle-control"));
+    assert!(!package_names.contains(&"vehicle-topology"));
+    assert!(!package_names.contains(&"boomerang_builder"));
+
+    launcher.build_locked_offline().unwrap();
+    let error = launcher.run_locked_offline().unwrap_err().to_string();
+    assert!(
+        error.contains("BOOMERANG_RTI_ADDRESS is required"),
+        "{error}"
+    );
+}
+
+/// Rejects reserved payload activation through an unselected transitive dependency.
+#[test]
+fn generated_launcher_rejects_transitive_payload_for_unselected_implementation() {
+    let _guard = support::toolchain_lock();
+    let target = tempfile::tempdir().unwrap();
+    let result = support::with_target_directory(target.path(), || {
+        cargo_boomerang::generate_launcher(fixture_workspace(), "transitive-peer", "sensor")
+    });
+    let error = result.err().expect("peer payload must fail").to_string();
+
+    assert!(
+        error.contains("unselected implementation package")
+            && error.contains("activates reserved payload facet"),
+        "{error}"
+    );
+}
+
 #[test]
 fn generated_launcher_check_and_run_apply_federate_cargo_configuration() {
     let _guard = support::toolchain_lock();
@@ -135,10 +204,69 @@ fn generated_launcher_renders_normalized_deployment_execution_policy() {
     );
     assert!(source.contains("physical_event_q_size: 1024"), "{source}");
     assert!(
-        source.contains("BOOMERANG_EXECUTION_SUMMARY_V1"),
+        source.contains("boomerang_util::launcher::write_execution_summary(&execution)?"),
         "{source}"
     );
-    assert!(source.contains("create_new(true)"), "{source}");
-    assert!(source.contains("execution.stats()"), "{source}");
-    assert!(source.contains("execution.final_tag()"), "{source}");
+}
+
+/// Rejects unsupported coordination selections before creating any launcher workspace.
+#[test]
+fn generated_launcher_rejects_unsupported_coordination_before_publication() {
+    let _guard = support::toolchain_lock();
+    let workspace = support::copied_fixture_workspace();
+    let target = tempfile::tempdir().unwrap();
+    let manifest = workspace.path().join("Boomerang.toml");
+    let original = std::fs::read_to_string(&manifest)
+        .unwrap()
+        .parse::<toml::Table>()
+        .unwrap();
+    for (selection, expected) in [
+        (
+            "backend",
+            "distributed coordination projection is not implemented",
+        ),
+        (
+            "transport",
+            "unsupported generated central-rti boundary configuration",
+        ),
+        (
+            "codec",
+            "unsupported generated central-rti boundary configuration",
+        ),
+    ] {
+        let mut changed = original.clone();
+        let deployment = changed["deployments"]["sensor-slice"]
+            .as_table_mut()
+            .unwrap();
+        if selection == "backend" {
+            deployment["coordination"]["backend"] = "peer-to-peer".into();
+            deployment.remove("rti");
+        } else {
+            deployment["boundaries"]["boundary/controller%2Fcommand/sensor%2Fcommand/c0"]
+                [selection] = if selection == "transport" {
+                "udp"
+            } else {
+                "postcard"
+            }
+            .into();
+        }
+        std::fs::write(&manifest, toml::to_string(&changed).unwrap()).unwrap();
+        let result = support::with_target_directory(target.path(), || {
+            cargo_boomerang::generate_launcher(workspace.path(), "sensor-slice", "host")
+        });
+        let error = result
+            .err()
+            .expect("unsupported coordination must be rejected");
+        assert!(
+            format!("{error:#}").contains(expected),
+            "{selection}: {error:#}"
+        );
+        assert!(
+            !target
+                .path()
+                .join("boomerang/generated/v1/launcher")
+                .exists(),
+            "{selection} wrote a generated launcher before validating coordination"
+        );
+    }
 }

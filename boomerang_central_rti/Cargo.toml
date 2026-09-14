@@ -1,0 +1,20 @@
+[package]
+name = "boomerang_central_rti"
+description = "Compiled central RTI execution for Boomerang federations."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+exclude.workspace = true
+
+[dependencies]
+boomerang_federated.workspace = true
+boomerang_runtime.workspace = true
+tinymap.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true

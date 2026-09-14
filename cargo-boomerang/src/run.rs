@@ -1,79 +1,60 @@
 //! Host-side execution of one verified generated deployment artifact.
 
+mod processes;
+
+use std::path::PathBuf;
+
 use std::{
     fs::{self, File, OpenOptions},
-    io::{self, Seek, SeekFrom},
-    path::{Path, PathBuf},
+    io::{self, Seek, SeekFrom, Write as _},
+    path::Path,
     process::{Command, ExitStatus},
 };
 
 use anyhow::{anyhow, bail, Context, Result};
-use serde::Deserialize;
+use boomerang_util::launcher::EXECUTION_SUMMARY_ENV;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     build::build_analyzed,
-    bundle::{load_published_artifact, DeploymentDocument},
+    bundle::{load_published_artifacts, DeploymentDocument},
     check::analyze,
     output::{CommandOutput, Phase},
 };
 
-/// Private environment key used by generated launchers for schema-v1 summaries.
-const EXECUTION_SUMMARY_ENV: &str = "BOOMERANG_EXECUTION_SUMMARY_V1";
 /// Maximum accepted execution-summary file size in bytes.
 const MAX_EXECUTION_SUMMARY_BYTES: u64 = 16 * 1024;
-
-/// Saturating sums of scheduler-work counters from a completed generated Federate.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ExecutionStats {
-    /// Scheduler tag-processing steps, including terminal tags.
-    processed_tags: usize,
-    /// Enabled reaction callbacks selected for invocation.
-    processed_reactions: usize,
-    /// Timing-dependent asynchronous scheduler events handled.
-    processed_events: usize,
-    /// Present-port observations during trigger propagation.
-    set_ports: usize,
-    /// Actions explicitly requested by reaction outcomes.
-    scheduled_actions: usize,
-}
-
-impl ExecutionStats {
-    /// Returns the saturating sum of scheduler tag-processing steps, including terminal tags.
-    pub const fn processed_tags(&self) -> usize {
-        self.processed_tags
-    }
-    /// Returns the saturating sum of enabled reaction callbacks selected for invocation.
-    pub const fn processed_reactions(&self) -> usize {
-        self.processed_reactions
-    }
-    /// Returns the saturating sum of timing-dependent asynchronous scheduler events handled.
-    ///
-    /// This is scheduler telemetry, not a count of unique logical events.
-    pub const fn processed_events(&self) -> usize {
-        self.processed_events
-    }
-    /// Returns the saturating sum of present-port observations during trigger propagation.
-    pub const fn set_ports(&self) -> usize {
-        self.set_ports
-    }
-    /// Returns the saturating sum of actions explicitly requested by reaction outcomes.
-    pub const fn scheduled_actions(&self) -> usize {
-        self.scheduled_actions
-    }
-}
 
 /// Final scheduling state reported by one completed generated Federate.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecutionSummary {
     /// Aggregate work counters from the completed execution.
-    stats: ExecutionStats,
+    stats: boomerang_runtime::Stats,
     /// Last nonterminal logical tag observed by the execution.
     final_tag: boomerang_runtime::Tag,
 }
 
 impl ExecutionSummary {
+    /// Serializes this execution summary as a schema-v1 JSON document.
+    pub fn write_json(&self, path: impl AsRef<Path>) -> Result<()> {
+        let path = path.as_ref();
+        let mut file =
+            File::create(path).with_context(|| format!("failed to create {}", path.display()))?;
+        let document = ExecutionSummaryDocumentV1 {
+            schema: 1,
+            stats: &self.stats,
+            final_tag: FinalTagDocumentV1 {
+                offset_nanos: self.final_tag.offset().whole_nanoseconds().to_string(),
+                microstep: self.final_tag.microstep().to_string(),
+            },
+        };
+        serde_json::to_writer(&mut file, &document)
+            .with_context(|| format!("failed to serialize {}", path.display()))?;
+        writeln!(file).with_context(|| format!("failed to finish {}", path.display()))
+    }
+
     /// Returns aggregate work counters from the completed execution.
-    pub const fn stats(&self) -> &ExecutionStats {
+    pub const fn stats(&self) -> &boomerang_runtime::Stats {
         &self.stats
     }
     /// Returns the last nonterminal logical tag observed by the execution.
@@ -115,35 +96,41 @@ pub fn run_with_output(
 ) -> Result<RunOutcome> {
     let analyzed = analyze(workspace.as_ref(), deployment_name, output)?;
     let federates = analyzed.compiled.federates();
-    if federates.len() != 1 {
-        bail!("generated execution currently supports exactly one local Federate");
+    for federate in federates.values() {
+        let federate_id = federate.id().as_str();
+        let configuration = analyzed
+            .resolved
+            .deployment()
+            .federates
+            .get(federate_id)
+            .ok_or_else(|| {
+                anyhow!("deployment has no configuration for Federate '{federate_id}'")
+            })?;
+        if federate.runtime().as_str() != "std" {
+            bail!(
+                "Federate '{federate_id}' selects unsupported runtime '{}'",
+                federate.runtime()
+            );
+        }
+        if configuration.target_json.is_some() {
+            bail!("Federate '{federate_id}' selects unsupported custom target JSON");
+        }
+        if federate.target().to_string() != target_lexicon::HOST.to_string() {
+            bail!(
+                "Federate '{federate_id}' target '{}' is not the host target '{}'",
+                federate.target(),
+                target_lexicon::HOST
+            );
+        }
     }
-    if analyzed.resolved.deployment().coordination.is_some() {
-        bail!("generated execution does not support coordination selection");
-    }
-    let federate = &federates[0];
-    let federate_id = federate.id().as_str();
-    let configuration = analyzed
-        .resolved
-        .deployment()
-        .federates
-        .get(federate_id)
-        .ok_or_else(|| anyhow!("deployment has no configuration for Federate '{federate_id}'"))?;
-    if federate.runtime().as_str() != "std" {
-        bail!(
-            "Federate '{federate_id}' selects unsupported runtime '{}'",
-            federate.runtime()
-        );
-    }
-    if configuration.target_json.is_some() {
-        bail!("Federate '{federate_id}' selects unsupported custom target JSON");
-    }
-    if federate.target().to_string() != target_lexicon::HOST.to_string() {
-        bail!(
-            "Federate '{federate_id}' target '{}' is not the host target '{}'",
-            federate.target(),
-            target_lexicon::HOST
-        );
+    if let Some(rti) = &analyzed.resolved.deployment().rti {
+        if rti.target != target_lexicon::HOST.to_string() {
+            bail!(
+                "RTI target '{}' is not the host target '{}'",
+                rti.target,
+                target_lexicon::HOST
+            );
+        }
     }
 
     let manifest = build_analyzed(&analyzed, output)?;
@@ -151,30 +138,77 @@ pub fn run_with_output(
         Phase::Validating,
         format_args!("published deployment '{deployment_name}'"),
     )?;
-    let published = load_published_artifact(&manifest)?;
+    let published = load_published_artifacts(&manifest)?;
     validate_published_host_artifact(&published.document)?;
-    let (_directory, summary_path, launcher) = prepare_execution_directory()?;
-    let mut executable = published.executable;
-    copy_verified_executable(&mut executable, &launcher, &published.executable_hash)?;
-    output.status(
-        Phase::Running,
-        format_args!("deployment '{deployment_name}'"),
-    )?;
-    let status = Command::new(&launcher)
-        .env(EXECUTION_SUMMARY_ENV, &summary_path)
-        .status()
-        .with_context(|| format!("failed to launch {}", launcher.display()))?;
-    if status.success() {
-        Ok(RunOutcome {
-            status,
-            summary: Some(read_execution_summary(&summary_path)?),
-        })
+    let (directory, local_summary, local_launcher) = prepare_execution_directory()?;
+    let mut local_paths = Some((local_summary, local_launcher));
+    let mut processes = processes::Processes::default();
+    let timeout = std::time::Duration::from_secs(10);
+    let address = if let Some(mut rti) = published.rti {
+        let path = directory
+            .path()
+            .join(format!("rti{}", std::env::consts::EXE_SUFFIX));
+        copy_verified_executable(&mut rti.executable, &path, &rti.executable_hash)?;
+        output.status(
+            Phase::Running,
+            format_args!("{} (central RTI)", path.display()),
+        )?;
+        Some(processes.start_rti(
+            Command::new(&path).env("BOOMERANG_RTI_BIND", "127.0.0.1:0"),
+            timeout,
+        )?)
     } else {
-        Ok(RunOutcome {
-            status,
-            summary: None,
-        })
+        None
+    };
+    let mut summaries = Vec::new();
+    for (index, mut artifact) in published.federates.into_iter().enumerate() {
+        let (summary, path) = if address.is_some() {
+            (
+                directory.path().join(format!("summary-{index}.json")),
+                directory
+                    .path()
+                    .join(format!("federate-{index}{}", std::env::consts::EXE_SUFFIX)),
+            )
+        } else {
+            local_paths
+                .take()
+                .expect("validated local deployment has exactly one Federate")
+        };
+        copy_verified_executable(&mut artifact.executable, &path, &artifact.executable_hash)?;
+        output.status(
+            Phase::Running,
+            format_args!(
+                "{} (deployment '{deployment_name}', Federate '{}')",
+                path.display(),
+                artifact.federate
+            ),
+        )?;
+        let mut command = Command::new(&path);
+        command.env(EXECUTION_SUMMARY_ENV, &summary);
+        if let Some(address) = address {
+            command.env("BOOMERANG_RTI_ADDRESS", address.to_string());
+        } else {
+            command.env_remove("BOOMERANG_RTI_ADDRESS");
+        }
+        processes.spawn(&mut command)?;
+        summaries.push(summary);
     }
+    let status = processes.wait(timeout)?;
+    let summary = if status.success() {
+        let mut aggregate = ExecutionSummary {
+            stats: Default::default(),
+            final_tag: boomerang_runtime::Tag::NEVER,
+        };
+        for path in summaries {
+            let summary = read_execution_summary(&path)?;
+            aggregate.stats.saturating_add_assign(summary.stats());
+            aggregate.final_tag = aggregate.final_tag.max(summary.final_tag());
+        }
+        Some(aggregate)
+    } else {
+        None
+    };
+    Ok(RunOutcome { status, summary })
 }
 
 /// Creates one private canonical directory for the summary and executable copy.
@@ -232,64 +266,51 @@ fn copy_verified_executable(
 
 /// Confirms that a validated bundle remains runnable by the local host process.
 fn validate_published_host_artifact(document: &DeploymentDocument) -> Result<()> {
-    if document.federates.len() != 1 {
-        bail!("published artifact requires exactly one local Federate");
-    }
-    if document.coordination.backend != "local" || document.coordination.protocol.is_some() {
+    if document.coordination.backend != "local" && document.coordination.backend != "central-rti" {
         bail!("published artifact selects unsupported coordination");
     }
-    let federate = &document.federates[0];
-    if federate.runtime != "std" {
-        bail!(
-            "published artifact Federate '{}' selects unsupported runtime",
-            federate.id
-        );
+    if let Some(rti) = &document.rti {
+        if rti.target != target_lexicon::HOST.to_string() {
+            bail!("published RTI is not built for the host target");
+        }
     }
-    if federate.target_json_hash.is_some() {
-        bail!(
-            "published artifact Federate '{}' selects custom target JSON",
-            federate.id
-        );
-    }
-    if federate.target != target_lexicon::HOST.to_string() {
-        bail!(
-            "published artifact Federate '{}' is not built for the host target",
-            federate.id
-        );
+    for federate in &document.federates {
+        if federate.runtime != "std" {
+            bail!(
+                "published artifact Federate '{}' selects unsupported runtime",
+                federate.id
+            );
+        }
+        if federate.target_json_hash.is_some() {
+            bail!(
+                "published artifact Federate '{}' selects custom target JSON",
+                federate.id
+            );
+        }
+        if federate.target != target_lexicon::HOST.to_string() {
+            bail!(
+                "published artifact Federate '{}' is not built for the host target",
+                federate.id
+            );
+        }
     }
     Ok(())
 }
 
-/// Schema-v1 summary document emitted only through the private out-of-band file.
-#[derive(Deserialize)]
+/// Schema-v1 summary document used by the launcher protocol and CLI export.
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct ExecutionSummaryDocumentV1 {
+struct ExecutionSummaryDocumentV1<S = boomerang_runtime::Stats> {
     /// Protocol schema version.
     schema: u32,
-    /// Aggregate scheduling counters encoded as decimal strings.
-    stats: ExecutionStatsDocumentV1,
+    /// Aggregate scheduling counters.
+    stats: S,
     /// Final logical tag encoded as decimal strings.
     final_tag: FinalTagDocumentV1,
 }
 
-/// Schema-v1 aggregate scheduling counters encoded as decimal strings.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ExecutionStatsDocumentV1 {
-    /// Processed logical tag count.
-    processed_tags: String,
-    /// Processed reaction count.
-    processed_reactions: String,
-    /// Processed event count.
-    processed_events: String,
-    /// Set port count.
-    set_ports: String,
-    /// Scheduled action count.
-    scheduled_actions: String,
-}
-
 /// Schema-v1 final logical tag encoded as decimal strings.
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct FinalTagDocumentV1 {
     /// Signed logical offset in nanoseconds.
@@ -326,13 +347,7 @@ fn read_execution_summary(path: &Path) -> Result<ExecutionSummary> {
         );
     }
     Ok(ExecutionSummary {
-        stats: ExecutionStats {
-            processed_tags: parse_usize("processed_tags", &stats.processed_tags)?,
-            processed_reactions: parse_usize("processed_reactions", &stats.processed_reactions)?,
-            processed_events: parse_usize("processed_events", &stats.processed_events)?,
-            set_ports: parse_usize("set_ports", &stats.set_ports)?,
-            scheduled_actions: parse_usize("scheduled_actions", &stats.scheduled_actions)?,
-        },
+        stats,
         final_tag: boomerang_runtime::Tag::new(
             boomerang_runtime::Duration::nanoseconds_i128(offset_nanos),
             parse_usize("microstep", &final_tag.microstep)?,
@@ -364,7 +379,7 @@ mod tests {
     use super::{copy_verified_executable, prepare_execution_directory, read_execution_summary};
     use crate::bundle::open_published_artifact;
     use std::{fs, io::Write, path::Path};
-    const VALID_SUMMARY: &str = r#"{"schema":1,"stats":{"processed_tags":"1","processed_reactions":"2","processed_events":"3","set_ports":"4","scheduled_actions":"5"},"final_tag":{"offset_nanos":"6","microstep":"7"}}"#;
+    const VALID_SUMMARY: &str = r#"{"schema":1,"stats":{"processed_tags":1,"processed_reactions":2,"processed_events":3,"set_ports":4,"scheduled_actions":5},"final_tag":{"offset_nanos":"6","microstep":"7"}}"#;
     fn write_summary(path: &Path, contents: &str) {
         fs::write(path, contents).unwrap();
     }
@@ -394,37 +409,37 @@ mod tests {
         let cases = [
             (
                 "unsupported-schema",
-                r#"{"schema":2,"stats":{"processed_tags":"1","processed_reactions":"2","processed_events":"3","set_ports":"4","scheduled_actions":"5"},"final_tag":{"offset_nanos":"6","microstep":"7"}}"#,
+                r#"{"schema":2,"stats":{"processed_tags":1,"processed_reactions":2,"processed_events":3,"set_ports":4,"scheduled_actions":5},"final_tag":{"offset_nanos":"6","microstep":"7"}}"#,
                 "unsupported execution summary schema 2",
             ),
             (
                 "unknown-field",
-                r#"{"schema":1,"stats":{"processed_tags":"1","processed_reactions":"2","processed_events":"3","set_ports":"4","scheduled_actions":"5","unexpected":"6"},"final_tag":{"offset_nanos":"6","microstep":"7"}}"#,
+                r#"{"schema":1,"stats":{"processed_tags":1,"processed_reactions":2,"processed_events":3,"set_ports":4,"scheduled_actions":5,"unexpected":6},"final_tag":{"offset_nanos":"6","microstep":"7"}}"#,
                 "unknown field",
             ),
             (
-                "non-decimal",
-                r#"{"schema":1,"stats":{"processed_tags":"one","processed_reactions":"2","processed_events":"3","set_ports":"4","scheduled_actions":"5"},"final_tag":{"offset_nanos":"6","microstep":"7"}}"#,
-                "invalid decimal processed_tags",
+                "string-counter",
+                r#"{"schema":1,"stats":{"processed_tags":"1","processed_reactions":2,"processed_events":3,"set_ports":4,"scheduled_actions":5},"final_tag":{"offset_nanos":"6","microstep":"7"}}"#,
+                "invalid type",
             ),
             (
                 "counter-overflow",
-                r#"{"schema":1,"stats":{"processed_tags":"340282366920938463463374607431768211456","processed_reactions":"2","processed_events":"3","set_ports":"4","scheduled_actions":"5"},"final_tag":{"offset_nanos":"6","microstep":"7"}}"#,
-                "processed_tags is outside host usize",
+                r#"{"schema":1,"stats":{"processed_tags":340282366920938463463374607431768211456,"processed_reactions":2,"processed_events":3,"set_ports":4,"scheduled_actions":5},"final_tag":{"offset_nanos":"6","microstep":"7"}}"#,
+                "expected usize",
             ),
             (
                 "offset-overflow",
-                r#"{"schema":1,"stats":{"processed_tags":"1","processed_reactions":"2","processed_events":"3","set_ports":"4","scheduled_actions":"5"},"final_tag":{"offset_nanos":"170141183460469231731687303715884105728","microstep":"7"}}"#,
+                r#"{"schema":1,"stats":{"processed_tags":1,"processed_reactions":2,"processed_events":3,"set_ports":4,"scheduled_actions":5},"final_tag":{"offset_nanos":"170141183460469231731687303715884105728","microstep":"7"}}"#,
                 "offset_nanos is outside i128",
             ),
             (
                 "duration-min-overflow",
-                r#"{"schema":1,"stats":{"processed_tags":"1","processed_reactions":"2","processed_events":"3","set_ports":"4","scheduled_actions":"5"},"final_tag":{"offset_nanos":"-170141183460469231731687303715884105728","microstep":"7"}}"#,
+                r#"{"schema":1,"stats":{"processed_tags":1,"processed_reactions":2,"processed_events":3,"set_ports":4,"scheduled_actions":5},"final_tag":{"offset_nanos":"-170141183460469231731687303715884105728","microstep":"7"}}"#,
                 "offset_nanos is outside time::Duration range",
             ),
             (
                 "duration-max-overflow",
-                r#"{"schema":1,"stats":{"processed_tags":"1","processed_reactions":"2","processed_events":"3","set_ports":"4","scheduled_actions":"5"},"final_tag":{"offset_nanos":"170141183460469231731687303715884105727","microstep":"7"}}"#,
+                r#"{"schema":1,"stats":{"processed_tags":1,"processed_reactions":2,"processed_events":3,"set_ports":4,"scheduled_actions":5},"final_tag":{"offset_nanos":"170141183460469231731687303715884105727","microstep":"7"}}"#,
                 "offset_nanos is outside time::Duration range",
             ),
         ];

@@ -19,9 +19,9 @@ use crate::{
 pub type ReactionBindingError = crate::ReactionRefsError;
 
 /// Validated state-binding and action-image maps keyed by their storage slots.
-type StorageLayout = (
+type StorageLayout<'image> = (
     TinySecondaryMap<StateSlotIndex, BindingSlotIndex>,
-    TinySecondaryMap<ActionSlotIndex, crate::image::ActionImage>,
+    TinySecondaryMap<ActionSlotIndex, &'image crate::image::ActionImage>,
 );
 /// Initialized reactor contexts and their paired event and shutdown channels.
 type InitializedContexts = (
@@ -250,7 +250,7 @@ impl<T: ReactorData> PortFactory for TypedPortFactory<T> {
 }
 
 /// Type-erased outbound route installed only after both typed endpoints pass preflight.
-trait OutboundRoute: Send {
+pub(crate) trait OutboundRoute: Send {
     /// Clones and admits one present source value at its destination timing boundary.
     fn emit(&mut self, source: &dyn BasePort, tag: Tag) -> Result<(), OwnedStorageError>;
 }
@@ -375,6 +375,24 @@ where
 /// Errors building or accessing heap-backed compiled-image storage.
 #[derive(thiserror::Error, Debug, Clone, PartialEq, Eq)]
 pub enum OwnedStorageError {
+    /// An external route's selected codec could not encode its value.
+    #[error("external route '{boundary}' encoding failed: {source}")]
+    ExternalRouteEncoding {
+        /// Stable compiled boundary identity.
+        boundary: String,
+        /// Failure returned by the selected payload codec.
+        #[source]
+        source: crate::PayloadCodecError,
+    },
+    /// The bound transport could not accept an encoded route value.
+    #[error("external route '{boundary}' submission failed: {source}")]
+    ExternalRouteSubmission {
+        /// Stable compiled boundary identity.
+        boundary: String,
+        /// Failure returned by the bound transport sink.
+        #[source]
+        source: crate::BoundarySubmissionError,
+    },
     /// A required image binding did not receive an implementation.
     #[error("missing {kind:?} binding at {slot}")]
     MissingBinding {
@@ -802,6 +820,19 @@ impl<'image> OwnedStorage<'image> {
         }
     }
 
+    /// Installs a preflight-checked external adapter at its compiled source port.
+    pub(crate) fn bind_external_outbound(
+        &mut self,
+        port: PortIndex,
+        route: Box<dyn OutboundRoute + 'image>,
+    ) {
+        if let Some(routes) = self.outbound_routes.get_mut(port) {
+            routes.push(route);
+        } else {
+            self.outbound_routes.insert(port, vec![route]);
+        }
+    }
+
     /// Emits each present routed port once before its source reaction completes.
     fn emit_outbound_routes(&mut self, tag: Tag) -> Result<(), OwnedStorageError> {
         let ready = self
@@ -872,7 +903,7 @@ impl<'image> OwnedStorage<'image> {
         reaction: ReactionIndex,
         tag: Tag,
     ) -> Result<(), OwnedStorageError> {
-        let reaction_image = self.image.reactions()[reaction];
+        let reaction_image = &self.image.reactions()[reaction];
         let reactor = reaction_image.reactor();
         let state_slot = self.image.reactors()[reactor].state_slot();
         let context = &mut self.contexts[reactor];
@@ -919,16 +950,10 @@ impl<'image> OwnedStorage<'image> {
         &self.contexts[reactor].trigger_res
     }
 
-    /// Copies the borrowed image descriptor so scheduler composition uses this storage's exact image.
+    /// Borrows this storage's validated image for scheduler composition.
     pub(crate) fn scheduler_image(&self) -> EnclaveImageView<'image> {
-        copy_borrowed_image_view(&self.image)
+        self.image.reborrow()
     }
-}
-
-/// Copies the present borrowed-only image descriptor without requiring a public `Clone` impl.
-fn copy_borrowed_image_view<'image>(image: &EnclaveImageView<'image>) -> EnclaveImageView<'image> {
-    // SAFETY: `EnclaveImageView` currently contains only Copy borrowed image data and no destructor.
-    unsafe { std::ptr::read(image) }
 }
 
 /// Validates every required binding before any state initializer can run.
@@ -984,9 +1009,9 @@ fn validate_bindings(
 }
 
 /// Verifies dense state and action slot coverage without initializing payload values.
-fn validate_storage_layout(
-    image: &EnclaveImageView<'_>,
-) -> Result<StorageLayout, OwnedStorageError> {
+fn validate_storage_layout<'image>(
+    image: &EnclaveImageView<'image>,
+) -> Result<StorageLayout<'image>, OwnedStorageError> {
     let mut state_bindings = TinySecondaryMap::new();
     for (_, reactor) in image.reactors().iter() {
         let slot = reactor.state_slot();
@@ -1007,7 +1032,7 @@ fn validate_storage_layout(
     let mut action_images = TinySecondaryMap::new();
     for (_, action) in image.actions().iter() {
         let slot = action.storage_slot();
-        if action_images.insert(slot, *action).is_some() {
+        if action_images.insert(slot, action).is_some() {
             return Err(OwnedStorageError::DuplicateActionSlot { slot });
         }
     }
@@ -1099,23 +1124,29 @@ fn initialize_states(
 
 /// Rejects unsupported or unrepresentable action timing before state initialization.
 fn validate_action_timing(
-    action_images: &TinySecondaryMap<ActionSlotIndex, crate::image::ActionImage>,
+    action_images: &TinySecondaryMap<ActionSlotIndex, &crate::image::ActionImage>,
 ) -> Result<(), OwnedStorageError> {
     for (slot, action) in action_images.iter() {
         match action.timing() {
             ActionTiming::Standard {
                 min_delay_nanos, ..
-            } => i64::try_from(min_delay_nanos)
-                .map(|_| ())
-                .map_err(|_| OwnedStorageError::DelayOutOfRange { min_delay_nanos })?,
+            } => i64::try_from(*min_delay_nanos).map(|_| ()).map_err(|_| {
+                OwnedStorageError::DelayOutOfRange {
+                    min_delay_nanos: *min_delay_nanos,
+                }
+            })?,
             ActionTiming::Timer {
                 period_nanos: Some(0),
             } => return Err(OwnedStorageError::ZeroPeriodTimer { slot }),
             ActionTiming::Timer {
                 period_nanos: Some(period_nanos),
             } => {
-                i64::try_from(period_nanos)
-                    .map_err(|_| OwnedStorageError::TimerPeriodOutOfRange { slot, period_nanos })?;
+                i64::try_from(*period_nanos).map_err(|_| {
+                    OwnedStorageError::TimerPeriodOutOfRange {
+                        slot,
+                        period_nanos: *period_nanos,
+                    }
+                })?;
             }
             ActionTiming::Timer { .. } | ActionTiming::Shutdown => {}
         }
@@ -1135,7 +1166,7 @@ fn validate_periodic_timer_startups(image: &EnclaveImageView<'_>) -> Result<(), 
                 .flat_map(|scope| image.scope_timer_startups(scope)),
         )
         .try_for_each(|startup| {
-            let action = image.actions()[startup.action()];
+            let action = &image.actions()[startup.action()];
             let ActionTiming::Timer {
                 period_nanos: Some(period_nanos),
             } = action.timing()
@@ -1144,20 +1175,20 @@ fn validate_periodic_timer_startups(image: &EnclaveImageView<'_>) -> Result<(), 
             };
             let startup_nanos = startup.logical_delay_nanos();
             startup_nanos
-                .checked_add(period_nanos)
+                .checked_add(*period_nanos)
                 .filter(|&successor| successor <= i64::MAX as u64)
                 .map(|_| ())
                 .ok_or(OwnedStorageError::PeriodicTimerTagOverflow {
                     slot: action.storage_slot(),
                     startup_nanos,
-                    period_nanos,
+                    period_nanos: *period_nanos,
                 })
         })
 }
 
 /// Initializes standard payload actions and executor-owned timer or shutdown unit actions.
 fn initialize_actions(
-    action_images: &TinySecondaryMap<ActionSlotIndex, crate::image::ActionImage>,
+    action_images: &TinySecondaryMap<ActionSlotIndex, &crate::image::ActionImage>,
     bindings: &TinySecondaryMap<BindingSlotIndex, Binding>,
 ) -> Result<TinyMap<ActionSlotIndex, Box<dyn BaseAction>>, OwnedStorageError> {
     let mut actions = TinyMap::with_capacity(action_images.len());
@@ -1176,7 +1207,7 @@ fn initialize_actions(
                 let Binding::Action(factory) = &bindings[binding_slot] else {
                     unreachable!("validated action binding has the required kind")
                 };
-                factory.create(slot, domain, min_delay_nanos)?
+                factory.create(slot, *domain, *min_delay_nanos)?
             }
         };
         let inserted = actions.insert(value);
@@ -1320,10 +1351,10 @@ mod tests {
     use crate::{
         image::{
             ActionImage, ActionIndex, ActionSlotIndex, ActionTiming, BindingKind, BindingSlotIndex,
-            BoundaryId, EnclaveImage, EnclaveImageView, EnclaveIndex, IdentityRange,
+            BoundaryId, EnclaveImage, EnclaveImageView, EnclaveIndex, IndexSpan,
             LevelReactionImage, ModeImage, PortImage, PortIndex, ReactionImage, ReactionIndex,
             ReactorImage, ReactorIndex, RequiredBindingImage, RouteDirection, RouteImage,
-            ScopeImage, ScopeIndex, StateSlotIndex, StorageBounds, TableRange, TimerStartupImage,
+            ScopeImage, ScopeIndex, SliceRange, StateSlotIndex, StorageBounds, TimerStartupImage,
             TimingDomain, TinyMapView,
         },
         AsyncEvent, CommonContext, CompiledModeEffectRef, Config, Context, Duration,
@@ -1404,7 +1435,7 @@ mod tests {
         BindingSlotIndex::new(0),
         StateSlotIndex::new(0),
         ScopeIndex::new(0),
-        TableRange::new(0, 1),
+        IndexSpan::new(0, 1),
         Some(crate::image::ModeIndex::new(0)),
         None,
     )];
@@ -1418,7 +1449,7 @@ mod tests {
             ScopeIndex::new(0),
             ActionSlotIndex::new(0),
             timing,
-            TableRange::new(0, 0),
+            SliceRange::new(0, 0),
             binding,
         )
     }
@@ -1432,7 +1463,7 @@ mod tests {
     })];
     static PORTS: [PortImage; 1] = [PortImage::new(
         ScopeIndex::new(0),
-        TableRange::new(0, 0),
+        SliceRange::new(0, 0),
         BindingSlotIndex::new(2),
     )];
     static REACTIONS: [ReactionImage; 1] = [ReactionImage::new(
@@ -1440,20 +1471,20 @@ mod tests {
         ScopeIndex::new(0),
         0,
         BindingSlotIndex::new(1),
-        TableRange::new(0, 0),
-        TableRange::new(0, 1),
-        TableRange::new(0, 1),
-        TableRange::new(0, 0),
+        SliceRange::new(0, 0),
+        SliceRange::new(0, 1),
+        SliceRange::new(0, 1),
+        SliceRange::new(0, 0),
     )];
     static FILTERED_REACTIONS: [ReactionImage; 1] = [ReactionImage::new(
         ReactorIndex::new(0),
         ScopeIndex::new(0),
         0,
         BindingSlotIndex::new(1),
-        TableRange::new(0, 0),
-        TableRange::new(0, 0),
-        TableRange::new(0, 0),
-        TableRange::new(0, 1),
+        SliceRange::new(0, 0),
+        SliceRange::new(0, 0),
+        SliceRange::new(0, 0),
+        SliceRange::new(0, 1),
     )];
     static MODES: [ModeImage; 1] = [ModeImage::new(ReactorIndex::new(0), ScopeIndex::new(1))];
     static SCOPES: [ScopeImage; 2] = [
@@ -1461,23 +1492,23 @@ mod tests {
             None,
             ReactorIndex::new(0),
             None,
-            TableRange::new(0, 2),
-            TableRange::new(0, 1),
-            TableRange::new(0, 0),
-            TableRange::new(0, 0),
-            TableRange::new(0, 0),
-            TableRange::new(0, 0),
+            SliceRange::new(0, 2),
+            SliceRange::new(0, 1),
+            SliceRange::new(0, 0),
+            SliceRange::new(0, 0),
+            SliceRange::new(0, 0),
+            SliceRange::new(0, 0),
         ),
         ScopeImage::new(
             Some(ScopeIndex::new(0)),
             ReactorIndex::new(0),
             Some(crate::image::ModeIndex::new(0)),
-            TableRange::new(2, 1),
-            TableRange::new(1, 0),
-            TableRange::new(0, 0),
-            TableRange::new(0, 0),
-            TableRange::new(0, 0),
-            TableRange::new(0, 0),
+            SliceRange::new(2, 1),
+            SliceRange::new(1, 0),
+            SliceRange::new(0, 0),
+            SliceRange::new(0, 0),
+            SliceRange::new(0, 0),
+            SliceRange::new(0, 0),
         ),
     ];
     static SCOPE_DESCENDANTS: [ScopeIndex; 3] =
@@ -1486,14 +1517,25 @@ mod tests {
         [crate::image::ModeIndex::new(0)];
     static SCOPE_LOGICAL_ACTIONS: [ActionIndex; 1] = [ActionIndex::new(0)];
     static REQUIRED_BINDINGS: [RequiredBindingImage; 4] = [
-        RequiredBindingImage::new(IdentityRange::new(7, 7), BindingKind::StateInitializer),
-        RequiredBindingImage::new(IdentityRange::new(14, 10), BindingKind::Reaction),
-        RequiredBindingImage::new(IdentityRange::new(24, 6), BindingKind::Port),
-        RequiredBindingImage::new(IdentityRange::new(30, 8), BindingKind::Action),
+        RequiredBindingImage::new(
+            crate::image::BindingSlotId::new("a-state"),
+            BindingKind::StateInitializer,
+        ),
+        RequiredBindingImage::new(
+            crate::image::BindingSlotId::new("b-reaction"),
+            BindingKind::Reaction,
+        ),
+        RequiredBindingImage::new(
+            crate::image::BindingSlotId::new("c-port"),
+            BindingKind::Port,
+        ),
+        RequiredBindingImage::new(
+            crate::image::BindingSlotId::new("d-action"),
+            BindingKind::Action,
+        ),
     ];
     static IMAGE: EnclaveImage<'static> = EnclaveImage {
-        identity_data: "enclavea-stateb-reactionc-portd-action",
-        enclave_id: IdentityRange::new(0, 7),
+        enclave_id: crate::image::EnclaveId::new("enclave"),
         reactors: TinyMapView::new(&REACTORS),
         actions: TinyMapView::new(&ACTIONS),
         ports: TinyMapView::new(&PORTS),
@@ -1517,7 +1559,7 @@ mod tests {
         shutdown_actions: &[],
         routes: TinyMapView::new(&[]),
         required_bindings: TinyMapView::new(&REQUIRED_BINDINGS),
-        storage_bounds: StorageBounds::new(1, 1, 1, 0, 0, 0),
+        storage_bounds: &StorageBounds::new(1, 1, 1, 0, 0, 0),
     };
     static UNREPRESENTABLE_ACTION_IMAGE: EnclaveImage<'static> = EnclaveImage {
         actions: TinyMapView::new(&UNREPRESENTABLE_ACTIONS),
@@ -1534,14 +1576,14 @@ mod tests {
     };
     static INBOUND_ROUTES: [RouteImage; 2] = [
         RouteImage::new(
-            IdentityRange::new(7, 7),
+            crate::image::BoundaryId::new("a-state"),
             PortIndex::new(0),
             RouteDirection::Inbound,
             TimingDomain::Logical,
             0,
         ),
         RouteImage::new(
-            IdentityRange::new(14, 10),
+            crate::image::BoundaryId::new("b-reaction"),
             PortIndex::new(0),
             RouteDirection::Inbound,
             TimingDomain::Logical,
@@ -1784,10 +1826,10 @@ mod tests {
             ScopeIndex::new(0),
             0,
             BindingSlotIndex::new(1),
-            TableRange::new(0, 0),
-            TableRange::new(0, 0),
-            TableRange::new(0, 2),
-            TableRange::new(0, 0),
+            SliceRange::new(0, 0),
+            SliceRange::new(0, 0),
+            SliceRange::new(0, 2),
+            SliceRange::new(0, 0),
         )];
         let aliased_image = EnclaveImage {
             reactions: TinyMapView::new(&reactions),
@@ -2024,7 +2066,7 @@ mod tests {
             ScopeIndex::new(0),
             ActionSlotIndex::new(0),
             ActionTiming::Timer { period_nanos: None },
-            TableRange::new(0, 1),
+            SliceRange::new(0, 1),
             None,
         )];
         let reaction_triggers = [LevelReactionImage::new(0, ReactionIndex::new(0))];

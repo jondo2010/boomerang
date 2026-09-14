@@ -7,10 +7,12 @@ entry = "vehicle::topology"
 [deployments.production.federates.sensor]
 groups = ["sensor"]
 runtime = "std"
+recovery = "fail-stop"
 
 [deployments.production.federates.compute]
 groups = ["control"]
 runtime = "std"
+recovery = "fail-stop"
 
 [deployments.production.coordination]
 backend = "central-rti"

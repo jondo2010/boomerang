@@ -9,6 +9,7 @@ __boomerang_descriptor = ["boomerang/__boomerang_descriptor", "dep:boomerang_bui
 __boomerang_payload = ["boomerang/__boomerang_payload"]
 simulated = []
 runtime-failure = []
+natural-quiescence = []
 payload-alias = ["__boomerang_payload"]
 
 [dependencies]

@@ -2,7 +2,6 @@
 name = "vehicle-control"
 version = "0.1.0"
 edition = "2021"
-
 [features]
 default = ["boomerang/hosted"]
 __boomerang_descriptor = ["boomerang/__boomerang_descriptor"]

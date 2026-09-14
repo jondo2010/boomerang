@@ -17,6 +17,7 @@ target = "thumbv7em-none-eabihf"
 toolchain = "nightly-2026-08-01"
 profile = "release"
 runtime = "bare-metal"
+recovery = "fail-stop"
 target-json = "targets/sensor.json"
 cargo-config = ".cargo/sensor-target.toml"
 
@@ -25,6 +26,7 @@ groups = ["control", "planning"]
 target = "aarch64-unknown-linux-gnu"
 profile = "release"
 runtime = "std"
+recovery = "fail-stop"
 
 [deployments.production.coordination]
 backend = "central-rti"
@@ -32,6 +34,18 @@ backend = "central-rti"
 [deployments.production.rti]
 target = "aarch64-unknown-linux-gnu"
 profile = "release"
+
+[deployments.production.boundaries."controller-to-sensor"]
+flow = "sensor-control"
+physical-input = "plant/sensor"
+physical-output = "plant/actuator"
+codec = "postcard"
+transport = "spi"
+failure-policy = "propagate-stop"
+transport-policy = "reliable-ordered-framed"
+codec-policy = "canonical-bounded"
+timing-policy = "best-effort"
+security-policy = "none"
 
 [deployments.replay.bindings."vehicle/sensor"]
 package = "sensor-replay"
@@ -42,14 +56,17 @@ package = "vehicle-control"
 [deployments.replay.federates.dev]
 groups = ["sensor", "control", "planning"]
 runtime = "std"
+recovery = "fail-stop"
 
 [deployments.future-p2p.federates.left]
 groups = ["sensor"]
 runtime = "std"
+recovery = "fail-stop"
 
 [deployments.future-p2p.federates.right]
 groups = ["control", "planning"]
 runtime = "std"
+recovery = "fail-stop"
 
 [deployments.future-p2p.coordination]
 backend = "peer-to-peer"

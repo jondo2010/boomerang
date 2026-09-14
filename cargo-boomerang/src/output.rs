@@ -172,6 +172,8 @@ pub(crate) enum Phase {
     Bundling,
     /// Atomically publish a report or bundle.
     Publishing,
+    /// Report one executable from a completed immutable publication.
+    Published,
     /// Execute the generated deployment.
     Running,
 }
@@ -185,6 +187,7 @@ impl fmt::Display for Phase {
             Self::Validating => "Validating",
             Self::Bundling => "Bundling",
             Self::Publishing => "Publishing",
+            Self::Published => "Published",
             Self::Running => "Running",
         })
     }

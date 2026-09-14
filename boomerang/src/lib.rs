@@ -45,17 +45,9 @@
 #![deny(clippy::all)]
 
 pub mod flatten_transposed;
-#[cfg(feature = "federated")]
-mod static_federation;
-
-#[cfg(feature = "federated")]
-pub use static_federation::{execute_federation_in_memory, execute_federation_over_tcp};
-
 // Re-exports
 #[cfg(feature = "hosted")]
 pub use boomerang_builder as builder;
-#[cfg(feature = "federated")]
-pub use boomerang_federated as federated;
 pub use boomerang_runtime as runtime;
 
 pub mod prelude {
@@ -68,20 +60,6 @@ pub mod prelude {
         ModeKind, Output, PartitionRoot, PartitionRootKind, Physical, PortBank, Reactor,
         ReactorPlacement, RuntimeAssembly, TimerActionKey, TimerSpec, TransitionKind,
         TypedActionKey, TypedPortKey,
-    };
-
-    #[cfg(feature = "federated")]
-    pub use super::builder::{
-        federated_routes_from_plan, federation_topology_from_plan, FederateBuildInfo, FederateSpec,
-        FederatedEdge, FederatedEndpoint, FederatedRoute, FederationPlan,
-    };
-
-    #[cfg(feature = "federated")]
-    pub use super::{execute_federation_in_memory, execute_federation_over_tcp};
-
-    #[cfg(feature = "federated")]
-    pub use super::federated::{
-        EndpointId, FederateId, RuntimeBridgeError, TcpStaticFederationConfig, WireDelay, WireTag,
     };
 
     pub use super::runtime::{self, action::ActionCommon, CommonContext, Duration, FromRefs, Tag};
@@ -100,12 +78,4 @@ pub enum BoomerangError {
 
     #[error(transparent)]
     Runtime(#[from] runtime::RuntimeError),
-
-    #[cfg(feature = "federated")]
-    #[error(transparent)]
-    StaticFederation(#[from] federated::StaticFederationRunnerError),
-
-    #[cfg(feature = "federated")]
-    #[error("static federation execution requires a lowered federation")]
-    MissingStaticFederation,
 }

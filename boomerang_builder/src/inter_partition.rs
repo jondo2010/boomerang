@@ -5,7 +5,6 @@ use crate::{runtime, AssemblyPortKey, AssemblyReactorKey};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PartitionRootKind {
     LocalEnclave,
-    Federated { federate: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,10 +17,6 @@ pub struct PartitionRoot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BoundaryKind {
     LocalEnclave,
-    Federated {
-        source_federate: String,
-        target_federate: String,
-    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,11 +41,5 @@ impl InterPartitionPlan {
         self.edges
             .iter()
             .filter(|edge| matches!(edge.kind, BoundaryKind::LocalEnclave))
-    }
-
-    pub fn federated_edges(&self) -> impl Iterator<Item = &InterPartitionEdge> {
-        self.edges
-            .iter()
-            .filter(|edge| matches!(edge.kind, BoundaryKind::Federated { .. }))
     }
 }

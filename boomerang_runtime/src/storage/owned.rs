@@ -375,7 +375,6 @@ where
 /// Errors building or accessing heap-backed compiled-image storage.
 #[derive(thiserror::Error, Debug, Clone, PartialEq, Eq)]
 pub enum OwnedStorageError {
-    #[cfg(feature = "federated")]
     /// An external route's selected codec could not encode its value.
     #[error("external route '{boundary}' encoding failed: {source}")]
     ExternalRouteEncoding {
@@ -385,7 +384,6 @@ pub enum OwnedStorageError {
         #[source]
         source: crate::PayloadCodecError,
     },
-    #[cfg(feature = "federated")]
     /// The bound transport could not accept an encoded route value.
     #[error("external route '{boundary}' submission failed: {source}")]
     ExternalRouteSubmission {
@@ -822,7 +820,6 @@ impl<'image> OwnedStorage<'image> {
         }
     }
 
-    #[cfg(feature = "federated")]
     /// Installs a preflight-checked external adapter at its compiled source port.
     pub(crate) fn bind_external_outbound(
         &mut self,

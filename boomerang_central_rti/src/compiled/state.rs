@@ -414,3 +414,6 @@ fn delay(tag: WireTag, nanos: u64) -> Result<WireTag, CentralRtiError> {
     tag.checked_delay(crate::WireDelay::from_nanos(nanos))
         .ok_or_else(|| CentralRtiError::new("compiled dependency tag overflow"))
 }
+
+#[cfg(test)]
+mod tests;

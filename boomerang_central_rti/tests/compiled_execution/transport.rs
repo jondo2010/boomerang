@@ -1,6 +1,6 @@
 //! Fixture-specific RTI worker and fault injection over the reference in-memory transport.
 use super::*;
-use boomerang::central_rti::compiled::{
+use boomerang_central_rti::compiled::{
     in_memory::{InMemoryReceiver, InMemorySender},
     RtiRequest, RtiRequestSink,
 };

@@ -168,7 +168,7 @@ fn compiled_reactions(
 }
 
 /// Runs validated owned storage through the shared core with local-only coordination.
-/// Owns the queue, scratch, clock, wake channel, and no-op federated hook for public execution.
+/// Owns the queue, scratch, clock, and wake channel for local compiled execution.
 pub(crate) fn run_owned_scheduler(
     storage: &mut OwnedStorage<'_>,
     config: &Config,
@@ -250,8 +250,6 @@ pub(crate) fn run_owned_scheduler_with_coordination(
         shutdown_tx: &shutdown_tx,
         upstream_enclaves: &mut upstream_enclaves,
         downstream_enclaves: &downstream_enclaves,
-        #[cfg(feature = "federated")]
-        federated_time_barrier: None,
         stats: &mut stats,
         reaction_buffer: &mut reaction_buffer,
         transition_buffer: &mut transition_buffer,

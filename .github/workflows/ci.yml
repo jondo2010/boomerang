@@ -46,7 +46,7 @@ jobs:
       - name: Check with Clippy
         run: |
           cargo clippy --workspace --exclude boomerang --all-targets --all-features -- -D warnings
-          cargo clippy -p boomerang --all-targets --features hosted,serde,parallel,replay,federated -- -D warnings
+          cargo clippy -p boomerang --all-targets --features hosted,serde,parallel,replay -- -D warnings
           cargo clippy -p boomerang --lib --no-default-features --features __boomerang_payload -- -D warnings
           cargo clippy -p boomerang --lib --no-default-features --features __boomerang_descriptor -- -D warnings
 
@@ -93,9 +93,6 @@ jobs:
       - name: test workspace except cargo-boomerang
         run: cargo test --workspace --exclude cargo-boomerang --verbose
 
-      - name: test compiled Federate execution with central RTI
-        run: cargo test -p boomerang --features federated --test compiled_reference --offline
-
       - name: smoke test cargo-boomerang toolchain on Windows
         if: matrix.os == 'windows-latest' && matrix.toolchain == 'stable'
         run: >-
@@ -130,4 +127,4 @@ jobs:
       - name: Test with Miri
         env:
           MIRIFLAGS: -Zmiri-disable-isolation
-        run: cargo +nightly miri nextest run -p boomerang -E 'kind(test)'
+        run: cargo +nightly miri nextest run -p boomerang -p boomerang_runtime -E 'kind(test)'

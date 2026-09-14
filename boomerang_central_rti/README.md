@@ -1,12 +1,9 @@
 # Boomerang central RTI
 
-`boomerang_central_rti` supplies the Tokio-backed, central RTI executor for
-hosted static Boomerang federations.
-It owns federate clients, transports, central sessions, and the static runner
-that adapts compiled runtime state to asynchronous I/O.
-Legacy protocol, topology, and RTI coordination remain in `boomerang_federated`;
-compiled image-backed coordination lives here and scheduler execution remains in
-`boomerang_runtime`.
+`boomerang_central_rti` supplies compiled central coordination for hosted Boomerang
+federations. It owns image-backed RTI state, ordered protocol clients, and hosted TCP
+transport. Pure wire tag and delay primitives remain in `boomerang_federated`;
+scheduler execution remains in `boomerang_runtime`.
 
 ## Compiled execution
 
@@ -14,8 +11,7 @@ compiled image-backed coordination lives here and scheduler execution remains in
 only mutable member state. It uses precomputed dependencies; canonical federation
 analysis remains in the compiler. Stable member and boundary identities are bound
 once to their distinct runtime key domains. `CoordinationIdentity` is the shared
-artifact digest supplied at admission; artifact generation supplies it in the next
-slice.
+artifact digest supplied at admission and embedded by artifact generation.
 
 `compiled::RtiClientBindings` groups the validated RTI projection, member, and artifact
 identity during preflight. It resolves outbound boundaries and maps all incoming RTI
@@ -38,7 +34,9 @@ global quiescence; an early local stop fails the session.
 execution, explicitly outside the intended production hot path. Fixture-specific
 worker setup and fault injection remain in the integration tests. The production I/O
 owner must enforce ordered delivery, report transport loss through `abort`, and
-own connection deadlines. Generated RTI/Federate artifacts, production transport,
-and child-process supervision belong to the final #131 slice. Existing legacy
-clients and transports remain separate pending #132; the transitional `federated`
-feature gate does not select the compiled protocol or its semantic model.
+own connection deadlines.
+
+`compiled::hosted` provides bounded framed TCP connections and generated RTI/Federate
+artifact entry points. Generated launcher child-process supervision belongs to
+`cargo-boomerang`. Compiled runtime and boundary APIs are available unconditionally;
+selecting the central backend adds this crate only to deployments that need it.

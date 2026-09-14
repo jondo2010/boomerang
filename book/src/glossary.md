@@ -52,10 +52,10 @@ the corresponding assembly key.
 
 ## Boundary
 
-A connection point between runtime partitions. A boundary may be local between
-enclaves or federated between coordinated participants. `BoundaryKind` and
-`InterPartitionPlan` describe the result of boundary analysis during lowering;
-the runtime backend supplies the corresponding delivery mechanism.
+A connection point between runtime partitions. A compiled boundary may be local
+between Enclaves or cross between coordinated Federates. Canonical compiler
+analysis determines its route and timing constraints; the selected runtime
+backend supplies the corresponding delivery mechanism.
 
 ## Connection
 
@@ -100,11 +100,11 @@ assembly.
 
 ## Federate
 
-A statically identified participant in coordinated federated execution. In the
-current experimental federation slice, each federate is placed at an enclave
-root and communicates through the runtime infrastructure loop (RTI). Federates,
-enclaves, processes, and hosts are separate concepts even where the current
-runner maps them one-to-one. See [Static Federation](./static-federation.md).
+A statically identified compiled execution participant containing one or more
+Enclaves. Federate structure is present even in a local one-Federate deployment.
+The central-RTI projection coordinates participants through a separate runtime
+infrastructure process. Federates, Enclaves, processes, and hosts are separate
+concepts. See [Static Federation](./static-federation.md).
 
 ## History Transition
 
@@ -214,7 +214,7 @@ execution.
 A stored build-time declaration inside an `Assembly`. `ReactorSpec`,
 `ReactionSpec`, `ActionSpec`, `PortSpec`, `ModeSpec`, and `ConnectionSpec`
 describe the logical graph before runtime allocation. `TimerSpec`,
-`ModeEffectSpec`, and `FederateSpec` are focused configuration specifications.
+and `ModeEffectSpec` are focused configuration specifications.
 
 A `Spec` is data that the assembly validates and lowers. It is not the temporary
 context or declaration API used to record that data, and it is not the runtime

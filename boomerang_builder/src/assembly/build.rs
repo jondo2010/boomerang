@@ -8,8 +8,6 @@ use boomerang_runtime::{self as runtime};
 use core::range::Range;
 use itertools::Itertools;
 use slotmap::SecondaryMap;
-#[cfg(feature = "federated")]
-use std::collections::BTreeMap;
 
 use crate::{
     connection::PortBindings, ActionType, AssemblyActionKey, AssemblyError, AssemblyModeKey,
@@ -17,8 +15,6 @@ use crate::{
     InterPartitionPlan, ParentReactorSpec, PartitionRoot, PartitionRootKind, ReactionDeclaration,
     TimerActionKey,
 };
-#[cfg(feature = "federated")]
-use crate::{federated_routes_from_plan, federation_topology_from_plan, FederationPlan};
 
 use super::Assembly;
 
@@ -60,26 +56,6 @@ pub struct RuntimeAliases {
 /// A map of partitions: each Reactor is mapped to one Enclave Reactor.
 pub type PartitionMap = SecondaryMap<AssemblyReactorKey, AssemblyReactorKey>;
 
-/// Fully lowered static-federation data owned by a [`RuntimeAssembly`].
-#[cfg(feature = "federated")]
-pub struct LoweredFederation {
-    /// Assembly-visible federate, edge, and endpoint metadata.
-    pub plan: FederationPlan,
-    /// Federation-specific runtime state consumed after lowering.
-    pub runtime: boomerang_central_rti::StaticFederationRuntime,
-}
-
-/// Federation artifacts created before runtime enclave keys have been allocated.
-#[cfg(feature = "federated")]
-struct PendingFederation {
-    /// Assembly-visible federate, edge, and endpoint metadata.
-    plan: FederationPlan,
-    /// Validated RTI topology and its precomputed coordination indexes.
-    topology: boomerang_federated::CompiledTopology,
-    /// Prebuilt protocol mailboxes, routes, inbound handlers, and fault state.
-    connections: boomerang_central_rti::FederatedRuntimeConnections,
-}
-
 #[derive(Default)]
 pub struct RuntimeAssembly {
     /// Executable runtime enclaves keyed by their lowered enclave identities.
@@ -88,9 +64,6 @@ pub struct RuntimeAssembly {
     pub aliases: RuntimeAliases,
     /// Assembly-owned metadata for logical edges that cross runtime partitions.
     pub inter_partition_plan: InterPartitionPlan,
-    #[cfg(feature = "federated")]
-    /// Fully lowered static-federation data, or `None` for a local-only assembly.
-    pub federation: Option<LoweredFederation>,
     #[cfg(feature = "replay")]
     /// Action replayers partitioned by their target runtime enclave.
     pub replayers: runtime::replay::ReplayersMap,
@@ -103,7 +76,6 @@ impl RuntimeAssembly {
         inter_partition_plan: InterPartitionPlan,
         enclave_deps: Vec<EnclaveDep>,
         physical_event_q_size: usize,
-        #[cfg(feature = "federated")] federation: Option<PendingFederation>,
     ) -> Result<Self, AssemblyError> {
         let mut enclaves = tinymap::TinyMap::new();
         let mut aliases = RuntimeAliases::default();
@@ -120,19 +92,6 @@ impl RuntimeAssembly {
                 aliases.enclave_aliases.insert(reactor_key, enclave_key);
             }
         }
-        #[cfg(feature = "federated")]
-        let federation = federation
-            .map(|federation| -> Result<LoweredFederation, AssemblyError> {
-                Ok(LoweredFederation {
-                    runtime: boomerang_central_rti::StaticFederationRuntime::new(
-                        federation.topology,
-                        lower_federate_enclaves(&federation.plan, &aliases.enclave_aliases)?,
-                        federation.connections,
-                    )?,
-                    plan: federation.plan,
-                })
-            })
-            .transpose()?;
         // Add any enclave dependencies
         for EnclaveDep {
             upstream,
@@ -165,8 +124,6 @@ impl RuntimeAssembly {
                 enclaves,
                 aliases,
                 inter_partition_plan,
-                #[cfg(feature = "federated")]
-                federation,
                 replayers,
             })
         }
@@ -177,39 +134,9 @@ impl RuntimeAssembly {
                 enclaves,
                 aliases,
                 inter_partition_plan,
-                #[cfg(feature = "federated")]
-                federation,
             })
         }
     }
-}
-
-#[cfg(feature = "federated")]
-fn lower_federate_enclaves(
-    plan: &FederationPlan,
-    enclave_aliases: &SecondaryMap<AssemblyReactorKey, runtime::EnclaveKey>,
-) -> Result<BTreeMap<boomerang_federated::FederateId, runtime::EnclaveKey>, AssemblyError> {
-    let mut federate_enclaves = BTreeMap::new();
-
-    for federate in &plan.federates {
-        let enclave_key = *enclave_aliases.get(federate.reactor).ok_or_else(|| {
-            AssemblyError::FederationBridgeError {
-                what: format!("federate '{}' has no runtime enclave alias", federate.id),
-            }
-        })?;
-        let federate_id = boomerang_federated::FederateId::new(federate.id.clone());
-
-        if federate_enclaves
-            .insert(federate_id.clone(), enclave_key)
-            .is_some()
-        {
-            return Err(AssemblyError::FederationBridgeError {
-                what: format!("duplicate federate id '{federate_id}'"),
-            });
-        }
-    }
-
-    Ok(federate_enclaves)
 }
 
 pub struct EnclaveDep {
@@ -349,70 +276,7 @@ impl Assembly {
     ) -> Result<InterPartitionPlan, AssemblyError> {
         let mut plan = InterPartitionPlan::default();
 
-        #[cfg(feature = "federated")]
-        let federate_id_by_partition = {
-            let mut federate_id_by_partition = SecondaryMap::<AssemblyReactorKey, String>::new();
-            let mut seen_ids = BTreeMap::<String, AssemblyReactorKey>::new();
-
-            for (reactor_key, reactor) in &self.reactor_specs {
-                let Some(spec) = reactor.federate_spec() else {
-                    continue;
-                };
-
-                if spec.id.trim().is_empty() {
-                    return Err(AssemblyError::UnsupportedFederationTopology {
-                        what: format!(
-                            "federate reactor '{}' must have a non-empty id",
-                            self.fqn_for(reactor_key, false)?
-                        ),
-                    });
-                }
-
-                if spec.transient {
-                    return Err(AssemblyError::UnsupportedFederationTopology {
-                        what: format!(
-                            "transient federate '{}' is reserved for a later milestone",
-                            spec.id
-                        ),
-                    });
-                }
-
-                if partition_map[reactor_key] != reactor_key {
-                    return Err(AssemblyError::UnsupportedFederationTopology {
-                        what: format!(
-                            "federate '{}' must be an enclave root in this milestone",
-                            spec.id
-                        ),
-                    });
-                }
-
-                if let Some(previous) = seen_ids.insert(spec.id.clone(), reactor_key) {
-                    return Err(AssemblyError::UnsupportedFederationTopology {
-                        what: format!(
-                            "duplicate federate id '{}' for '{}' and '{}'",
-                            spec.id,
-                            self.fqn_for(previous, false)?,
-                            self.fqn_for(reactor_key, false)?,
-                        ),
-                    });
-                }
-
-                federate_id_by_partition.insert(reactor_key, spec.id.clone());
-            }
-
-            federate_id_by_partition
-        };
-
         for partition in partition_map.values().copied().unique() {
-            #[cfg(feature = "federated")]
-            let kind = federate_id_by_partition
-                .get(partition)
-                .map(|federate| PartitionRootKind::Federated {
-                    federate: federate.clone(),
-                })
-                .unwrap_or(PartitionRootKind::LocalEnclave);
-
-            #[cfg(not(feature = "federated"))]
             let kind = PartitionRootKind::LocalEnclave;
 
             plan.partition_roots.push(PartitionRoot {
@@ -440,41 +304,7 @@ impl Assembly {
                 continue;
             }
 
-            #[cfg(feature = "federated")]
-            let kind = {
-                let source_federate = federate_id_by_partition.get(source_partition);
-                let target_federate = federate_id_by_partition.get(target_partition);
-
-                match (source_federate, target_federate) {
-                    (None, None) => BoundaryKind::LocalEnclave,
-                    (Some(source_federate), Some(target_federate)) => BoundaryKind::Federated {
-                        source_federate: source_federate.clone(),
-                        target_federate: target_federate.clone(),
-                    },
-                    _ => {
-                        return Err(AssemblyError::UnsupportedFederationTopology {
-                            what: format!(
-                                "connection '{}' -> '{}' crosses a federated boundary, but both enclave roots are not federates",
-                                self.fqn_for(source_port_key, false)?,
-                                self.fqn_for(target_port_key, false)?,
-                            ),
-                        });
-                    }
-                }
-            };
-
-            #[cfg(not(feature = "federated"))]
             let kind = BoundaryKind::LocalEnclave;
-
-            if matches!(kind, BoundaryKind::Federated { .. }) && connection.physical() {
-                return Err(AssemblyError::UnsupportedFederationTopology {
-                    what: format!(
-                        "cross-federate physical connection '{}' -> '{}' is reserved for a later milestone",
-                        self.fqn_for(source_port_key, false)?,
-                        self.fqn_for(target_port_key, false)?,
-                    ),
-                });
-            }
 
             plan.edges.push(InterPartitionEdge {
                 kind,
@@ -487,53 +317,7 @@ impl Assembly {
             });
         }
 
-        #[cfg(feature = "federated")]
-        self.validate_federation_zero_delay_cycles(&plan)?;
-
         Ok(plan)
-    }
-
-    #[cfg(feature = "federated")]
-    fn validate_federation_zero_delay_cycles(
-        &self,
-        plan: &InterPartitionPlan,
-    ) -> Result<(), AssemblyError> {
-        let mut graph = petgraph::prelude::DiGraphMap::<AssemblyReactorKey, ()>::new();
-
-        for root in &plan.partition_roots {
-            if matches!(root.kind, PartitionRootKind::Federated { .. }) {
-                graph.add_node(root.reactor);
-            }
-        }
-
-        for edge in plan.federated_edges() {
-            let has_positive_delay = edge
-                .delay
-                .is_some_and(|delay| delay > runtime::Duration::ZERO);
-            if !has_positive_delay {
-                graph.add_edge(edge.source_partition, edge.target_partition, ());
-            }
-        }
-
-        if let Err(cycle) = petgraph::algo::toposort(&graph, None) {
-            let cycle = super::util::find_minimal_cycle(&graph, cycle.node_id());
-            let cycle = cycle
-                .into_iter()
-                .map(|reactor_key| {
-                    self.reactor_specs[reactor_key]
-                        .federate_spec()
-                        .map(|spec| spec.id.clone())
-                        .unwrap_or_else(|| format!("{reactor_key:?}"))
-                })
-                .join(" -> ");
-            return Err(AssemblyError::UnsupportedFederationTopology {
-                what: format!(
-                    "distributed zero-delay cycle is unsupported in the static MVP: {cycle}"
-                ),
-            });
-        }
-
-        Ok(())
     }
 
     /// Process the connections and reduce them to a set of port bindings.
@@ -737,36 +521,6 @@ impl Assembly {
                 .finish()?;
         }
 
-        Ok(())
-    }
-
-    #[cfg(feature = "federated")]
-    fn build_federated_inbound_endpoints(
-        &mut self,
-        runtime_assembly: &mut RuntimeAssembly,
-    ) -> Result<(), AssemblyError> {
-        if self.federated_inbound_endpoint_factories.is_empty() {
-            return Ok(());
-        }
-        let mut connections = std::mem::take(
-            runtime_assembly
-                .federation
-                .as_mut()
-                .ok_or_else(|| AssemblyError::InconsistentAssemblyState {
-                    what: "federated inbound endpoints exist without a lowered federation".into(),
-                })?
-                .runtime
-                .connections_mut(),
-        );
-        for endpoint_factory in self.federated_inbound_endpoint_factories.drain(..) {
-            endpoint_factory(runtime_assembly, &mut connections)?;
-        }
-        *runtime_assembly
-            .federation
-            .as_mut()
-            .expect("lowered federation was checked before endpoint construction")
-            .runtime
-            .connections_mut() = connections;
         Ok(())
     }
 
@@ -1033,41 +787,6 @@ impl Assembly {
     ) -> Result<RuntimeAssembly, AssemblyError> {
         let mut partition_map = self.build_partition_map();
         let inter_partition_plan = self.build_inter_partition_plan(&partition_map)?;
-        #[cfg(feature = "federated")]
-        let federation_plan =
-            FederationPlan::from_inter_partition_plan(&inter_partition_plan, |port| {
-                self.fqn_for(port, false).map(|fqn| fqn.to_string())
-            })?;
-        #[cfg(feature = "federated")]
-        let compiled_federation_topology = if federation_plan.is_empty() {
-            None
-        } else {
-            Some(boomerang_federated::CompiledTopology::new(
-                federation_topology_from_plan(&federation_plan)?,
-            )?)
-        };
-        #[cfg(feature = "federated")]
-        let federated_connections = boomerang_central_rti::FederatedRuntimeConnections::new(
-            federation_plan
-                .federates
-                .iter()
-                .map(|federate| boomerang_federated::FederateId::new(federate.id.clone())),
-            federated_routes_from_plan(&federation_plan)?
-                .into_iter()
-                .map(|route| {
-                    boomerang_central_rti::FederateClientRoute::new(
-                        route.endpoint,
-                        route.source,
-                        route.target,
-                    )
-                }),
-        )?;
-        #[cfg(feature = "federated")]
-        let federation = compiled_federation_topology.map(|topology| PendingFederation {
-            plan: federation_plan,
-            topology,
-            connections: federated_connections,
-        });
         let enclave_deps = enclave_deps_from_inter_partition_plan(&inter_partition_plan);
         let port_bindings = self.build_connections(&mut partition_map)?;
         let mut runtime_assembly = RuntimeAssembly::new(
@@ -1075,13 +794,9 @@ impl Assembly {
             inter_partition_plan,
             enclave_deps,
             config.physical_event_q_size,
-            #[cfg(feature = "federated")]
-            federation,
         )?;
 
         self.build_runtime_actions(&partition_map, &mut runtime_assembly)?;
-        #[cfg(feature = "federated")]
-        self.build_federated_inbound_endpoints(&mut runtime_assembly)?;
         self.build_runtime_ports(&partition_map, &mut runtime_assembly, &port_bindings)?;
 
         // this must be done before build_runtime_reactors, since that drains self.reaction_specs

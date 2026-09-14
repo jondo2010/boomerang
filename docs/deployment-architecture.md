@@ -16,11 +16,11 @@ defines:
 - the feature boundary between Federates and coordination backends.
 
 The logical-time behavior in [Federated Runtime Internals](./federated-runtime.md) remains
-applicable. [Static Federated Protocol](./federated-protocol.md) defines the initial `central-rti`
+applicable. [Compiled Central RTI Protocol](./federated-protocol.md) defines the initial `central-rti`
 backend; another backend may use a different protocol only if it preserves the same declared
-logical-time guarantees. The live `RuntimeFederation` and startup-time runtime-object construction
-described by those documents are transitional implementation forms that this architecture replaces
-with compiled deployment images.
+logical-time guarantees. Those documents describe the compiled path. Ordinary local
+`Assembly` construction remains during caller migration; live federation construction and its
+static runners have been removed.
 
 ## Decision summary
 
@@ -139,13 +139,14 @@ The concepts have distinct meanings:
 
 ## Migration context
 
-The current implementation combines declarative analysis and live runtime construction.
-`Assembly::into_runtime_assembly` performs partition analysis, federation analysis, connection
-lowering, runtime Enclave creation, state/action/port/reaction construction, replay construction,
+The remaining local Assembly path combines declarative analysis and live runtime construction.
+`Assembly::into_runtime_assembly` performs local partition analysis, connection lowering,
+runtime Enclave creation, state/action/port/reaction construction, replay construction,
 and final scheduler-graph preparation in one consuming operation in
 `boomerang_builder/src/assembly/build.rs`.
 
-The macro and builder model similarly combine structural declarations and executable payloads:
+The ordinary local macro and builder path still combines structural declarations and executable
+payloads; the compiled descriptor/payload path separates them:
 
 - `#[reactor]` expands to a closure that receives concrete state and mutates an `Assembly` in
   `boomerang_macros/src/reactor.rs`.
@@ -157,9 +158,12 @@ The macro and builder model similarly combine structural declarations and execut
   coordination state, and heap-backed scratch buffers at startup in
   `boomerang_runtime/src/sched/mod.rs`.
 
-These couplings are convenient for hosted execution but prevent strict target slicing and require
-allocator-backed graph-to-runtime construction. The target architecture separates these phases
-without duplicating scheduler semantics.
+These local-path couplings require allocator-backed graph-to-runtime construction. Compiled
+deployments already separate these phases and preserve strict target slicing. The local API remains
+for migration; public application authoring and hosted compiled runner work is tracked separately in
+[#234](https://github.com/jondo2010/boomerang/issues/234) and
+[#235](https://github.com/jondo2010/boomerang/issues/235). The legacy federation deletion does not
+redesign those APIs.
 
 ## Architectural representations
 
@@ -679,9 +683,10 @@ Periodic timers are deferred until typed scheduler/storage capabilities preserve
 executor rejects them rather than treating them as one-shot timers; future support must not restore
 live graph lowering or `DynamicStorage`.
 
-`Assembly::into_runtime_assembly` may temporarily adapt to this path during migration. It is not a
-permanent alternative lowering architecture and is eventually deprecated with live
-`RuntimeAssembly` and `RuntimeFederation`.
+`Assembly::into_runtime_assembly` continues to construct ordinary local `RuntimeAssembly` values
+during caller migration. It has no federation aggregate or distributed runner. Removing that
+remaining local path follows the public authoring and hosted compiled runner work; it is not part
+of the completed live federation deletion.
 
 ## Federate and coordination execution
 
@@ -854,9 +859,10 @@ Exact crate extraction may evolve, but dependency responsibilities are invariant
 - `boomerang_runtime` owns compiled-image views, scheduler semantics, storage/queue interfaces,
   clocks, generic logical-time coordination, and trace admission interfaces. It does not depend on
   Cargo metadata, Tokio, RTI frames, or graph construction.
-- The RTI/protocol layer owns wire identities and tags, immutable RTI graph projection, RTI state,
-  sessions, clients, framing, and transports. It does not own source descriptors, application
-  graph lowering, or scheduler execution.
+- `boomerang_federated` contains only pure `WireTag` and `WireDelay` primitives.
+- `boomerang_central_rti` consumes the immutable `RtiImage` projection and owns compiled RTI state,
+  clients, checked tag conversions, framing, and hosted/reference transports. It does not own
+  source descriptors, application graph lowering, or scheduler execution.
 - Host-side federation backend adapters validate and project the protocol-neutral federation graph
   into backend-specific coordination images, participant routes, and generated transport bindings.
   The centralized adapter produces `RtiImage`.
@@ -872,11 +878,11 @@ payload/backend packages.
 Federate identity and compiled Federate structure are always available. There is no user-facing
 feature that turns a local application from "not a Federate" into a Federate.
 
-Distributed coordination protocols, client transports, and any coordinator executable are behind
-backend-specific internal feature boundaries. `cargo-boomerang` selects only the capability named
-by the deployment: initially `rti` for `central-rti`, and eventually a distinct capability for
-`peer-to-peer`. It omits all distributed-coordination capabilities for one-Federate deployments.
-There is no user-authored Cargo feature that selects federation placement or coordination backend.
+Compiled Federate, boundary, and coordination-backend interfaces are unconditional. Distributed
+coordination is selected by the deployment projection and an explicit backend package dependency.
+For `central-rti`, generated artifacts depend on `boomerang_central_rti`; a one-Federate deployment
+omits that dependency and its transport. There is no user-facing `federated` feature and no
+user-authored Cargo feature that selects placement or coordination backend.
 
 Replay support is orthogonal. Trace interfaces may be present in the runtime core while concrete
 containers such as MCAP remain optional hosted dependencies.
@@ -931,8 +937,9 @@ comments, including private compiler-model records. Public documentation is enfo
 review checklist. Documentation describes semantic responsibility or identity lifetime rather
 than restating the Rust type.
 
-The existing in-memory runner may remain as migration and protocol-test scaffolding. It is not the
-final proof of deployable artifact correctness.
+The compiled in-memory transport remains reference and protocol-test infrastructure only. The
+legacy live federation runner has been removed. Generated artifact and multi-process tests provide
+the deployable execution proof.
 
 ## Migration direction
 
@@ -950,8 +957,9 @@ Migration follows architecture seams rather than attempting one replacement:
    backend-neutral analysis and projection seam.
 7. Move replay to stable scheduler-boundary events and container-neutral trace interfaces.
 8. Add bounded static storage and allocator-free runtime backends.
-9. Remove the `federated` user-facing feature distinction and deprecate live `RuntimeAssembly` and
-   `RuntimeFederation` construction.
+9. Complete migration of local callers and remove live `RuntimeAssembly` construction after the
+   public authoring and hosted compiled runner seams are available. The `federated` feature and
+   live federation construction have already been removed.
 
 This sequence is directional, not an implementation plan. Each step requires its own scoped plan,
 runnable proof, and compatibility decision.

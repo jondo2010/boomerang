@@ -1,4 +1,4 @@
-//! Checked borrowed views over immutable compiled runtime images.
+//! Checked views over immutable compiled runtime images.
 use super::*;
 use tinymap::{IndexSpan, Key, SliceRange, TinyMapView};
 
@@ -6,10 +6,11 @@ use tinymap::{IndexSpan, Key, SliceRange, TinyMapView};
 ///
 /// Deployment compilation separately checks coherence with the authoritative federation.
 /// This view checks the standalone artifact's identities, ranges, and typed references.
+/// It owns the image descriptor while borrowing its backing tables and member names.
 #[derive(Debug)]
 pub struct RtiImageView<'a> {
     /// Immutable coordination projection whose internal references were checked.
-    image: &'a RtiImage<'a>,
+    image: RtiImage<'a>,
     /// Canonical stable identities sharing the projection's Federate key domain.
     members: IdentityTable<'a, FederateIndex>,
 }
@@ -17,18 +18,24 @@ pub struct RtiImageView<'a> {
 impl<'a> RtiImageView<'a> {
     /// Validates a standalone coordination projection and its member identities.
     pub fn new(
-        image: &'a RtiImage<'a>,
+        image: RtiImage<'a>,
         members: IdentityTable<'a, FederateIndex>,
     ) -> Result<Self, ImageValidationError<'a>> {
         validate_rti_identity_table("coordination.rti.member_identities", "federate", members)?;
-        validate_rti_member_count(image, members.len())?;
-        validate_rti(image)?;
+        validate_rti_member_count(&image, members.len())?;
+        validate_rti(&image)?;
         Ok(Self { image, members })
     }
 
     /// Returns the checked immutable coordination projection.
     #[must_use]
-    pub const fn image(&self) -> &'a RtiImage<'a> {
+    pub const fn image(&self) -> &RtiImage<'a> {
+        &self.image
+    }
+
+    /// Consumes the validated view and returns its immutable image descriptor.
+    #[must_use]
+    pub fn into_image(self) -> RtiImage<'a> {
         self.image
     }
 
@@ -2347,7 +2354,7 @@ mod tests {
         let dependencies = [RtiDependencyImage::new(FederateIndex::new(0), 42)];
         let image = rti_fixture(&members, &dependencies, &[], &[]);
         let identities = IdentityTable::new(&["standalone"]);
-        let view = RtiImageView::new(&image, identities).unwrap();
+        let view = RtiImageView::new(image.clone(), identities).unwrap();
         assert_eq!(
             view.member_identity(FederateIndex::new(0))
                 .unwrap()
@@ -2360,11 +2367,11 @@ mod tests {
             42
         );
         assert_eq!(view.members().len(), 1);
-        assert!(RtiImageView::new(&image, IdentityTable::new(&[])).is_err());
-        assert!(RtiImageView::new(&image, IdentityTable::new(&[""])).is_err());
+        assert!(RtiImageView::new(image.clone(), IdentityTable::new(&[])).is_err());
+        assert!(RtiImageView::new(image, IdentityTable::new(&[""])).is_err());
 
         let missing_dependencies = rti_fixture(&members, &[], &[], &[]);
-        assert!(RtiImageView::new(&missing_dependencies, identities).is_err());
+        assert!(RtiImageView::new(missing_dependencies, identities).is_err());
         let invalid_routes = [RtiRouteImage::new(
             BoundaryId::new("route"),
             FlowIndex::new(0),
@@ -2383,7 +2390,7 @@ mod tests {
         )];
         let invalid_route_image = rti_fixture(&members, &dependencies, &invalid_routes, &["flow"]);
         assert!(matches!(
-            RtiImageView::new(&invalid_route_image, identities),
+            RtiImageView::new(invalid_route_image, identities),
             Err(ImageValidationError::ReferenceOutOfBounds {
                 table: "coordination.rti.routes",
                 field: "target",
@@ -2395,7 +2402,7 @@ mod tests {
         let invalid_dependencies = [RtiDependencyImage::new(FederateIndex::new(1), 42)];
         let invalid = rti_fixture(&members, &invalid_dependencies, &[], &[]);
         assert!(matches!(
-            RtiImageView::new(&invalid, identities),
+            RtiImageView::new(invalid, identities),
             Err(ImageValidationError::ReferenceOutOfBounds {
                 table: "coordination.rti.dependencies",
                 referenced: 1,

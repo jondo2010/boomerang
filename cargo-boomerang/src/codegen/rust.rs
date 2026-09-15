@@ -85,8 +85,8 @@ pub(super) fn render_launcher(
             let address = std::env::var("BOOMERANG_RTI_ADDRESS")
                 .map_err(|_| "BOOMERANG_RTI_ADDRESS is required for central-rti execution")?
                 .parse()?;
-            let view = RtiImageView::new(&COORDINATION_IMAGE, COORDINATION_MEMBERS)?;
-            let rti_bindings = RtiClientBindings::from_image(&view, FEDERATE, COORDINATION_IDENTITY)?;
+            let view = RtiImageView::new(COORDINATION_IMAGE, COORDINATION_MEMBERS)?;
+            let rti_bindings = RtiClientBindings::from_image(view, FEDERATE, COORDINATION_IDENTITY)?;
             let connection = hosted::connect(address, FEDERATE, wire_contract(), timeout)?;
             let sink = connection.sink();
             let bindings = generated_bindings(&rti_bindings, sink.clone())?;

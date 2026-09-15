@@ -1,8 +1,9 @@
 //! Behavioral grant checks over precomputed images; no legacy topology oracle.
 use super::*;
 use boomerang_runtime::image::{
-    BoundaryId, CodecCapabilityIndex, CodecPolicy, FlowIndex, RtiDependencyImage, RtiMemberImage,
-    RtiRouteImage, SliceRange, TinyMapView, TransportCapabilityIndex, TransportPolicy,
+    BoundaryId, CodecCapabilityIndex, CodecPolicy, FlowIndex, IdentityTable, RtiDependencyImage,
+    RtiImage, RtiMemberImage, RtiRouteImage, SliceRange, TinyMapView, TransportCapabilityIndex,
+    TransportPolicy,
 };
 
 const A: FederateIndex = FederateIndex::new(0);
@@ -75,8 +76,8 @@ fn admitted(
     image: &'static RtiImage<'static>,
     identities: &'static [&'static str],
 ) -> CompiledRti<'static> {
-    let view = RtiImageView::new(image, IdentityTable::new(identities)).unwrap();
-    let mut rti = CompiledRti::from_image(&view, IDENTITY).unwrap();
+    let view = RtiImageView::new(image.clone(), IdentityTable::new(identities)).unwrap();
+    let mut rti = CompiledRti::from_image(view, IDENTITY).unwrap();
     for member in image.members().keys() {
         let replies = rti.handle(member, RtiRequest::Hello { identity: IDENTITY });
         assert!(replies
@@ -99,6 +100,26 @@ fn publish(
             next_event: tag,
         },
     )
+}
+
+#[test]
+fn coordinator_outlives_local_image_descriptor() {
+    let names = [String::from("a"), String::from("b"), String::from("c")];
+    let identities = names.each_ref().map(String::as_str);
+    let mut rti = {
+        let image = CHAIN.clone();
+        let view = RtiImageView::new(image, IdentityTable::new(&identities)).unwrap();
+        CompiledRti::from_image(view, IDENTITY).unwrap()
+    };
+
+    assert_eq!(rti.resolve_member("b").unwrap(), B);
+    for member in [A, B, C] {
+        let replies = rti.handle(member, RtiRequest::Hello { identity: IDENTITY });
+        assert!(replies
+            .iter()
+            .all(|delivery| matches!(delivery.reply, RtiReply::Started)));
+    }
+    assert_eq!(rti.member_count(), 3);
 }
 
 fn grants(deliveries: Vec<RtiDelivery>) -> Vec<(FederateIndex, WireTag)> {

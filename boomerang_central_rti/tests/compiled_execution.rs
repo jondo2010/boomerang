@@ -103,14 +103,14 @@ fn rti_view(view: &CompiledDeploymentView<'static>) -> RtiImageView<'static> {
     let CoordinationProjection::CentralRti(image) = view.coordination() else {
         panic!("fixture must select central-rti")
     };
-    RtiImageView::new(image, IdentityTable::new(&MEMBER_NAMES)).unwrap()
+    RtiImageView::new(image.clone(), IdentityTable::new(&MEMBER_NAMES)).unwrap()
 }
 
 /// Runs the real scheduler/backend/RTI path with transport confined to test support.
 fn execute_pair(mismatch: bool, fail_rti: bool, fail_scheduler: bool) {
     bounded(move || {
         let view = CompiledDeploymentView::new(&DEPLOYMENT).unwrap();
-        let rti = CompiledRti::from_image(&rti_view(&view), IDENTITY).unwrap();
+        let rti = CompiledRti::from_image(rti_view(&view), IDENTITY).unwrap();
         let source_rti = RtiClientBindings::new(&view, MEMBERS[0], IDENTITY).unwrap();
         let sink_rti = RtiClientBindings::new(
             &view,
@@ -248,7 +248,7 @@ fn rti_failure_releases_both_compiled_federates() {
 /// Starts a pure RTI without a transport for protocol-boundary assertions.
 fn admitted_rti() -> CompiledRti<'static> {
     let view = CompiledDeploymentView::new(&DEPLOYMENT).unwrap();
-    let mut rti = CompiledRti::from_image(&rti_view(&view), IDENTITY).unwrap();
+    let mut rti = CompiledRti::from_image(rti_view(&view), IDENTITY).unwrap();
     for member in MEMBERS {
         rti.handle(member, RtiRequest::Hello { identity: IDENTITY });
     }
@@ -448,8 +448,11 @@ fn outbound_preflight_resolves_and_authorizes_typed_routes() {
     use boomerang_central_rti::compiled::in_memory::InMemorySender;
     let view = CompiledDeploymentView::new(&DEPLOYMENT).unwrap();
     assert!(RtiClientBindings::new(&view, FederateIndex::new(9), IDENTITY).is_err());
-    let source = RtiClientBindings::new(&view, MEMBERS[0], IDENTITY).unwrap();
-    let target = RtiClientBindings::new(&view, MEMBERS[1], IDENTITY).unwrap();
+    assert!(
+        RtiClientBindings::from_image(rti_view(&view), FederateIndex::new(9), IDENTITY).is_err()
+    );
+    let source = RtiClientBindings::from_image(rti_view(&view), MEMBERS[0], IDENTITY).unwrap();
+    let target = RtiClientBindings::from_image(rti_view(&view), MEMBERS[1], IDENTITY).unwrap();
     let (tx, rx) = std::sync::mpsc::channel();
     let sender = Arc::new(InMemorySender::new(MEMBERS[0], tx));
     assert!(source

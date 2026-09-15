@@ -1076,8 +1076,8 @@ pub(crate) fn generate_analyzed_rti(
         fn main() -> Result<(), Box<dyn std::error::Error>> {
             use std::io::Write;
             boomerang_util::launcher::init_tracing();
-            let view = RtiImageView::new(&COORDINATION_IMAGE, COORDINATION_MEMBERS)?;
-            let rti = boomerang_central_rti::compiled::CompiledRti::from_image(&view, COORDINATION_IDENTITY)?;
+            let view = RtiImageView::new(COORDINATION_IMAGE, COORDINATION_MEMBERS)?;
+            let rti = boomerang_central_rti::compiled::CompiledRti::from_image(view, COORDINATION_IDENTITY)?;
             let bind = std::env::var("BOOMERANG_RTI_BIND").unwrap_or_else(|_| "127.0.0.1:0".into());
             let listener = std::net::TcpListener::bind(bind)?;
             if let Ok(ready) = std::env::var("BOOMERANG_RTI_READY_ADDRESS") {

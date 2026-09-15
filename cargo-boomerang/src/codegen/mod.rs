@@ -1088,7 +1088,7 @@ pub(crate) fn generate_analyzed_rti(
             } else {
                 println!("BOOMERANG_RTI_READY_V1 {}", listener.local_addr()?);
             }
-            boomerang_central_rti::compiled::hosted::serve(listener, rti, wire_contract(), std::time::Duration::from_secs(10))?;
+            boomerang_central_rti::compiled::hosted::Server::new(listener, rti, wire_contract(), std::time::Duration::from_secs(10))?.serve()?;
             Ok(())
         }
     })?;

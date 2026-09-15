@@ -63,8 +63,66 @@ fn receive(
     .boxed_local()
 }
 
-/// Owns the compiled membership's TCP admission, task supervision, and bounded shutdown.
-struct Server<'contract, 'wire, 'image> {
+/// Owns an unstarted compiled TCP server and its borrowed image projections.
+pub struct Server<'wire, 'image> {
+    /// Standard listener retained until the serving runtime can register it.
+    listener: TcpListener,
+    /// Coordinator state borrowing its immutable compiled image.
+    rti: CompiledRti<'image>,
+    /// Owned admission profile borrowing the original member and route tables.
+    contract: WireContract<'wire>,
+    /// Bound on admission, partial frames, queued writes, and terminal draining.
+    timeout: Duration,
+}
+
+impl<'wire, 'image> Server<'wire, 'image> {
+    /// Takes ownership of a bound listener and admission profile without requiring a Tokio runtime.
+    pub fn new(
+        listener: TcpListener,
+        rti: CompiledRti<'image>,
+        contract: WireContract<'wire>,
+        timeout: Duration,
+    ) -> Result<Self, CentralRtiError> {
+        if timeout.is_zero() {
+            return Err(failure("hosted timeout must be positive"));
+        }
+        listener.set_nonblocking(true).map_err(failure)?;
+        Ok(Self {
+            listener,
+            rti,
+            contract,
+            timeout,
+        })
+    }
+
+    /// Serves until coordinated stop or failure, then joins all I/O within one shutdown deadline.
+    /// Call from a synchronous owner; healthy admitted connections may remain idle indefinitely.
+    pub fn serve(self) -> Result<(), CentralRtiError> {
+        let Self {
+            listener,
+            rti,
+            contract,
+            timeout,
+        } = self;
+        runtime()?.block_on(async {
+            RunningServer {
+                listener: AsyncListener::from_std(listener).map_err(failure)?,
+                peers: TinySecondaryMap::with_capacity(rti.member_count()),
+                rti,
+                contract: &contract,
+                inputs: Inputs::new(),
+                writers: JoinSet::new(),
+                cancel: CancellationToken::new(),
+                timeout,
+            }
+            .serve()
+            .await
+        })
+    }
+}
+
+/// Active I/O state borrowing the contract held by the synchronous server owner.
+struct RunningServer<'contract, 'wire, 'image> {
     /// Listener accepting only the compiled roster's bounded number of connections.
     listener: AsyncListener,
     /// Coordinator state borrowing its immutable compiled image.
@@ -83,36 +141,7 @@ struct Server<'contract, 'wire, 'image> {
     timeout: Duration,
 }
 
-/// Serves the compiled membership until coordinated stop or terminal failure.
-/// Admission, incomplete frames, queued writes and shutdown have bounded deadlines;
-/// a fully admitted connection may remain idle indefinitely.
-pub fn serve(
-    listener: TcpListener,
-    rti: CompiledRti<'_>,
-    contract: WireContract<'_>,
-    timeout: Duration,
-) -> Result<(), CentralRtiError> {
-    if timeout.is_zero() {
-        return Err(failure("hosted timeout must be positive"));
-    }
-    listener.set_nonblocking(true).map_err(failure)?;
-    runtime()?.block_on(async {
-        Server {
-            listener: AsyncListener::from_std(listener).map_err(failure)?,
-            peers: TinySecondaryMap::with_capacity(rti.member_count()),
-            rti,
-            contract: &contract,
-            inputs: Inputs::new(),
-            writers: JoinSet::new(),
-            cancel: CancellationToken::new(),
-            timeout,
-        }
-        .serve()
-        .await
-    })
-}
-
-impl Server<'_, '_, '_> {
+impl RunningServer<'_, '_, '_> {
     /// Runs dispatch, then consumes every socket owner within one shared shutdown deadline.
     async fn serve(mut self) -> Result<(), CentralRtiError> {
         let result = self.run().await;

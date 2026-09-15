@@ -80,7 +80,7 @@ fn server(timeout: Duration) -> (SocketAddr, JoinHandle<Result<(), CentralRtiErr
         );
         let view = RtiImageView::new(&image, IdentityTable::new(&["source", "target"])).unwrap();
         let rti = CompiledRti::from_image(&view, CoordinationIdentity::new([1; 32])).unwrap();
-        serve(listener, rti, test_contract(), timeout)
+        Server::new(listener, rti, test_contract(), timeout)?.serve()
     });
     (address, worker)
 }

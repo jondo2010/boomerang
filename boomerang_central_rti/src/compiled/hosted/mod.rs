@@ -32,7 +32,7 @@ mod wire;
 pub use boomerang_federated::channel::QUEUE_CAPACITY;
 pub use canonical::MAX_FRAME_BYTES;
 use canonical::MAX_PAYLOAD_BYTES;
-pub use server::serve;
+pub use server::Server;
 pub use wire::WireContract;
 use wire::*;
 

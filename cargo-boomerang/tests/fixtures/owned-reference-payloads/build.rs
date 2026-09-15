@@ -10,7 +10,7 @@ fn main() {
     println!(
         "cargo:rustc-check-cfg=cfg(feature, values(\"__boomerang_descriptor\", \
          \"broken-descriptor\", \"broken-payload\", \"profile-config-probe\", \
-         \"runtime-failure\", \"warning-diagnostic\"))"
+         \"natural-quiescence\", \"runtime-failure\", \"warning-diagnostic\"))"
     );
     let manifest_dir = fs::canonicalize(env::var_os("CARGO_MANIFEST_DIR").unwrap()).unwrap();
     let manifest_dir = manifest_dir.to_str().unwrap();

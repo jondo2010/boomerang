@@ -7,8 +7,8 @@ pub use boomerang_runtime as runtime;
 
 /// Minimal payload-facet prelude used by the included fixture sources.
 pub mod prelude {
-    pub use boomerang_macros::{reaction, reactor, reactor_ports, timer};
-    pub use boomerang_runtime::{self as runtime, CommonContext, Duration, FromRefs, Tag};
+    pub use boomerang_macros::{reaction, reactor, reactor_ports};
+    pub use boomerang_runtime::{self as runtime, CommonContext};
 }
 
 /// Controller payload compiled directly from the fixture-owned source.

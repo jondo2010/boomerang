@@ -47,17 +47,6 @@ codec-policy = "canonical-bounded"
 timing-policy = "best-effort"
 security-policy = "none"
 
-[deployments.replay.bindings."vehicle/sensor"]
-package = "sensor-replay"
-
-[deployments.replay.bindings."vehicle/controller"]
-package = "vehicle-control"
-
-[deployments.replay.federates.dev]
-groups = ["sensor", "control", "planning"]
-runtime = "std"
-recovery = "fail-stop"
-
 [deployments.future-p2p.federates.left]
 groups = ["sensor"]
 runtime = "std"

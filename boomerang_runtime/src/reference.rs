@@ -12,7 +12,7 @@ use std::{
     time::Instant,
 };
 
-use tinymap::{TinyMap, TinySecondaryMap};
+use tinymap::{TinyMap, TinyMapView, TinySecondaryMap};
 
 use crate::{
     image::{
@@ -638,20 +638,19 @@ fn federate_shutdown_unblocks_a_full_mailbox_and_blocked_sender() {
 
 /// Resolves every outbound route to its unique inbound half after root validation.
 fn local_route_endpoints<'image>(
-    deployment: &'image CompiledDeploymentImage<'image>,
+    enclaves: TinyMapView<'image, EnclaveIndex, EnclaveImage<'image>>,
     selected_federate: FederateIndex,
     selected: &crate::image::FederateImage<'_>,
 ) -> Result<Vec<ResolvedLocalRoute<'image>>, ExecuteOwnedFederateError> {
     let mut endpoints = Vec::new();
-    for (source, source_image) in deployment.enclaves.iter() {
+    for (source, source_image) in enclaves.iter() {
         for (outbound_route, outbound) in source_image
             .routes
             .iter()
             .filter(|(_, route)| route.direction() == RouteDirection::Outbound)
         {
             let boundary = outbound.boundary();
-            let (destination, inbound) = deployment
-                .enclaves
+            let (destination, inbound) = enclaves
                 .iter()
                 .flat_map(|(enclave, image)| {
                     image
@@ -696,22 +695,22 @@ fn local_route_endpoints<'image>(
 
 /// Validates complete Enclave and route bindings before any user initializer runs.
 fn preflight_owned_federate<'image>(
-    deployment: &'image CompiledDeploymentImage<'image>,
+    deployment: CompiledDeploymentImage<'image>,
     federate: FederateIndex,
     bindings: &FederateBindings<'_>,
 ) -> Result<PreparedFederate<'image>, ExecuteOwnedFederateError> {
-    CompiledDeploymentView::new(deployment).map_err(|error| {
+    let deployment = CompiledDeploymentView::new(deployment).map_err(|error| {
         ExecuteOwnedFederateError::ImageValidation {
             message: error.to_string(),
         }
     })?;
     let selected = deployment
-        .federates
+        .federates()
         .get(federate)
         .ok_or(ExecuteOwnedFederateError::FederateNotFound { federate })?;
 
     let images = deployment
-        .enclaves
+        .enclaves()
         .iter()
         .filter(|(key, _)| selected.enclaves().contains(*key))
         .collect();
@@ -722,7 +721,7 @@ fn preflight_owned_federate<'image>(
             federate,
         });
     }
-    let endpoints = local_route_endpoints(deployment, federate, selected)?;
+    let endpoints = local_route_endpoints(deployment.enclaves(), federate, selected)?;
     preflight_local_bindings(federate, &images, &endpoints, bindings)?;
     Ok(PreparedFederate { images, endpoints })
 }
@@ -842,12 +841,13 @@ fn preflight_local_bindings(
 
 /// Executes every Enclave in one validated Federate with direct typed local routes.
 ///
+/// Consumes the deployment descriptor; backing tables remain borrowed for the duration of execution.
 /// All root, binding, route, timer, and timing checks complete before any user initializer runs.
 /// The first execution failure triggers Federate-wide shutdown; every scheduler thread is joined.
 /// Automatic quiescence covers executor-owned scheduler and local-route work. Callers that admit
 /// exogenous events must set [`Config::keep_alive`] and request shutdown explicitly.
 pub fn execute_owned_federate(
-    deployment: &CompiledDeploymentImage<'_>,
+    deployment: CompiledDeploymentImage<'_>,
     federate: FederateIndex,
     bindings: FederateBindings<'_>,
     config: Config,
@@ -861,7 +861,7 @@ pub fn execute_owned_federate(
 /// each scheduler thread. Production always returns `false`; unit tests use the guard to exercise
 /// failures that cannot be induced safely through operating-system resource exhaustion.
 fn execute_owned_federate_with_spawn_guard(
-    deployment: &CompiledDeploymentImage<'_>,
+    deployment: CompiledDeploymentImage<'_>,
     federate: FederateIndex,
     bindings: FederateBindings<'_>,
     config: Config,
@@ -1331,7 +1331,7 @@ mod scoped_spawn_tests {
         IndexSpan::new(0, 3),
     )];
     static MEMBERS: [FederateIndex; 1] = [FederateIndex::new(0)];
-    static DEPLOYMENT: CompiledDeploymentImage<'static> = CompiledDeploymentImage {
+    const DEPLOYMENT: CompiledDeploymentImage<'static> = CompiledDeploymentImage {
         federation: GlobalFederationImage::new(&MEMBERS, &[]),
         federates: TinyMapView::new(&FEDERATES),
         enclaves: TinyMapView::new(&ENCLAVES),
@@ -1430,7 +1430,7 @@ mod scoped_spawn_tests {
 
     fn execute_with_spawn_failure(failed_spawn: Option<EnclaveIndex>) -> ExecuteOwnedFederateError {
         execute_owned_federate_with_spawn_guard(
-            &DEPLOYMENT,
+            DEPLOYMENT,
             FederateIndex::new(0),
             bindings(),
             Config::default().with_fast_forward(true),

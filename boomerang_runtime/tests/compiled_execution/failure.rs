@@ -88,7 +88,7 @@ fn competing_panic_after_route_failure(
 fn owned_federate_panic_requests_bounded_shutdown_and_joins() {
     let started = Instant::now();
     let error = execute_owned_federate(
-        &ROUTED_DEPLOYMENT,
+        ROUTED_DEPLOYMENT,
         FederateIndex::new(0),
         FederateBindings::new()
             .bind_enclave(EnclaveIndex::new(0), source_bindings())
@@ -172,17 +172,16 @@ fn owned_federate_abort_stops_peer_with_recurring_internal_work_child() {
     let enclaves = [recurring, panicking];
     let federates = [fixture_federate("host", "target", "runtime", s!(0, 2))];
     let members = [FederateIndex::new(0)];
-    let deployment = CompiledDeploymentImage {
-        federation: GlobalFederationImage::new(&members, &[]),
-        federates: TinyMapView::new(&federates),
-        enclaves: TinyMapView::new(&enclaves),
-        coordination: CoordinationProjection::Local,
-    };
-
     for keep_alive in [false, true] {
+        let deployment = CompiledDeploymentImage {
+            federation: GlobalFederationImage::new(&members, &[]),
+            federates: TinyMapView::new(&federates),
+            enclaves: TinyMapView::new(&enclaves),
+            coordination: CoordinationProjection::Local,
+        };
         RECURRING_ABORT_PEER_READY.store(false, Ordering::SeqCst);
         let error = execute_owned_federate(
-            &deployment,
+            deployment,
             FederateIndex::new(0),
             FederateBindings::new()
                 .bind_enclave(EnclaveIndex::new(0), recurring_abort_peer_bindings())
@@ -235,7 +234,7 @@ fn owned_federate_retains_route_failure_before_competing_scheduler_panic() {
     };
     let started = Instant::now();
     let error = execute_owned_federate(
-        &deployment,
+        deployment,
         FederateIndex::new(0),
         FederateBindings::new()
             .bind_enclave(

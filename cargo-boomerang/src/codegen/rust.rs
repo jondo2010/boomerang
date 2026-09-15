@@ -85,8 +85,8 @@ pub(super) fn render_launcher(
             let address = std::env::var("BOOMERANG_RTI_ADDRESS")
                 .map_err(|_| "BOOMERANG_RTI_ADDRESS is required for central-rti execution")?
                 .parse()?;
-            let view = RtiImageView::new(&COORDINATION_IMAGE, COORDINATION_MEMBERS)?;
-            let rti_bindings = RtiClientBindings::from_image(&view, FEDERATE, COORDINATION_IDENTITY)?;
+            let view = RtiImageView::new(COORDINATION_IMAGE, COORDINATION_MEMBERS)?;
+            let rti_bindings = RtiClientBindings::from_image(view, FEDERATE, COORDINATION_IDENTITY)?;
             let connection = hosted::connect(address, FEDERATE, wire_contract(), timeout)?;
             let sink = connection.sink();
             let bindings = generated_bindings(&rti_bindings, sink.clone())?;
@@ -98,7 +98,7 @@ pub(super) fn render_launcher(
     } else {
         quote! {
             let execution = boomerang_runtime::execute_owned_federate(
-                &DEPLOYMENT, FEDERATE, generated_bindings(), #config,
+                DEPLOYMENT, FEDERATE, generated_bindings(), #config,
             )?;
         }
     };
@@ -355,7 +355,7 @@ fn render_deployment(slice: &FederateSlice<'_>, include_local_deployment: bool) 
         quote!(
             static FEDERATES: [FederateImage; 1] = [FEDERATE_IMAGE];
             static FEDERATION_MEMBERS: [FederateIndex; 1] = [FEDERATE];
-            static DEPLOYMENT: CompiledDeploymentImage<'static> = CompiledDeploymentImage {
+            const DEPLOYMENT: CompiledDeploymentImage<'static> = CompiledDeploymentImage {
                 federation: GlobalFederationImage::new(&FEDERATION_MEMBERS, &[]),
                 federates: TinyMapView::new(&FEDERATES),
                 enclaves: TinyMapView::new(&ENCLAVES),

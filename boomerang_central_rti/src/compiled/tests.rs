@@ -46,7 +46,7 @@ fn bindings() -> RtiClientBindings<'static> {
         TinyMapView::new(&[]),
     );
     RtiClientBindings {
-        image: &IMAGE,
+        image: IMAGE,
         member: FederateIndex::new(0),
         identity: CoordinationIdentity::new([1; 32]),
     }

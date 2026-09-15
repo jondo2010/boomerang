@@ -845,10 +845,18 @@ For hosted `run`, readiness uses a private loopback connection with a ten-second
 Federates start only after the RTI reports its bound data address. Admission, partial frames,
 stalled writes and terminal flushing have ten-second bounds; healthy inactive sessions may wait
 indefinitely. Complete frames are limited to 65,583 bytes and opaque payloads to 65,535 bytes.
-Each stage has sixteen fixed queue entries; payloads may consume only twelve, reserving four
-for coordination. All accepted traffic remains FIFO, so completion and grants cannot overtake
-preceding payloads. Queue exhaustion closes the link and preserves the original failure.
-The synchronous socket worker is temporary pending the Tokio projection in #134. The supervisor
+Each stage uses a bounded Tokio channel with sixteen entries; payload semaphore permits
+limit queued payloads to twelve, reserving four entries for coordination. Each transfer and
+writer retains at most one additional frame; writers flush before taking another. Standard
+framed buffers retain allocation capacity; wire limits bound records rather than exact allocator
+overhead. Accepted traffic remains FIFO, so completion and grants cannot overtake preceding
+payloads. Synchronous submission fails closed on queue exhaustion; async transfers await capacity
+within their original deadline. The link preserves the original failure.
+The hosted adapter uses Tokio tasks and `FramedRead`/`FramedWrite` over TCP. Only synchronous
+scheduler owners wait on the reply bridge or join worker threads. Cancellation closes admission
+and bounds terminal output, receive draining, and task joins by one shared deadline. TCP owns
+retransmission, ordering, duplicate suppression and segmentation; the adapter adds canonical
+framing validation and operation deadlines without a second retry protocol. The supervisor
 allows ten seconds for peers to exit after the first successful child exit, or one second after a
 failure, then kills outstanding children and reaps all of them. It forwards application streams,
 returns a failing child status, and exports a summary only when every child succeeds (saturated

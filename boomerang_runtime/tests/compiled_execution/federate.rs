@@ -35,7 +35,7 @@ const HORIZON_DEPLOYMENT: CompiledDeploymentImage<'static> = CompiledDeploymentI
     enclaves: TinyMapView::new(&HORIZON_ENCLAVES),
     coordination: CoordinationProjection::Local,
 };
-static QUIESCENT_HORIZON_DEPLOYMENT: CompiledDeploymentImage<'static> = CompiledDeploymentImage {
+const QUIESCENT_HORIZON_DEPLOYMENT: CompiledDeploymentImage<'static> = CompiledDeploymentImage {
     enclaves: TinyMapView::new(&QUIESCENT_HORIZON_ENCLAVES),
     ..HORIZON_DEPLOYMENT
 };
@@ -190,7 +190,7 @@ static MULTI_ENCLAVES: [EnclaveImage<'static>; 3] = [
 ];
 static MULTI_FEDERATES: [FederateImage; 1] =
     [fixture_federate("host", "target", "runtime", s!(0, 3))];
-static MULTI_DEPLOYMENT: CompiledDeploymentImage<'static> = CompiledDeploymentImage {
+const MULTI_DEPLOYMENT: CompiledDeploymentImage<'static> = CompiledDeploymentImage {
     federation: GlobalFederationImage::new(&ROUTED_FEDERATE_MEMBERS, &[]),
     federates: TinyMapView::new(&MULTI_FEDERATES),
     enclaves: TinyMapView::new(&MULTI_ENCLAVES),
@@ -200,7 +200,7 @@ static MULTI_DEPLOYMENT: CompiledDeploymentImage<'static> = CompiledDeploymentIm
 #[test]
 fn owned_federate_coordinates_multiple_same_tag_sources_before_destination_execution() {
     let result = execute_owned_federate(
-        &MULTI_DEPLOYMENT,
+        MULTI_DEPLOYMENT,
         FederateIndex::new(0),
         FederateBindings::new()
             .bind_enclave(
@@ -243,7 +243,7 @@ fn owned_federate_routes_typed_values_and_shares_one_origin() {
         let result = bounded(move || {
             let boundary = String::from("pipe");
             execute_owned_federate(
-                &ROUTED_DEPLOYMENT,
+                ROUTED_DEPLOYMENT,
                 FederateIndex::new(0),
                 FederateBindings::new()
                     .bind_enclave(EnclaveIndex::new(0), source_bindings())
@@ -337,7 +337,7 @@ fn owned_federate_paced_origin_preserves_downstream_order() {
             ..ROUTED_DEPLOYMENT
         };
         execute_owned_federate(
-            &deployment,
+            deployment,
             FederateIndex::new(0),
             FederateBindings::new()
                 .bind_enclave(EnclaveIndex::new(0), paced_source_bindings())
@@ -379,7 +379,7 @@ fn owned_federate_paced_origin_preserves_downstream_order() {
 fn owned_federate_quiesces_when_a_source_emits_no_route_value() {
     let result = bounded(|| {
         execute_owned_federate(
-            &ROUTED_DEPLOYMENT,
+            ROUTED_DEPLOYMENT,
             FederateIndex::new(0),
             FederateBindings::new()
                 .bind_enclave(
@@ -413,7 +413,7 @@ fn owned_federate_quiesces_when_a_source_emits_no_route_value() {
 fn owned_federate_keep_alive_shutdown_stops_idle_peer() {
     let result = bounded(|| {
         execute_owned_federate(
-            &ROUTED_DEPLOYMENT,
+            ROUTED_DEPLOYMENT,
             FederateIndex::new(0),
             FederateBindings::new()
                 .bind_enclave(
@@ -444,7 +444,7 @@ fn owned_federate_keep_alive_shutdown_stops_idle_peer() {
 fn owned_federate_quiescence_wins_before_logical_horizon() {
     let result = bounded(|| {
         execute_owned_federate(
-            &QUIESCENT_HORIZON_DEPLOYMENT,
+            QUIESCENT_HORIZON_DEPLOYMENT,
             FederateIndex::new(0),
             FederateBindings::new()
                 .bind_enclave(EnclaveIndex::new(0), reference_bindings())
@@ -477,7 +477,7 @@ fn owned_federate_logical_horizon_stops_all_enclaves_at_one_tag() {
     let horizon = Duration::nanoseconds(1);
     let result = bounded(move || {
         execute_owned_federate(
-            &HORIZON_DEPLOYMENT,
+            HORIZON_DEPLOYMENT,
             FederateIndex::new(0),
             FederateBindings::new()
                 .bind_enclave(EnclaveIndex::new(0), reference_bindings())
@@ -543,7 +543,7 @@ fn owned_federate_quiesces_a_positive_delay_route_cycle() {
             ..ROUTED_DEPLOYMENT
         };
         execute_owned_federate(
-            &deployment,
+            deployment,
             FederateIndex::new(0),
             FederateBindings::new()
                 .bind_enclave(

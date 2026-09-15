@@ -20,10 +20,12 @@ mod transport;
 
 /// Shared compiler-issued identity for this immutable test deployment.
 const IDENTITY: CoordinationIdentity = CoordinationIdentity::new([7; 32]);
+/// Stable names in the same canonical order as the Federate and RTI member tables.
+static MEMBER_NAMES: [&str; 2] = ["a-source", "b-sink"];
 /// Canonical Federates owning separate Enclave slices.
 static FEDERATES: [FederateImage; 2] = [
-    fixture_federate("a-source", "host", "std", IndexSpan::new(0, 1)),
-    fixture_federate("b-sink", "host", "std", IndexSpan::new(1, 2)),
+    fixture_federate(MEMBER_NAMES[0], "host", "std", IndexSpan::new(0, 1)),
+    fixture_federate(MEMBER_NAMES[1], "host", "std", IndexSpan::new(1, 2)),
 ];
 /// Authoritative federation membership for the fixture.
 static MEMBERS: [FederateIndex; 2] = [FederateIndex::new(0), FederateIndex::new(1)];
@@ -80,7 +82,7 @@ static ENCLAVES: [EnclaveImage; 3] = [
     },
 ];
 /// Both executor slices and the RTI borrow this one validated deployment.
-static DEPLOYMENT: CompiledDeploymentImage = CompiledDeploymentImage {
+const DEPLOYMENT: CompiledDeploymentImage = CompiledDeploymentImage {
     federation: GlobalFederationImage::new(&MEMBERS, &EDGES),
     federates: TinyMapView::new(&FEDERATES),
     enclaves: TinyMapView::new(&ENCLAVES),
@@ -96,11 +98,19 @@ static DEPLOYMENT: CompiledDeploymentImage = CompiledDeploymentImage {
     )),
 };
 
+/// Validates the RTI projection after the caller has checked full-deployment coherence.
+fn rti_view(view: &CompiledDeploymentView<'static>) -> RtiImageView<'static> {
+    let CoordinationProjection::CentralRti(image) = view.coordination() else {
+        panic!("fixture must select central-rti")
+    };
+    RtiImageView::new(image.clone(), IdentityTable::new(&MEMBER_NAMES)).unwrap()
+}
+
 /// Runs the real scheduler/backend/RTI path with transport confined to test support.
 fn execute_pair(mismatch: bool, fail_rti: bool, fail_scheduler: bool) {
     bounded(move || {
-        let view = CompiledDeploymentView::new(&DEPLOYMENT).unwrap();
-        let rti = CompiledRti::new(&view, IDENTITY).unwrap();
+        let view = CompiledDeploymentView::new(DEPLOYMENT).unwrap();
+        let rti = CompiledRti::from_image(rti_view(&view), IDENTITY).unwrap();
         let source_rti = RtiClientBindings::new(&view, MEMBERS[0], IDENTITY).unwrap();
         let sink_rti = RtiClientBindings::new(
             &view,
@@ -237,8 +247,8 @@ fn rti_failure_releases_both_compiled_federates() {
 
 /// Starts a pure RTI without a transport for protocol-boundary assertions.
 fn admitted_rti() -> CompiledRti<'static> {
-    let view = CompiledDeploymentView::new(&DEPLOYMENT).unwrap();
-    let mut rti = CompiledRti::new(&view, IDENTITY).unwrap();
+    let view = CompiledDeploymentView::new(DEPLOYMENT).unwrap();
+    let mut rti = CompiledRti::from_image(rti_view(&view), IDENTITY).unwrap();
     for member in MEMBERS {
         rti.handle(member, RtiRequest::Hello { identity: IDENTITY });
     }
@@ -436,10 +446,13 @@ fn publish(
 #[test]
 fn outbound_preflight_resolves_and_authorizes_typed_routes() {
     use boomerang_central_rti::compiled::in_memory::InMemorySender;
-    let view = CompiledDeploymentView::new(&DEPLOYMENT).unwrap();
+    let view = CompiledDeploymentView::new(DEPLOYMENT).unwrap();
     assert!(RtiClientBindings::new(&view, FederateIndex::new(9), IDENTITY).is_err());
-    let source = RtiClientBindings::new(&view, MEMBERS[0], IDENTITY).unwrap();
-    let target = RtiClientBindings::new(&view, MEMBERS[1], IDENTITY).unwrap();
+    assert!(
+        RtiClientBindings::from_image(rti_view(&view), FederateIndex::new(9), IDENTITY).is_err()
+    );
+    let source = RtiClientBindings::from_image(rti_view(&view), MEMBERS[0], IDENTITY).unwrap();
+    let target = RtiClientBindings::from_image(rti_view(&view), MEMBERS[1], IDENTITY).unwrap();
     let (tx, rx) = std::sync::mpsc::channel();
     let sender = Arc::new(InMemorySender::new(MEMBERS[0], tx));
     assert!(source
@@ -466,8 +479,11 @@ fn outbound_preflight_resolves_and_authorizes_typed_routes() {
 #[test]
 fn inbound_preflight_requires_complete_member_bindings() {
     use boomerang_central_rti::compiled::in_memory::{InMemoryReceiver, InMemorySender};
-    let view = CompiledDeploymentView::new(&DEPLOYMENT).unwrap();
-    let bindings = RtiClientBindings::new(&view, MEMBERS[1], IDENTITY).unwrap();
+    let bindings = {
+        let image = DEPLOYMENT;
+        let view = CompiledDeploymentView::new(image).unwrap();
+        RtiClientBindings::new(&view, MEMBERS[1], IDENTITY).unwrap()
+    };
     let (tx, requests) = std::sync::mpsc::channel();
     let (_replies, rx) = std::sync::mpsc::channel();
     let error = CentralRtiClient::connect(
@@ -520,7 +536,7 @@ fn payload_rejects_unknown_and_foreign_route_keys() {
 fn inbound_preflight_rejects_extra_and_foreign_bindings() {
     use boomerang_central_rti::compiled::in_memory::{InMemoryReceiver, InMemorySender};
     for extra in [false, true] {
-        let view = CompiledDeploymentView::new(&DEPLOYMENT).unwrap();
+        let view = CompiledDeploymentView::new(DEPLOYMENT).unwrap();
         let bindings =
             RtiClientBindings::new(&view, if extra { MEMBERS[1] } else { MEMBERS[0] }, IDENTITY)
                 .unwrap();

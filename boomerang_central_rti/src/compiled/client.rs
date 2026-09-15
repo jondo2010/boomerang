@@ -19,8 +19,8 @@ use tinymap::TinySecondaryMap;
 /// with the RTI before any scheduler starts; execution retains only the resolved typed bindings.
 #[derive(Debug)]
 pub struct RtiClientBindings<'a> {
-    /// Validated mechanical coordination projection used only during preflight.
-    pub(crate) image: &'a RtiImage<'a>,
+    /// Validated projection descriptor owned during preflight; backing tables remain borrowed.
+    pub(crate) image: RtiImage<'a>,
     /// Member owning the source and destination bindings being prepared.
     pub(crate) member: FederateIndex,
     /// Compiler-issued identity embedded alongside this image in the artifact.
@@ -42,15 +42,15 @@ impl<'a> RtiClientBindings<'a> {
             return Err(CentralRtiError::new("unknown compiled Federate key"));
         }
         Ok(Self {
-            image,
+            image: image.clone(),
             member,
             identity,
         })
     }
 
-    /// Selects a member from a validated RTI-only projection without retaining remote Enclaves.
+    /// Consumes a validated RTI-only projection to select a member without retaining remote Enclaves.
     pub fn from_image(
-        view: &RtiImageView<'a>,
+        view: RtiImageView<'a>,
         member: FederateIndex,
         identity: CoordinationIdentity,
     ) -> Result<Self, CentralRtiError> {
@@ -58,7 +58,7 @@ impl<'a> RtiClientBindings<'a> {
             return Err(CentralRtiError::new("unknown compiled Federate key"));
         }
         Ok(Self {
-            image: view.image(),
+            image: view.into_image(),
             member,
             identity,
         })

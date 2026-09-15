@@ -18,3 +18,10 @@ tinymap.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+bytes = "1"
+futures-util = { version = "0.3", features = ["sink"] }
+tokio = { version = "1", features = ["rt", "net", "sync", "time", "macros", "io-util"] }
+tokio-util = { version = "0.7", features = ["codec", "rt"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }

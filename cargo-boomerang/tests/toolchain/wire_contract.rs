@@ -13,7 +13,7 @@ fn generated_wire_contract_conformance() {
         hex(WIRE_MAPPING),
         std::env::var("EXPECTED_MAPPING").unwrap()
     );
-    let _view = RtiImageView::new(&COORDINATION_IMAGE, COORDINATION_MEMBERS).unwrap();
+    let _view = RtiImageView::new(COORDINATION_IMAGE, COORDINATION_MEMBERS).unwrap();
     let (route_key, route) = COORDINATION_IMAGE.routes().iter().next().unwrap();
     let member = route.source();
     let contract = wire_contract();

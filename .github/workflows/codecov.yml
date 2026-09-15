@@ -55,7 +55,7 @@ jobs:
               print("\x1f".join(tomllib.load(config)["build"]["rustflags"]))
           PY
           )
-          CARGO_ENCODED_RUSTFLAGS="$fixture_rustflags" cargo llvm-cov --no-clean --no-rustc-wrapper -p cargo-boomerang --test toolchain -- run::generated_monolith_matches_owned_reference_execution_summary --exact
+          CARGO_ENCODED_RUSTFLAGS="$fixture_rustflags" cargo llvm-cov --no-clean --no-rustc-wrapper -p cargo-boomerang --test toolchain -- run::generated_monolith_cli_matches_owned_execution --exact
           # The launcher lives in an independent generated workspace, outside
           # cargo-llvm-cov's object discovery. Include its instrumented helpers.
           launchers=(target/llvm-cov-target/tmp/cargo-boomerang-fixtures/toolchain/boomerang/production/*/artifacts/host/boomerang-static-launcher)

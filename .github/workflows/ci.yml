@@ -97,7 +97,7 @@ jobs:
         if: matrix.os == 'windows-latest' && matrix.toolchain == 'stable'
         run: >-
           cargo test -p cargo-boomerang --test toolchain --
-          run::run_forwards_application_streams_without_reframing --exact
+          run::generated_monolith_cli_matches_owned_execution --exact
 
       - name: test cargo-boomerang toolchain on Ubuntu
         if: matrix.os == 'ubuntu-latest' && matrix.toolchain == 'stable'

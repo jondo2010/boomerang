@@ -3,8 +3,10 @@ use std::{fs, path::Path, path::PathBuf};
 use cargo_boomerang::resolve_workspace;
 use cargo_metadata::MetadataCommand;
 
+mod support;
+
 fn fixture_workspace() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/workspace")
+    support::fixture_workspace()
 }
 
 fn copy_without_lockfile(source: &Path, destination: &Path) {
@@ -25,6 +27,26 @@ fn copy_without_lockfile(source: &Path, destination: &Path) {
 
 #[test]
 fn resolution_returns_exact_package_ids_and_rejects_nonmembers() {
+    let _manifest = support::fixture_variant("resolution", "production", |deployment| {
+        deployment["federates"]["host"]
+            .as_table_mut()
+            .unwrap()
+            .insert("target".into(), "x86_64-unknown-linux-gnu".into());
+        deployment["federates"]["host"]
+            .as_table_mut()
+            .unwrap()
+            .insert("target-json".into(), "targets/host.json".into());
+        deployment["federates"]["host"]
+            .as_table_mut()
+            .unwrap()
+            .insert("cargo-config".into(), ".cargo/host.toml".into());
+    });
+    let _outside = support::fixture_variant("outside-member", "production", |deployment| {
+        deployment.as_table_mut().unwrap().insert(
+            "bindings".into(),
+            toml::toml! { "vehicle/sensor" = { package = "outside-member" } }.into(),
+        );
+    });
     let workspace = fixture_workspace();
     let mut metadata = MetadataCommand::new();
     metadata

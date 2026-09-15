@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use super::support;
 
 fn fixture_workspace() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/workspace")
+    support::fixture_workspace()
 }
 
 #[test]
@@ -11,9 +11,12 @@ fn check_runs_complete_host_analysis_without_building_payloads() {
     let _guard = support::toolchain_lock();
     let target = support::toolchain_target();
     support::reset_deployment_output(&target, "production");
+    let current = tempfile::tempdir().unwrap();
     let result = std::process::Command::new(env!("CARGO_BIN_EXE_cargo-boomerang"))
-        .args(["boomerang", "check", "--deployment", "production"])
-        .current_dir(fixture_workspace())
+        .args(["boomerang", "--workspace"])
+        .arg(fixture_workspace())
+        .args(["check", "--deployment", "production"])
+        .current_dir(current.path())
         .env("CARGO_TARGET_DIR", target.as_path())
         .output()
         .unwrap();
@@ -74,37 +77,19 @@ fn check_runs_complete_host_analysis_without_building_payloads() {
 }
 
 #[test]
-fn check_accepts_an_explicit_workspace_outside_the_current_directory() {
-    let _guard = support::toolchain_lock();
-    let current = tempfile::tempdir().unwrap();
-    let target = support::toolchain_target();
-    support::reset_deployment_output(&target, "production");
-    let result = std::process::Command::new(env!("CARGO_BIN_EXE_cargo-boomerang"))
-        .arg("boomerang")
-        .arg("--workspace")
-        .arg(fixture_workspace())
-        .args(["check", "--deployment", "production"])
-        .current_dir(current.path())
-        .env("CARGO_TARGET_DIR", target.as_path())
-        .output()
-        .unwrap();
-
-    assert!(
-        result.status.success(),
-        "{}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-    assert!(target
-        .as_path()
-        .join("boomerang/production/check.json")
-        .exists());
-}
-
-#[test]
 fn descriptor_failure_reports_actionable_diagnostic_before_cargo_summary() {
     let _guard = support::toolchain_lock();
     let target = support::toolchain_target();
     support::reset_deployment_output(&target, "broken-descriptor");
+    let _manifest = support::fixture_variant("broken-descriptor", "production", |deployment| {
+        deployment["bindings"]["controller"]
+            .as_table_mut()
+            .unwrap()
+            .insert(
+                "features".into(),
+                toml::Value::try_from(["broken-descriptor"]).unwrap(),
+            );
+    });
     let result = std::process::Command::new(env!("CARGO_BIN_EXE_cargo-boomerang"))
         .args(["boomerang", "check", "--deployment", "broken-descriptor"])
         .current_dir(fixture_workspace())

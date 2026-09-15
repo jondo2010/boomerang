@@ -2,7 +2,7 @@
 use super::*;
 use boomerang_runtime::image::{
     BoundaryId, CodecCapabilityIndex, CodecPolicy, FlowIndex, RtiDependencyImage, RtiMemberImage,
-    RtiRouteImage, SliceRange, TransportCapabilityIndex, TransportPolicy,
+    RtiRouteImage, SliceRange, TinyMapView, TransportCapabilityIndex, TransportPolicy,
 };
 
 const A: FederateIndex = FederateIndex::new(0);

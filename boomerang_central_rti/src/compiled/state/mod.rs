@@ -1,8 +1,7 @@
 use super::*;
 use boomerang_runtime::image::{
-    BoundaryFailurePolicy, CompiledDeploymentView, CoordinationProjection, FederateImage,
-    IdentityTable, RecoveryPolicy, RtiImage, RtiImageView, SecurityPolicy, TimingPolicy,
-    TinyMapView,
+    BoundaryFailurePolicy, IdentityTable, RecoveryPolicy, RtiImage, RtiImageView, SecurityPolicy,
+    TimingPolicy,
 };
 use std::collections::BTreeSet;
 use tinymap::TinySecondaryMap;
@@ -43,17 +42,9 @@ impl MemberState {
     }
 }
 
-/// Borrowed stable identities supplied by either validated preflight representation.
-enum MemberIdentities<'a> {
-    /// Existing full-deployment preflight representation.
-    Deployment(&'a TinyMapView<'a, FederateIndex, FederateImage<'a>>),
-    /// Standalone RTI artifact's stable names in the same compiled key domain.
-    Projection(IdentityTable<'a, FederateIndex>),
-}
-
 /// Central coordination state borrowing the canonical immutable RTI projection.
 ///
-/// Construction accepts either a validated complete deployment or a standalone RTI image.
+/// Construction accepts a validated RTI-only projection and its canonical member names.
 /// Only stable member identities and the RTI projection are retained; no Enclave scheduler
 /// image is stored or analyzed. The I/O owner binds each stable member identity once,
 /// dispatches ordered requests, and sends returned deliveries in order. Transport failure
@@ -61,8 +52,8 @@ enum MemberIdentities<'a> {
 pub struct CompiledRti<'a> {
     /// Mechanical precomputed dependency and route projection.
     image: &'a RtiImage<'a>,
-    /// Stable member descriptors in the same typed domain as the RTI image.
-    members: MemberIdentities<'a>,
+    /// Stable member names in the same typed domain as the RTI image.
+    members: IdentityTable<'a, FederateIndex>,
     /// Mutable data for every existing member key; the image owns the key domain.
     states: TinySecondaryMap<FederateIndex, MemberState>,
     /// Shared immutable coordination identity.
@@ -71,41 +62,12 @@ pub struct CompiledRti<'a> {
     failure: Option<String>,
 }
 impl<'a> CompiledRti<'a> {
-    /// Materializes runtime state without rebuilding reachability or delay analysis.
-    pub fn new(
-        view: &CompiledDeploymentView<'a>,
-        identity: CoordinationIdentity,
-    ) -> Result<Self, CentralRtiError> {
-        let CoordinationProjection::CentralRti(image) = view.coordination() else {
-            return Err(CentralRtiError::new(
-                "compiled deployment does not select central-rti",
-            ));
-        };
-        Self::build_with_identity(
-            image,
-            MemberIdentities::Deployment(view.federates()),
-            identity,
-        )
-    }
-
     /// Creates coordination state from a validated RTI-only projection without Enclave images.
     pub fn from_image(
         view: &RtiImageView<'a>,
         identity: CoordinationIdentity,
     ) -> Result<Self, CentralRtiError> {
-        Self::build_with_identity(
-            view.image(),
-            MemberIdentities::Projection(view.members()),
-            identity,
-        )
-    }
-
-    /// Materializes only mutable state while retaining the original immutable identity representation.
-    fn build_with_identity(
-        image: &'a RtiImage<'a>,
-        members: MemberIdentities<'a>,
-        identity: CoordinationIdentity,
-    ) -> Result<Self, CentralRtiError> {
+        let image = view.image();
         let mut states = TinySecondaryMap::with_capacity(image.members().len());
         for (key, _) in image.members().iter() {
             if image.member_recovery_policy(key) != RecoveryPolicy::FailStop {
@@ -123,7 +85,7 @@ impl<'a> CompiledRti<'a> {
         }
         Ok(Self {
             image,
-            members,
+            members: view.members(),
             states,
             identity,
             failure: None,
@@ -139,10 +101,7 @@ impl<'a> CompiledRti<'a> {
     }
     /// Returns the stable identity used by transport admission and diagnostics.
     pub fn member_identity(&self, member: FederateIndex) -> &str {
-        match &self.members {
-            MemberIdentities::Deployment(members) => members[member].id().as_str(),
-            MemberIdentities::Projection(members) => members[member],
-        }
+        self.members[member]
     }
     /// Returns the exact compiled membership count for bounded transport admission.
     pub fn member_count(&self) -> usize {

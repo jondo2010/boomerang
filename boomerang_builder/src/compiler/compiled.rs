@@ -660,7 +660,7 @@ impl OwnedCompiledDeployment {
     /// Validates the complete target-facing deployment hierarchy.
     pub fn validate(&self) -> Result<(), CompiledDeploymentValidationError> {
         self.with_image(|image| {
-            crate::runtime::image::CompiledDeploymentView::new(&image)
+            crate::runtime::image::CompiledDeploymentView::new(image)
                 .map(|_| ())
                 .map_err(CompiledDeploymentValidationError::from_image)
         })

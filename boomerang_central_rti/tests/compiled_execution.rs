@@ -109,7 +109,7 @@ fn rti_view(view: &CompiledDeploymentView<'static>) -> RtiImageView<'static> {
 /// Runs the real scheduler/backend/RTI path with transport confined to test support.
 fn execute_pair(mismatch: bool, fail_rti: bool, fail_scheduler: bool) {
     bounded(move || {
-        let view = CompiledDeploymentView::new(&DEPLOYMENT).unwrap();
+        let view = CompiledDeploymentView::new(DEPLOYMENT.clone()).unwrap();
         let rti = CompiledRti::from_image(rti_view(&view), IDENTITY).unwrap();
         let source_rti = RtiClientBindings::new(&view, MEMBERS[0], IDENTITY).unwrap();
         let sink_rti = RtiClientBindings::new(
@@ -247,7 +247,7 @@ fn rti_failure_releases_both_compiled_federates() {
 
 /// Starts a pure RTI without a transport for protocol-boundary assertions.
 fn admitted_rti() -> CompiledRti<'static> {
-    let view = CompiledDeploymentView::new(&DEPLOYMENT).unwrap();
+    let view = CompiledDeploymentView::new(DEPLOYMENT.clone()).unwrap();
     let mut rti = CompiledRti::from_image(rti_view(&view), IDENTITY).unwrap();
     for member in MEMBERS {
         rti.handle(member, RtiRequest::Hello { identity: IDENTITY });
@@ -446,7 +446,7 @@ fn publish(
 #[test]
 fn outbound_preflight_resolves_and_authorizes_typed_routes() {
     use boomerang_central_rti::compiled::in_memory::InMemorySender;
-    let view = CompiledDeploymentView::new(&DEPLOYMENT).unwrap();
+    let view = CompiledDeploymentView::new(DEPLOYMENT.clone()).unwrap();
     assert!(RtiClientBindings::new(&view, FederateIndex::new(9), IDENTITY).is_err());
     assert!(
         RtiClientBindings::from_image(rti_view(&view), FederateIndex::new(9), IDENTITY).is_err()
@@ -479,8 +479,11 @@ fn outbound_preflight_resolves_and_authorizes_typed_routes() {
 #[test]
 fn inbound_preflight_requires_complete_member_bindings() {
     use boomerang_central_rti::compiled::in_memory::{InMemoryReceiver, InMemorySender};
-    let view = CompiledDeploymentView::new(&DEPLOYMENT).unwrap();
-    let bindings = RtiClientBindings::new(&view, MEMBERS[1], IDENTITY).unwrap();
+    let bindings = {
+        let image = DEPLOYMENT.clone();
+        let view = CompiledDeploymentView::new(image).unwrap();
+        RtiClientBindings::new(&view, MEMBERS[1], IDENTITY).unwrap()
+    };
     let (tx, requests) = std::sync::mpsc::channel();
     let (_replies, rx) = std::sync::mpsc::channel();
     let error = CentralRtiClient::connect(
@@ -533,7 +536,7 @@ fn payload_rejects_unknown_and_foreign_route_keys() {
 fn inbound_preflight_rejects_extra_and_foreign_bindings() {
     use boomerang_central_rti::compiled::in_memory::{InMemoryReceiver, InMemorySender};
     for extra in [false, true] {
-        let view = CompiledDeploymentView::new(&DEPLOYMENT).unwrap();
+        let view = CompiledDeploymentView::new(DEPLOYMENT.clone()).unwrap();
         let bindings =
             RtiClientBindings::new(&view, if extra { MEMBERS[1] } else { MEMBERS[0] }, IDENTITY)
                 .unwrap();

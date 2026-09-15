@@ -700,7 +700,7 @@ fn preflight_owned_federate<'image>(
     federate: FederateIndex,
     bindings: &FederateBindings<'_>,
 ) -> Result<PreparedFederate<'image>, ExecuteOwnedFederateError> {
-    CompiledDeploymentView::new(deployment).map_err(|error| {
+    CompiledDeploymentView::new(deployment.clone()).map_err(|error| {
         ExecuteOwnedFederateError::ImageValidation {
             message: error.to_string(),
         }

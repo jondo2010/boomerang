@@ -174,7 +174,7 @@ pub fn owned_reference_summary(deployment_name: &str) -> Value {
     let selected = FederateIndex::new(0);
     let execution = compiled.with_image(|image| {
         execute_owned_federate(
-            &image,
+            image,
             selected,
             owned_reference_payloads::bindings(),
             Config::default(),

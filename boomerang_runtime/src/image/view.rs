@@ -258,6 +258,11 @@ impl<'a> CompiledDeploymentView<'a> {
         self.image.federates
     }
 
+    /// Returns the complete Enclave table with its original deployment-wide keys.
+    pub const fn enclaves(&self) -> TinyMapView<'a, EnclaveIndex, EnclaveImage<'a>> {
+        self.image.enclaves
+    }
+
     /// Returns a validated Federate descriptor independent of this aggregate view.
     pub fn federate(&self, key: FederateIndex) -> FederateImageView<'a> {
         FederateImageView {

@@ -31,7 +31,7 @@ fn owned_federate_preflight_rejects_before_initializers() {
     };
     ROUTED_INITIALIZATIONS.store(0, Ordering::SeqCst);
     let error = execute_owned_federate(
-        &ROUTED_DEPLOYMENT,
+        ROUTED_DEPLOYMENT,
         FederateIndex::new(0),
         FederateBindings::new().bind_enclave(EnclaveIndex::new(0), counted_source_bindings()),
         Config::default(),
@@ -52,7 +52,7 @@ fn owned_federate_preflight_rejects_before_initializers() {
         ..ROUTED_DEPLOYMENT
     };
     let error = execute_owned_federate(
-        &unpaired,
+        unpaired,
         FederateIndex::new(0),
         FederateBindings::new().bind_enclave(EnclaveIndex::new(0), counted_source_bindings()),
         Config::default(),
@@ -65,7 +65,7 @@ fn owned_federate_preflight_rejects_before_initializers() {
     assert_eq!(ROUTED_INITIALIZATIONS.load(Ordering::SeqCst), 0);
 
     let error = execute_owned_federate(
-        &ROUTED_DEPLOYMENT,
+        ROUTED_DEPLOYMENT,
         FederateIndex::new(0),
         FederateBindings::new()
             .bind_enclave(EnclaveIndex::new(0), counted_source_bindings())
@@ -118,7 +118,7 @@ fn owned_federate_preflight_rejects_before_initializers() {
             .bind_port(BindingSlotIndex::new(2), PayloadType::<Collision>::new())
     };
     let error = execute_owned_federate(
-        &ROUTED_DEPLOYMENT,
+        ROUTED_DEPLOYMENT,
         FederateIndex::new(0),
         bindings
             .bind_enclave(EnclaveIndex::new(0), source)
@@ -182,7 +182,7 @@ fn owned_federate_preflight_rejects_before_initializers() {
         ..ROUTED_DEPLOYMENT
     };
     let error = execute_owned_federate(
-        &cross,
+        cross,
         FederateIndex::new(0),
         FederateBindings::new().bind_enclave(EnclaveIndex::new(0), counted_source_bindings()),
         Config::default(),
@@ -234,7 +234,7 @@ fn owned_federate_rejects_enclave_without_root_reactor() {
     };
 
     let error = execute_owned_federate(
-        &deployment,
+        deployment,
         FederateIndex::new(0),
         FederateBindings::new().bind_enclave(EnclaveIndex::new(0), EnclaveBindings::new()),
         Config::default(),

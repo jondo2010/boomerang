@@ -58,7 +58,7 @@ fn payload(value: u32, nanos: i128) -> RtiReply {
 fn execute_script(
     script: Arc<Mutex<Script>>,
 ) -> Result<boomerang_runtime::FederateExecution, boomerang_runtime::ExecuteOwnedFederateError> {
-    let view = CompiledDeploymentView::new(DEPLOYMENT.clone()).unwrap();
+    let view = CompiledDeploymentView::new(DEPLOYMENT).unwrap();
     let bindings = RtiClientBindings::new(&view, MEMBERS[1], IDENTITY).unwrap();
     let decoder = script.clone();
     execute_owned_federate_with_backend(

@@ -186,7 +186,8 @@ pub(super) mod tests {
         );
         (client.unwrap(), server.unwrap().0)
     }
-    fn frame(body: &[u8]) -> Vec<u8> {
+    /// Frames arbitrary bytes for transport tests without imposing message semantics.
+    pub(in super::super) fn frame(body: &[u8]) -> Vec<u8> {
         let mut result = u32::try_from(body.len()).unwrap().to_be_bytes().to_vec();
         result.extend_from_slice(body);
         result

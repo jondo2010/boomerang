@@ -63,12 +63,32 @@ fn receive(
     .boxed_local()
 }
 
+/// Owns the compiled membership's TCP admission, task supervision, and bounded shutdown.
+struct Server<'contract, 'wire, 'image> {
+    /// Listener accepting only the compiled roster's bounded number of connections.
+    listener: AsyncListener,
+    /// Coordinator state borrowing its immutable compiled image.
+    rti: CompiledRti<'image>,
+    /// External immutable contract also borrowed by admitted peer sessions.
+    contract: &'contract WireContract<'wire>,
+    /// Admitted sessions indexed by their original compiled member keys.
+    peers: TinySecondaryMap<FederateIndex, Peer<'contract, 'wire>>,
+    /// At most one owned reader future per pending or admitted connection.
+    inputs: Inputs,
+    /// Independently driven socket writers, joined before server completion.
+    writers: JoinSet<Result<(), CentralRtiError>>,
+    /// Recovers read halves for draining when dispatch ends.
+    cancel: CancellationToken,
+    /// Bound on admission, partial frames, queued writes, and terminal draining.
+    timeout: Duration,
+}
+
 /// Serves the compiled membership until coordinated stop or terminal failure.
 /// Admission, incomplete frames, queued writes and shutdown have bounded deadlines;
 /// a fully admitted connection may remain idle indefinitely.
 pub fn serve(
     listener: TcpListener,
-    mut rti: CompiledRti<'_>,
+    rti: CompiledRti<'_>,
     contract: WireContract<'_>,
     timeout: Duration,
 ) -> Result<(), CentralRtiError> {
@@ -77,34 +97,37 @@ pub fn serve(
     }
     listener.set_nonblocking(true).map_err(failure)?;
     runtime()?.block_on(async {
-        let listener = AsyncListener::from_std(listener).map_err(failure)?;
-        let mut peers = TinySecondaryMap::with_capacity(rti.member_count());
-        let mut inputs = Inputs::new();
-        let mut writers = JoinSet::new();
-        let cancel = CancellationToken::new();
-        let result = run(
-            &listener,
-            &mut rti,
-            &contract,
-            &mut peers,
-            &mut inputs,
-            &mut writers,
-            &cancel,
+        Server {
+            listener: AsyncListener::from_std(listener).map_err(failure)?,
+            peers: TinySecondaryMap::with_capacity(rti.member_count()),
+            rti,
+            contract: &contract,
+            inputs: Inputs::new(),
+            writers: JoinSet::new(),
+            cancel: CancellationToken::new(),
             timeout,
-        )
-        .await;
-        let deadline = Deadline::now() + timeout;
-        cancel.cancel();
+        }
+        .serve()
+        .await
+    })
+}
+
+impl Server<'_, '_, '_> {
+    /// Runs dispatch, then consumes every socket owner within one shared shutdown deadline.
+    async fn serve(mut self) -> Result<(), CentralRtiError> {
+        let result = self.run().await;
+        let deadline = Deadline::now() + self.timeout;
+        self.cancel.cancel();
         let mut drains = JoinSet::new();
-        while let Some(input) = inputs.next().await {
+        while let Some(input) = self.inputs.next().await {
             drains.spawn(async move {
                 let _ = input.reader.drain(deadline).await;
             });
         }
         let mut terminal = FuturesUnordered::new();
         if let Err(error) = &result {
-            for delivery in rti.abort(error.to_string()) {
-                if let Some(peer) = peers.get_mut(delivery.member) {
+            for delivery in self.rti.abort(error.to_string()) {
+                if let Some(peer) = self.peers.get_mut(delivery.member) {
                     if let Ok((bytes, class)) = peer.encode(&delivery.reply) {
                         let output = peer.output.clone();
                         terminal.push(async move {
@@ -117,8 +140,8 @@ pub fn serve(
             }
         }
         while terminal.next().await.is_some() {}
-        drop(peers);
-        let flushed = finish_writers(&mut writers, deadline).await;
+        drop(self.peers);
+        let flushed = finish_writers(&mut self.writers, deadline).await;
         // Drain unread input until peer EOF without extending the shared shutdown budget.
         while !drains.is_empty() {
             if tokio::time::timeout_at(deadline, drains.join_next())
@@ -131,88 +154,79 @@ pub fn serve(
         drains.abort_all();
         while drains.join_next().await.is_some() {}
         result.and(flushed)
-    })
-}
-
-/// Coordinates admission, receive, dispatch and bounded writer transfers.
-#[allow(clippy::too_many_arguments)]
-async fn run<'a, 'image>(
-    listener: &AsyncListener,
-    rti: &mut CompiledRti<'_>,
-    contract: &'a WireContract<'image>,
-    peers: &mut TinySecondaryMap<FederateIndex, Peer<'a, 'image>>,
-    inputs: &mut Inputs,
-    writers: &mut JoinSet<Result<(), CentralRtiError>>,
-    cancel: &CancellationToken,
-    timeout: Duration,
-) -> Result<(), CentralRtiError> {
-    let admission = Deadline::now() + timeout;
-    let mut pending = 0;
-    while !rti.is_finished() {
-        let deliveries = tokio::select! {
-            _ = tokio::time::sleep_until(admission), if peers.len() < rti.member_count() => {
-                return Err(failure("hosted admission timed out"));
-            }
-            ended = writers.join_next(), if !writers.is_empty() => {
-                return Err(writer_stopped(ended.expect("nonempty writer set")));
-            }
-            accepted = listener.accept() => {
-                let (stream, _) = accepted.map_err(failure)?;
-                if peers.len() + pending >= rti.member_count() {
-                    return Err(failure("unexpected or duplicate hosted member connection"));
-                }
-                let (reader, writer) = io::split(stream, timeout);
-                inputs.push(receive(None, reader, Some(writer), cancel.clone()));
-                pending += 1;
-                Vec::new()
-            }
-            input = inputs.next(), if !inputs.is_empty() => {
-                let input = input.expect("nonempty reader set");
-                let Some(frame) = input.frame else { return Err(failure("hosted server canceled")); };
-                if let Some(member) = input.member {
-                    let peer = peers.get_mut(member).expect("reader has admitted member");
-                    if peer.stopped { continue; }
-                    let frame = frame?;
-                    let request = request_from(peer.session.decode(&frame).map_err(HostedError::from)?)?;
-                    let deliveries = dispatch(rti, member, request)?;
-                    inputs.push(receive(Some(member), input.reader, None, cancel.clone()));
-                    deliveries
-                } else {
-                    let frame = frame?;
-                    let hello = canonical::decode_handshake(&frame).map_err(HostedError::from)?;
-                    let member = rti.resolve_member(hello.member)?;
-                    if peers.contains_key(member) {
-                        return Err(failure("duplicate hosted member binding"));
-                    }
-                    let mut session = WireSession::new(contract, member).map_err(HostedError::from)?;
-                    session.accept_handshake(&frame).map_err(HostedError::from)?;
-                    let (output, receiver) = channel::bounded();
-                    // Queue the exact echo before any coordinator reply for this member.
-                    output.send(frame.to_vec(), Class::Coordination, admission)?;
-                    writers.spawn(writer_loop(input.writer.expect("pending writer"), receiver, timeout));
-                    peers.insert(member, Peer { output, session, stopped: false });
-                    pending -= 1;
-                    inputs.push(receive(Some(member), input.reader, None, cancel.clone()));
-                    dispatch(rti, member, RtiRequest::Hello { identity: hello.coordination })?
-                }
-            }
-        };
-        for delivery in deliveries {
-            let peer = peers
-                .get_mut(delivery.member)
-                .ok_or_else(|| failure("RTI delivery has no bound hosted member"))?;
-            let (bytes, class) = peer.encode(&delivery.reply)?;
-            transfer(
-                &peer.output,
-                bytes,
-                class,
-                Deadline::now() + timeout,
-                writers,
-            )
-            .await?;
-        }
     }
-    Ok(())
+
+    /// Coordinates admission, receive, dispatch and bounded writer transfers.
+    async fn run(&mut self) -> Result<(), CentralRtiError> {
+        let admission = Deadline::now() + self.timeout;
+        let mut pending = 0;
+        while !self.rti.is_finished() {
+            let deliveries = tokio::select! {
+                _ = tokio::time::sleep_until(admission), if self.peers.len() < self.rti.member_count() => {
+                    return Err(failure("hosted admission timed out"));
+                }
+                ended = self.writers.join_next(), if !self.writers.is_empty() => {
+                    return Err(writer_stopped(ended.expect("nonempty writer set")));
+                }
+                accepted = self.listener.accept() => {
+                    let (stream, _) = accepted.map_err(failure)?;
+                    if self.peers.len() + pending >= self.rti.member_count() {
+                        return Err(failure("unexpected or duplicate hosted member connection"));
+                    }
+                    let (reader, writer) = io::split(stream, self.timeout);
+                    self.inputs.push(receive(None, reader, Some(writer), self.cancel.clone()));
+                    pending += 1;
+                    Vec::new()
+                }
+                input = self.inputs.next(), if !self.inputs.is_empty() => {
+                    let input = input.expect("nonempty reader set");
+                    let Some(frame) = input.frame else { return Err(failure("hosted server canceled")); };
+                    if let Some(member) = input.member {
+                        let peer = self.peers.get_mut(member).expect("reader has admitted member");
+                        if peer.stopped { continue; }
+                        let frame = frame?;
+                        let request = request_from(peer.session.decode(&frame).map_err(HostedError::from)?)?;
+                        let deliveries = dispatch(&mut self.rti, member, request)?;
+                        self.inputs.push(receive(Some(member), input.reader, None, self.cancel.clone()));
+                        deliveries
+                    } else {
+                        let frame = frame?;
+                        let hello = canonical::decode_handshake(&frame).map_err(HostedError::from)?;
+                        let member = self.rti.resolve_member(hello.member)?;
+                        if self.peers.contains_key(member) {
+                            return Err(failure("duplicate hosted member binding"));
+                        }
+                        let mut session = WireSession::new(self.contract, member).map_err(HostedError::from)?;
+                        session.accept_handshake(&frame).map_err(HostedError::from)?;
+                        let (output, receiver) = channel::bounded();
+                        // Queue the exact echo before any coordinator reply for this member.
+                        output.send(frame.to_vec(), Class::Coordination, admission)?;
+                        self.writers.spawn(writer_loop(input.writer.expect("pending writer"), receiver, self.timeout));
+                        self.peers.insert(member, Peer { output, session, stopped: false });
+                        pending -= 1;
+                        self.inputs.push(receive(Some(member), input.reader, None, self.cancel.clone()));
+                        dispatch(&mut self.rti, member, RtiRequest::Hello { identity: hello.coordination })?
+                    }
+                }
+            };
+            for delivery in deliveries {
+                let peer = self
+                    .peers
+                    .get_mut(delivery.member)
+                    .ok_or_else(|| failure("RTI delivery has no bound hosted member"))?;
+                let (bytes, class) = peer.encode(&delivery.reply)?;
+                transfer(
+                    &peer.output,
+                    bytes,
+                    class,
+                    Deadline::now() + self.timeout,
+                    &mut self.writers,
+                )
+                .await?;
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Transfers one frame without treating a temporarily busy async consumer as failure.
@@ -274,29 +288,16 @@ async fn finish_writers(
 
 #[cfg(test)]
 mod tests {
-    use super::super::io::tests::sockets;
+    use super::super::io::tests::{frame, sockets};
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    /// A complete canonical frame used to verify exact output bytes.
-    fn frame() -> Vec<u8> {
-        let mut frame = vec![0; 256];
-        let contract = super::super::tests::test_contract();
-        let length = canonical::encode_handshake(
-            &contract.handshake(FederateIndex::new(0)).unwrap(),
-            &mut frame,
-        )
-        .unwrap();
-        frame.truncate(length);
-        frame
-    }
 
     #[tokio::test]
     async fn terminal_flush_services_healthy_peers_after_another_write_fails() {
         let (mut broken, _remote) = sockets().await;
         broken.shutdown().await.unwrap();
         let (healthy, mut remote) = sockets().await;
-        let frame = frame();
+        let frame = frame(b"coordination");
         let timeout = Duration::from_secs(1);
         let deadline = Deadline::now() + timeout;
         let mut writers = JoinSet::new();
@@ -323,7 +324,7 @@ mod tests {
     #[tokio::test]
     async fn async_server_transfer_waits_for_a_busy_writer() {
         let (socket, mut remote) = sockets().await;
-        let frame = frame();
+        let frame = frame(b"coordination");
         let timeout = Duration::from_secs(1);
         let deadline = Deadline::now() + timeout;
         let (_, writer) = io::split(socket, timeout);

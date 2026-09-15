@@ -392,7 +392,7 @@ fn closing_drain_joins_within_one_deadline_when_the_peer_does_not_read() {
 }
 
 /// Uses the same borrowed typed domain as the standalone test coordinator.
-pub(super) fn test_contract() -> WireContract<'static> {
+fn test_contract() -> WireContract<'static> {
     test_contract_routes(&[])
 }
 

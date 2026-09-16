@@ -85,8 +85,30 @@ jobs:
       - name: prime generated-workspace dependency cache
         run: cargo fetch
 
-      - name: test workspace
-        run: cargo test --workspace --verbose
+      - name: test workspace except cargo-boomerang
+        run: cargo test --workspace --exclude cargo-boomerang --verbose
+
+      - name: test cargo-boomerang fast targets
+        run: >-
+          cargo test -p cargo-boomerang --lib --bin cargo-boomerang
+          --test manifest --test workspace --verbose
+
+      # Generated builds dominate runtime (23 minutes on Windows). Exercise the
+      # full suite once, and keep the CLI/owned-execution smoke test portable.
+      - name: test cargo-boomerang toolchain
+        if: matrix.os == 'ubuntu-latest' && matrix.toolchain == 'stable'
+        run: cargo test -p cargo-boomerang --test toolchain -- --test-threads=1
+
+      - name: smoke test cargo-boomerang toolchain
+        if: matrix.os != 'ubuntu-latest' || matrix.toolchain != 'stable'
+        run: >-
+          cargo test -p cargo-boomerang --test toolchain --
+          run::generated_monolith_cli_matches_owned_execution --exact
+
+      - name: discard disposable fixture builds before caching
+        shell: bash
+        # Each test binary recreates these directories, so restoring them cannot help.
+        run: rm -rf target/tmp/cargo-boomerang-fixtures
 
   miri:
     runs-on: ubuntu-latest

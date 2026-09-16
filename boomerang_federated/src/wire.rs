@@ -241,6 +241,12 @@ pub enum Reply<R, P, D> {
         /// Original terminal failure diagnostic.
         message: D,
     },
+    /// Downstream next-event bound through which redundant NET reports may be suppressed.
+    /// This is not execution authority; an accepted grant must also cover the candidate.
+    Dnet {
+        /// Latest source tag that cannot affect downstream progress.
+        tag: WireTag,
+    },
 }
 
 impl<R: Copy, P, D> Request<R, P, D> {
@@ -305,6 +311,7 @@ impl<R: Copy, P, D> Reply<R, P, D> {
         text: impl Fn(&'a D) -> T,
     ) -> Result<Reply<S, Q, T>, E> {
         Ok(match self {
+            Self::Dnet { tag } => Reply::Dnet { tag: *tag },
             Self::Started => Reply::Started,
             Self::Grant { revision, tag } => Reply::Grant {
                 revision: *revision,

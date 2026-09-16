@@ -12,4 +12,6 @@ boomerang = { workspace = true }
 snake-game = { path = "game" }
 snake-keyboard = { path = "keyboard" }
 
-crossterm = { version = "0.29" }
+[dev-dependencies]
+serde_json.workspace = true
+boomerang_builder = { workspace = true, features = ["host-interchange"] }

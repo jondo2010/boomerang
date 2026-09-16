@@ -91,7 +91,7 @@ pub enum TopologyBuildError {
 }
 
 /// Stages structural declarations by stable identity before validation.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ApplicationTopologyBuilder {
     /// Stable identity of the application being assembled.
     application_id: ApplicationId,

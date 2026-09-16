@@ -9,6 +9,8 @@ use syn::{
 
 use crate::util::convert_from_snake_case;
 
+mod topology;
+
 /// Top-level arguments for the #[reactor] macro
 #[derive(attribute_derive::FromAttr)]
 pub struct ReactorArgs {
@@ -1638,6 +1640,11 @@ impl ToTokens for ArgsModel {
             return;
         }
         let descriptor_output = descriptor_output(&self.0, &self.1);
+        let topology_output = if self.2 {
+            topology::output(&self.0, &self.1)
+        } else {
+            TokenStream::new()
+        };
         let conflict_output = quote! {
             compile_error!("__boomerang_descriptor and __boomerang_payload cannot both be enabled");
         };
@@ -2120,7 +2127,7 @@ impl ToTokens for ArgsModel {
                 pub(super) use payload;
             }
 
-            #facet_module::hosted! { #output }
+            #facet_module::hosted! { #output #topology_output }
             #facet_module::descriptor! { #descriptor_output }
             #facet_module::payload! { #payload_output }
             #facet_module::conflict! { #conflict_output }

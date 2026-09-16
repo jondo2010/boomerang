@@ -1,0 +1,422 @@
+{
+  "application_id": "application/keyboard/snake",
+  "components": [
+    {
+      "id": "keyboard",
+      "contract": "snake.keyboard",
+      "contract_version": 1
+    },
+    {
+      "id": "snake",
+      "contract": "snake.game",
+      "contract_version": 1
+    }
+  ],
+  "reactors": [
+    {
+      "id": "keyboard",
+      "component": "keyboard",
+      "parent": null,
+      "bank": null,
+      "enclave": "keyboard",
+      "placement_group": "placement/keyboard",
+      "scope_mode": null
+    },
+    {
+      "id": "snake",
+      "component": "snake",
+      "parent": null,
+      "bank": null,
+      "enclave": "keyboard",
+      "placement_group": "placement/keyboard",
+      "scope_mode": null
+    }
+  ],
+  "actions": [
+    {
+      "id": "keyboard/__shutdown",
+      "reactor": "keyboard",
+      "kind": "Shutdown",
+      "declaration_position": 1,
+      "mode": null
+    },
+    {
+      "id": "keyboard/__startup",
+      "reactor": "keyboard",
+      "kind": "Startup",
+      "declaration_position": 0,
+      "mode": null
+    },
+    {
+      "id": "keyboard/key_press",
+      "reactor": "keyboard",
+      "kind": {
+        "Physical": {
+          "minimum_delay": [
+            0,
+            10000000
+          ]
+        }
+      },
+      "declaration_position": 2,
+      "mode": null
+    },
+    {
+      "id": "snake/__shutdown",
+      "reactor": "snake",
+      "kind": "Shutdown",
+      "declaration_position": 1,
+      "mode": null
+    },
+    {
+      "id": "snake/__startup",
+      "reactor": "snake",
+      "kind": "Startup",
+      "declaration_position": 0,
+      "mode": null
+    },
+    {
+      "id": "snake/add_more_food",
+      "reactor": "snake",
+      "kind": {
+        "Logical": {
+          "minimum_delay": null
+        }
+      },
+      "declaration_position": 4,
+      "mode": null
+    },
+    {
+      "id": "snake/manually_add_more_food",
+      "reactor": "snake",
+      "kind": {
+        "Logical": {
+          "minimum_delay": null
+        }
+      },
+      "declaration_position": 3,
+      "mode": null
+    },
+    {
+      "id": "snake/screen_refresh",
+      "reactor": "snake",
+      "kind": {
+        "Logical": {
+          "minimum_delay": null
+        }
+      },
+      "declaration_position": 2,
+      "mode": null
+    }
+  ],
+  "ports": [
+    {
+      "id": "keyboard/key",
+      "reactor": "keyboard",
+      "direction": "Output",
+      "bank": null,
+      "declaration_position": 0,
+      "mode": null
+    },
+    {
+      "id": "keyboard/ready",
+      "reactor": "keyboard",
+      "direction": "Output",
+      "bank": null,
+      "declaration_position": 1,
+      "mode": null
+    },
+    {
+      "id": "snake/key",
+      "reactor": "snake",
+      "direction": "Input",
+      "bank": null,
+      "declaration_position": 0,
+      "mode": null
+    },
+    {
+      "id": "snake/ready",
+      "reactor": "snake",
+      "direction": "Input",
+      "bank": null,
+      "declaration_position": 1,
+      "mode": null
+    }
+  ],
+  "reactions": [
+    {
+      "id": "keyboard/KeyPress",
+      "reactor": "keyboard",
+      "relations": [
+        {
+          "target": {
+            "Action": "keyboard/key_press"
+          },
+          "flags": 3,
+          "declaration_position": 0
+        },
+        {
+          "target": {
+            "Port": "keyboard/key"
+          },
+          "flags": 4,
+          "declaration_position": 0
+        }
+      ],
+      "options": {
+        "mode": null,
+        "enabled_modes": [],
+        "reset_modes": [],
+        "transition": null
+      }
+    },
+    {
+      "id": "keyboard/Shutdown",
+      "reactor": "keyboard",
+      "relations": [
+        {
+          "target": {
+            "Action": "keyboard/__shutdown"
+          },
+          "flags": 3,
+          "declaration_position": 0
+        }
+      ],
+      "options": {
+        "mode": null,
+        "enabled_modes": [],
+        "reset_modes": [],
+        "transition": null
+      }
+    },
+    {
+      "id": "keyboard/Startup",
+      "reactor": "keyboard",
+      "relations": [
+        {
+          "target": {
+            "Action": "keyboard/__startup"
+          },
+          "flags": 3,
+          "declaration_position": 0
+        },
+        {
+          "target": {
+            "Action": "keyboard/key_press"
+          },
+          "flags": 4,
+          "declaration_position": 1
+        },
+        {
+          "target": {
+            "Port": "keyboard/ready"
+          },
+          "flags": 4,
+          "declaration_position": 0
+        }
+      ],
+      "options": {
+        "mode": null,
+        "enabled_modes": [],
+        "reset_modes": [],
+        "transition": null
+      }
+    },
+    {
+      "id": "snake/AddFood",
+      "reactor": "snake",
+      "relations": [
+        {
+          "target": {
+            "Action": "snake/manually_add_more_food"
+          },
+          "flags": 3,
+          "declaration_position": 0
+        },
+        {
+          "target": {
+            "Action": "snake/add_more_food"
+          },
+          "flags": 3,
+          "declaration_position": 1
+        }
+      ],
+      "options": {
+        "mode": null,
+        "enabled_modes": [],
+        "reset_modes": [],
+        "transition": null
+      }
+    },
+    {
+      "id": "snake/FoodClock",
+      "reactor": "snake",
+      "relations": [
+        {
+          "target": {
+            "Action": "snake/add_more_food"
+          },
+          "flags": 3,
+          "declaration_position": 0
+        }
+      ],
+      "options": {
+        "mode": null,
+        "enabled_modes": [],
+        "reset_modes": [],
+        "transition": null
+      }
+    },
+    {
+      "id": "snake/Keyboard",
+      "reactor": "snake",
+      "relations": [
+        {
+          "target": {
+            "Port": "snake/key"
+          },
+          "flags": 3,
+          "declaration_position": 0
+        }
+      ],
+      "options": {
+        "mode": null,
+        "enabled_modes": [],
+        "reset_modes": [],
+        "transition": null
+      }
+    },
+    {
+      "id": "snake/Move",
+      "reactor": "snake",
+      "relations": [
+        {
+          "target": {
+            "Action": "snake/screen_refresh"
+          },
+          "flags": 3,
+          "declaration_position": 0
+        },
+        {
+          "target": {
+            "Action": "snake/manually_add_more_food"
+          },
+          "flags": 4,
+          "declaration_position": 1
+        }
+      ],
+      "options": {
+        "mode": null,
+        "enabled_modes": [],
+        "reset_modes": [],
+        "transition": null
+      }
+    },
+    {
+      "id": "snake/ScreenRefresh",
+      "reactor": "snake",
+      "relations": [
+        {
+          "target": {
+            "Action": "snake/screen_refresh"
+          },
+          "flags": 3,
+          "declaration_position": 0
+        }
+      ],
+      "options": {
+        "mode": null,
+        "enabled_modes": [],
+        "reset_modes": [],
+        "transition": null
+      }
+    },
+    {
+      "id": "snake/Shutdown",
+      "reactor": "snake",
+      "relations": [
+        {
+          "target": {
+            "Action": "snake/__shutdown"
+          },
+          "flags": 3,
+          "declaration_position": 0
+        }
+      ],
+      "options": {
+        "mode": null,
+        "enabled_modes": [],
+        "reset_modes": [],
+        "transition": null
+      }
+    },
+    {
+      "id": "snake/Startup",
+      "reactor": "snake",
+      "relations": [
+        {
+          "target": {
+            "Action": "snake/screen_refresh"
+          },
+          "flags": 4,
+          "declaration_position": 0
+        },
+        {
+          "target": {
+            "Action": "snake/add_more_food"
+          },
+          "flags": 4,
+          "declaration_position": 1
+        },
+        {
+          "target": {
+            "Port": "snake/ready"
+          },
+          "flags": 3,
+          "declaration_position": 0
+        }
+      ],
+      "options": {
+        "mode": null,
+        "enabled_modes": [],
+        "reset_modes": [],
+        "transition": null
+      }
+    }
+  ],
+  "connections": [
+    {
+      "id": "boundary/keyboard%2Fkey/snake%2Fkey/c0",
+      "source": "keyboard/key",
+      "target": "snake/key",
+      "semantics": {
+        "Logical": {
+          "after": null
+        }
+      }
+    },
+    {
+      "id": "boundary/keyboard%2Fready/snake%2Fready/c0",
+      "source": "keyboard/ready",
+      "target": "snake/ready",
+      "semantics": {
+        "Logical": {
+          "after": null
+        }
+      }
+    }
+  ],
+  "modes": [],
+  "enclaves": [
+    {
+      "id": "keyboard",
+      "root": "keyboard"
+    }
+  ],
+  "placement_groups": [
+    {
+      "id": "placement/keyboard",
+      "parent": null
+    }
+  ]
+}

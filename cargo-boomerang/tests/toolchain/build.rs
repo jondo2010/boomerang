@@ -109,6 +109,8 @@ fn verbose_colored_build_preserves_compiler_diagnostics() {
             "Analyzing",
             "Generating",
             "Building",
+            "Generating",
+            "Building",
             "Validating",
             "Generating",
             "Building",
@@ -230,6 +232,8 @@ fn build_publishes_reuses_and_protects_a_fingerprinted_bundle() {
         &stderr,
         &[
             "Analyzing",
+            "Generating",
+            "Building",
             "Generating",
             "Building",
             "Validating",

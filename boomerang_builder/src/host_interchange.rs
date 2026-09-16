@@ -152,6 +152,77 @@ pub fn decode_descriptor_driver_output(
     }
     DescriptorDriverOutput::try_new(wire.topology, wire.bindings)
 }
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct StageOutput {
+    schema: u32,
+    data: StageData,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(tag = "stage", rename_all = "kebab-case", deny_unknown_fields)]
+enum StageData {
+    Topology {
+        topology: Box<ApplicationTopology>,
+    },
+    Descriptors {
+        bindings: Vec<DescriptorDriverBinding>,
+    },
+}
+
+fn encode_stage(writer: impl io::Write, data: StageData) -> Result<(), HostInterchangeError> {
+    serde_json::to_writer(writer, &StageOutput { schema: 1, data }).map_err(interchange_error)
+}
+
+fn decode_stage(reader: impl io::Read) -> Result<StageData, HostInterchangeError> {
+    let output: StageOutput = serde_json::from_reader(reader).map_err(interchange_error)?;
+    if output.schema != 1 {
+        return Err(interchange_error("unsupported host-stage schema"));
+    }
+    Ok(output.data)
+}
+
+/// Encodes logical topology independently of implementation descriptor compilation.
+pub fn encode_topology_output(
+    writer: impl io::Write,
+    topology: ApplicationTopology,
+) -> Result<(), HostInterchangeError> {
+    encode_stage(
+        writer,
+        StageData::Topology {
+            topology: Box::new(topology),
+        },
+    )
+}
+
+/// Decodes and validates the topology stage, rejecting descriptor-stage output.
+pub fn decode_topology_output(
+    reader: impl io::Read,
+) -> Result<ApplicationTopology, HostInterchangeError> {
+    match decode_stage(reader)? {
+        StageData::Topology { topology } => Ok(*topology),
+        StageData::Descriptors { .. } => Err(interchange_error("expected topology-stage output")),
+    }
+}
+
+/// Encodes selected descriptors without linking the application's hosted topology.
+pub fn encode_descriptor_output(
+    writer: impl io::Write,
+    bindings: Vec<DescriptorDriverBinding>,
+) -> Result<(), HostInterchangeError> {
+    encode_stage(writer, StageData::Descriptors { bindings })
+}
+
+/// Decodes descriptor data; binding completeness is checked when joined with topology.
+pub fn decode_descriptor_output(
+    reader: impl io::Read,
+) -> Result<Vec<DescriptorDriverBinding>, HostInterchangeError> {
+    match decode_stage(reader)? {
+        StageData::Descriptors { bindings } => Ok(bindings),
+        StageData::Topology { .. } => Err(interchange_error("expected descriptor-stage output")),
+    }
+}
 /// Invalid generated descriptor-driver output.
 #[derive(Debug, Error)]
 #[error("{message}")]
@@ -163,5 +234,40 @@ pub struct HostInterchangeError {
 fn interchange_error(error: impl std::fmt::Display) -> HostInterchangeError {
     HostInterchangeError {
         message: error.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod stage_tests {
+    use super::*;
+
+    #[test]
+    fn stage_decoders_enforce_stage_schema_and_fields() {
+        let mut bytes = Vec::new();
+        encode_descriptor_output(&mut bytes, Vec::new()).unwrap();
+        assert!(decode_descriptor_output(bytes.as_slice())
+            .unwrap()
+            .is_empty());
+        assert!(decode_topology_output(bytes.as_slice())
+            .unwrap_err()
+            .to_string()
+            .contains("expected topology-stage"));
+        let valid: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        for (field, value) in [
+            ("schema", serde_json::json!(2)),
+            ("unknown", serde_json::json!(true)),
+        ] {
+            let mut invalid = valid.clone();
+            invalid[field] = value;
+            assert!(
+                decode_descriptor_output(serde_json::to_vec(&invalid).unwrap().as_slice()).is_err()
+            );
+        }
+        let mut unknown_stage_field = valid;
+        unknown_stage_field["data"]["unexpected"] = serde_json::json!(true);
+        assert!(decode_descriptor_output(
+            serde_json::to_vec(&unknown_stage_field).unwrap().as_slice()
+        )
+        .is_err());
     }
 }

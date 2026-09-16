@@ -16,6 +16,7 @@ boomerang_federated.workspace = true
 boomerang_runtime = { workspace = true, features = ["serde"] }
 boomerang_util = { workspace = true, features = ["launcher"] }
 cargo_metadata.workspace = true
+cargo-config2.workspace = true
 fs2.workspace = true
 humantime.workspace = true
 clap = { version = "4.2", features = ["derive"] }

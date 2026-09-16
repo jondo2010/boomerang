@@ -418,3 +418,224 @@ fn deployment_facets_reject_duplicate_mode_names() {
 fn hosted_mode_accepts_duplicate_named_reactions() {
     cargo_check("descriptor-duplicate-reaction", &[]).unwrap();
 }
+
+#[test]
+fn named_components_preserve_owned_modules_in_hosted_builds() {
+    cargo_test("named-components", &[]).unwrap();
+}
+
+fn named_input_key() -> String {
+    let manifest_dir = fs::canonicalize(fixture_path("named-components")).unwrap();
+    boomerang_runtime::binding::component_payload_fingerprint_compile_inputs_key(
+        manifest_dir.to_str().unwrap(),
+        "named.same",
+        1,
+        "Root",
+    )
+}
+
+fn named_command(mode: &str, features: &str) -> Command {
+    let mut cargo = command("named-components", "test", &["--features", features]);
+    cargo.env(
+        "RUSTFLAGS",
+        format!("-D warnings --cfg boomerang_facet=\"{mode}\""),
+    );
+    cargo.env(
+        "RUSTDOCFLAGS",
+        format!("-D warnings --cfg boomerang_facet=\"{mode}\""),
+    );
+    cargo.env(named_input_key(), concat!(
+        "named_components::parent::keyboard=e0055db4be88cc8e0abadd0f4314cfa176d1b46c9b65730bef680f2676a08e6f\n",
+        "named_components::parent::alternate=1af19367a6fe4903a6f7a28a6a630513a160c6d9397e2777d31c78e05f0c12a5",
+    ));
+    cargo
+}
+
+#[test]
+fn named_components_descriptor_excludes_all_helpers_and_reactions() {
+    let output = run(
+        named_command("descriptor", "sentinel,descriptor-assert"),
+        "named-components",
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn named_components_payload_uses_full_module_identity() {
+    let output = run(
+        named_command("payload", "payload-assert"),
+        "named-components",
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn named_components_reject_duplicate_and_invalid_modules() {
+    let duplicate = failure(
+        command("named-components", "check", &["--features", "duplicate"]),
+        "named-components",
+    );
+    assert!(duplicate.contains("defined multiple times"), "{duplicate}");
+    let invalid = failure(
+        command("named-components", "check", &["--features", "invalid"]),
+        "named-components",
+    );
+    assert!(invalid.contains("exactly one root #[reactor]"), "{invalid}");
+}
+
+#[test]
+fn named_components_reject_invalid_and_conflicting_facet_selectors() {
+    let invalid = failure(named_command("invalid", ""), "named-components");
+    assert!(invalid.contains("invalid boomerang_facet"), "{invalid}");
+    let mut both = named_command("payload", "");
+    both.env(
+        "RUSTFLAGS",
+        "-D warnings --cfg boomerang_facet=\"descriptor\" --cfg boomerang_facet=\"payload\"",
+    );
+    let conflict = failure(both, "named-components");
+    assert!(conflict.contains("invalid boomerang_facet"), "{conflict}");
+    for (mode, feature) in [
+        ("descriptor", "boomerang/__boomerang_payload"),
+        ("payload", "boomerang/__boomerang_descriptor"),
+    ] {
+        let conflict = failure(named_command(mode, feature), "named-components");
+        assert!(
+            conflict.contains("conflicting boomerang facet selectors"),
+            "{conflict}"
+        );
+    }
+}
+
+#[test]
+fn named_components_reject_missing_or_invalid_payload_inputs() {
+    let key = named_input_key();
+    let mut missing = named_command("payload", "subset-assert");
+    missing.env_remove(&key);
+    let diagnostic = failure(missing, "named-components");
+    assert!(
+        diagnostic.contains("missing payload descriptor fingerprint compile input"),
+        "{diagnostic}"
+    );
+    let mut invalid = named_command("payload", "subset-assert");
+    invalid.env(&key, "named_components::parent::keyboard=ABC");
+    let diagnostic = failure(invalid, "named-components");
+    assert!(
+        diagnostic.contains("exactly 64 lowercase hex digits"),
+        "{diagnostic}"
+    );
+    let mut abi = named_command("payload", "subset-assert");
+    abi.env(MACRO_ABI_INPUT, "4");
+    let diagnostic = failure(abi, "named-components");
+    assert!(
+        diagnostic.contains("payload macro ABI mismatch"),
+        "{diagnostic}"
+    );
+}
+
+#[test]
+fn named_component_helper_and_reaction_sentinels_remain_active_outside_descriptor() {
+    let hosted = failure(
+        command("named-components", "check", &["--features", "sentinel"]),
+        "named-components",
+    );
+    assert!(hosted.contains("helper sentinel reached"), "{hosted}");
+    assert!(hosted.contains("reaction sentinel reached"), "{hosted}");
+    let payload = failure(named_command("payload", "sentinel"), "named-components");
+    assert!(payload.contains("helper sentinel reached"), "{payload}");
+    assert!(payload.contains("reaction sentinel reached"), "{payload}");
+}
+
+#[test]
+fn named_components_default_features_do_not_pull_builder_into_payload() {
+    let mut cargo = command(
+        "named-components",
+        "tree",
+        &["--edges", "normal", "--prefix", "none"],
+    );
+    cargo.env("RUSTFLAGS", "--cfg boomerang_facet=\"payload\"");
+    let output = run(cargo, "named-components");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let graph = String::from_utf8_lossy(&output.stdout);
+    assert!(graph.contains("boomerang_runtime"), "{graph}");
+    assert!(!graph.contains("boomerang_builder"), "{graph}");
+}
+
+#[test]
+fn named_components_reject_root_attributes_instead_of_discarding_them() {
+    for feature in ["cfg-root", "cfg-attr-root", "deprecated-root"] {
+        let error = failure(
+            command("named-components", "check", &["--features", feature]),
+            "named-components",
+        );
+        assert!(
+            error.contains("unsupported component root attribute"),
+            "{error}"
+        );
+        assert!(error.contains("component module"), "{error}");
+    }
+}
+
+#[test]
+fn named_components_payload_can_compile_unselected_components() {
+    let mut cargo = named_command("payload", "");
+    cargo.env_remove(named_input_key());
+    cargo.env_remove(MACRO_ABI_INPUT);
+    let output = run(cargo, "named-components");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn named_components_payload_can_select_one_component_from_an_owning_crate() {
+    let mut cargo = named_command("payload", "subset-assert");
+    cargo.env(named_input_key(), "named_components::parent::keyboard=e0055db4be88cc8e0abadd0f4314cfa176d1b46c9b65730bef680f2676a08e6f");
+    let output = run(cargo, "named-components");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn named_components_payload_normalizes_raw_module_path_segments() {
+    let mut cargo = named_command("payload", "subset-assert");
+    cargo.env(named_input_key(), "r#named_components::r#parent::r#keyboard=e0055db4be88cc8e0abadd0f4314cfa176d1b46c9b65730bef680f2676a08e6f");
+    let output = run(cargo, "named-components");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn named_components_payload_rejects_missing_entries_and_ambiguous_or_malformed_tables() {
+    for (input, message) in [
+        ("named_components::parent::alternate=e0055db4be88cc8e0abadd0f4314cfa176d1b46c9b65730bef680f2676a08e6f", "missing payload descriptor fingerprint compile input"),
+        ("not a record", "malformed component payload fingerprint input record"),
+        (concat!("named_components::parent::keyboard=e0055db4be88cc8e0abadd0f4314cfa176d1b46c9b65730bef680f2676a08e6f\n",
+            "named_components::parent::r#keyboard=e0055db4be88cc8e0abadd0f4314cfa176d1b46c9b65730bef680f2676a08e6f"), "duplicate component payload fingerprint input record"),
+    ] {
+        let mut cargo = named_command("payload", "subset-assert");
+        cargo.env(named_input_key(), input);
+        let error = failure(cargo, "named-components");
+        assert!(error.contains(message), "{error}");
+        assert!(error.contains("E0080"), "selected-component validation must fail at compile time: {error}");
+    }
+}

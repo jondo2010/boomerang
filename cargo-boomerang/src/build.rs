@@ -270,9 +270,12 @@ fn binding_records(analyzed: &crate::check::AnalyzedDeployment) -> Result<Vec<Bi
             .ok_or_else(|| {
                 anyhow!("descriptor driver returned unselected component '{component}'")
             })?;
-        let package = analyzed.resolved.package(implementation).ok_or_else(|| {
-            anyhow!("descriptor driver returned unresolved package '{implementation}'")
-        })?;
+        let (package, _) = analyzed
+            .resolved
+            .implementation(implementation)
+            .ok_or_else(|| {
+                anyhow!("descriptor driver returned unresolved implementation '{implementation}'")
+            })?;
         let descriptor = binding.descriptor();
         let descriptor_hash = lowercase_hex(
             &descriptor
@@ -288,7 +291,8 @@ fn binding_records(analyzed: &crate::check::AnalyzedDeployment) -> Result<Vec<Bi
         };
         let descriptor = DescriptorDocument {
             component: component.clone(),
-            package: implementation.to_owned(),
+            package: package.name.clone(),
+            module: selection.component.clone(),
             contract: descriptor.contract_id().as_str().to_owned(),
             contract_version: descriptor.contract_version(),
             fingerprint: descriptor_hash,

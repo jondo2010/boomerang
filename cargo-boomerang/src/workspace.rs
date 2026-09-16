@@ -29,6 +29,8 @@ pub struct CargoPackage {
     pub id: PackageId,
     /// Absolute path to the selected package manifest.
     pub manifest_path: PathBuf,
+    /// Whether the package exposes the legacy reserved feature pair.
+    pub legacy_facets: bool,
 }
 
 /// Resolved target and runtime configuration for one Federate.
@@ -127,13 +129,35 @@ impl ResolvedWorkspace {
         &self.table_store
     }
 
-    /// Returns all direct packages expected beneath the synthetic driver root.
-    pub(crate) fn driver_package_ids(&self) -> BTreeSet<String> {
-        self.packages
+    /// Resolves a selected implementation identity back to its package and component entry.
+    pub(crate) fn implementation(&self, identity: &str) -> Option<(&CargoPackage, &Binding)> {
+        let binding = self
+            .deployment
+            .bindings
             .values()
-            .chain(std::iter::once(&self.host_builder))
-            .map(|package| package.id.to_string())
-            .collect()
+            .find(|binding| binding.implementation_id() == identity)?;
+        Some((self.package(&binding.package)?, binding))
+    }
+
+    /// Direct package roots used by one isolated host stage.
+    pub(crate) fn host_stage_package_ids(&self, topology: bool) -> BTreeSet<String> {
+        let mut packages = BTreeSet::from([self.host_builder.id.to_string()]);
+        if topology {
+            packages.insert(
+                self.package(&self.topology.package)
+                    .expect("topology resolved")
+                    .id
+                    .to_string(),
+            );
+        } else {
+            packages.extend(self.deployment.bindings.values().map(|binding| {
+                self.package(&binding.package)
+                    .expect("implementation resolved")
+                    .id
+                    .to_string()
+            }));
+        }
+        packages
     }
 
     /// Returns every exact package identity available to the source application.
@@ -396,6 +420,8 @@ fn cargo_package(package: &Package) -> CargoPackage {
             .map(|target| target.name.clone()),
         id: package.id.clone(),
         manifest_path: normalize_metadata_manifest_path(package.manifest_path.as_std_path()),
+        legacy_facets: package.features.contains_key(DESCRIPTOR_FEATURE)
+            && package.features.contains_key(PAYLOAD_FEATURE),
     }
 }
 
@@ -416,6 +442,11 @@ fn workspace_member<'a>(metadata: &'a Metadata, name: &str) -> Result<&'a Packag
 
 /// Confirms that a package supports both reserved deployment facets.
 fn validate_facets(package: &Package) -> Result<()> {
+    if !package.features.contains_key(DESCRIPTOR_FEATURE)
+        && !package.features.contains_key(PAYLOAD_FEATURE)
+    {
+        return Ok(());
+    }
     for feature in [DESCRIPTOR_FEATURE, PAYLOAD_FEATURE] {
         if !package.features.contains_key(feature) {
             bail!(
@@ -484,6 +515,7 @@ mod tests {
             String::from("component"),
             Binding {
                 package: String::from("payload"),
+                component: None,
                 features: Vec::new(),
             },
         )]);

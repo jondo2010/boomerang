@@ -47,6 +47,8 @@ fn check_runs_complete_host_analysis_without_building_payloads() {
             "Analyzing",
             "Generating",
             "Building",
+            "Generating",
+            "Building",
             "Validating",
             "Publishing",
         ],

@@ -126,7 +126,10 @@ pub fn hosted_fixture() -> ManifestGuard {
 pub fn shared_target(lane: &str) -> PathBuf {
     static ROOT: OnceLock<PathBuf> = OnceLock::new();
     let root = ROOT.get_or_init(|| {
-        let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("cargo-boomerang-fixtures");
+        // One test binary must not delete another's workspace or coverage objects.
+        let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+            .join("cargo-boomerang-fixtures")
+            .join(env!("CARGO_CRATE_NAME"));
         if root.exists() {
             std::fs::remove_dir_all(&root).unwrap();
         }

@@ -85,25 +85,8 @@ jobs:
       - name: prime generated-workspace dependency cache
         run: cargo fetch
 
-      - name: test cargo-boomerang fast targets
-        run: >-
-          cargo test -p cargo-boomerang --lib --bin cargo-boomerang
-          --test manifest --test workspace --verbose
-
-      - name: test workspace except cargo-boomerang
-        run: cargo test --workspace --exclude cargo-boomerang --verbose
-
-      - name: smoke test cargo-boomerang toolchain on Windows
-        if: matrix.os == 'windows-latest' && matrix.toolchain == 'stable'
-        run: >-
-          cargo test -p cargo-boomerang --test toolchain --
-          run::generated_monolith_cli_matches_owned_execution --exact
-
-      - name: test cargo-boomerang toolchain on Ubuntu
-        if: matrix.os == 'ubuntu-latest' && matrix.toolchain == 'stable'
-        run: >-
-          cargo test -p cargo-boomerang --test toolchain --
-          --test-threads=1
+      - name: test workspace
+        run: cargo test --workspace --verbose
 
   miri:
     runs-on: ubuntu-latest

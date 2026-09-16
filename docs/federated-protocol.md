@@ -119,35 +119,46 @@ apply the route delay once; payload requests carry the final destination tag.
 
 ## Definitive grants
 
-This section describes the implemented request-sized grants. The approved target is the
-[efficient centralized coordination algorithm](deployment-architecture.md#efficient-centralized-coordination),
-which adds safe-horizon grants, `DNET` suppression, and selective cumulative `LTC`. Those changes
-are sequenced in the [deployment roadmap](federated-deployment-roadmap.md#phase-6---bounded-wire-protocol-and-transport-foundation);
-they are not implemented by the current request/reply contract described here.
+The RTI implements safe-horizon grants from the
+[efficient centralized coordination algorithm](deployment-architecture.md#efficient-centralized-coordination).
+NET and cumulative LTC reports remain eager. DNET suppression and selective LTC reporting
+are the subsequent optimization described in the deployment roadmap.
 
 Each member has a publication, completed and granted frontiers, lifecycle state,
-and a set of distinct incoming tags not yet covered by completion. Multiple
-payloads at one tag occupy one set entry. The earliest possible upstream work is
-the minimum of its publication and earliest in-transit tag. Before publication
-it is `Never`; a locally idle publication contributes `Forever`, but incoming
-payloads still constrain it.
+and a sorted, preallocated collection of distinct incoming tags not yet covered by completion.
+The compiler derives its capacity by summing the member's lowered Enclave event capacities
+with checked arithmetic. The capacity is part of the coordination fingerprint. Multiple
+payloads at one tag occupy one entry; cumulative completion retires all entries through
+its tag. A new distinct tag at capacity fails the session before forwarding the payload.
 
-For a finite requested tag, `CompiledRti` uses precomputed bounds:
+The earliest possible upstream work is the minimum of its publication and earliest
+in-transit tag. Before publication it is `Never`; a locally idle publication contributes
+`Forever`, but incoming payloads still constrain it.
 
-1. Check every direct upstream completion shifted by its edge delay. A zero-delay
-   bound covers an equal requested tag. A positive-delay bound must be strictly
-   later: later source microsteps at the same offset collapse onto the same
-   destination tag after positive delay.
-2. If those completion bounds do not establish safety, require every transitive
-   upstream earliest-work bound, shifted by its minimum cumulative delay, to be
-   strictly later than the request.
-3. Grant the requested tag and publication revision only when one of those
-   proofs succeeds. A member with no upstream dependencies can proceed directly.
+For a finite requested tag, `CompiledRti` computes two independent safe horizons:
 
-Accepted requests reconsider the sender and its compiler-projected affected
-members. Completion clears in-transit bounds and may therefore release a
-previously blocked downstream request. Topology analysis and zero-delay-cycle
-rejection remain compiler responsibilities.
+1. The completion horizon is the minimum direct upstream completion shifted by its
+   edge delay. A zero-delay bound includes that tag. A positive-delay bound uses its
+   predecessor because later source microsteps collapse onto the same destination tag.
+2. The earliest-input horizon is the predecessor of the minimum transitive upstream
+   earliest-work bound shifted by its minimum cumulative delay.
+
+The grant horizon is the maximum of these proofs and the member's retained grant.
+An empty minimum is `Forever`. Completion can tighten a conservative earliest-input
+bound when a NET report is stale. Authority never decreases. The RTI replies when the
+horizon covers the request, including every new publication revision; for the same
+revision it sends only a strictly extended horizon.
+
+The runtime retains accepted authority and releases later covered candidates after
+their revised publication crosses the local mailbox and backend publication fence.
+It does not wait for another RTI grant for these candidates. A reply for an obsolete
+revision cannot release work; a current-revision extension can release waiting sibling
+Enclaves. Grant conversion floors unsupported finite bounds conservatively, while event
+conversion remains exact and finite authority never becomes `Forever`.
+
+Accepted requests reconsider the sender and its compiler-projected affected members.
+Completion clears in-transit bounds and may therefore extend a downstream horizon.
+Topology analysis and zero-delay-cycle rejection remain compiler responsibilities.
 
 ## Ordered payload admission
 
@@ -166,7 +177,7 @@ sequenceDiagram
     R->>C: Payload(route, final tag, bytes)
     C->>T: decode and admit at final tag
     S->>R: Complete(source tag)
-    R->>C: Grant(revision, requested tag)
+    R->>C: Grant(revision, safe horizon)
     C->>T: grant acquisition
     T->>R: Complete(target tag), through client
 ```

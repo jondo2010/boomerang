@@ -260,8 +260,16 @@ impl<B: FederateCoordinationBackend> FederateCoordinator<B> {
     fn run_loop(&mut self) -> Result<(), FederateCoordinationError> {
         loop {
             let outcome = match self.report_rx.recv_timeout(StdDuration::from_millis(1)) {
-                Ok(report) => self.handle_report(report),
-                Err(mpsc::RecvTimeoutError::Timeout) => self.progress_backend(),
+                Ok(report) => self.handle_report(report).and_then(|terminal| {
+                    if terminal {
+                        Ok(true)
+                    } else {
+                        self.progress_backend(StdDuration::ZERO)
+                    }
+                }),
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    self.progress_backend(StdDuration::from_millis(1))
+                }
                 Err(mpsc::RecvTimeoutError::Disconnected) => Err(
                     FederateCoordinationError::CoordinatorReportChannelDisconnected {
                         enclave: None,
@@ -301,6 +309,8 @@ impl<B: FederateCoordinationBackend> FederateCoordinator<B> {
                         if let Some(publication) = self.pending_publication.take() {
                             if publication.revision() == self.state.revision() {
                                 self.backend.publish(publication)?;
+                                let actions = self.state.handle_publication_sent(publication)?;
+                                return self.execute_actions(actions);
                             }
                         }
                     }
@@ -389,8 +399,11 @@ impl<B: FederateCoordinationBackend> FederateCoordinator<B> {
     }
 
     /// Progresses one backend input and applies any acquired grant through the pure state.
-    fn progress_backend(&mut self) -> Result<bool, FederateCoordinationError> {
-        if let Some(acquisition) = self.backend.progress(StdDuration::from_millis(1))? {
+    fn progress_backend(
+        &mut self,
+        timeout: StdDuration,
+    ) -> Result<bool, FederateCoordinationError> {
+        if let Some(acquisition) = self.backend.progress(timeout)? {
             let actions = self.state.handle_acquisition(acquisition)?;
             if self.execute_actions(actions)? {
                 return Ok(true);
@@ -1081,6 +1094,39 @@ mod tests {
         }
     }
 
+    #[test]
+    fn sustained_scheduler_reports_do_not_starve_backend_progress() {
+        let enclave = EnclaveIndex::new(0);
+        let (tx, rx) = kanal::unbounded();
+        let (progress_tx, progress_rx) = mpsc::channel();
+        let parts = FederateCoordinationParts::new(
+            [(enclave, tx, rx)],
+            LifecyclePolicy::KeepAlive,
+            IdlePollingBackend {
+                local: LocalFederateCoordinationBackend::default(),
+                idle_published: true,
+                progress_tx,
+            },
+        )
+        .unwrap();
+        let port = &parts.participants[enclave];
+        for _ in 0..64 {
+            port.report(CoordinatorReport::Scheduler(SchedulerMessage::Active {
+                enclave,
+            }))
+            .unwrap();
+        }
+        port.report(CoordinatorReport::Scheduler(
+            SchedulerMessage::ParticipantStopped { enclave },
+        ))
+        .unwrap();
+        parts.coordinator.run().coordination_result.unwrap();
+        assert!(
+            progress_rx.try_iter().count() >= 64,
+            "backend must be polled while reports remain queued"
+        );
+    }
+
     /// Controllable authority at the transport boundary; queue handling stays real.
     struct IdleAuthorityBackend {
         local: LocalFederateCoordinationBackend,
@@ -1191,12 +1237,12 @@ mod tests {
                 })
                 .unwrap());
         }
-        assert!(!coordinator.progress_backend().unwrap());
+        assert!(!coordinator.progress_backend(StdDuration::ZERO).unwrap());
         assert_eq!(coordinator.backend.confirmations, 1);
         assert_eq!(coordinator.backend.progresses, 1);
         assert!(!coordinator.state.is_stopped());
         coordinator.backend.accepted = true;
-        assert!(!coordinator.progress_backend().unwrap());
+        assert!(!coordinator.progress_backend(StdDuration::ZERO).unwrap());
         assert_eq!(coordinator.backend.confirmations, 2);
         assert_eq!(coordinator.state.phase(), CoordinationPhase::Probing);
         assert!(matches!(
@@ -1335,6 +1381,64 @@ mod tests {
                 matches!(call_rx.try_recv(), Ok(BackendCall::Publish { next_event }) if next_event == candidate)
             );
         }
+    }
+
+    #[test]
+    fn cached_grant_waits_for_backend_publication_after_mailbox_confirmation() {
+        let enclave = EnclaveIndex::new(0);
+        let (tx, rx) = kanal::unbounded();
+        let (call_tx, call_rx) = mpsc::channel();
+        let mut parts = FederateCoordinationParts::new(
+            [(enclave, tx, rx)],
+            LifecyclePolicy::KeepAlive,
+            CallRecordingBackend { call_tx },
+        )
+        .unwrap();
+        parts
+            .coordinator
+            .state
+            .handle_scheduler(SchedulerMessage::Publish {
+                enclave,
+                next_event: Some(Tag::ZERO),
+            })
+            .unwrap();
+        let revision = parts.coordinator.state.revision();
+        parts
+            .coordinator
+            .state
+            .handle_acquisition(FederateAcquisition::new(revision, Tag::FOREVER))
+            .unwrap();
+        let next = Tag::new(Duration::nanoseconds(1), 0);
+        parts
+            .coordinator
+            .handle_report(CoordinatorReport::Scheduler(SchedulerMessage::Publish {
+                enclave,
+                next_event: Some(next),
+            }))
+            .unwrap();
+        let port = &parts.participants[enclave];
+        assert!(port.command_rx.try_iter().all(|command| !matches!(
+            command,
+            ParticipantCommand::Action(CoordinationAction::Grant { .. })
+        )));
+        assert!(call_rx.try_recv().is_err());
+        parts
+            .coordinator
+            .handle_report(CoordinatorReport::PublicationObserved {
+                enclave,
+                generation: parts.coordinator.publication_generation,
+            })
+            .unwrap();
+        assert_eq!(
+            call_rx.try_recv().unwrap(),
+            BackendCall::Publish {
+                next_event: Some(next)
+            }
+        );
+        assert!(port
+            .command_rx
+            .try_iter()
+            .any(|command| matches!(command, ParticipantCommand::Action(CoordinationAction::Grant { tag, .. }) if tag == next)));
     }
 
     /// Backend that records publication and stop ordering through a channel.

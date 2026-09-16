@@ -9,6 +9,9 @@ struct Script {
     requests: Vec<RtiRequest>,
     decoded: Vec<u32>,
     observed_grants: usize,
+    single_horizon: bool,
+    horizon_sent: bool,
+    observed_horizons: usize,
 }
 
 struct RequestRecorder(Arc<Mutex<Script>>);
@@ -17,7 +20,11 @@ impl RtiRequestSink for RequestRecorder {
         let mut script = self.0.lock().unwrap();
         match request {
             RtiRequest::Publish { revision, next_event: Some(tag) } => {
-                script.replies.push_back(RtiReply::Grant { revision, tag });
+                if !script.single_horizon || tag < WireTag::finite(1_000_000, 0) || !script.horizon_sent {
+                    let tag = if script.single_horizon && tag >= WireTag::finite(1_000_000, 0) { WireTag::finite(2_000_000, 0) } else { tag };
+                    script.replies.push_back(RtiReply::Grant { revision, tag });
+                    script.horizon_sent |= tag == WireTag::finite(2_000_000, 0);
+                }
             }
             RtiRequest::ConfirmIdle { revision } if script.requests.iter().any(|request| {
                 matches!(request, RtiRequest::Complete { tag } if *tag == WireTag::finite(2_000_000, 0))
@@ -42,6 +49,10 @@ impl RtiReplySource for OrderedReplies {
                 "all preceding payloads must be admitted before exposing a grant"
             );
             script.observed_grants += 1;
+            if matches!(reply, Some(RtiReply::Grant { tag, .. }) if tag == WireTag::finite(2_000_000, 0))
+            {
+                script.observed_horizons += 1;
+            }
         }
         Ok(reply)
     }
@@ -117,6 +128,41 @@ fn multiple_payloads_are_admitted_in_order_before_grant_and_execute_at_their_tag
         let script = script.lock().unwrap();
         assert_eq!(script.decoded, [41, 42]);
         assert!(script.observed_grants > 0);
+        assert!(matches!(script.requests.last(), Some(RtiRequest::Stop)));
+    });
+}
+
+#[test]
+fn one_horizon_executes_multiple_events_without_another_rti_grant() {
+    bounded(|| {
+        let script = Arc::new(Mutex::new(Script {
+            replies: [
+                RtiReply::Started,
+                payload(41, 1_000_000),
+                payload(42, 2_000_000),
+            ]
+            .into(),
+            single_horizon: true,
+            ..Script::default()
+        }));
+        let result = execute_script(script.clone()).unwrap();
+        let sink = result.enclave(EnclaveIndex::new(1)).unwrap();
+        assert_eq!(
+            sink.state::<RoutedSinkState>(StateSlotIndex::new(0))
+                .unwrap()
+                .values,
+            [41, 42]
+        );
+        assert_eq!(sink.final_tag(), Tag::new(Duration::milliseconds(2), 0));
+        let script = script.lock().unwrap();
+        assert_eq!(script.observed_horizons, 1);
+        // Reusing authority must preserve eager NET and cumulative completion reports.
+        for nanos in [1_000_000, 2_000_000] {
+            assert!(script.requests.iter().any(|request| matches!(request,
+                RtiRequest::Publish { next_event: Some(tag), .. } if *tag == WireTag::finite(nanos, 0))));
+            assert!(script.requests.iter().any(|request| matches!(request,
+                RtiRequest::Complete { tag } if *tag >= WireTag::finite(nanos, 0))));
+        }
         assert!(matches!(script.requests.last(), Some(RtiRequest::Stop)));
     });
 }

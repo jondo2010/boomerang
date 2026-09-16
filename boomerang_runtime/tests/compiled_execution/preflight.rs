@@ -147,7 +147,8 @@ fn owned_federate_preflight_rejects_before_initializers() {
         1_000_000,
     )];
     let rti_members =
-        [const { RtiMemberImage::new(RecoveryPolicy::FailStop, r!(0, 0), r!(0, 0), r!(0, 0)) }; 2];
+        [const { RtiMemberImage::new(RecoveryPolicy::FailStop, r!(0, 0), r!(0, 0), r!(0, 0), 32) };
+            2];
     let rti_routes = [RtiRouteImage::new(
         BoundaryId::new("pipe"),
         FlowIndex::new(0),

@@ -334,16 +334,16 @@ impl FederateCoordinationState {
         &mut self,
         acquisition: FederateAcquisition,
     ) -> Result<Vec<CoordinationAction>, CoordinationStateError> {
-        if acquisition.revision() != self.revision
-            || self
-                .pending_publication
-                .map(|publication| publication.revision())
-                != Some(self.revision)
-        {
+        if self.is_stopped() || acquisition.revision() != self.revision {
             return Ok(Vec::new());
         }
 
         let granted = acquisition.granted();
+        if self.pending_publication.is_none()
+            && self.grant_horizon.is_none_or(|horizon| granted <= horizon)
+        {
+            return Ok(Vec::new());
+        }
         let horizon = self
             .grant_horizon
             .map_or(granted, |existing| existing.max(granted));
@@ -374,6 +374,26 @@ impl FederateCoordinationState {
         self.pending_publication = None;
 
         Ok(actions)
+    }
+
+    /// Reuses accepted authority only after the publication crossed the backend fence.
+    ///
+    /// Enclaves must confirm their publication generation and the backend must accept NET
+    /// before these grants release new work that can produce output or completion reports.
+    pub(crate) fn handle_publication_sent(
+        &mut self,
+        publication: FederatePublication,
+    ) -> Result<Vec<CoordinationAction>, CoordinationStateError> {
+        if self.pending_publication != Some(publication) {
+            return Ok(Vec::new());
+        }
+        if let Some(horizon) = self.grant_horizon {
+            if publication.next_event().is_some_and(|next| next <= horizon) {
+                return self
+                    .handle_acquisition(FederateAcquisition::new(publication.revision(), horizon));
+            }
+        }
+        Ok(Vec::new())
     }
 
     /// Applies one revision-bound participant acknowledgement.
@@ -1310,5 +1330,121 @@ mod tests {
         assert_eq!(fail(&mut state, first), vec![CoordinationAction::Abort]);
         assert!(fail(&mut state, second).is_empty());
         assert_eq!(state.first_failure(), Some(first));
+    }
+    #[test]
+    fn covered_local_candidates_do_not_wait_for_another_acquisition() {
+        let enclave = EnclaveIndex::new(0);
+        let mut state =
+            FederateCoordinationState::new([enclave], LifecyclePolicy::KeepAlive).unwrap();
+        let first = Tag::new(Duration::nanoseconds(1), 0);
+        let horizon = Tag::new(Duration::nanoseconds(5), 0);
+        publish(&mut state, enclave, Some(first));
+        state
+            .handle_acquisition(FederateAcquisition::new(state.revision(), horizon))
+            .unwrap();
+        for nanos in [2, 3, 5] {
+            let tag = Tag::new(Duration::nanoseconds(nanos), 0);
+            let actions = publish(&mut state, enclave, Some(tag));
+            assert!(
+                !actions
+                    .iter()
+                    .any(|action| matches!(action, CoordinationAction::Grant { .. })),
+                "must wait for publication fence"
+            );
+            let publication = actions
+                .iter()
+                .find_map(|action| match action {
+                    CoordinationAction::Publish(publication) => Some(*publication),
+                    _ => None,
+                })
+                .unwrap();
+            let actions = state.handle_publication_sent(publication).unwrap();
+            assert!(actions.iter().any(|action| matches!(action, CoordinationAction::Grant { enclave: e, tag: t } if *e == enclave && *t == tag)));
+        }
+        let actions = publish(
+            &mut state,
+            enclave,
+            Some(Tag::new(Duration::nanoseconds(6), 0)),
+        );
+        assert!(!actions
+            .iter()
+            .any(|action| matches!(action, CoordinationAction::Grant { .. })));
+    }
+
+    #[test]
+    fn current_revision_can_extend_an_already_acquired_horizon() {
+        let enclave = EnclaveIndex::new(0);
+        let mut state =
+            FederateCoordinationState::new([enclave], LifecyclePolicy::KeepAlive).unwrap();
+        publish(&mut state, enclave, Some(Tag::ZERO));
+        let revision = state.revision();
+        state
+            .handle_acquisition(FederateAcquisition::new(revision, Tag::ZERO))
+            .unwrap();
+        let horizon = Tag::new(Duration::nanoseconds(10), 0);
+        let actions = state
+            .handle_acquisition(FederateAcquisition::new(revision, horizon))
+            .unwrap();
+        assert_eq!(state.grant_horizon(), Some(horizon));
+        assert_eq!(
+            actions,
+            [CoordinationAction::AdvanceHorizon { tag: horizon }]
+        );
+    }
+
+    #[test]
+    fn horizon_extension_releases_a_waiting_sibling_only_once() {
+        let first = EnclaveIndex::new(0);
+        let second = EnclaveIndex::new(1);
+        let later = Tag::new(Duration::nanoseconds(10), 0);
+        let mut state =
+            FederateCoordinationState::new([first, second], LifecyclePolicy::KeepAlive).unwrap();
+        publish(&mut state, first, Some(Tag::ZERO));
+        publish(&mut state, second, Some(later));
+        let revision = state.revision();
+        state
+            .handle_acquisition(FederateAcquisition::new(revision, Tag::ZERO))
+            .unwrap();
+        let actions = state
+            .handle_acquisition(FederateAcquisition::new(revision, later))
+            .unwrap();
+        assert_eq!(
+            actions,
+            [
+                CoordinationAction::AdvanceHorizon { tag: later },
+                CoordinationAction::Grant {
+                    enclave: second,
+                    tag: later
+                }
+            ]
+        );
+        assert!(state
+            .handle_acquisition(FederateAcquisition::new(revision, later))
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn stale_publication_fence_cannot_release_revised_work() {
+        let enclave = EnclaveIndex::new(0);
+        let mut state =
+            FederateCoordinationState::new([enclave], LifecyclePolicy::KeepAlive).unwrap();
+        publish(&mut state, enclave, Some(Tag::ZERO));
+        state
+            .handle_acquisition(FederateAcquisition::new(state.revision(), Tag::FOREVER))
+            .unwrap();
+        publish(
+            &mut state,
+            enclave,
+            Some(Tag::new(Duration::nanoseconds(10), 0)),
+        );
+        let old = state.pending_publication().unwrap();
+        publish(
+            &mut state,
+            enclave,
+            Some(Tag::new(Duration::nanoseconds(5), 0)),
+        );
+        assert!(state.handle_publication_sent(old).unwrap().is_empty());
+        assert!(state.pending_publication().is_some());
     }
 }

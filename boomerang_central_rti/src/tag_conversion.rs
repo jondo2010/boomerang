@@ -121,6 +121,35 @@ pub fn runtime_tag_from_wire(tag: WireTag) -> Result<boomerang_runtime::Tag, Tag
     }
 }
 
+/// Converts a grant bound to the greatest supported runtime tag at or below it.
+///
+/// A horizon may end at the wire's largest microstep, which need not fit a target's
+/// native microstep or duration. Flooring is safe for authority, but must never decode
+/// an event. Finite authority cannot become the runtime's `FOREVER` sentinel.
+pub(crate) fn runtime_horizon_from_wire(
+    tag: WireTag,
+) -> Result<boomerang_runtime::Tag, TagConversionError> {
+    let WireTag::Finite {
+        offset_ns,
+        microstep,
+    } = tag
+    else {
+        return runtime_tag_from_wire(tag);
+    };
+    if offset_ns > boomerang_runtime::Duration::MAX.whole_nanoseconds() {
+        return Ok(boomerang_runtime::Tag::new(
+            boomerang_runtime::Duration::MAX,
+            usize::MAX - 1,
+        ));
+    }
+    let mut microstep = usize::try_from(microstep).unwrap_or(usize::MAX);
+    if offset_ns == boomerang_runtime::Duration::MAX.whole_nanoseconds() && microstep == usize::MAX
+    {
+        microstep -= 1;
+    }
+    runtime_tag_from_wire(WireTag::finite(offset_ns, microstep as u64))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -176,6 +205,28 @@ mod tests {
                 u64::MAX,
             )),
             "collides with runtime Tag::FOREVER",
+        );
+    }
+    #[test]
+    fn finite_horizon_floors_without_becoming_forever() {
+        let offset = boomerang_runtime::Duration::MAX;
+        let bound = WireTag::finite(offset.whole_nanoseconds(), u64::MAX);
+        assert_eq!(
+            runtime_horizon_from_wire(WireTag::finite(offset.whole_nanoseconds() + 1, 0)).unwrap(),
+            boomerang_runtime::Tag::new(offset, usize::MAX - 1)
+        );
+        assert!(runtime_tag_from_wire(bound).is_err());
+        assert_eq!(
+            runtime_horizon_from_wire(bound).unwrap(),
+            boomerang_runtime::Tag::new(offset, usize::MAX - 1)
+        );
+        assert_eq!(
+            runtime_horizon_from_wire(WireTag::FOREVER).unwrap(),
+            boomerang_runtime::Tag::FOREVER
+        );
+        assert_eq!(
+            runtime_horizon_from_wire(WireTag::finite(49, u64::MAX)).unwrap(),
+            boomerang_runtime::Tag::new(boomerang_runtime::Duration::nanoseconds(49), usize::MAX)
         );
     }
 }

@@ -46,12 +46,14 @@ static RTI_MEMBERS: [RtiMemberImage; 2] = [
         SliceRange::new(0, 0),
         SliceRange::new(0, 0),
         SliceRange::new(0, 1),
+        32,
     ),
     RtiMemberImage::new(
         RecoveryPolicy::FailStop,
         SliceRange::new(0, 1),
         SliceRange::new(1, 1),
         SliceRange::new(1, 0),
+        32,
     ),
 ];
 /// Immutable concrete route selected by the compiled boundary identity.
@@ -255,12 +257,17 @@ fn admitted_rti() -> CompiledRti<'static> {
     rti
 }
 
-/// Rejects payload submission after the source exhausted its granted horizon.
+/// Rejects payload submission before the delayed source completion frontier.
 #[test]
-fn completed_source_cannot_emit_late_payload() {
+fn completed_source_cannot_emit_earlier_payload() {
     let mut rti = admitted_rti();
     publish(&mut rti, MEMBERS[0], 0, Some(WireTag::ZERO));
-    rti.handle(MEMBERS[0], RtiRequest::Complete { tag: WireTag::ZERO });
+    rti.handle(
+        MEMBERS[0],
+        RtiRequest::Complete {
+            tag: WireTag::finite(1, 0),
+        },
+    );
     let replies = rti.handle(
         MEMBERS[0],
         RtiRequest::Payload {
@@ -317,7 +324,7 @@ fn unknown_upstream_blocks_and_in_transit_payload_prevents_idle() {
         .is_empty());
     let replies = publish(&mut rti, MEMBERS[1], 2, Some(destination));
     assert!(
-        matches!(replies.as_slice(), [delivery] if matches!(delivery.reply, RtiReply::Grant { revision: 2, tag } if tag == destination))
+        matches!(replies.as_slice(), [delivery] if matches!(delivery.reply, RtiReply::Grant { revision: 2, tag } if tag == WireTag::FOREVER))
     );
     rti.handle(MEMBERS[1], RtiRequest::Complete { tag: destination });
     publish(&mut rti, MEMBERS[1], 3, None);
@@ -382,7 +389,7 @@ fn positive_delay_completion_does_not_cover_later_source_microsteps() {
     );
     let replies = publish(&mut rti, MEMBERS[0], 2, None);
     assert!(
-        matches!(replies.as_slice(), [delivery] if matches!(delivery.reply, RtiReply::Grant { tag, .. } if tag == destination))
+        matches!(replies.as_slice(), [delivery] if matches!(delivery.reply, RtiReply::Grant { tag, .. } if tag == WireTag::FOREVER))
     );
 }
 

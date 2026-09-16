@@ -39,7 +39,8 @@ fn render_image(image: &RtiImage<'_>) -> TokenStream {
         let direct = range(member.direct_incoming_range());
         let transitive = range(member.transitive_incoming_range());
         let downstream = range(member.affected_downstream_range());
-        quote!(RtiMemberImage::new(#recovery, #direct, #transitive, #downstream))
+        let capacity = member.in_transit_capacity();
+        quote!(RtiMemberImage::new(#recovery, #direct, #transitive, #downstream, #capacity))
     });
     let dependencies = image.dependencies().iter().map(|entry| {
         let source = entry.source().as_u32();

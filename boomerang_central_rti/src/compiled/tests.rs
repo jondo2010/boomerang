@@ -36,6 +36,7 @@ fn bindings() -> RtiClientBindings<'static> {
             SliceRange::new(0, 0),
             SliceRange::new(0, 0),
             SliceRange::new(0, 0),
+            32,
         )]),
         &[],
         &[],

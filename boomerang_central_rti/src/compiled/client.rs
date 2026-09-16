@@ -192,7 +192,7 @@ impl CentralRtiClient {
         }
         match self.source.receive(timeout)? {
             None => Ok(None),
-            Some(RtiReply::Dnet { tag }) => {
+            Some(RtiReply::SuppressPublication { tag }) => {
                 let mut reports = self
                     .reports
                     .lock()
@@ -348,7 +348,9 @@ impl FederateCoordinationBackend for CentralRtiClient {
                         Some(RtiReply::Failed { message }) => {
                             return Err(CentralRtiError::new(message))
                         }
-                        Some(RtiReply::Idle { .. } | RtiReply::Dnet { .. }) => continue,
+                        Some(RtiReply::Idle { .. } | RtiReply::SuppressPublication { .. }) => {
+                            continue
+                        }
                         None => return Err(CentralRtiError::new("stop acknowledgement timed out")),
                         _ => return Err(CentralRtiError::new("unexpected reply during stop")),
                     }

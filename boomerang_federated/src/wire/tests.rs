@@ -100,7 +100,7 @@ fn baseline_messages_have_canonical_vectors_and_borrow_payloads() {
         ),
         (Message::Reply(Reply::Stopped), vec![1, 4]),
         (
-            Message::Reply(Reply::Dnet { tag }),
+            Message::Reply(Reply::SuppressPublication { tag }),
             [&[1, 6][..], &tag_bytes].concat(),
         ),
         (

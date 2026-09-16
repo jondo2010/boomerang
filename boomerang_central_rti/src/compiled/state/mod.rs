@@ -394,7 +394,7 @@ impl<'a> CompiledRti<'a> {
                 self.states[member].dnet = Some(tag);
                 deliveries.push(RtiDelivery {
                     member,
-                    reply: RtiReply::Dnet { tag },
+                    reply: RtiReply::SuppressPublication { tag },
                 });
             }
         }

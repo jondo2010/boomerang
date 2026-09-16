@@ -224,7 +224,7 @@ fn dnet_reduces_net_traffic_with_identical_compiled_execution() {
         let run = |suppress| {
             let mut replies = VecDeque::from([RtiReply::Started]);
             if suppress {
-                replies.push_back(RtiReply::Dnet {
+                replies.push_back(RtiReply::SuppressPublication {
                     tag: WireTag::FOREVER,
                 });
             }
@@ -266,7 +266,7 @@ fn outbound_payload_tightens_dnet_before_the_next_publication() {
     let script = Arc::new(Mutex::new(Script {
         replies: [
             RtiReply::Started,
-            RtiReply::Dnet {
+            RtiReply::SuppressPublication {
                 tag: WireTag::FOREVER,
             },
         ]

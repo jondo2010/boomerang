@@ -152,14 +152,14 @@ fn dnet_requires_accepted_authority_and_restores_latest_skipped_net() {
         Replies(
             [
                 RtiReply::Started,
-                RtiReply::Dnet {
+                RtiReply::SuppressPublication {
                     tag: WireTag::finite(100, 0),
                 },
                 RtiReply::Grant {
                     revision: 0,
                     tag: WireTag::finite(100, 0),
                 },
-                RtiReply::Dnet {
+                RtiReply::SuppressPublication {
                     tag: WireTag::finite(15, 0),
                 },
             ]
@@ -223,10 +223,10 @@ fn local_completions_are_silent_and_ltc_prevents_restoring_completed_net() {
         Replies(
             [
                 RtiReply::Started,
-                RtiReply::Dnet {
+                RtiReply::SuppressPublication {
                     tag: WireTag::FOREVER,
                 },
-                RtiReply::Dnet {
+                RtiReply::SuppressPublication {
                     tag: WireTag::NEVER,
                 },
             ]
@@ -268,7 +268,7 @@ fn ten_event_trace_reduces_reports_without_changing_completion_frontier() {
         Replies(
             [
                 RtiReply::Started,
-                RtiReply::Dnet {
+                RtiReply::SuppressPublication {
                     tag: WireTag::FOREVER,
                 },
             ]
@@ -323,10 +323,10 @@ fn advice_delayed_across_idle_is_revoked_before_waking_net_can_remain_suppressed
         Replies(
             [
                 RtiReply::Started,
-                RtiReply::Dnet {
+                RtiReply::SuppressPublication {
                     tag: WireTag::finite(100, 0),
                 },
-                RtiReply::Dnet {
+                RtiReply::SuppressPublication {
                     tag: WireTag::finite(20, 0),
                 },
             ]

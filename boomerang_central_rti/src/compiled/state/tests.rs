@@ -130,7 +130,7 @@ fn grants(deliveries: Vec<RtiDelivery>) -> Vec<(FederateIndex, WireTag)> {
         .into_iter()
         .filter_map(|delivery| match delivery.reply {
             RtiReply::Grant { tag, .. } => Some((delivery.member, tag)),
-            RtiReply::Dnet { .. } => None,
+            RtiReply::SuppressPublication { .. } => None,
             other => panic!("unexpected reply: {other:?}"),
         })
         .collect()
@@ -416,7 +416,7 @@ fn dnet_tracks_transitive_downstream_and_tightens_for_in_transit_input() {
     publish(&mut rti, B, 1, Some(WireTag::finite(20, 0)));
     let updates = publish(&mut rti, C, 1, Some(WireTag::finite(30, 0)));
     assert!(updates.iter().any(|d| d.member == A
-        && matches!(d.reply, RtiReply::Dnet { tag } if tag == WireTag::finite(20, 0))));
+        && matches!(d.reply, RtiReply::SuppressPublication { tag } if tag == WireTag::finite(20, 0))));
     let updates = rti.handle(
         A,
         RtiRequest::Payload {
@@ -430,7 +430,7 @@ fn dnet_tracks_transitive_downstream_and_tightens_for_in_transit_input() {
         RtiReply::Payload { .. }
     ));
     assert!(updates.iter().any(|d| d.member == A
-        && matches!(d.reply, RtiReply::Dnet { tag } if tag == WireTag::finite(10, 0))));
+        && matches!(d.reply, RtiReply::SuppressPublication { tag } if tag == WireTag::finite(10, 0))));
 }
 
 #[test]
@@ -512,12 +512,12 @@ fn dnet_tightening_reaches_idle_members_before_their_next_net() {
     publish(&mut rti, B, 1, Some(WireTag::finite(50, 0)));
     let advice = publish(&mut rti, C, 1, Some(WireTag::finite(60, 0)));
     assert!(advice.iter().any(|d| d.member == A
-        && matches!(d.reply, RtiReply::Dnet { tag } if tag == WireTag::finite(50, 0))));
+        && matches!(d.reply, RtiReply::SuppressPublication { tag } if tag == WireTag::finite(50, 0))));
     publish(&mut rti, A, 2, None);
     let tightened = publish(&mut rti, B, 2, Some(WireTag::finite(10, 0)));
     assert!(
         tightened.iter().any(|d| d.member == A
-            && matches!(d.reply, RtiReply::Dnet { tag } if tag == WireTag::finite(10, 0))),
+            && matches!(d.reply, RtiReply::SuppressPublication { tag } if tag == WireTag::finite(10, 0))),
         "an idle member can wake and suppress NET using its retained DNET advice"
     );
 }

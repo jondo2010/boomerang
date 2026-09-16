@@ -296,7 +296,7 @@ fn unknown_upstream_blocks_and_in_transit_payload_prevents_idle() {
             }
         )
         .iter()
-        .all(|d| matches!(d.reply, RtiReply::Dnet { .. })));
+        .all(|d| matches!(d.reply, RtiReply::SuppressPublication { .. })));
     let replies = publish(&mut rti, MEMBERS[0], 0, Some(WireTag::ZERO));
     assert!(
         matches!(replies.as_slice(), [delivery] if delivery.member == MEMBERS[0] && matches!(delivery.reply, RtiReply::Grant { .. }))
@@ -323,7 +323,7 @@ fn unknown_upstream_blocks_and_in_transit_payload_prevents_idle() {
             }
         )
         .iter()
-        .all(|d| matches!(d.reply, RtiReply::Dnet { .. })));
+        .all(|d| matches!(d.reply, RtiReply::SuppressPublication { .. })));
     let replies = publish(&mut rti, MEMBERS[1], 2, Some(destination));
     assert!(
         matches!(replies.as_slice(), [delivery] if matches!(delivery.reply, RtiReply::Grant { revision: 2, tag } if tag == WireTag::FOREVER))
@@ -450,7 +450,7 @@ fn publish(
         },
     )
     .into_iter()
-    .filter(|delivery| !matches!(delivery.reply, RtiReply::Dnet { .. }))
+    .filter(|delivery| !matches!(delivery.reply, RtiReply::SuppressPublication { .. }))
     .collect()
 }
 

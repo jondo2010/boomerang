@@ -36,7 +36,7 @@ The message envelope encodes direction (`Request=0`, `Reply=1`), followed by its
 | Request 4 stop; Reply 0 started; Reply 4 stopped | Empty. |
 | Request 5 abort; Reply 5 failed | Borrowed diagnostic text. |
 | Reply 1 grant / TAG | Revision `u64` and tag. |
-| Reply 6 DNET | Tag. |
+| Reply 6 suppress publication / DNET | Tag. |
 
 PTAG and port ABS have no admitted record in this profile; unknown discriminants are rejected.
 
@@ -116,7 +116,7 @@ apply the route delay once; payload requests carry the final destination tag.
 | --- | --- |
 | `Started` | All expected artifacts passed identity admission. |
 | `Grant { revision, tag }` | Authorize execution through a safe horizon for the named publication. |
-| `Dnet { tag }` | Advise that NET reports through this tag are unnecessary, subject to already accepted grant authority. |
+| `SuppressPublication { tag }` | Advise that NET reports through this tag are unnecessary, subject to already accepted grant authority. |
 | `Payload { route, tag, payload }` | Deliver a value through the preflighted local inbound adapter. |
 | `Idle { revision }` | Authorize global quiescence for this local-idle revision. |
 | `Stopped` | Acknowledge this member's terminal stop. |
@@ -165,6 +165,14 @@ Completion clears in-transit bounds and may therefore extend a downstream horizo
 Topology analysis and zero-delay-cycle rejection remain compiler responsibilities.
 
 ## Selective progress reports
+
+The Rust API uses descriptive message names while retaining the source algorithm's terminology:
+
+| Rust message | Source algorithm term |
+| --- | --- |
+| `Publish` | Next Event Tag (NET) |
+| `Complete` | Latest Tag Complete (LTC) |
+| `SuppressPublication` | Downstream Next Event Tag (DNET) |
 
 For each member, DNET is the minimum over its other transitive downstream members of
 `subtract_delay(earliest_work, minimum_path_delay)`. Zero delay preserves the tag. A positive

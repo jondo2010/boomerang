@@ -3,18 +3,17 @@
 This note describes the current compiled `central-rti` coordination backend.
 Its requests and replies are defined in
 [compiled/mod.rs](../boomerang_central_rti/src/compiled/mod.rs), state transitions
-in [compiled/state.rs](../boomerang_central_rti/src/compiled/state.rs), and runtime
+in [compiled/state/mod.rs](../boomerang_central_rti/src/compiled/state/mod.rs), and runtime
 integration in [compiled/client.rs](../boomerang_central_rti/src/compiled/client.rs).
 See [runtime internals](./federated-runtime.md) for crate ownership.
 
 The hosted framing is experimental and versioned. It is not a stable public
 protocol or a guarantee of compatibility between Boomerang versions.
 
-## Canonical bounded protocol (Phase 6A)
+## Canonical bounded protocol
 
 [`boomerang_federated::wire`](../boomerang_federated/src/wire.rs) defines the transport-independent
-protocol consumed by the subsequent Phase 6B Tokio `Framed` adapter. The current hosted TCP path
-below retains its Phase 5 framing until that adapter lands. The canonical codec owns no I/O,
+protocol consumed by the hosted Tokio TCP adapter. The canonical codec owns no I/O,
 queues, reliability, grant decisions, or executor. It borrows caller-owned buffers and immutable
 member/route tables, preserving their actual typed key domains.
 
@@ -75,11 +74,10 @@ any execution. Subsequent `RtiRouteIndex` values belong to that admitted image;
 they are not process-local Enclave route keys. Socket arrival order does not
 establish membership.
 
-[compiled/hosted.rs](../boomerang_central_rti/src/compiled/hosted.rs) implements
-bounded binary frames with a big-endian `u32` length prefix, explicit fixed-width
-fields, a one-MiB frame limit, and bounded queues. JSON is an application payload
-codec, not the control-frame encoding. The transport uses nonblocking socket I/O
-and deadlines without a Tokio runtime. In-memory transport exercises the same
+[compiled/hosted/mod.rs](../boomerang_central_rti/src/compiled/hosted/mod.rs) implements
+the canonical bounded frames described above and bounded queues. JSON is an application payload
+codec, not the control-frame encoding. The transport uses Tokio asynchronous socket I/O,
+deadlines, cancellation, and task supervision. In-memory transport exercises the same
 ordered interfaces for testing and reference execution only.
 
 ## Tags and delays
@@ -120,6 +118,12 @@ apply the route delay once; payload requests carry the final destination tag.
 | `Failed { message }` | Report terminal session failure. |
 
 ## Definitive grants
+
+This section describes the implemented request-sized grants. The approved target is the
+[efficient centralized coordination algorithm](deployment-architecture.md#efficient-centralized-coordination),
+which adds safe-horizon grants, `DNET` suppression, and selective cumulative `LTC`. Those changes
+are sequenced in the [deployment roadmap](federated-deployment-roadmap.md#phase-6---bounded-wire-protocol-and-transport-foundation);
+they are not implemented by the current request/reply contract described here.
 
 Each member has a publication, completed and granted frontiers, lifecycle state,
 and a set of distinct incoming tags not yet covered by completion. Multiple

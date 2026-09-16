@@ -406,10 +406,14 @@ mod tests {
         });
         let one = Tag::new(Duration::seconds(1), 0);
         let two = Tag::new(Duration::seconds(2), 0);
-        queue.push_event(one, [], false);
-        queue.push_network_event(two, []);
-        queue.push_event(two, [], false);
         let mut values = Vec::new();
+        queue.push_event(one, [], false);
+        queue.push_network_event(one, []);
+        assert!(queue.pop_next_event(&mut values).unwrap().network_input);
+
+        queue.push_event(one, [], false);
+        queue.push_event(two, [], false);
+        queue.push_network_event(two, []);
         assert!(!queue.pop_next_event(&mut values).unwrap().network_input);
         assert!(queue.pop_next_event(&mut values).unwrap().network_input);
     }

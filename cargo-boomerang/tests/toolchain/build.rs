@@ -10,7 +10,7 @@ use serde_json::Value;
 use super::support;
 
 fn fixture_workspace() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/workspace")
+    support::fixture_workspace()
 }
 
 fn build_fixture(deployment: &str, target: &Path) -> Output {
@@ -18,7 +18,9 @@ fn build_fixture(deployment: &str, target: &Path) -> Output {
 }
 
 fn build_fixture_with_options(deployment: &str, target: &Path, options: &[&str]) -> Output {
+    let current = tempfile::tempdir().unwrap();
     Command::new(env!("CARGO_BIN_EXE_cargo-boomerang"))
+        .current_dir(current.path())
         .arg("boomerang")
         .arg("--workspace")
         .arg(fixture_workspace())
@@ -57,44 +59,6 @@ fn assert_no_staging_residue(path: &Path) {
 }
 
 #[test]
-fn build_reports_cargo_style_progress_without_polluting_stdout() {
-    let _guard = support::toolchain_lock();
-    let target = support::toolchain_target();
-    support::reset_deployment_output(&target, "production");
-    let output = build_fixture("production", &target);
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    let stderr = String::from_utf8(output.stderr).unwrap();
-
-    assert!(output.status.success(), "{stderr}");
-    assert_eq!(stdout.lines().count(), 1, "unexpected stdout: {stdout:?}");
-    let executable = published_executable(&stdout);
-    assert!(executable.is_absolute(), "{}", executable.display());
-    assert!(
-        support::without_ansi(&stderr).contains(&format!(
-            "Published Federate 'host' executable {}",
-            executable.display()
-        )),
-        "{stderr}"
-    );
-    assert!(stderr.contains("Building"), "{stderr}");
-    assert!(stderr.contains("Bundling"), "{stderr}");
-    support::assert_progress_phases(
-        &stderr,
-        &[
-            "Analyzing",
-            "Generating",
-            "Building",
-            "Validating",
-            "Generating",
-            "Building",
-            "Bundling",
-            "Publishing",
-            "Published",
-        ],
-    );
-}
-
-#[test]
 fn quiet_build_keeps_its_machine_readable_result_without_progress() {
     let _guard = support::toolchain_lock();
     let target = support::toolchain_target();
@@ -116,26 +80,24 @@ fn quiet_build_keeps_its_machine_readable_result_without_progress() {
 }
 
 #[test]
-fn color_always_styles_progress_without_styling_stdout() {
+fn verbose_colored_build_preserves_compiler_diagnostics() {
     let _guard = support::toolchain_lock();
     let target = support::toolchain_target();
-    support::reset_deployment_output(&target, "production");
-    let output = build_fixture_with_options("production", &target, &["--color", "always"]);
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    let stderr = String::from_utf8(output.stderr).unwrap();
-
-    assert!(output.status.success(), "{stderr}");
-    assert_eq!(stdout.lines().count(), 1, "unexpected stdout: {stdout:?}");
-    assert!(!stdout.contains('\u{1b}'), "unexpected color: {stdout:?}");
-    assert!(stderr.contains("\u{1b}[1;32m"), "missing color: {stderr:?}");
-}
-
-#[test]
-fn verbose_build_forwards_nested_cargo_output_between_progress_phases() {
-    let _guard = support::toolchain_lock();
-    let target = support::toolchain_target();
-    support::reset_deployment_output(&target, "production");
-    let output = build_fixture_with_options("production", &target, &["--verbose"]);
+    support::reset_deployment_output(&target, "warning-diagnostic");
+    let _manifest = support::fixture_variant("warning-diagnostic", "production", |deployment| {
+        deployment["bindings"]["controller"]
+            .as_table_mut()
+            .unwrap()
+            .insert(
+                "features".into(),
+                toml::Value::try_from(["warning-diagnostic"]).unwrap(),
+            );
+    });
+    let output = build_fixture_with_options(
+        "warning-diagnostic",
+        &target,
+        &["--verbose", "--color", "always"],
+    );
     let stdout = String::from_utf8(output.stdout).unwrap();
     let stderr = String::from_utf8(output.stderr).unwrap();
 
@@ -171,20 +133,8 @@ fn verbose_build_forwards_nested_cargo_output_between_progress_phases() {
         building < nested,
         "nested Cargo output was out of order:\n{stderr}"
     );
-}
-
-#[test]
-fn successful_build_preserves_compiler_warnings_in_phase_order() {
-    let _guard = support::toolchain_lock();
-    let target = support::toolchain_target();
-    support::reset_deployment_output(&target, "warning-diagnostic");
-    let output = build_fixture("warning-diagnostic", &target);
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    let stderr = String::from_utf8(output.stderr).unwrap();
-
-    assert!(output.status.success(), "{stderr}");
-    assert_eq!(stdout.lines().count(), 1, "unexpected stdout: {stdout:?}");
-    let plain_stderr = support::without_ansi(&stderr);
+    assert!(!stdout.contains('\u{1b}'), "unexpected color: {stdout:?}");
+    assert!(stderr.contains("\u{1b}[1;32m"), "missing color: {stderr:?}");
     let building = plain_stderr.find("Building launcher").unwrap();
     let warning = plain_stderr
         .find("INTENTIONAL_TARGET_PAYLOAD_WARNING")
@@ -198,6 +148,15 @@ fn broken_payload_preserves_diagnostics_without_publishing_a_bundle() {
     let _guard = support::toolchain_lock();
     let target = support::toolchain_target();
     support::reset_deployment_output(&target, "broken-payload");
+    let _manifest = support::fixture_variant("broken-payload", "production", |deployment| {
+        deployment["bindings"]["controller"]
+            .as_table_mut()
+            .unwrap()
+            .insert(
+                "features".into(),
+                toml::Value::try_from(["broken-payload"]).unwrap(),
+            );
+    });
     let result = build_fixture("broken-payload", &target);
     let stderr = String::from_utf8_lossy(&result.stderr);
     let plain_stderr = support::without_ansi(&stderr);
@@ -238,8 +197,17 @@ fn broken_payload_preserves_diagnostics_without_publishing_a_bundle() {
 }
 
 #[test]
-fn build_publishes_a_valid_fingerprinted_bundle() {
+fn build_publishes_reuses_and_protects_a_fingerprinted_bundle() {
     let _guard = support::toolchain_lock();
+    let _manifest = support::fixture_variant("production", "production", |deployment| {
+        deployment["bindings"]["controller"]
+            .as_table_mut()
+            .unwrap()
+            .insert(
+                "features".into(),
+                toml::Value::try_from(["warning-diagnostic"]).unwrap(),
+            );
+    });
     let target = support::toolchain_target();
     support::reset_deployment_output(&target, "production");
     let result = build_fixture("production", &target);
@@ -247,6 +215,38 @@ fn build_publishes_a_valid_fingerprinted_bundle() {
     assert!(result.status.success(), "{stderr}");
 
     let stdout = String::from_utf8(result.stdout).unwrap();
+    let executable = published_executable(&stdout);
+    assert!(executable.is_absolute(), "{}", executable.display());
+    assert!(
+        support::without_ansi(&stderr).contains(&format!(
+            "Published Federate 'host' executable {}",
+            executable.display()
+        )),
+        "{stderr}"
+    );
+    assert!(stderr.contains("Building"), "{stderr}");
+    assert!(stderr.contains("Bundling"), "{stderr}");
+    support::assert_progress_phases(
+        &stderr,
+        &[
+            "Analyzing",
+            "Generating",
+            "Building",
+            "Validating",
+            "Generating",
+            "Building",
+            "Bundling",
+            "Publishing",
+            "Published",
+        ],
+    );
+    let plain_stderr = support::without_ansi(&stderr);
+    let building = plain_stderr.find("Building launcher").unwrap();
+    let warning = plain_stderr
+        .find("INTENTIONAL_TARGET_PAYLOAD_WARNING")
+        .expect("default output must retain successful compiler warnings");
+    let bundling = plain_stderr.find("Bundling deployment").unwrap();
+    assert!(building < warning && warning < bundling, "{stderr}");
     let manifest_path = fs::canonicalize(PathBuf::from(stdout.trim())).unwrap();
     assert_eq!(stdout.lines().count(), 1, "unexpected stdout: {stdout:?}");
     let target_directory = fs::canonicalize(&target).unwrap();
@@ -350,18 +350,59 @@ fn build_publishes_a_valid_fingerprinted_bundle() {
             .all(|enclave| enclave.get("event_capacity").is_some()),
         "each Enclave resource record must retain its authoritative event capacity: {resources:?}"
     );
+    let artifact = manifest_path
+        .parent()
+        .unwrap()
+        .join(document["artifacts"][0]["path"].as_str().unwrap());
+    let manifest_before = fs::read(&manifest_path).unwrap();
+    let artifact_before = fs::read(&artifact).unwrap();
+    let artifact_hash_before = blake3::hash(&artifact_before);
+
+    let second = build_fixture("production", &target);
+    assert!(
+        second.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let second_manifest = fs::canonicalize(PathBuf::from(
+        String::from_utf8(second.stdout).unwrap().trim(),
+    ))
+    .unwrap();
+
+    assert_eq!(second_manifest, manifest_path);
+    assert_eq!(fs::read(&manifest_path).unwrap(), manifest_before);
+    let artifact_after = fs::read(&artifact).unwrap();
+    assert_eq!(artifact_after, artifact_before);
+    assert_eq!(blake3::hash(&artifact_after), artifact_hash_before);
+    assert_no_staging_residue(&target.join("boomerang/generated"));
+    assert_no_staging_residue(manifest_path.parent().unwrap().parent().unwrap());
+    let mut corrupted = fs::read(&artifact).unwrap();
+    corrupted[0] ^= 1;
+    fs::write(&artifact, &corrupted).unwrap();
+    let manifest_before = fs::read(&manifest_path).unwrap();
+
+    let second = build_fixture("production", &target);
+    let stderr = String::from_utf8_lossy(&second.stderr);
+    assert!(!second.status.success(), "{stderr}");
+    assert!(stderr.contains("conflict"), "{stderr}");
+    assert_eq!(fs::read(&artifact).unwrap(), corrupted);
+    assert_eq!(fs::read(&manifest_path).unwrap(), manifest_before);
 }
 
 /// Publishes one canonical generated workspace and artifact per compiled Federate.
 #[test]
-fn build_publishes_canonical_federate_artifact_collection() {
+fn generated_central_deployment_publishes_isolated_artifacts_and_exchanges_tagged_payload() {
     let _guard = support::toolchain_lock();
     let target = support::toolchain_target();
     support::reset_deployment_output(&target, "sensor-slice");
+    let _hosted = support::hosted_fixture();
+    let directory = tempfile::tempdir().unwrap();
+    let summary = directory.path().join("summary.json");
     let result = Command::new(env!("CARGO_BIN_EXE_cargo-boomerang"))
         .args(["boomerang", "--workspace"])
-        .arg(support::hosted_fixture_workspace())
-        .args(["build", "--deployment", "sensor-slice"])
+        .arg(fixture_workspace())
+        .args(["run", "--deployment", "sensor-slice", "--summary"])
+        .arg(&summary)
         .env("CARGO_TARGET_DIR", &target)
         .output()
         .unwrap();
@@ -371,9 +412,19 @@ fn build_publishes_canonical_federate_artifact_collection() {
         String::from_utf8_lossy(&result.stderr)
     );
 
-    let manifest = PathBuf::from(String::from_utf8(result.stdout).unwrap().trim());
+    assert!(String::from_utf8_lossy(&result.stdout).contains("sensor received command 42"));
+    let summary: Value = serde_json::from_slice(&fs::read(summary).unwrap()).unwrap();
+    assert_eq!(summary["final_tag"]["offset_nanos"], "1000000");
+    assert_eq!(summary["final_tag"]["microstep"], "0");
+    let manifests = fs::read_dir(target.join("boomerang/sensor-slice"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path().join("deployment.json"))
+        .filter(|path| path.is_file())
+        .collect::<Vec<_>>();
+    assert_eq!(manifests.len(), 1);
+    let manifest = &manifests[0];
     let bundle = manifest.parent().unwrap();
-    let document: Value = serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
+    let document: Value = serde_json::from_slice(&fs::read(manifest).unwrap()).unwrap();
     let host_target = target_lexicon::HOST.to_string();
     let mut federate_metadata = document["federates"].clone();
     let claims = federate_metadata
@@ -504,6 +555,10 @@ fn build_publishes_canonical_federate_artifact_collection() {
     let rti = &document["rti"];
     assert_eq!(rti["target"], host_target);
     assert_eq!(rti["profile"], Value::Null);
+    assert!(rti["artifact"]["path"]
+        .as_str()
+        .unwrap()
+        .starts_with("artifacts/rti/"));
     let rti_executable = bundle.join(rti["artifact"]["path"].as_str().unwrap());
     assert_eq!(
         rti["artifact"]["blake3"],
@@ -543,6 +598,56 @@ fn build_publishes_canonical_federate_artifact_collection() {
             node.id
         );
     }
+    for (federate, present, absent) in [
+        ("host", "vehicle-control", "sensor-host"),
+        ("sensor", "sensor-host", "vehicle-control"),
+    ] {
+        let metadata = MetadataCommand::new()
+            .manifest_path(bundle.join(format!("generated/federates/{federate}/Cargo.toml")))
+            .other_options(vec!["--locked".into(), "--offline".into()])
+            .exec()
+            .unwrap();
+        let packages = metadata
+            .packages
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect::<Vec<_>>();
+        assert!(packages.contains(&present), "{packages:?}");
+        for forbidden in [absent, "vehicle-topology", "boomerang_builder"] {
+            assert!(!packages.contains(&forbidden), "{packages:?}");
+        }
+        assert!(packages.contains(&"boomerang_central_rti"));
+    }
+    assert!(sensor_source.contains(".bind_enclave("), "{sensor_source}");
+    assert!(
+        sensor_source.contains("EnclaveIndex::new(2)"),
+        "{sensor_source}"
+    );
+    assert!(
+        sensor_source.contains("boundary/controller%2Fcommand/sensor%2Fcommand/c0"),
+        "{sensor_source}"
+    );
+    assert!(!sensor_source.contains("IdentityRange"), "{sensor_source}");
+    assert!(!sensor_source.contains("IDENTITIES"), "{sensor_source}");
+    assert!(
+        sensor_source.contains("FederateImage::new("),
+        "{sensor_source}"
+    );
+    assert!(
+        sensor_source.contains("FederateId::new(\"sensor\")"),
+        "{sensor_source}"
+    );
+    let sensor = bundle.join(artifacts[1]["path"].as_str().unwrap());
+    let output = Command::new(sensor)
+        .env_remove("BOOMERANG_RTI_ADDRESS")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("BOOMERANG_RTI_ADDRESS is required"),
+        "{stderr}"
+    );
 }
 
 /// Executes the portable codec/admission contract compiled with the actual generated RTI tables.
@@ -590,50 +695,28 @@ fn verify_generated_wire_contract(bundle: &Path, document: &Value, target: &Path
 }
 
 #[test]
-fn repeated_build_preserves_the_same_published_bundle() {
-    let _guard = support::toolchain_lock();
-    let target = support::toolchain_target();
-    support::reset_deployment_output(&target, "production");
-    let first = build_fixture("production", &target);
-    assert!(
-        first.status.success(),
-        "{}",
-        String::from_utf8_lossy(&first.stderr)
-    );
-    let first_manifest = PathBuf::from(String::from_utf8(first.stdout).unwrap().trim());
-    let first_document: Value =
-        serde_json::from_slice(&fs::read(&first_manifest).unwrap()).unwrap();
-    let artifact = first_manifest
-        .parent()
-        .unwrap()
-        .join(first_document["artifacts"][0]["path"].as_str().unwrap());
-    let manifest_before = fs::read(&first_manifest).unwrap();
-    let artifact_before = fs::read(&artifact).unwrap();
-    let artifact_hash_before = blake3::hash(&artifact_before);
-
-    let second = build_fixture("production", &target);
-    assert!(
-        second.status.success(),
-        "{}",
-        String::from_utf8_lossy(&second.stderr)
-    );
-    let second_manifest = PathBuf::from(String::from_utf8(second.stdout).unwrap().trim());
-
-    assert_eq!(second_manifest, first_manifest);
-    assert_eq!(fs::read(&first_manifest).unwrap(), manifest_before);
-    let artifact_after = fs::read(&artifact).unwrap();
-    assert_eq!(artifact_after, artifact_before);
-    assert_eq!(blake3::hash(&artifact_after), artifact_hash_before);
-    assert_no_staging_residue(&target.join("boomerang/generated"));
-    assert_no_staging_residue(first_manifest.parent().unwrap().parent().unwrap());
-}
-
-#[test]
 fn build_normalizes_deployment_execution_policy_into_every_published_artifact() {
     let _guard = support::toolchain_lock();
     let target = support::toolchain_target();
     support::reset_deployment_output(&target, "execution");
     support::reset_deployment_output(&target, "execution-equivalent");
+    let _manifest = support::fixture_variant("execution", "production", |deployment| {
+        deployment.as_table_mut().unwrap().insert(
+            "execution".into(),
+            toml::toml! {
+                fast-forward = true
+                keep-alive = true
+                logical-horizon = "1000ms"
+            }
+            .into(),
+        );
+    });
+    let _equivalent = support::fixture_variant("execution-equivalent", "execution", |deployment| {
+        deployment["execution"]
+            .as_table_mut()
+            .unwrap()
+            .insert("logical-horizon".into(), "1s".into());
+    });
     let result = build_fixture("execution", &target);
     assert!(
         result.status.success(),
@@ -696,65 +779,30 @@ fn build_normalizes_deployment_execution_policy_into_every_published_artifact() 
     )
     .unwrap();
     assert_eq!(equivalent_source, source);
-}
-
-#[test]
-fn corrupted_published_artifact_causes_a_conflict_without_overwrite() {
-    let _guard = support::toolchain_lock();
-    let target = support::toolchain_target();
-    support::reset_deployment_output(&target, "production");
-    let first = build_fixture("production", &target);
+    assert!(source.contains("physical_event_q_size: 1024"), "{source}");
     assert!(
-        first.status.success(),
-        "{}",
-        String::from_utf8_lossy(&first.stderr)
+        source.contains("boomerang_util::launcher::write_execution_summary(&execution)?"),
+        "{source}"
     );
-    let manifest = PathBuf::from(String::from_utf8(first.stdout).unwrap().trim());
-    let document: Value = serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
-    let artifact = manifest
-        .parent()
-        .unwrap()
-        .join(document["artifacts"][0]["path"].as_str().unwrap());
-    let mut corrupted = fs::read(&artifact).unwrap();
-    corrupted[0] ^= 1;
-    fs::write(&artifact, &corrupted).unwrap();
-    let manifest_before = fs::read(&manifest).unwrap();
-
-    let second = build_fixture("production", &target);
-    let stderr = String::from_utf8_lossy(&second.stderr);
-    assert!(!second.status.success(), "{stderr}");
-    assert!(stderr.contains("conflict"), "{stderr}");
-    assert_eq!(fs::read(&artifact).unwrap(), corrupted);
-    assert_eq!(fs::read(&manifest).unwrap(), manifest_before);
-}
-
-#[test]
-fn build_accepts_an_explicit_workspace_outside_the_current_directory() {
-    let _guard = support::toolchain_lock();
-    let current = tempfile::tempdir().unwrap();
-    let target = support::toolchain_target();
-    support::reset_deployment_output(&target, "production");
-    let result = Command::new(env!("CARGO_BIN_EXE_cargo-boomerang"))
-        .arg("boomerang")
-        .arg("--workspace")
-        .arg(fixture_workspace())
-        .args(["build", "--deployment", "production"])
-        .current_dir(current.path())
-        .env("CARGO_TARGET_DIR", &target)
-        .output()
-        .unwrap();
-
-    assert!(
-        result.status.success(),
-        "{}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-    let manifest = fs::canonicalize(PathBuf::from(
-        String::from_utf8(result.stdout).unwrap().trim(),
-    ))
+    let generated_manifest: toml::Value = toml::from_str(
+        &fs::read_to_string(manifest.parent().unwrap().join("generated/host/Cargo.toml")).unwrap(),
+    )
     .unwrap();
-    assert!(manifest.exists(), "missing {}", manifest.display());
-    assert!(manifest.starts_with(fs::canonicalize(target).unwrap()));
+    let dependencies = generated_manifest["dependencies"].as_table().unwrap();
+    assert_eq!(
+        dependencies["boomerang_util"]["features"]
+            .as_array()
+            .unwrap(),
+        &[toml::Value::String("launcher".into())]
+    );
+    assert!(!dependencies.contains_key("tracing-subscriber"));
+    let executable = published_executable(manifest.to_str().unwrap());
+    let output = Command::new(executable).output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
@@ -762,6 +810,23 @@ fn build_applies_configured_release_profile_and_cargo_configuration() {
     let _guard = support::toolchain_lock();
     let target = support::toolchain_target();
     support::reset_deployment_output(&target, "profile-config");
+    let _manifest = support::fixture_variant("profile-config", "production", |deployment| {
+        deployment["bindings"]["controller"]
+            .as_table_mut()
+            .unwrap()
+            .insert(
+                "features".into(),
+                toml::Value::try_from(["profile-config-probe"]).unwrap(),
+            );
+        deployment["federates"]["host"]
+            .as_table_mut()
+            .unwrap()
+            .insert("profile".into(), "release".into());
+        deployment["federates"]["host"]
+            .as_table_mut()
+            .unwrap()
+            .insert("cargo-config".into(), ".cargo/profile-config.toml".into());
+    });
     let result = build_fixture("profile-config", &target);
 
     assert!(
@@ -771,4 +836,10 @@ fn build_applies_configured_release_profile_and_cargo_configuration() {
     );
     let manifest = PathBuf::from(String::from_utf8(result.stdout).unwrap().trim());
     assert!(manifest.exists(), "missing {}", manifest.display());
+    let launcher = support::with_target_directory(&target, || {
+        cargo_boomerang::generate_launcher(fixture_workspace(), "profile-config", "host")
+    })
+    .unwrap();
+    launcher.check_locked_offline().unwrap();
+    launcher.run_locked_offline().unwrap();
 }

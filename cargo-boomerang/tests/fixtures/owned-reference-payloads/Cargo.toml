@@ -5,10 +5,8 @@ edition = "2021"
 publish = false
 
 [features]
-default = ["__boomerang_payload", "simulated"]
+default = ["__boomerang_payload"]
 __boomerang_payload = []
-simulated = []
-natural-quiescence = []
 
 [dependencies]
 boomerang_macros = { path = "../../../../boomerang_macros" }

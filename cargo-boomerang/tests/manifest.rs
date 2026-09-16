@@ -121,8 +121,13 @@ fn deployment_execution_policy_is_nameable_from_the_public_crate_root() {
 
 #[test]
 fn central_rti_requires_an_rti_table() {
-    let source = std::fs::read_to_string(fixture("invalid-rti")).unwrap();
-    let error = parse_manifest(&source).unwrap_err();
+    let mut source: toml::Value =
+        toml::from_str(&std::fs::read_to_string(fixture("valid")).unwrap()).unwrap();
+    source["deployments"]["production"]
+        .as_table_mut()
+        .unwrap()
+        .remove("rti");
+    let error = parse_manifest(&toml::to_string(&source).unwrap()).unwrap_err();
     assert!(error
         .to_string()
         .contains("central-rti requires deployments.production.rti"));

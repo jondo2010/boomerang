@@ -3,7 +3,7 @@ use std::{
     process::{Command, Output},
 };
 
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use super::support;
 
@@ -30,167 +30,17 @@ fn run_cli_with_options(
     command.envs(environment.iter().copied()).output().unwrap()
 }
 
-/// Runs the installed Cargo plugin with options specific to the `run` command.
-fn run_cli_with_run_options(deployment: &str, options: &[&str]) -> Output {
-    let target = support::toolchain_target();
-    let mut command = Command::new(env!("CARGO_BIN_EXE_cargo-boomerang"));
-    command
-        .args(["boomerang", "--workspace"])
-        .arg(support::fixture_workspace())
-        .args(["run", "--deployment", deployment])
-        .args(options)
-        .env("CARGO_TARGET_DIR", target)
-        .env_remove("RUST_LOG")
-        .output()
-        .unwrap()
-}
-
-fn summary_json(summary: &cargo_boomerang::ExecutionSummary) -> Value {
-    let stats = summary.stats();
-    json!({
-        "schema": 1,
-        "stats": {
-            "processed_tags": stats.processed_tags(),
-            "processed_reactions": stats.processed_reactions(),
-            "processed_events": stats.processed_events(),
-            "set_ports": stats.set_ports(),
-            "scheduled_actions": stats.scheduled_actions(),
-        },
-        "final_tag": {
-            "offset_nanos": summary.final_tag().offset().whole_nanoseconds().to_string(),
-            "microstep": summary.final_tag().microstep().to_string(),
-        },
-    })
-}
-
-#[test]
-fn generated_monolith_matches_owned_reference_execution_summary() {
-    let _guard = support::toolchain_lock();
-    let target = support::toolchain_target();
-    support::reset_deployment_output(&target, "production");
-    let expected =
-        support::with_target_directory(&target, || support::owned_reference_summary("production"));
-    assert!(
-        !target.join("boomerang/production").exists(),
-        "owned reference execution must not generate a launcher"
-    );
-
-    let observed = support::with_target_directory(&target, || {
-        cargo_boomerang::run(support::fixture_workspace(), "production")
-    })
-    .unwrap();
-    assert!(observed.status().success());
-    let observed = summary_json(observed.summary().unwrap());
-    assert_eq!(observed["final_tag"], expected["final_tag"]);
-    for counter in [
-        "processed_tags",
-        "processed_reactions",
-        "set_ports",
-        "scheduled_actions",
-    ] {
-        assert_eq!(observed["stats"][counter], expected["stats"][counter]);
-    }
-    assert_ne!(expected["stats"]["processed_events"], 0);
-    assert_ne!(observed["stats"]["processed_events"], 0);
-}
-
-/// Persists the decoded execution summary when the CLI receives `-s`.
-#[test]
-fn run_writes_the_requested_execution_summary() {
-    let _guard = support::toolchain_lock();
-    let target = support::toolchain_target();
-    support::reset_deployment_output(&target, "production");
-    let directory = tempfile::tempdir().unwrap();
-    let summary_path = directory.path().join("result.json");
-    let summary_path_argument = summary_path.to_str().unwrap();
-
-    let output = run_cli_with_run_options("production", &["-s", summary_path_argument]);
-
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let document: Value = serde_json::from_slice(&fs::read(summary_path).unwrap()).unwrap();
-    assert_eq!(document["schema"], 1);
-    assert!(document["stats"]["processed_tags"].is_number());
-    assert!(document["stats"]["processed_reactions"].is_number());
-    assert!(document["stats"]["processed_events"].is_number());
-    assert!(document["stats"]["set_ports"].is_number());
-    assert!(document["stats"]["scheduled_actions"].is_number());
-    assert!(document["final_tag"]["offset_nanos"].is_string());
-    assert!(document["final_tag"]["microstep"].is_string());
-}
-
-#[test]
-fn generated_launcher_manifest_uses_canonical_host_support() {
-    let _guard = support::toolchain_lock();
-    let target = support::toolchain_target();
-    let launcher = support::with_target_directory(&target, || {
-        cargo_boomerang::generate_launcher(support::fixture_workspace(), "execution", "host")
-            .unwrap()
-    });
-    let manifest: toml::Value =
-        toml::from_str(&fs::read_to_string(launcher.manifest_path()).unwrap()).unwrap();
-    let dependencies = manifest["dependencies"].as_table().unwrap();
-
-    assert_eq!(
-        dependencies["boomerang_util"]["features"]
-            .as_array()
-            .unwrap(),
-        &[toml::Value::String(String::from("launcher"))]
-    );
-    assert!(!dependencies.contains_key("tracing-subscriber"));
-    launcher.build_locked_offline().unwrap();
-    launcher.run_locked_offline().unwrap();
-}
-
-/// Builds three independent artifacts and exchanges a typed payload through the generated RTI.
-#[test]
-fn generated_central_rti_exchanges_tagged_payload() {
-    let _guard = support::toolchain_lock();
-    let workspace = support::hosted_fixture_workspace();
-    let directory = tempfile::tempdir().unwrap();
-    let target = support::toolchain_target();
-    support::reset_deployment_output(&target, "sensor-slice");
-    let summary = directory.path().join("summary.json");
-    let output = Command::new(env!("CARGO_BIN_EXE_cargo-boomerang"))
-        .args(["boomerang", "--workspace"])
-        .arg(&workspace)
-        .args(["run", "--deployment", "sensor-slice", "--summary"])
-        .arg(&summary)
-        .env("CARGO_TARGET_DIR", &target)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("sensor received command 42"));
-    let result: Value = serde_json::from_slice(&fs::read(summary).unwrap()).unwrap();
-    assert_eq!(result["final_tag"]["offset_nanos"], "1000000");
-    assert_eq!(result["final_tag"]["microstep"], "0");
-    let bundle_path = fs::read_dir(target.join("boomerang/sensor-slice"))
-        .unwrap()
-        .filter_map(Result::ok)
-        .map(|e| e.path().join("deployment.json"))
-        .find(|p| p.is_file())
-        .unwrap();
-    let bundle: Value = serde_json::from_slice(&fs::read(&bundle_path).unwrap()).unwrap();
-    assert_eq!(bundle["federates"].as_array().unwrap().len(), 2);
-    assert_eq!(bundle["artifacts"].as_array().unwrap().len(), 2);
-    assert!(bundle["rti"]["artifact"]["path"]
-        .as_str()
-        .unwrap()
-        .starts_with("artifacts/rti/"));
-}
-
 #[test]
 fn run_rejects_a_custom_target_before_bundle_generation() {
     let _guard = support::toolchain_lock();
     let target = support::toolchain_target();
     support::reset_deployment_output(&target, "resolution");
+    let _manifest = support::fixture_variant("resolution", "production", |deployment| {
+        deployment["federates"]["host"]
+            .as_table_mut()
+            .unwrap()
+            .insert("target-json".into(), "targets/host.json".into());
+    });
     let result = support::with_target_directory(&target, || {
         cargo_boomerang::run(support::fixture_workspace(), "resolution")
     });
@@ -202,11 +52,18 @@ fn run_rejects_a_custom_target_before_bundle_generation() {
 #[test]
 fn run_rejects_a_foreign_native_target_before_bundle_generation() {
     let _guard = support::toolchain_lock();
-    let deployment = if target_lexicon::HOST.to_string() == "x86_64-unknown-linux-gnu" {
-        "foreign-aarch64-macos"
+    let deployment = "foreign";
+    let foreign_target = if target_lexicon::HOST.to_string() == "x86_64-unknown-linux-gnu" {
+        "aarch64-apple-darwin"
     } else {
-        "foreign-x86-linux"
+        "x86_64-unknown-linux-gnu"
     };
+    let _manifest = support::fixture_variant(deployment, "production", |deployment| {
+        deployment["federates"]["host"]
+            .as_table_mut()
+            .unwrap()
+            .insert("target".into(), foreign_target.into());
+    });
     let target = support::toolchain_target();
     support::reset_deployment_output(&target, deployment);
     let result = support::with_target_directory(&target, || {
@@ -219,16 +76,53 @@ fn run_rejects_a_foreign_native_target_before_bundle_generation() {
 }
 
 #[test]
-fn run_forwards_application_streams_without_reframing() {
+fn generated_monolith_cli_matches_owned_execution() {
     let _guard = support::toolchain_lock();
     let target = support::toolchain_target();
     support::reset_deployment_output(&target, "production");
-    let output = run_cli("production", &[]);
+    let expected =
+        support::with_target_directory(&target, || support::owned_reference_summary("production"));
+    assert!(
+        !target.join("boomerang/production").exists(),
+        "owned reference must not generate a launcher"
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let summary = directory.path().join("result.json");
+    let output = Command::new(env!("CARGO_BIN_EXE_cargo-boomerang"))
+        .args(["boomerang", "--workspace"])
+        .arg(support::fixture_workspace())
+        .args(["run", "--deployment", "production", "-s"])
+        .arg(&summary)
+        .env("CARGO_TARGET_DIR", &target)
+        .env("CARGO_BUILD_TARGET", "invalid-boomerang-test-target")
+        .env_remove("RUST_LOG")
+        .output()
+        .unwrap();
     assert!(
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    let observed: Value = serde_json::from_slice(&fs::read(summary).unwrap()).unwrap();
+    assert_eq!(observed["schema"], 1);
+    assert_eq!(observed["final_tag"], expected["final_tag"]);
+    assert!(observed["final_tag"]["offset_nanos"].is_string());
+    assert!(observed["final_tag"]["microstep"].is_string());
+    for counter in [
+        "processed_tags",
+        "processed_reactions",
+        "set_ports",
+        "scheduled_actions",
+    ] {
+        assert!(observed["stats"][counter].is_number());
+        assert_eq!(
+            observed["stats"][counter], expected["stats"][counter],
+            "{counter}"
+        );
+    }
+    assert!(observed["stats"]["processed_events"].is_number());
+    assert_ne!(expected["stats"]["processed_events"], 0);
+    assert_ne!(observed["stats"]["processed_events"], 0);
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
         "sensor received command 42\n"
@@ -299,44 +193,6 @@ fn quiet_run_suppresses_tool_progress_but_not_application_streams() {
 }
 
 #[test]
-fn implicit_host_run_overrides_ambient_cargo_build_target() {
-    let _guard = support::toolchain_lock();
-    let target = support::toolchain_target();
-    support::reset_deployment_output(&target, "production");
-    let output = run_cli(
-        "production",
-        &[("CARGO_BUILD_TARGET", "invalid-boomerang-test-target")],
-    );
-
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(
-        String::from_utf8(output.stdout).unwrap(),
-        "sensor received command 42\n"
-    );
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    support::assert_progress_phases(
-        &stderr,
-        &[
-            "Analyzing",
-            "Generating",
-            "Building",
-            "Validating",
-            "Generating",
-            "Building",
-            "Bundling",
-            "Publishing",
-            "Published",
-            "Validating",
-            "Running",
-        ],
-    );
-}
-
-#[test]
 fn generated_launcher_honors_rust_log_trace() {
     let _guard = support::toolchain_lock();
     let target = support::toolchain_target();
@@ -362,6 +218,15 @@ fn run_propagates_the_generated_application_exit_code() {
     let _guard = support::toolchain_lock();
     let target = support::toolchain_target();
     support::reset_deployment_output(&target, "runtime-failure");
+    let _manifest = support::fixture_variant("runtime-failure", "production", |deployment| {
+        deployment["bindings"]["sensor"]
+            .as_table_mut()
+            .unwrap()
+            .insert(
+                "features".into(),
+                toml::Value::try_from(["simulated", "runtime-failure"]).unwrap(),
+            );
+    });
     let output = run_cli("runtime-failure", &[]);
     assert_eq!(output.status.code(), Some(42));
 }
@@ -370,10 +235,24 @@ fn run_propagates_the_generated_application_exit_code() {
 #[test]
 fn generated_federate_failure_terminates_the_deployment() {
     let _guard = support::toolchain_lock();
+    let _hosted = support::hosted_fixture();
+    let _manifest = support::fixture_variant("central-failure", "sensor-slice", |deployment| {
+        deployment["bindings"]["sensor"]
+            .as_table_mut()
+            .unwrap()
+            .insert(
+                "features".into(),
+                toml::Value::try_from(["simulated", "runtime-failure"]).unwrap(),
+            );
+    });
+    support::reset_deployment_output(&support::toolchain_target(), "central-failure");
+    let directory = tempfile::tempdir().unwrap();
+    let summary = directory.path().join("failed-summary.json");
     let output = Command::new(env!("CARGO_BIN_EXE_cargo-boomerang"))
         .args(["boomerang", "--workspace"])
-        .arg(support::hosted_fixture_workspace())
-        .args(["run", "--deployment", "central-failure"])
+        .arg(support::fixture_workspace())
+        .args(["run", "--deployment", "central-failure", "--summary"])
+        .arg(&summary)
         .env("CARGO_TARGET_DIR", support::toolchain_target())
         .output()
         .unwrap();
@@ -381,4 +260,8 @@ fn generated_federate_failure_terminates_the_deployment() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("central RTI"), "{stderr}");
     assert!(!stderr.contains("shutdown timed out"), "{stderr}");
+    assert!(
+        !summary.exists(),
+        "failed deployment published a success summary"
+    );
 }

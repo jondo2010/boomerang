@@ -39,6 +39,8 @@ struct MemberState {
     granted_revision: Option<u64>,
     /// Last issued logical horizon.
     granted: Option<WireTag>,
+    /// Last downstream bound sent to this member.
+    dnet: Option<WireTag>,
     /// Greatest completed tag.
     completed: Option<WireTag>,
     /// Tags delivered but not yet covered by destination completion.
@@ -363,6 +365,39 @@ impl<'a> CompiledRti<'a> {
                 }
             }
         }
+        for member in self.view.image().members().keys() {
+            let state = &self.states[member];
+            let Some((_, next)) = state.publication else {
+                continue;
+            };
+            if state.stopped || state.idle.is_some() {
+                continue;
+            }
+            let mut tag = WireTag::FOREVER;
+            for downstream in self.view.image().affected_downstream(member) {
+                if *downstream == member {
+                    continue;
+                }
+                for dependency in self.view.image().transitive_incoming(*downstream) {
+                    if dependency.source() == member {
+                        tag = tag.min(subtract_delay(
+                            self.states[*downstream].earliest(),
+                            dependency.delay_nanos(),
+                        )?);
+                    }
+                }
+            }
+            let old = state.dnet.unwrap_or(WireTag::NEVER);
+            // Idle members can wake using old advice, including advice still in flight.
+            // Always send tightenings; only useful increases need transmission.
+            if tag != old && (tag < old || next.is_some_and(|next| next <= tag)) {
+                self.states[member].dnet = Some(tag);
+                deliveries.push(RtiDelivery {
+                    member,
+                    reply: RtiReply::SuppressPublication { tag },
+                });
+            }
+        }
         Ok(deliveries)
     }
     /// Extends authority using independent completion and earliest-input proofs.
@@ -426,6 +461,26 @@ fn delay(tag: WireTag, nanos: u64) -> Result<WireTag, CentralRtiError> {
 fn predecessor(tag: WireTag) -> Result<WireTag, CentralRtiError> {
     tag.checked_predecessor()
         .ok_or_else(|| CentralRtiError::new("compiled predecessor tag overflow"))
+}
+
+/// Latest source tag whose delayed value is at or before the downstream bound.
+fn subtract_delay(tag: WireTag, nanos: u64) -> Result<WireTag, CentralRtiError> {
+    if nanos == 0 {
+        return Ok(tag);
+    }
+    match tag {
+        WireTag::Finite { offset_ns, .. } => {
+            let offset = offset_ns
+                .checked_sub(i128::from(nanos))
+                .ok_or_else(|| CentralRtiError::new("downstream delay subtraction overflowed"))?;
+            Ok(if offset < 0 {
+                WireTag::NEVER
+            } else {
+                WireTag::finite(offset, u64::MAX)
+            })
+        }
+        _ => Ok(tag),
+    }
 }
 
 #[cfg(test)]

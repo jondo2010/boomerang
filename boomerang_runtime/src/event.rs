@@ -9,6 +9,8 @@ pub enum AsyncEventTarget {
     Action(ActionKey),
     /// A validated scheduler boundary port destination.
     BoundaryPort(PortIndex),
+    /// A validated network input whose processing requires cumulative confirmation.
+    NetworkBoundaryPort(PortIndex),
 }
 
 /// `AsyncEvent` is used to inject events into the scheduler from outside of the normal event loop.

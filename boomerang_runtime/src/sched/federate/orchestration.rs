@@ -112,7 +112,11 @@ pub(crate) trait FederateSchedulerCoordination {
 
     /// Reports completion of one processed logical tag.
     #[allow(dead_code)]
-    fn logical_tag_complete(&mut self, tag: Tag) -> Result<(), FederateCoordinationError>;
+    fn logical_tag_complete(
+        &mut self,
+        tag: Tag,
+        network_input: bool,
+    ) -> Result<(), FederateCoordinationError>;
 
     /// Reports that the legacy shared logical horizon is being processed.
     fn logical_horizon_reached(&mut self, tag: Tag);
@@ -883,12 +887,17 @@ impl FederateSchedulerCoordination for EnclaveCoordinationPort {
     }
 
     /// Reports logical completion through the coordinator so backend failures remain supervised.
-    fn logical_tag_complete(&mut self, tag: Tag) -> Result<(), FederateCoordinationError> {
+    fn logical_tag_complete(
+        &mut self,
+        tag: Tag,
+        network_input: bool,
+    ) -> Result<(), FederateCoordinationError> {
         self.take_deferred_error()?;
         self.report(CoordinatorReport::Scheduler(
             SchedulerMessage::CompleteTag {
                 enclave: self.enclave,
                 tag,
+                network_input,
             },
         ))
     }

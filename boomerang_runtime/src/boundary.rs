@@ -146,7 +146,7 @@ impl InboundBoundaryAdapter {
                     .map_err(|error| PayloadCodecError::new(error.to_string()))?;
                 match sender.try_send(AsyncEvent::Logical {
                     tag,
-                    target: AsyncEventTarget::BoundaryPort(port),
+                    target: AsyncEventTarget::NetworkBoundaryPort(port),
                     value: Box::new(value),
                 }) {
                     Ok(true) => Ok(()),

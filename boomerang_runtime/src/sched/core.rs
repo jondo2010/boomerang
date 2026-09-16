@@ -338,6 +338,11 @@ where
                     self.schedule,
                 );
             }
+            AsyncEventTarget::NetworkBoundaryPort(key) => {
+                let port = self.storage.stage_inbound_boundary_value(key, tag, value)?;
+                self.events
+                    .push_network_event(tag, self.schedule.port_triggers(port));
+            }
             AsyncEventTarget::BoundaryPort(key) => {
                 let port = self.storage.stage_inbound_boundary_value(key, tag, value)?;
                 self.events
@@ -748,7 +753,7 @@ where
         self.release_tag_downstream(*self.current_tag);
         if let Some(coordination) = self.federate_coordination.as_deref_mut() {
             if let Err(error) = coordination
-                .logical_tag_complete(*self.current_tag)
+                .logical_tag_complete(*self.current_tag, event.network_input)
                 .map_err(SchedulerError::FederateCoordination)
             {
                 return Err(self.report_federate_failure(error));

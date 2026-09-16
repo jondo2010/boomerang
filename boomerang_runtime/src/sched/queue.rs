@@ -34,6 +34,8 @@ pub(super) struct ScheduledEvent<K: tinymap::Key, A: Copy> {
     pub(super) terminal: bool,
     /// Whether every same-tag contribution is local control with no executable or terminal work.
     pub(super) control_only: bool,
+    /// Whether a same-tag contribution came from a network boundary.
+    pub(super) network_input: bool,
     /// Number of queued nonterminal contributions merged into this event.
     pub(super) nonterminal_work_count: usize,
     /// Optional action value metadata needed for modal rebasing.
@@ -79,12 +81,12 @@ impl<K: tinymap::Key, A: Copy + PartialEq> EventQueue<K, A> {
     where
         I: IntoIterator<Item = (Level, K)>,
     {
-        self.push_event_inner(tag, reactions, terminal, false, None);
+        self.push_event_inner(tag, reactions, terminal, false, None, false);
     }
 
     /// Pushes a provisional local-barrier event that requires only retained-horizon authorization.
     pub(crate) fn push_control_event(&mut self, tag: Tag) {
-        self.push_event_inner(tag, std::iter::empty(), false, true, None);
+        self.push_event_inner(tag, std::iter::empty(), false, true, None, false);
     }
 
     pub(crate) fn push_action_event<I>(
@@ -96,7 +98,15 @@ impl<K: tinymap::Key, A: Copy + PartialEq> EventQueue<K, A> {
     ) where
         I: IntoIterator<Item = (Level, K)>,
     {
-        self.push_event_inner(tag, reactions, terminal, false, action_value);
+        self.push_event_inner(tag, reactions, terminal, false, action_value, false);
+    }
+
+    /// Queues network work without confirming it until the scheduler processes its tag.
+    pub(crate) fn push_network_event<I>(&mut self, tag: Tag, reactions: I)
+    where
+        I: IntoIterator<Item = (Level, K)>,
+    {
+        self.push_event_inner(tag, reactions, false, false, None, true);
     }
 
     fn push_event_inner<I>(
@@ -106,6 +116,7 @@ impl<K: tinymap::Key, A: Copy + PartialEq> EventQueue<K, A> {
         terminal: bool,
         control_only: bool,
         action_value: Option<ScheduledActionValue<A>>,
+        network_input: bool,
     ) where
         I: IntoIterator<Item = (Level, K)>,
     {
@@ -119,6 +130,7 @@ impl<K: tinymap::Key, A: Copy + PartialEq> EventQueue<K, A> {
             event.reactions.extend_above(reactions);
             event.terminal = event.terminal || terminal;
             event.control_only &= control_only;
+            event.network_input |= network_input;
             event.nonterminal_work_count = event
                 .nonterminal_work_count
                 .checked_add(usize::from(!terminal && !control_only))
@@ -135,6 +147,7 @@ impl<K: tinymap::Key, A: Copy + PartialEq> EventQueue<K, A> {
                 reactions: reaction_set,
                 terminal,
                 control_only,
+                network_input,
                 nonterminal_work_count: usize::from(!terminal && !control_only),
                 action_value,
             };
@@ -165,6 +178,7 @@ impl<K: tinymap::Key, A: Copy + PartialEq> EventQueue<K, A> {
                     event.reactions.merge(&next_event.reactions);
                     event.terminal = event.terminal || next_event.terminal;
                     event.control_only &= next_event.control_only;
+                    event.network_input |= next_event.network_input;
                     event.nonterminal_work_count = event
                         .nonterminal_work_count
                         .checked_add(next_event.nonterminal_work_count)
@@ -289,6 +303,7 @@ mod tests {
             reactions: KeySet::default(),
             terminal: false,
             control_only: false,
+            network_input: false,
             nonterminal_work_count: 1,
             action_value: None,
         });
@@ -297,6 +312,7 @@ mod tests {
             reactions: KeySet::default(),
             terminal: true,
             control_only: false,
+            network_input: false,
             nonterminal_work_count: 0,
             action_value: None,
         });
@@ -305,6 +321,7 @@ mod tests {
             reactions: KeySet::default(),
             terminal: false,
             control_only: false,
+            network_input: false,
             nonterminal_work_count: 1,
             action_value: None,
         });
@@ -380,5 +397,24 @@ mod tests {
         assert_eq!(queue.pop_next_event(&mut Vec::new()).unwrap().tag, earlier);
         assert_eq!(queue.peek_tag(), Some(future));
         assert!(!queue.peek_is_control_only());
+    }
+    #[test]
+    fn network_input_marker_survives_same_tag_merging_without_marking_earlier_work() {
+        let mut queue = EventQueue::<DefaultKey, u8>::new(ReactionSetLimits {
+            max_level: Level::default(),
+            num_keys: 0,
+        });
+        let one = Tag::new(Duration::seconds(1), 0);
+        let two = Tag::new(Duration::seconds(2), 0);
+        let mut values = Vec::new();
+        queue.push_event(one, [], false);
+        queue.push_network_event(one, []);
+        assert!(queue.pop_next_event(&mut values).unwrap().network_input);
+
+        queue.push_event(one, [], false);
+        queue.push_event(two, [], false);
+        queue.push_network_event(two, []);
+        assert!(!queue.pop_next_event(&mut values).unwrap().network_input);
+        assert!(queue.pop_next_event(&mut values).unwrap().network_input);
     }
 }

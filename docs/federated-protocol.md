@@ -25,16 +25,20 @@ zero epoch/incarnation values followed by the derived message enum. Nonzero rese
 Postcard uses minimal unsigned varints, ZigZag signed integers, and varint string/byte lengths.
 Tags encode Never=0, finite=1 plus `i128` nanoseconds and `u64` microstep, or Forever=2; no padding.
 
-| Traffic kind | Fields after the discriminant |
+The message envelope encodes direction (`Request=0`, `Reply=1`), followed by its record discriminant:
+
+| Direction / record | Fields after the discriminant |
 | --- | --- |
-| 0 publish / NET | Revision `u64`, optional tag. |
-| 1 complete / LTC | Tag. |
-| 2 payload to RTI; 8 payload to Federate | Route `u32`, tag, borrowed payload bytes. |
-| 3 confirm idle; 9 idle | Revision `u64`. |
-| 4 stop; 6 started; 10 stopped | Empty. |
-| 5 abort; 11 failed | Borrowed diagnostic text. |
-| 7 grant / TAG | Revision `u64` and tag. |
-| 12 PTAG; 13 port ABS | Reserved; rejected. |
+| Request 0 publish / NET | Revision `u64`, optional tag. |
+| Request 1 complete / LTC | Tag. |
+| Request 2 payload; Reply 2 payload | Route `u32`, tag, borrowed payload bytes. |
+| Request 3 confirm idle; Reply 3 idle | Revision `u64`. |
+| Request 4 stop; Reply 0 started; Reply 4 stopped | Empty. |
+| Request 5 abort; Reply 5 failed | Borrowed diagnostic text. |
+| Reply 1 grant / TAG | Revision `u64` and tag. |
+| Reply 6 suppress publication / DNET | Tag. |
+
+PTAG and port ABS have no admitted record in this profile; unknown discriminants are rejected.
 
 Participants always upgrade atomically as a closed world. Protocol, codec, and fingerprint
 matching are exact; there is no backward-compatible decoder or version negotiation. Canonical
@@ -111,7 +115,8 @@ apply the route delay once; payload requests carry the final destination tag.
 | Reply | Meaning |
 | --- | --- |
 | `Started` | All expected artifacts passed identity admission. |
-| `Grant { revision, tag }` | Authorize the named publication at its requested tag. |
+| `Grant { revision, tag }` | Authorize execution through a safe horizon for the named publication. |
+| `SuppressPublication { tag }` | Advise that NET reports through this tag are unnecessary, subject to already accepted grant authority. |
 | `Payload { route, tag, payload }` | Deliver a value through the preflighted local inbound adapter. |
 | `Idle { revision }` | Authorize global quiescence for this local-idle revision. |
 | `Stopped` | Acknowledge this member's terminal stop. |
@@ -121,8 +126,7 @@ apply the route delay once; payload requests carry the final destination tag.
 
 The RTI implements safe-horizon grants from the
 [efficient centralized coordination algorithm](deployment-architecture.md#efficient-centralized-coordination).
-NET and cumulative LTC reports remain eager. DNET suppression and selective LTC reporting
-are the subsequent optimization described in the deployment roadmap.
+NET and cumulative LTC reports are selective; local progress and completion remain eager.
 
 Each member has a publication, completed and granted frontiers, lifecycle state,
 and a sorted, preallocated collection of distinct incoming tags not yet covered by completion.
@@ -159,6 +163,43 @@ conversion remains exact and finite authority never becomes `Forever`.
 Accepted requests reconsider the sender and its compiler-projected affected members.
 Completion clears in-transit bounds and may therefore extend a downstream horizon.
 Topology analysis and zero-delay-cycle rejection remain compiler responsibilities.
+
+## Selective progress reports
+
+The Rust API uses descriptive message names while retaining the source algorithm's terminology:
+
+| Rust message | Source algorithm term |
+| --- | --- |
+| `Publish` | Next Event Tag (NET) |
+| `Complete` | Latest Tag Complete (LTC) |
+| `SuppressPublication` | Downstream Next Event Tag (DNET) |
+
+For each member, DNET is the minimum over its other transitive downstream members of
+`subtract_delay(earliest_work, minimum_path_delay)`. Zero delay preserves the tag. A positive
+delay maps a finite `(t, microstep)` to `(t - delay, u64::MAX)`; a negative result is `Never`.
+`Never` and `Forever` remain explicit sentinels. Self paths are excluded, and zero-delay
+cycles are rejected during compilation. The RTI sends a changed bound when it can suppress
+reports or when tightening revokes previous advice. Tightenings also reach idle members: a member may wake using earlier advice,
+including a DNET still in flight when it published no future event. Increases are sent
+only when useful for a finite NET.
+
+The client initially uses `Never`. It suppresses a finite NET only when both DNET and the
+runtime's accepted grant horizon cover the candidate. It retains the latest skipped tag and
+revision, and submits that NET when DNET tightens below it. Payload submission tightens the
+local DNET to the destination tag under the same lock used for the suppression decision.
+No-future publications and lifecycle reports are always sent. Grants retain their original
+wire revision: stale replies are still rejected, and the first candidate outside accepted
+authority requires a fresh NET even when DNET would otherwise allow suppression.
+
+A network boundary marks its existing scheduled event. Processing that event, including its
+resulting output, creates a cumulative completion obligation; decoding and queueing it does
+not. Same-tag merges preserve the marker, including inputs with no active reaction. Local
+routes do not set it. The Federate's existing completion fence waits for every Enclave before
+confirming a frontier. A constant-space range retains processed-input obligations when an
+Enclave runs ahead; intermediate frontiers can conservatively produce an extra LTC until the
+range is covered. No second incoming-event queue is maintained. A sent LTC discards any
+skipped NET at or before its completed tag, preventing delayed DNET advice from restoring a
+completed publication.
 
 ## Ordered payload admission
 

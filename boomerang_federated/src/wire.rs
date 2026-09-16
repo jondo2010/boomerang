@@ -167,14 +167,15 @@ pub enum AdmissionError {
 /// Hello is local admission input and cannot be serialized as ordinary traffic.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Request<R, P, D> {
-    /// Publishes a reversible local candidate; `None` permits later inbound work.
+    /// Publishes the Next Event Tag (NET), a reversible local candidate.
+    /// `None` permits later inbound work.
     Publish {
         /// Revision owned by the compiled Federate coordinator.
         revision: u64,
         /// Current earliest local event, or local idle.
         next_event: Option<WireTag>,
     },
-    /// Reports completion after all payload submissions at this tag.
+    /// Reports the Latest Tag Complete (LTC), after all payload submissions at this tag.
     Complete {
         /// Greatest completed local tag.
         tag: WireTag,
@@ -241,6 +242,12 @@ pub enum Reply<R, P, D> {
         /// Original terminal failure diagnostic.
         message: D,
     },
+    /// Supplies the Downstream Next Event Tag (DNET), allowing publications through this
+    /// bound to be suppressed when accepted grant authority also covers the candidate.
+    SuppressPublication {
+        /// Latest source tag that cannot affect downstream progress.
+        tag: WireTag,
+    },
 }
 
 impl<R: Copy, P, D> Request<R, P, D> {
@@ -305,6 +312,7 @@ impl<R: Copy, P, D> Reply<R, P, D> {
         text: impl Fn(&'a D) -> T,
     ) -> Result<Reply<S, Q, T>, E> {
         Ok(match self {
+            Self::SuppressPublication { tag } => Reply::SuppressPublication { tag: *tag },
             Self::Started => Reply::Started,
             Self::Grant { revision, tag } => Reply::Grant {
                 revision: *revision,

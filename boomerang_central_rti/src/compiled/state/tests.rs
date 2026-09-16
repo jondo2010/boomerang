@@ -128,8 +128,9 @@ fn coordinator_outlives_local_image_descriptor() {
 fn grants(deliveries: Vec<RtiDelivery>) -> Vec<(FederateIndex, WireTag)> {
     deliveries
         .into_iter()
-        .map(|delivery| match delivery.reply {
-            RtiReply::Grant { tag, .. } => (delivery.member, tag),
+        .filter_map(|delivery| match delivery.reply {
+            RtiReply::Grant { tag, .. } => Some((delivery.member, tag)),
+            RtiReply::SuppressPublication { .. } => None,
             other => panic!("unexpected reply: {other:?}"),
         })
         .collect()
@@ -145,8 +146,8 @@ fn transitive_source_blocks_grant_through_later_intermediate_publication() {
         grants(publish(&mut rti, A, 1, Some(early))),
         [(A, WireTag::FOREVER)]
     );
-    assert!(publish(&mut rti, B, 1, Some(middle)).is_empty());
-    assert!(publish(&mut rti, C, 1, Some(target)).is_empty());
+    assert!(grants(publish(&mut rti, B, 1, Some(middle))).is_empty());
+    assert!(grants(publish(&mut rti, C, 1, Some(target))).is_empty());
     // A's new lower bound reaches C through the compiled affected-downstream table.
     let advanced = WireTag::finite(101, 0);
     assert_eq!(
@@ -162,8 +163,8 @@ fn transitive_source_blocks_grant_through_later_intermediate_publication() {
 #[test]
 fn chain_waits_for_each_upstream_to_advance_past_requested_tag() {
     let mut rti = admitted(&CHAIN, &["a", "b", "c"]);
-    assert!(publish(&mut rti, B, 1, Some(WireTag::ZERO)).is_empty());
-    assert!(publish(&mut rti, C, 1, Some(WireTag::ZERO)).is_empty());
+    assert!(grants(publish(&mut rti, B, 1, Some(WireTag::ZERO))).is_empty());
+    assert!(grants(publish(&mut rti, C, 1, Some(WireTag::ZERO))).is_empty());
     assert_eq!(
         grants(publish(&mut rti, A, 1, Some(WireTag::ZERO))),
         [(A, WireTag::FOREVER)]
@@ -209,56 +210,57 @@ fn completion_clears_in_transit_tag_and_reconsiders_downstream() {
     assert!(rti
         .handle(A, RtiRequest::Complete { tag: pending })
         .is_empty());
-    assert!(publish(&mut rti, A, 2, None).is_empty());
+    assert!(grants(publish(&mut rti, A, 2, None)).is_empty());
     // B advertises later local work while the earlier delivery is still in transit.
     assert_eq!(
         grants(publish(&mut rti, B, 1, Some(WireTag::finite(0, 10)))),
         [(B, WireTag::FOREVER)]
     );
     let target = WireTag::finite(0, 9);
-    assert!(publish(&mut rti, C, 1, Some(target)).is_empty());
+    assert!(grants(publish(&mut rti, C, 1, Some(target))).is_empty());
     assert_eq!(
         grants(rti.handle(B, RtiRequest::Complete { tag: pending })),
         [(C, WireTag::finite(0, 9))]
     );
 }
 
+static CYCLE: RtiImage<'static> = RtiImage::new(
+    TinyMapView::new(&[
+        RtiMemberImage::new(
+            RecoveryPolicy::FailStop,
+            SliceRange::new(0, 1),
+            SliceRange::new(1, 2),
+            SliceRange::new(0, 2),
+            2,
+        ),
+        RtiMemberImage::new(
+            RecoveryPolicy::FailStop,
+            SliceRange::new(3, 1),
+            SliceRange::new(4, 2),
+            SliceRange::new(2, 2),
+            2,
+        ),
+    ]),
+    &[
+        RtiDependencyImage::new(B, 10),
+        RtiDependencyImage::new(A, 20),
+        RtiDependencyImage::new(B, 10),
+        RtiDependencyImage::new(A, 10),
+        RtiDependencyImage::new(A, 10),
+        RtiDependencyImage::new(B, 20),
+    ],
+    &[A, B, A, B],
+    TinyMapView::new(&[route("a-b", A, B, 10), route("b-a", B, A, 10)]),
+    IdentityTable::new(&["flow"]),
+    IdentityTable::new(&[]),
+    IdentityTable::new(&["ordered"]),
+    IdentityTable::new(&["bytes"]),
+);
+
 #[test]
 fn positive_delay_cycle_starts_after_both_members_publish() {
-    static CYCLE: RtiImage<'static> = RtiImage::new(
-        TinyMapView::new(&[
-            RtiMemberImage::new(
-                RecoveryPolicy::FailStop,
-                SliceRange::new(0, 1),
-                SliceRange::new(1, 2),
-                SliceRange::new(0, 2),
-                2,
-            ),
-            RtiMemberImage::new(
-                RecoveryPolicy::FailStop,
-                SliceRange::new(3, 1),
-                SliceRange::new(4, 2),
-                SliceRange::new(2, 2),
-                2,
-            ),
-        ]),
-        &[
-            RtiDependencyImage::new(B, 10),
-            RtiDependencyImage::new(A, 20),
-            RtiDependencyImage::new(B, 10),
-            RtiDependencyImage::new(A, 10),
-            RtiDependencyImage::new(A, 10),
-            RtiDependencyImage::new(B, 20),
-        ],
-        &[A, B, A, B],
-        TinyMapView::new(&[route("a-b", A, B, 10), route("b-a", B, A, 10)]),
-        IdentityTable::new(&["flow"]),
-        IdentityTable::new(&[]),
-        IdentityTable::new(&["ordered"]),
-        IdentityTable::new(&["bytes"]),
-    );
     let mut rti = admitted(&CYCLE, &["a", "b"]);
-    assert!(publish(&mut rti, A, 1, Some(WireTag::ZERO)).is_empty());
+    assert!(grants(publish(&mut rti, A, 1, Some(WireTag::ZERO))).is_empty());
     assert_eq!(
         grants(publish(&mut rti, B, 1, Some(WireTag::ZERO))),
         [
@@ -374,7 +376,7 @@ fn cumulative_completion_releases_bounded_accounting_for_later_tags() {
     ));
     // Tag 2 still blocks C, even though B advertises much later local work.
     publish(&mut rti, B, 2, Some(WireTag::finite(50, 0)));
-    assert!(publish(&mut rti, C, 1, Some(WireTag::finite(2, 0))).is_empty());
+    assert!(grants(publish(&mut rti, C, 1, Some(WireTag::finite(2, 0)))).is_empty());
     assert_eq!(
         grants(rti.handle(
             B,
@@ -399,10 +401,123 @@ fn covered_revisions_are_answered_and_current_horizons_extend_once() {
         grants(publish(&mut rti, B, 2, Some(WireTag::finite(20, 0)))),
         [(B, horizon)]
     );
-    assert!(publish(&mut rti, B, 2, Some(WireTag::finite(20, 0))).is_empty());
+    assert!(grants(publish(&mut rti, B, 2, Some(WireTag::finite(20, 0)))).is_empty());
     let replies = publish(&mut rti, A, 2, Some(WireTag::finite(60, 0)));
     assert!(replies.iter().any(|delivery| matches!(delivery,
         RtiDelivery { member: B, reply: RtiReply::Grant { revision: 2, tag } }
             if *tag == WireTag::finite(59, u64::MAX))));
-    assert!(publish(&mut rti, A, 2, Some(WireTag::finite(60, 0))).is_empty());
+    assert!(grants(publish(&mut rti, A, 2, Some(WireTag::finite(60, 0)))).is_empty());
+}
+
+#[test]
+fn dnet_tracks_transitive_downstream_and_tightens_for_in_transit_input() {
+    let mut rti = admitted(&CHAIN, &["a", "b", "c"]);
+    publish(&mut rti, A, 1, Some(WireTag::finite(5, 0)));
+    publish(&mut rti, B, 1, Some(WireTag::finite(20, 0)));
+    let updates = publish(&mut rti, C, 1, Some(WireTag::finite(30, 0)));
+    assert!(updates.iter().any(|d| d.member == A
+        && matches!(d.reply, RtiReply::SuppressPublication { tag } if tag == WireTag::finite(20, 0))));
+    let updates = rti.handle(
+        A,
+        RtiRequest::Payload {
+            route: RtiRouteIndex::new(0),
+            tag: WireTag::finite(10, 0),
+            payload: vec![1],
+        },
+    );
+    assert!(matches!(
+        updates.first().unwrap().reply,
+        RtiReply::Payload { .. }
+    ));
+    assert!(updates.iter().any(|d| d.member == A
+        && matches!(d.reply, RtiReply::SuppressPublication { tag } if tag == WireTag::finite(10, 0))));
+}
+
+#[test]
+fn inverse_delay_preserves_closed_tag_bounds() {
+    for (tag, nanos, expected) in [
+        (WireTag::finite(20, 3), 0, WireTag::finite(20, 3)),
+        (WireTag::finite(20, 3), 5, WireTag::finite(15, u64::MAX)),
+        (WireTag::finite(4, 0), 5, WireTag::NEVER),
+        (WireTag::NEVER, 5, WireTag::NEVER),
+        (WireTag::FOREVER, 5, WireTag::FOREVER),
+    ] {
+        assert_eq!(subtract_delay(tag, nanos).unwrap(), expected);
+    }
+}
+
+#[test]
+fn positive_delay_cycle_progresses_with_delayed_completion_and_stops() {
+    let mut rti = admitted(&CYCLE, &["a", "b"]);
+    for revision in 1..=4 {
+        let tag = WireTag::finite(i128::from(revision - 1) * 10, 0);
+        let mut deliveries = publish(&mut rti, A, revision, Some(tag));
+        deliveries.extend(publish(&mut rti, B, revision, Some(tag)));
+        for member in [A, B] {
+            assert!(deliveries.iter().any(|d| d.member == member
+                && matches!(d.reply, RtiReply::Grant { tag: horizon, .. } if horizon >= tag)));
+        }
+        if revision < 4 {
+            for (source, route) in [(A, RtiRouteIndex::new(0)), (B, RtiRouteIndex::new(1))] {
+                let replies = rti.handle(
+                    source,
+                    RtiRequest::Payload {
+                        route,
+                        tag: WireTag::finite(i128::from(revision) * 10, 0),
+                        payload: vec![42],
+                    },
+                );
+                assert!(matches!(
+                    replies.first().map(|d| &d.reply),
+                    Some(RtiReply::Payload { .. })
+                ));
+            }
+        }
+        if revision > 1 {
+            // Outputs at the next input tag precede cumulative LTC for the processed tag.
+            for member in [B, A] {
+                assert!(rti
+                    .handle(member, RtiRequest::Complete { tag })
+                    .iter()
+                    .all(|d| !matches!(d.reply, RtiReply::Failed { .. })));
+            }
+        }
+    }
+    for member in [A, B] {
+        publish(&mut rti, member, 5, None);
+    }
+    rti.handle(B, RtiRequest::ConfirmIdle { revision: 5 });
+    let idle = rti.handle(A, RtiRequest::ConfirmIdle { revision: 5 });
+    assert_eq!(
+        idle.iter()
+            .filter(|d| matches!(d.reply, RtiReply::Idle { .. }))
+            .count(),
+        2
+    );
+    for member in [B, A] {
+        assert!(matches!(
+            rti.handle(member, RtiRequest::Stop).as_slice(),
+            [RtiDelivery {
+                reply: RtiReply::Stopped,
+                ..
+            }]
+        ));
+    }
+    assert!(rti.is_finished());
+}
+#[test]
+fn dnet_tightening_reaches_idle_members_before_their_next_net() {
+    let mut rti = admitted(&CHAIN, &["a", "b", "c"]);
+    publish(&mut rti, A, 1, Some(WireTag::finite(5, 0)));
+    publish(&mut rti, B, 1, Some(WireTag::finite(50, 0)));
+    let advice = publish(&mut rti, C, 1, Some(WireTag::finite(60, 0)));
+    assert!(advice.iter().any(|d| d.member == A
+        && matches!(d.reply, RtiReply::SuppressPublication { tag } if tag == WireTag::finite(50, 0))));
+    publish(&mut rti, A, 2, None);
+    let tightened = publish(&mut rti, B, 2, Some(WireTag::finite(10, 0)));
+    assert!(
+        tightened.iter().any(|d| d.member == A
+            && matches!(d.reply, RtiReply::SuppressPublication { tag } if tag == WireTag::finite(10, 0))),
+        "an idle member can wake and suppress NET using its retained DNET advice"
+    );
 }

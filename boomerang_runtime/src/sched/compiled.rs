@@ -380,7 +380,11 @@ mod tests {
         }
 
         /// Records logical completion.
-        fn logical_tag_complete(&mut self, tag: Tag) -> Result<(), FederateCoordinationError> {
+        fn logical_tag_complete(
+            &mut self,
+            tag: Tag,
+            _network_input: bool,
+        ) -> Result<(), FederateCoordinationError> {
             self.calls.lock().unwrap().push(Call::Complete(tag));
             Ok(())
         }

@@ -295,7 +295,8 @@ fn unknown_upstream_blocks_and_in_transit_payload_prevents_idle() {
                 next_event: Some(destination)
             }
         )
-        .is_empty());
+        .iter()
+        .all(|d| matches!(d.reply, RtiReply::SuppressPublication { .. })));
     let replies = publish(&mut rti, MEMBERS[0], 0, Some(WireTag::ZERO));
     assert!(
         matches!(replies.as_slice(), [delivery] if delivery.member == MEMBERS[0] && matches!(delivery.reply, RtiReply::Grant { .. }))
@@ -310,7 +311,7 @@ fn unknown_upstream_blocks_and_in_transit_payload_prevents_idle() {
         },
     );
     assert!(
-        matches!(replies.as_slice(), [delivery] if delivery.member == MEMBERS[1] && matches!(delivery.reply, RtiReply::Payload { .. }))
+        matches!(replies.first(), Some(delivery) if delivery.member == MEMBERS[1] && matches!(delivery.reply, RtiReply::Payload { .. }))
     );
     rti.handle(MEMBERS[0], RtiRequest::Complete { tag: WireTag::ZERO });
     assert!(rti
@@ -321,7 +322,8 @@ fn unknown_upstream_blocks_and_in_transit_payload_prevents_idle() {
                 next_event: None
             }
         )
-        .is_empty());
+        .iter()
+        .all(|d| matches!(d.reply, RtiReply::SuppressPublication { .. })));
     let replies = publish(&mut rti, MEMBERS[1], 2, Some(destination));
     assert!(
         matches!(replies.as_slice(), [delivery] if matches!(delivery.reply, RtiReply::Grant { revision: 2, tag } if tag == WireTag::FOREVER))
@@ -447,6 +449,9 @@ fn publish(
             next_event,
         },
     )
+    .into_iter()
+    .filter(|delivery| !matches!(delivery.reply, RtiReply::SuppressPublication { .. }))
+    .collect()
 }
 
 /// Preflight authorizes stable outbound identities and retains only the shared route key.

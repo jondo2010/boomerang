@@ -150,7 +150,7 @@ minimum-delay paths and bounded in-transit-message state.
 
 The efficient centralized baseline follows the 2025 efficiency follow-up: `EIMT` safe-horizon
 grants, downstream next-event (`DNET`) suppression of unnecessary `NET` reports, and selective
-cumulative Latest Tag Confirmed (`LTC`) reporting. A grant can cover several local events;
+cumulative Latest Tag Complete (`LTC`) reporting. A grant can cover several local events;
 suppression requires existing grant authority and restores reporting when downstream bounds
 tighten. `LTC` follows completion of a tag that executed network input, including resulting output
 and all participating Enclaves, rather than receipt into a future-event queue. Local progress and

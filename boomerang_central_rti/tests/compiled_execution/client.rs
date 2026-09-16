@@ -1,7 +1,11 @@
 //! Ordered scripted replies exercise the production client and real compiled scheduler.
 use super::*;
 use boomerang_central_rti::compiled::{CentralRtiError, RtiReplySource, RtiRequestSink};
-use std::{collections::VecDeque, sync::Mutex, time::Duration as StdDuration};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    sync::Mutex,
+    time::Duration as StdDuration,
+};
 
 #[derive(Default)]
 struct Script {
@@ -48,6 +52,15 @@ impl RtiReplySource for OrderedReplies {
                 [41, 42],
                 "all preceding payloads must be admitted before exposing a grant"
             );
+            if script.observed_grants == 0 {
+                assert!(
+                    !script
+                        .requests
+                        .iter()
+                        .any(|r| matches!(r, RtiRequest::Complete { .. })),
+                    "admitting future input must not emit LTC before processing"
+                );
+            }
             script.observed_grants += 1;
             if matches!(reply, Some(RtiReply::Grant { tag, .. }) if tag == WireTag::finite(2_000_000, 0))
             {
@@ -203,4 +216,95 @@ fn decode_failure_terminates_execution_before_queued_grant() {
             matches!(script.requests.last(), Some(RtiRequest::Abort { message }) if message.contains("scripted malformed payload"))
         );
     });
+}
+
+#[test]
+fn dnet_reduces_net_traffic_with_identical_compiled_execution() {
+    bounded(|| {
+        let run = |suppress| {
+            let mut replies = VecDeque::from([RtiReply::Started]);
+            if suppress {
+                replies.push_back(RtiReply::SuppressPublication {
+                    tag: WireTag::FOREVER,
+                });
+            }
+            replies.extend([payload(41, 1_000_000), payload(42, 2_000_000)]);
+            let script = Arc::new(Mutex::new(Script {
+                replies,
+                single_horizon: true,
+                ..Script::default()
+            }));
+            let execution = execute_script(script.clone()).unwrap();
+            let values = execution
+                .enclave(EnclaveIndex::new(1))
+                .unwrap()
+                .state::<RoutedSinkState>(StateSlotIndex::new(0))
+                .unwrap()
+                .values
+                .clone();
+            let script = script.lock().unwrap();
+            let second_nets = script.requests.iter().filter(|r| matches!(r,
+                RtiRequest::Publish { next_event: Some(tag), .. } if *tag == WireTag::finite(2_000_000, 0))).count();
+            assert!(script.requests.iter().any(|r| matches!(r,
+                RtiRequest::Complete { tag } if *tag == WireTag::finite(2_000_000, 0))));
+            (values, second_nets)
+        };
+        let eager = run(false);
+        let suppressed = run(true);
+        assert_eq!(eager.0, [41, 42]);
+        assert_eq!(suppressed.0, eager.0);
+        assert!(eager.1 >= 1);
+        assert_eq!(suppressed.1, 0);
+    });
+}
+
+#[test]
+fn outbound_payload_tightens_dnet_before_the_next_publication() {
+    use boomerang_runtime::{
+        CoordinationRevision, FederateCoordinationBackend, FederatePublication, TaggedPayload,
+    };
+    let script = Arc::new(Mutex::new(Script {
+        replies: [
+            RtiReply::Started,
+            RtiReply::SuppressPublication {
+                tag: WireTag::FOREVER,
+            },
+        ]
+        .into(),
+        ..Script::default()
+    }));
+    let sink = Arc::new(RequestRecorder(script.clone()));
+    let view = CompiledDeploymentView::new(DEPLOYMENT).unwrap();
+    let bindings = RtiClientBindings::new(&view, MEMBERS[0], IDENTITY).unwrap();
+    let outbound = bindings
+        .outbound_sink(sink.clone(), BoundaryId::new("pipe"))
+        .unwrap();
+    let mut client = CentralRtiClient::connect(
+        sink,
+        OrderedReplies(script.clone()),
+        bindings,
+        BTreeMap::new(),
+        StdDuration::from_millis(10),
+    )
+    .unwrap();
+    client.progress(StdDuration::ZERO).unwrap();
+    let publication = |revision, millis| {
+        FederatePublication::new(
+            CoordinationRevision::new(revision),
+            Some(Tag::new(Duration::milliseconds(millis), 0)),
+        )
+        .with_grant_horizon(Some(Tag::FOREVER))
+    };
+    client.publish(publication(1, 1)).unwrap();
+    outbound
+        .send(TaggedPayload {
+            tag: Tag::new(Duration::milliseconds(1), 0),
+            payload: vec![42],
+        })
+        .unwrap();
+    client.publish(publication(2, 2)).unwrap();
+    assert!(matches!(script.lock().unwrap().requests.as_slice(), [
+        RtiRequest::Hello { .. }, RtiRequest::Payload { .. },
+        RtiRequest::Publish { revision: 2, next_event: Some(tag) }
+    ] if *tag == WireTag::finite(2_000_000, 0)));
 }

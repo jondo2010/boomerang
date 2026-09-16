@@ -746,7 +746,7 @@ grant authority to proceed. A Federate retains its latest skipped report, sends 
 update when `DNET` tightens, and updates its local bound when sending payloads. Suppression changes
 wire traffic; local publication revisions and scheduler progress still advance consistently.
 
-Latest Tag Confirmed (`LTC`) reports cumulative completion through a tag and retires incoming
+Latest Tag Complete (`LTC`) reports cumulative completion through a tag and retires incoming
 obligations through that tag. Send it after completion of a tag that executed a network-input
 reaction, including resulting outputs and completion across the Federate's Enclaves. Receiving a
 payload into a future-event queue does not establish completion. Local completion tracking

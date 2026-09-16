@@ -75,6 +75,8 @@ pub(crate) enum SchedulerMessage {
         enclave: EnclaveIndex,
         /// Monotonic participant completion tag.
         tag: Tag,
+        /// Whether the processed tag included network input.
+        network_input: bool,
     },
     /// Confirm a fresh empty mailbox for the current completion fence.
     CompletionObserved {
@@ -207,6 +209,8 @@ pub(crate) struct FederateCoordinationState {
     pending_publication: Option<FederatePublication>,
     /// Greatest completion frontier emitted for the whole Federate.
     completed_frontier: Option<Tag>,
+    /// Earliest and latest processed network inputs awaiting aggregate completion.
+    pending_inputs: Option<(Tag, Tag)>,
     /// Independent generation for completion mailbox checks.
     completion_generation: u64,
     /// Completion frontier currently awaiting mailbox checks.
@@ -247,6 +251,7 @@ impl FederateCoordinationState {
             revision: CoordinationRevision::new(0),
             pending_publication: None,
             completed_frontier: None,
+            pending_inputs: None,
             completion_generation: 0,
             completion_probe: None,
             grant_horizon: None,
@@ -318,7 +323,11 @@ impl FederateCoordinationState {
                 enclave,
                 next_event,
             } => self.publish(enclave, next_event),
-            SchedulerMessage::CompleteTag { enclave, tag } => self.complete(enclave, tag),
+            SchedulerMessage::CompleteTag {
+                enclave,
+                tag,
+                network_input,
+            } => self.complete(enclave, tag, network_input),
             SchedulerMessage::ParticipantStopped { enclave } => {
                 self.participant(enclave)?;
                 Ok(self.stop())
@@ -598,9 +607,7 @@ impl FederateCoordinationState {
         }) {
             self.completed_frontier = Some(frontier);
             self.completion_probe = None;
-            return vec![CoordinationAction::Complete(FederateCompletion::new(
-                frontier,
-            ))];
+            return vec![CoordinationAction::Complete(self.completion(frontier))];
         }
         Vec::new()
     }
@@ -610,6 +617,7 @@ impl FederateCoordinationState {
         &mut self,
         enclave: EnclaveIndex,
         tag: Tag,
+        network_input: bool,
     ) -> Result<Vec<CoordinationAction>, CoordinationStateError> {
         let participant = self.participant(enclave)?;
         if self.is_stopped()
@@ -618,6 +626,12 @@ impl FederateCoordinationState {
                 .is_some_and(|completed| tag <= completed)
         {
             return Ok(Vec::new());
+        }
+        if network_input {
+            self.pending_inputs = Some(
+                self.pending_inputs
+                    .map_or((tag, tag), |(first, last)| (first.min(tag), last.max(tag))),
+            );
         }
         self.participants[enclave].completed = Some(tag);
 
@@ -637,9 +651,26 @@ impl FederateCoordinationState {
             return Ok(Vec::new());
         }
         self.completed_frontier = Some(frontier);
-        Ok(vec![CoordinationAction::Complete(FederateCompletion::new(
-            frontier,
-        ))])
+        Ok(vec![CoordinationAction::Complete(
+            self.completion(frontier),
+        )])
+    }
+
+    /// Confirms only safe frontiers covering processed network input.
+    ///
+    /// A range conservatively retains later obligations when Enclaves run ahead of one
+    /// another. Intermediate frontiers may send an extra LTC; no input tag is forgotten.
+    fn completion(&mut self, frontier: Tag) -> FederateCompletion {
+        let needed = self
+            .pending_inputs
+            .is_some_and(|(first, _)| first <= frontier);
+        if self
+            .pending_inputs
+            .is_some_and(|(_, last)| last <= frontier)
+        {
+            self.pending_inputs = None;
+        }
+        FederateCompletion::new(frontier).with_network_input(needed)
     }
 
     /// Latches the first optional typed failure origin and emits `Abort` at most once.
@@ -717,7 +748,8 @@ impl FederateCoordinationState {
             .values()
             .filter_map(|participant| participant.candidate)
             .min();
-        let publication = FederatePublication::new(self.revision, next_event);
+        let publication = FederatePublication::new(self.revision, next_event)
+            .with_grant_horizon(self.grant_horizon);
         self.pending_publication = Some(publication);
         let mut actions = vec![CoordinationAction::Publish(publication)];
         if resume {
@@ -780,7 +812,11 @@ mod tests {
         tag: Tag,
     ) -> Vec<CoordinationAction> {
         state
-            .handle_scheduler(SchedulerMessage::CompleteTag { enclave, tag })
+            .handle_scheduler(SchedulerMessage::CompleteTag {
+                enclave,
+                tag,
+                network_input: false,
+            })
             .unwrap()
     }
 
@@ -894,11 +930,14 @@ mod tests {
                     (first, Some(Some(first_tag))),
                     (second, Some(Some(second_tag)))
                 ],
-                pending_publication: Some(FederatePublication::new(revision, Some(first_tag))),
-                actions: vec![CoordinationAction::Publish(FederatePublication::new(
-                    revision,
-                    Some(first_tag),
-                ))],
+                pending_publication: Some(
+                    FederatePublication::new(revision, Some(first_tag))
+                        .with_grant_horizon(Some(first_tag))
+                ),
+                actions: vec![CoordinationAction::Publish(
+                    FederatePublication::new(revision, Some(first_tag),)
+                        .with_grant_horizon(Some(first_tag))
+                )],
             }
         );
     }
@@ -1219,7 +1258,14 @@ mod tests {
                 FederateCoordinationState::new([first, second], LifecyclePolicy::KeepAlive)
                     .unwrap();
             state.grant_horizon = Some(frontier);
-            assert!(complete(&mut state, first, frontier).is_empty());
+            assert!(state
+                .handle_scheduler(SchedulerMessage::CompleteTag {
+                    enclave: first,
+                    tag: frontier,
+                    network_input: true,
+                })
+                .unwrap()
+                .is_empty());
             let actions = publish(&mut state, second, candidate);
             let generation = actions
                 .iter()
@@ -1264,9 +1310,9 @@ mod tests {
                         generation: current
                     })
                     .unwrap(),
-                vec![CoordinationAction::Complete(FederateCompletion::new(
-                    frontier
-                ))]
+                vec![CoordinationAction::Complete(
+                    FederateCompletion::new(frontier).with_network_input(true)
+                )]
             );
             assert!(state
                 .handle_scheduler(SchedulerMessage::CompletionObserved {
@@ -1446,5 +1492,35 @@ mod tests {
         );
         assert!(state.handle_publication_sent(old).unwrap().is_empty());
         assert!(state.pending_publication().is_some());
+    }
+    #[test]
+    fn selective_completion_retains_inputs_across_intermediate_aggregate_frontiers() {
+        let a = EnclaveIndex::new(3);
+        let b = EnclaveIndex::new(7);
+        let tag = |n| Tag::new(Duration::seconds(n), 0);
+        let mut state = FederateCoordinationState::new([a, b], LifecyclePolicy::KeepAlive).unwrap();
+        for n in [1, 3] {
+            assert!(state
+                .handle_scheduler(SchedulerMessage::CompleteTag {
+                    enclave: a,
+                    tag: tag(n),
+                    network_input: true,
+                })
+                .unwrap()
+                .is_empty());
+        }
+        for n in [1, 2, 3] {
+            let actions = complete(&mut state, b, tag(n));
+            assert!(
+                matches!(actions.as_slice(), [CoordinationAction::Complete(c)]
+                if c.completed() == tag(n) && c.confirms_network_input())
+            );
+        }
+        complete(&mut state, a, tag(4));
+        let actions = complete(&mut state, b, tag(4));
+        assert!(
+            matches!(actions.as_slice(), [CoordinationAction::Complete(c)]
+            if !c.confirms_network_input())
+        );
     }
 }

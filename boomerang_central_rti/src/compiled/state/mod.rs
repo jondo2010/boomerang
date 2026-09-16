@@ -2,8 +2,31 @@ use super::*;
 use boomerang_runtime::image::{
     BoundaryFailurePolicy, RecoveryPolicy, RtiImageView, SecurityPolicy, TimingPolicy,
 };
-use std::collections::BTreeSet;
 use tinymap::TinySecondaryMap;
+
+/// A compiled coordination resource budget could not be allocated or was exhausted.
+#[derive(Clone, Debug, thiserror::Error)]
+pub enum RtiResourceError {
+    /// Startup could not reserve the compiled incoming-tag storage.
+    #[error("could not reserve {capacity} in-transit tags for {member:?}: {source}")]
+    Allocation {
+        /// Destination whose storage could not be reserved.
+        member: FederateIndex,
+        /// Compiled number of distinct incoming tags.
+        capacity: u32,
+        /// Original allocation or address-space failure.
+        #[source]
+        source: std::collections::TryReserveError,
+    },
+    /// A new destination tag would exceed its compiled accounting budget.
+    #[error("in-transit tag capacity {capacity} exhausted for {member:?}")]
+    InTransitCapacity {
+        /// Destination whose accounting budget was exhausted.
+        member: FederateIndex,
+        /// Compiled number of distinct incoming tags.
+        capacity: u32,
+    },
+}
 
 /// Mutable state for one canonical compiled member, allocated only at RTI startup.
 #[derive(Default)]
@@ -19,7 +42,7 @@ struct MemberState {
     /// Greatest completed tag.
     completed: Option<WireTag>,
     /// Tags delivered but not yet covered by destination completion.
-    in_transit: BTreeSet<WireTag>,
+    in_transit: Vec<WireTag>,
     /// Current revision explicitly participating in terminal quiescence.
     idle_request: Option<u64>,
     /// Revision authorized to commit terminal idle stop.
@@ -67,11 +90,20 @@ impl<'a> CompiledRti<'a> {
     ) -> Result<Self, CentralRtiError> {
         let image = view.image();
         let mut states = TinySecondaryMap::with_capacity(image.members().len());
-        for (key, _) in image.members().iter() {
+        for (key, member) in image.members().iter() {
             if image.member_recovery_policy(key) != RecoveryPolicy::FailStop {
                 return Err(CentralRtiError::new("unsupported member recovery policy"));
             }
-            states.insert(key, MemberState::default());
+            let mut state = MemberState::default();
+            state
+                .in_transit
+                .try_reserve_exact(member.in_transit_capacity() as usize)
+                .map_err(|source| RtiResourceError::Allocation {
+                    member: key,
+                    capacity: member.in_transit_capacity(),
+                    source,
+                })?;
+            states.insert(key, state);
         }
         for (key, _) in image.routes().iter() {
             if image.route_failure_policy(key) != BoundaryFailurePolicy::PropagateStop
@@ -253,7 +285,17 @@ impl<'a> CompiledRti<'a> {
                         "payload reached a completed or stopped destination",
                     ));
                 }
-                self.states[target].in_transit.insert(tag);
+                if let Err(position) = self.states[target].in_transit.binary_search(&tag) {
+                    let capacity = self.view.image().members()[target].in_transit_capacity();
+                    if self.states[target].in_transit.len() >= capacity as usize {
+                        return Err(RtiResourceError::InTransitCapacity {
+                            member: target,
+                            capacity,
+                        }
+                        .into());
+                    }
+                    self.states[target].in_transit.insert(position, tag);
+                }
                 deliveries.push(RtiDelivery {
                     member: target,
                     reply: RtiReply::Payload {
@@ -323,16 +365,20 @@ impl<'a> CompiledRti<'a> {
         }
         Ok(deliveries)
     }
-    /// Applies precomputed direct completion and transitive next-event lower bounds.
+    /// Extends authority using independent completion and earliest-input proofs.
+    ///
+    /// Completion can tighten a conservative incoming bound whose NET is stale. The
+    /// retained horizon is irrevocable; a new revision is answered even if it is covered,
+    /// since the client may have discarded an earlier reply for an obsolete revision.
     fn grant(&self, member: FederateIndex) -> Result<Option<(u64, WireTag)>, CentralRtiError> {
         let state = &self.states[member];
         let Some((revision, Some(requested))) = state.publication else {
             return Ok(None);
         };
-        if state.stopped || state.granted_revision == Some(revision) {
+        if state.stopped || state.idle.is_some() {
             return Ok(None);
         }
-        let mut complete = true;
+        let mut completed_horizon = WireTag::FOREVER;
         for dependency in self.view.image().direct_incoming(member) {
             let bound = delay(
                 self.states[dependency.source()]
@@ -340,24 +386,30 @@ impl<'a> CompiledRti<'a> {
                     .unwrap_or(WireTag::NEVER),
                 dependency.delay_nanos(),
             )?;
-            // Positive delay collapses later source microsteps onto this same destination tag.
-            if bound < requested || (dependency.delay_nanos() != 0 && bound == requested) {
-                complete = false;
-                break;
-            }
+            // Positive delay collapses later source microsteps onto the same destination tag.
+            completed_horizon = completed_horizon.min(if dependency.delay_nanos() == 0 {
+                bound
+            } else {
+                predecessor(bound)?
+            });
         }
-        if !complete {
-            for dependency in self.view.image().transitive_incoming(member) {
-                if delay(
-                    self.states[dependency.source()].earliest(),
-                    dependency.delay_nanos(),
-                )? <= requested
-                {
-                    return Ok(None);
-                }
-            }
+        let mut incoming = WireTag::FOREVER;
+        for dependency in self.view.image().transitive_incoming(member) {
+            incoming = incoming.min(delay(
+                self.states[dependency.source()].earliest(),
+                dependency.delay_nanos(),
+            )?);
         }
-        Ok(Some((revision, requested)))
+        let horizon = predecessor(incoming)?
+            .max(completed_horizon)
+            .max(state.granted.unwrap_or(WireTag::NEVER));
+        if horizon < requested
+            || (state.granted_revision == Some(revision)
+                && state.granted.is_some_and(|old| horizon <= old))
+        {
+            return Ok(None);
+        }
+        Ok(Some((revision, horizon)))
     }
 }
 /// Checks the finite nonnegative event-tag domain at the wire boundary.
@@ -368,6 +420,12 @@ fn finite(tag: WireTag) -> bool {
 fn delay(tag: WireTag, nanos: u64) -> Result<WireTag, CentralRtiError> {
     tag.checked_delay(crate::WireDelay::from_nanos(nanos))
         .ok_or_else(|| CentralRtiError::new("compiled dependency tag overflow"))
+}
+
+/// Computes a strict safe horizon without wrapping finite tag arithmetic.
+fn predecessor(tag: WireTag) -> Result<WireTag, CentralRtiError> {
+    tag.checked_predecessor()
+        .ok_or_else(|| CentralRtiError::new("compiled predecessor tag overflow"))
 }
 
 #[cfg(test)]

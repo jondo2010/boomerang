@@ -43,6 +43,23 @@ impl WireTag {
         }
     }
 
+    /// Returns the greatest finite wire tag strictly before a finite bound.
+    ///
+    /// A zero microstep borrows one nanosecond and uses the largest wire microstep.
+    /// Sentinels are preserved; the smallest finite offset cannot wrap on subtraction.
+    pub fn checked_predecessor(self) -> Option<Self> {
+        match self {
+            Self::Never | Self::Forever => Some(self),
+            Self::Finite {
+                offset_ns,
+                microstep,
+            } if microstep != 0 => Some(Self::finite(offset_ns, microstep - 1)),
+            Self::Finite { offset_ns, .. } => offset_ns
+                .checked_sub(1)
+                .map(|offset| Self::finite(offset, u64::MAX)),
+        }
+    }
+
     /// Apply a logical connection delay using Boomerang's delayed-action tag rule.
     ///
     /// A zero delay preserves the source tag. A positive delay advances the offset and resets the
@@ -142,6 +159,18 @@ mod tests {
             let encoded = serde_json::to_vec(&tag).unwrap();
             let decoded: WireTag = serde_json::from_slice(&encoded).unwrap();
             assert_eq!(decoded, tag);
+        }
+    }
+    #[test]
+    fn predecessor_bounds_superdense_tags_without_wrapping() {
+        for (tag, expected) in [
+            (WireTag::NEVER, Some(WireTag::NEVER)),
+            (WireTag::FOREVER, Some(WireTag::FOREVER)),
+            (WireTag::finite(50, 2), Some(WireTag::finite(50, 1))),
+            (WireTag::finite(50, 0), Some(WireTag::finite(49, u64::MAX))),
+            (WireTag::finite(i128::MIN, 0), None),
+        ] {
+            assert_eq!(tag.checked_predecessor(), expected);
         }
     }
 }

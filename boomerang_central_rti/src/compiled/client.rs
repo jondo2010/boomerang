@@ -183,7 +183,7 @@ impl CentralRtiClient {
             None => Ok(None),
             Some(RtiReply::Grant { revision, tag }) => Ok(Some(FederateAcquisition::new(
                 CoordinationRevision::new(revision),
-                crate::runtime_tag_from_wire(tag)
+                crate::tag_conversion::runtime_horizon_from_wire(tag)
                     .map_err(|e| CentralRtiError::new(e.to_string()))?,
             ))),
             Some(RtiReply::Payload {

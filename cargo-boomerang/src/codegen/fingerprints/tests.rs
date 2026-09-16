@@ -28,6 +28,7 @@ fn fixture(
         implementation,
         "serde-json",
         false,
+        8,
     )
 }
 
@@ -39,6 +40,7 @@ fn fixture_profile(
     implementation: &str,
     codec: &str,
     reverse: bool,
+    queue_capacity: u64,
 ) -> (
     ApplicationTopology,
     Vec<DescriptorDriverBinding>,
@@ -106,7 +108,7 @@ fn fixture_profile(
             vec![],
             vec![],
             DescriptorBounds {
-                queue_capacity: DescriptorBound::Known(8),
+                queue_capacity: DescriptorBound::Known(queue_capacity),
                 payload_bytes: DescriptorBound::Known(512),
                 state_bytes: DescriptorBound::Known(if name == "a" { state_bytes } else { 64 }),
                 scratch_bytes: DescriptorBound::Known(64),
@@ -235,13 +237,14 @@ fn mapping_is_canonical_and_tracks_selected_codec() {
     let base = coordination(&compiled, &topology).unwrap();
     let key = compiled.federates().iter().next().unwrap().0;
     let image = federate_image(&compiled.federate_slice(key).unwrap(), &bindings).unwrap();
-    let (topology, bindings, reordered) = fixture_profile(1, 64, 0, "impl-a", "serde-json", true);
+    let (topology, bindings, reordered) =
+        fixture_profile(1, 64, 0, "impl-a", "serde-json", true, 8);
     assert_eq!(base, coordination(&reordered, &topology).unwrap());
     assert_eq!(
         image,
         federate_image(&reordered.federate_slice(key).unwrap(), &bindings).unwrap()
     );
-    let (topology, _, changed) = fixture_profile(1, 64, 0, "impl-a", "postcard-v1", false);
+    let (topology, _, changed) = fixture_profile(1, 64, 0, "impl-a", "postcard-v1", false, 8);
     assert_ne!(base, coordination(&changed, &topology).unwrap());
     assert_ne!(mapping(&compiled).unwrap(), mapping(&changed).unwrap());
 }
@@ -255,4 +258,12 @@ fn reused_implementation_descriptors_follow_owning_component() {
     let baseline = federate_image(&slice, &bindings).unwrap();
     bindings.reverse();
     assert_eq!(baseline, federate_image(&slice, &bindings).unwrap());
+}
+
+#[test]
+fn coordination_tracks_compiled_in_transit_capacity() {
+    let (topology, _, compiled) = fixture(1, 64, 0, "impl-a");
+    let base = coordination(&compiled, &topology).unwrap();
+    let (topology, _, changed) = fixture_profile(1, 64, 0, "impl-a", "serde-json", false, 9);
+    assert_ne!(base, coordination(&changed, &topology).unwrap());
 }

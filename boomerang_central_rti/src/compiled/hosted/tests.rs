@@ -60,12 +60,14 @@ fn server(timeout: Duration) -> (SocketAddr, JoinHandle<Result<(), CentralRtiErr
                 SliceRange::new(0, 0),
                 SliceRange::new(0, 0),
                 SliceRange::new(0, 0),
+                32,
             ),
             RtiMemberImage::new(
                 RecoveryPolicy::FailStop,
                 SliceRange::new(0, 0),
                 SliceRange::new(0, 0),
                 SliceRange::new(0, 0),
+                32,
             ),
         ];
         let image = RtiImage::new(

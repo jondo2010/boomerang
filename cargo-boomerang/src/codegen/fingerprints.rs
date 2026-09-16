@@ -107,6 +107,7 @@ pub(super) fn coordination(
             .map(|(key, m)| {
                 (
                     image.member_recovery_policy(key),
+                    m.in_transit_capacity(),
                     ranges(m.direct_incoming_range()),
                     ranges(m.transitive_incoming_range()),
                     (

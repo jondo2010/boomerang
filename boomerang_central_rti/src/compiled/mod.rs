@@ -13,7 +13,7 @@ mod tests;
 use crate::WireTag;
 use boomerang_runtime::image::{FederateIndex, RtiRouteIndex};
 pub use client::{CentralRtiClient, RtiClientBindings};
-pub use state::CompiledRti;
+pub use state::{CompiledRti, RtiResourceError};
 
 /// Compiler-issued shared coordination digest, identical at the core and wire boundary.
 pub use boomerang_federated::wire::CoordinationFingerprint as CoordinationIdentity;
@@ -21,6 +21,9 @@ pub use boomerang_federated::wire::CoordinationFingerprint as CoordinationIdenti
 /// Terminal compiled session or transport failure at a hosted interface boundary.
 #[derive(Clone, Debug, thiserror::Error)]
 pub enum CentralRtiError {
+    /// A compiled coordination storage budget could not be satisfied.
+    #[error("central RTI: {0}")]
+    Resource(#[from] RtiResourceError),
     /// A terminal coordination diagnostic independent of any transport implementation.
     #[error("central RTI: {0}")]
     Coordination(String),

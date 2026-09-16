@@ -2263,6 +2263,7 @@ mod tests {
             SliceRange::new(0, 0),
             SliceRange::new(0, 0),
             SliceRange::new(0, 0),
+            32,
         );
         let one = [member];
         let image = CompiledDeploymentImage {
@@ -2314,6 +2315,7 @@ mod tests {
             SliceRange::new(0, 0),
             SliceRange::new(0, 0),
             SliceRange::new(0, 0),
+            32,
         )];
         let edges = [FederationEdgeImage::new(
             BoundaryId::new("host"),
@@ -2364,6 +2366,7 @@ mod tests {
             SliceRange::new(0, 1),
             SliceRange::new(1, 0),
             SliceRange::new(0, 0),
+            32,
         )];
         let dependencies = [RtiDependencyImage::new(FederateIndex::new(0), 42)];
         let image = rti_fixture(&members, &dependencies, &[], &[]);
@@ -2433,6 +2436,7 @@ mod tests {
             SliceRange::new(0, 0),
             SliceRange::new(0, 0),
             SliceRange::new(0, 0),
+            32,
         );
         let members = [member];
         let routes = [RtiRouteImage::new(
@@ -2476,6 +2480,7 @@ mod tests {
             SliceRange::new(0, 1),
             SliceRange::new(0, 0),
             SliceRange::new(0, 0),
+            32,
         )];
         let image = CompiledDeploymentImage {
             coordination: CoordinationProjection::CentralRti(rti_fixture(
@@ -2653,6 +2658,7 @@ mod tests {
             SliceRange::new(0, 0),
             SliceRange::new(0, 0),
             SliceRange::new(0, 0),
+            32,
         );
         let rti_members = [rti_member_image.clone(), rti_member_image];
         let image = CompiledDeploymentImage {

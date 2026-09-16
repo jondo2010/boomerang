@@ -725,6 +725,54 @@ RTI graph and one persistent ordered client connection per Federate. A future `p
 deployment uses only its generated direct-peer routes and backend-specific coordination tables.
 Same-Federate Enclaves never communicate through a federation coordination backend.
 
+### Efficient centralized coordination
+
+The `central-rti` baseline follows the algorithm in [Improving the Efficiency of Coordinating
+Timed Events in Distributed Systems](https://doi.org/10.1145/3726301.3728399). Each Federate sends
+payloads through the RTI over its reliable ordered channel. The RTI records incoming tag
+obligations before forwarding payloads, and orders each destination's payloads before grants
+that depend on them. The destination admits those payloads before making the grants effective.
+
+The RTI computes the earliest incoming message tag (`EIMT`) from compiled minimum-delay paths,
+participant progress, and outstanding incoming tags. New progress publications cannot hide an
+earlier in-transit message. Safe-horizon grants extend to the latest representable tag strictly
+before `EIMT`, subject to stop and lifecycle constraints. A Federate can execute multiple local
+events within that horizon without a control round trip for each event. Tag predecessor and
+delay calculations preserve checked arithmetic and explicit `Never`/`Forever` semantics.
+
+Downstream next-event bounds (`DNET`) suppress a Federate's next-event reports (`NET`) when the
+algorithm establishes that downstream participants do not need them and the Federate already has
+grant authority to proceed. A Federate retains its latest skipped report, sends the necessary
+update when `DNET` tightens, and updates its local bound when sending payloads. Suppression changes
+wire traffic; local publication revisions and scheduler progress still advance consistently.
+
+Latest Tag Confirmed (`LTC`) reports cumulative completion through a tag and retires incoming
+obligations through that tag. Send it after completion of a tag that executed a network-input
+reaction, including resulting outputs and completion across the Federate's Enclaves. Receiving a
+payload into a future-event queue does not establish completion. Local completion tracking
+continues even when an external report is unnecessary. Lifecycle reporting remains independent.
+There is no per-payload application receipt or permission exchange and no duplicate receiver-side
+in-transit queue solely for deciding whether to send `LTC`.
+
+In-transit state and transport storage have explicit deployment resource bounds. Saturation must
+either preserve progress for completion and control traffic or produce a bounded declared failure;
+it must never lose an outstanding obligation or block the sole reader waiting for the completion
+report that would release capacity. Transport reliability remains the transport's responsibility.
+Protocol transitions must remain safe under delayed reports and cross-participant interleavings;
+they cannot assume that related `LTC` and `NET` reports arrive nearly simultaneously. Stale `NET`
+values must not regress grants or deadlock shutdown. Unexpected link loss does not authorize a
+terminal horizon as though an upstream Federate had permanently and normally resigned.
+
+These efficiency rules apply to the supported graph class outside zero-delay cycles, including
+positive-delay cycles. Constructive zero-delay coordination requires its own `PTAG`/`ABS` analysis
+and conformance evidence before any efficiency rule is enabled within those components.
+
+Direct payload routing under central RTI authority is deferred to a measured optimization with
+its own safety proof. It must preserve conservative message accounting and prevent effective
+grants from overtaking payload admission on a separate channel. Neither direct routing nor an
+extra per-send control exchange is required by the efficient centralized baseline. The separate
+future `peer-to-peer` coordination backend remains subject to the shared logical-time guarantees.
+
 ## Recording and replay
 
 ### Recording point

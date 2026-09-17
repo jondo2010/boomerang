@@ -1340,6 +1340,11 @@ pub fn execute_owned<'image>(
             count: unsupported_routes,
         });
     }
+    if let Err(error) = OwnedStorage::validate_image_bindings(&image, &bindings) {
+        tracing::warn!(target: "boomerang::runtime",
+            event = "runtime.preflight.rejected", owner = "enclave", reason = "binding");
+        return Err(error.into());
+    }
     tracing::debug!(target: "boomerang::runtime",
         event = "runtime.preflight.completed", owner = "enclave");
     let mut storage_phase = ConstructionPhase::started("storage");
@@ -1769,8 +1774,7 @@ mod scoped_spawn_tests {
         assert_spawn_failure_event(&coordinator_events);
 
         let failed_enclave = EnclaveIndex::new(1);
-        let (scheduler, scheduler_events) =
-            execute_with_spawn_failure(Some(failed_enclave));
+        let (scheduler, scheduler_events) = execute_with_spawn_failure(Some(failed_enclave));
         assert!(matches!(
             scheduler,
             ExecuteOwnedFederateError::ThreadSpawn { enclave, source }

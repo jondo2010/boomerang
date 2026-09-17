@@ -55,6 +55,27 @@ fn runtime_lifecycle_trace_validates_identity_before_construction() {
             .collect::<Vec<_>>(),
         ["runtime.preflight.started", "runtime.preflight.rejected"]
     );
+
+    let (result, events) =
+        capture_runtime(|| execute_owned(&IMAGE, EnclaveBindings::new(), Config::default()));
+    assert!(matches!(
+        result,
+        Err(ExecuteOwnedError::Storage(
+            OwnedStorageError::MissingBinding { .. }
+        ))
+    ));
+    let lifecycle = lifecycle_events(&events);
+    assert_eq!(
+        lifecycle
+            .iter()
+            .map(|event| event["fields"]["event"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["runtime.preflight.started", "runtime.preflight.rejected"]
+    );
+    assert_eq!(lifecycle[1]["fields"]["reason"], "binding");
+    assert!(!lifecycle.iter().any(|event| event["fields"]["event"]
+        .as_str()
+        .is_some_and(|name| name.starts_with("runtime.construction"))));
 }
 
 #[test]

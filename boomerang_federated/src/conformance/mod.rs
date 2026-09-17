@@ -577,10 +577,11 @@ struct MemberState {
 
 impl MemberState {
     fn earliest(&self) -> WireTag {
-        let published = self
-            .publication
-            .and_then(|(_, tag)| tag)
-            .unwrap_or(WireTag::FOREVER);
+        let published = match self.publication {
+            None => WireTag::NEVER,
+            Some((_, None)) => WireTag::FOREVER,
+            Some((_, Some(tag))) => tag,
+        };
         self.in_transit
             .first()
             .copied()

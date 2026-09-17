@@ -18,6 +18,28 @@ fn tagged_payload_exchange_is_a_reusable_oracle_vector() {
 }
 
 #[test]
+fn destination_waits_for_upstream_publication_before_idle_releases_it() {
+    let source = Member::new(0);
+    let destination = Member::new(1);
+    let route = Route::new(0);
+    let requested = WireTag::finite(0, 10);
+    let mut oracle = ReferenceCoordinator::new(
+        [source, destination],
+        Topology::new([(route, RouteTopology::new(source, destination))]).unwrap(),
+        1,
+    )
+    .unwrap();
+
+    assert!(oracle
+        .apply(VectorStep::publish(destination, 1, Some(requested)))
+        .is_empty());
+    assert_eq!(
+        oracle.apply(VectorStep::publish(source, 1, None)),
+        vec![Outcome::grant(destination, 1, WireTag::FOREVER)]
+    );
+}
+
+#[test]
 fn completion_releases_only_the_accounted_frontier() {
     let source = Member::new(0);
     let destination = Member::new(1);

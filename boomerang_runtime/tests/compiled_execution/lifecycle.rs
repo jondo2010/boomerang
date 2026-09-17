@@ -1,6 +1,128 @@
 //! Single-enclave lifecycle, typed storage, validation, and unsupported-route contracts.
 use super::*;
 
+fn panicking_initializer() -> CounterState {
+    panic!("injected initializer panic")
+}
+
+#[test]
+fn runtime_lifecycle_trace_validates_identity_before_construction() {
+    if !run_runtime_trace_test(
+        "lifecycle::runtime_lifecycle_trace_validates_identity_before_construction",
+    ) {
+        return;
+    }
+    let (result, events) = capture_runtime(|| {
+        execute_owned(
+            &IMAGE,
+            reference_bindings(),
+            Config::default().with_fast_forward(true),
+        )
+    });
+    result.unwrap();
+    let lifecycle = lifecycle_events(&events);
+    let names = lifecycle
+        .iter()
+        .map(|event| event["fields"]["event"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        names,
+        [
+            "runtime.preflight.started",
+            "runtime.preflight.completed",
+            "runtime.construction.started",
+            "runtime.construction.completed",
+        ]
+    );
+    assert_eq!(lifecycle[1]["span"]["name"], "runtime.enclave");
+    assert_eq!(
+        lifecycle[1]["span"]["enclave_id"],
+        IMAGE.enclave_id.as_str()
+    );
+    assert_eq!(lifecycle[2]["fields"]["phase"], "storage");
+
+    let invalid = EnclaveImage {
+        enclave_id: EnclaveId::new(" invalid"),
+        ..IMAGE
+    };
+    let (result, events) =
+        capture_runtime(|| execute_owned(&invalid, EnclaveBindings::new(), Config::default()));
+    assert!(result.is_err());
+    assert_eq!(
+        lifecycle_events(&events)
+            .iter()
+            .map(|event| event["fields"]["event"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["runtime.preflight.started", "runtime.preflight.rejected"]
+    );
+}
+
+#[test]
+fn runtime_lifecycle_trace_reports_initializer_unwind() {
+    if !run_runtime_trace_test("lifecycle::runtime_lifecycle_trace_reports_initializer_unwind") {
+        return;
+    }
+    let (_, events) = capture_runtime(|| {
+        std::panic::catch_unwind(|| {
+            execute_owned(
+                &IMAGE,
+                EnclaveBindings::new()
+                    .bind_state(BindingSlotIndex::new(0), panicking_initializer)
+                    .bind_reaction(BindingSlotIndex::new(1), increment_counter),
+                Config::default(),
+            )
+        })
+    });
+    let lifecycle = lifecycle_events(&events);
+    let cancelled = lifecycle.last().unwrap();
+    assert_eq!(
+        cancelled["fields"]["event"],
+        "runtime.construction.cancelled"
+    );
+    assert_eq!(cancelled["fields"]["phase"], "storage");
+    assert_eq!(cancelled["fields"]["reason"], "unwind");
+}
+
+#[test]
+fn local_federate_lifecycle_trace_covers_all_construction_phases() {
+    if !run_runtime_trace_test(
+        "lifecycle::local_federate_lifecycle_trace_covers_all_construction_phases",
+    ) {
+        return;
+    }
+    let (result, events) = capture_runtime(|| {
+        execute_owned_federate(
+            ROUTED_DEPLOYMENT,
+            FederateIndex::new(0),
+            FederateBindings::new()
+                .bind_enclave(EnclaveIndex::new(0), source_bindings())
+                .bind_enclave(EnclaveIndex::new(1), sink_bindings())
+                .bind_route(
+                    route_boundary(),
+                    PayloadType::<u32>::new(),
+                    PayloadType::<u32>::new(),
+                ),
+            Config::default().with_fast_forward(true),
+        )
+    });
+    result.unwrap();
+    let lifecycle = lifecycle_events(&events);
+    let phases = lifecycle
+        .iter()
+        .filter_map(|event| event["fields"]["phase"].as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        phases,
+        ["storage", "storage", "routes", "routes", "backend", "backend", "workers", "workers"]
+    );
+    assert!(lifecycle.iter().skip(1).all(|event| {
+        event["span"]["name"] == "runtime.federate"
+            && event["span"]["federate"] == "FederateIndex(0)"
+            && event["span"]["federate_id"] == "host"
+            && event["span"]["ownership"] == "local"
+    }));
+}
+
 #[test]
 fn compiled_reference_executes_startup_to_shutdown() {
     let result = execute_owned(

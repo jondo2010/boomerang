@@ -172,10 +172,27 @@ pub fn execute_owned_federate_with_backend<'image, B: FederateCoordinationBacken
         BTreeMap<BoundaryId<'image>, InboundBoundaryAdapter>,
     ) -> Result<B, crate::FederateCoordinationError>,
 ) -> Result<FederateExecution, ExecuteOwnedFederateError> {
-    let images = prepare_images(image, images)?;
-    preflight_enclave_bindings(federate, &images, &bindings)?;
-    let (endpoints, external) = resolve_routes(federate, &images, &bindings)?;
-    preflight_local_bindings(federate, &images, &endpoints, &bindings)?;
+    tracing::debug!(target: "boomerang::runtime",
+        event = "runtime.preflight.started", owner = "federate", %federate);
+    let preflight = || {
+        let images = prepare_images(image, images)?;
+        preflight_enclave_bindings(federate, &images, &bindings)?;
+        let (endpoints, external) = resolve_routes(federate, &images, &bindings)?;
+        preflight_local_bindings(federate, &images, &endpoints, &bindings)?;
+        Ok((images, endpoints, external))
+    };
+    let (images, endpoints, external) = match preflight() {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            tracing::warn!(target: "boomerang::runtime", event = "runtime.preflight.rejected",
+                owner = "federate", %federate, reason = preflight_reason(&error));
+            return Err(error);
+        }
+    };
+    let span = federate_span(federate, image, "distributed");
+    let _span = span.enter();
+    tracing::debug!(target: "boomerang::runtime",
+        event = "runtime.preflight.completed", owner = "federate", %federate);
     let adapters = std::mem::take(&mut bindings.external_routes);
     let lifecycle = if config.keep_alive {
         LifecyclePolicy::KeepAlive

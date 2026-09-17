@@ -24,25 +24,42 @@ fn wrong_sink_bindings() -> EnclaveBindings {
 
 #[test]
 fn owned_federate_preflight_rejects_before_initializers() {
+    if !run_runtime_trace_test("preflight::owned_federate_preflight_rejects_before_initializers") {
+        return;
+    }
     use boomerang_runtime::image::{
         BoundaryFailurePolicy, CodecCapabilityIndex, CodecPolicy, FederationEdgeImage, FlowIndex,
         IdentityTable, PhysicalBoundaryIndex, RecoveryPolicy, RtiImage, RtiMemberImage,
         RtiRouteImage, SecurityPolicy, TimingPolicy, TransportCapabilityIndex, TransportPolicy,
     };
     ROUTED_INITIALIZATIONS.store(0, Ordering::SeqCst);
-    let error = execute_owned_federate(
-        ROUTED_DEPLOYMENT,
-        FederateIndex::new(0),
-        FederateBindings::new().bind_enclave(EnclaveIndex::new(0), counted_source_bindings()),
-        Config::default(),
-    )
-    .unwrap_err();
+    let (result, events) = capture_runtime(|| {
+        execute_owned_federate(
+            ROUTED_DEPLOYMENT,
+            FederateIndex::new(0),
+            FederateBindings::new().bind_enclave(EnclaveIndex::new(0), counted_source_bindings()),
+            Config::default(),
+        )
+    });
+    let error = result.unwrap_err();
     assert!(matches!(
         error,
         ExecuteOwnedFederateError::MissingEnclaveBinding { enclave }
             if enclave == EnclaveIndex::new(1)
     ));
     assert_eq!(ROUTED_INITIALIZATIONS.load(Ordering::SeqCst), 0);
+    let lifecycle = lifecycle_events(&events);
+    assert_eq!(lifecycle[0]["fields"]["event"], "runtime.preflight.started");
+    assert_eq!(
+        lifecycle[1]["fields"]["event"],
+        "runtime.preflight.rejected"
+    );
+    assert_eq!(lifecycle[1]["fields"]["reason"], "binding");
+    assert_eq!(
+        lifecycle.len(),
+        2,
+        "rejected preflight constructed runtime state"
+    );
 
     let unpaired_enclaves = [ROUTED_SOURCE_IMAGE];
     let unpaired_federates = [fixture_federate("host", "target", "runtime", s!(0, 1))];

@@ -1,9 +1,9 @@
 #[cfg(test)]
 mod tests {
     use super::{
-        ConstructionError, Failure, FaultEffect, FaultScript, Lane, Member, OrderedFaultScheduler,
-        Outcome, ReferenceCoordinator, Route, RouteTopology, ScheduledOutcome, Topology,
-        VectorStep,
+        ConstructionError, Failure, FaultEffect, FaultScript, FaultScriptError, Lane, Member,
+        OrderedFaultScheduler, Outcome, ReferenceCoordinator, Route, RouteTopology,
+        ScheduledOutcome, Topology, VectorStep,
     };
     use crate::WireTag;
 
@@ -137,6 +137,113 @@ mod tests {
         assert_eq!(
             scheduler.submit(1, lane, later),
             vec![ScheduledOutcome::failed(Failure::Corrupted)]
+        );
+    }
+
+    #[test]
+    fn zero_delay_fault_is_rejected_as_excluded_configuration() {
+        assert_eq!(
+            FaultScript::new([FaultEffect::delay(0, 0, 0)]),
+            Err(FaultScriptError::ZeroDelay {
+                ordinal: 0,
+                tick: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn separate_net_and_ltc_lane_ticks_drive_the_oracle_without_coarrival() {
+        let source = Member::new(0);
+        let destination = Member::new(1);
+        let net_lane = Lane::new(0);
+        let ltc_lane = Lane::new(1);
+        let route = Route::new(0);
+        let tag = WireTag::finite(5, 0);
+        let mut scheduler =
+            OrderedFaultScheduler::new([net_lane, ltc_lane], FaultScript::new([]).unwrap())
+                .unwrap();
+        let mut oracle = ReferenceCoordinator::new(
+            [source, destination],
+            Topology::new([(route, RouteTopology::new(source, destination))]).unwrap(),
+            1,
+        )
+        .unwrap();
+
+        assert_eq!(
+            scheduler.submit(0, net_lane, VectorStep::publish(source, 1, Some(tag))),
+            vec![ScheduledOutcome::delivered(
+                net_lane,
+                VectorStep::publish(source, 1, Some(tag)),
+            )]
+        );
+        assert_eq!(
+            oracle.apply(VectorStep::publish(source, 1, Some(tag))),
+            vec![Outcome::grant(source, 1, WireTag::FOREVER)]
+        );
+        assert_eq!(
+            scheduler.submit(2, ltc_lane, VectorStep::complete(destination, tag)),
+            vec![ScheduledOutcome::delivered(
+                ltc_lane,
+                VectorStep::complete(destination, tag),
+            )]
+        );
+        assert!(oracle
+            .apply(VectorStep::complete(destination, tag))
+            .is_empty());
+    }
+
+    #[test]
+    fn fault_actions_do_not_duplicate_delivery_and_retain_declared_failures() {
+        let lane = Lane::new(0);
+        let source = Member::new(0);
+        let step = VectorStep::complete(source, WireTag::ZERO);
+
+        for (effect, expected) in [
+            (
+                FaultEffect::drop(0, 0),
+                ScheduledOutcome::failed(Failure::Lost),
+            ),
+            (
+                FaultEffect::duplicate(0, 0),
+                ScheduledOutcome::delivered(lane, step),
+            ),
+            (
+                FaultEffect::fail(0, 0, Failure::Publication),
+                ScheduledOutcome::failed(Failure::Publication),
+            ),
+        ] {
+            let mut scheduler =
+                OrderedFaultScheduler::new([lane], FaultScript::new([effect]).unwrap()).unwrap();
+            assert_eq!(scheduler.submit(0, lane, step), vec![expected]);
+            match expected {
+                ScheduledOutcome::Delivered { .. } => assert!(scheduler.advance(1).is_empty()),
+                ScheduledOutcome::Failed { .. } => assert_eq!(scheduler.advance(1), vec![expected]),
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_lane_and_regressing_tick_become_retained_failures() {
+        let lane = Lane::new(0);
+        let unknown_lane = Lane::new(1);
+        let source = Member::new(0);
+        let step = VectorStep::complete(source, WireTag::ZERO);
+        let mut invalid_lane =
+            OrderedFaultScheduler::new([lane], FaultScript::new([]).unwrap()).unwrap();
+        assert_eq!(
+            invalid_lane.submit(0, unknown_lane, step),
+            vec![ScheduledOutcome::failed(Failure::UnknownLane)]
+        );
+
+        let mut regressing_tick =
+            OrderedFaultScheduler::new([lane], FaultScript::new([]).unwrap()).unwrap();
+        assert_eq!(
+            regressing_tick.submit(1, lane, step),
+            vec![ScheduledOutcome::delivered(lane, step)]
+        );
+        assert_eq!(
+            regressing_tick.advance(0),
+            vec![ScheduledOutcome::failed(Failure::TickRegression)]
         );
     }
 }
@@ -441,6 +548,19 @@ impl FaultScript {
     /// Builds a script ordered strictly by `(submission ordinal, logical tick)`.
     pub fn new(effects: impl IntoIterator<Item = FaultEffect>) -> Result<Self, FaultScriptError> {
         let effects = effects.into_iter().collect::<Vec<_>>();
+        for effect in &effects {
+            if let FaultEffect::Delay {
+                ordinal,
+                tick,
+                ticks: 0,
+            } = effect
+            {
+                return Err(FaultScriptError::ZeroDelay {
+                    ordinal: *ordinal,
+                    tick: *tick,
+                });
+            }
+        }
         for pair in effects.windows(2) {
             let previous = pair[0].key();
             let current = pair[1].key();
@@ -468,6 +588,8 @@ impl FaultScript {
 /// A fault script was ambiguous or non-deterministically ordered.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FaultScriptError {
+    /// A delay effect used zero ticks, which is excluded from fault injection.
+    ZeroDelay { ordinal: u64, tick: u64 },
     /// Two effects selected the same submission ordinal and logical tick.
     Duplicate { ordinal: u64, tick: u64 },
     /// An effect appeared before a lower ordinal/tick script position.

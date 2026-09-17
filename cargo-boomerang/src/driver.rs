@@ -112,8 +112,16 @@ pub(crate) fn prepare_compiler_wrapper(
     resolved: &ResolvedWorkspace,
     output: &crate::CommandOutput,
 ) -> Result<PathBuf> {
+    let package = toml::Table::from_iter([
+        ("name".into(), "boomerang-facet-rustc".into()),
+        ("version".into(), "0.0.0".into()),
+        ("edition".into(), "2021".into()),
+    ]);
     let generated = GeneratedCrate {
-        manifest: "[package]\nname = \"boomerang-facet-rustc\"\nversion = \"0.0.0\"\nedition = \"2021\"\n[workspace]\n".to_owned(),
+        manifest: toml::to_string(&toml::Table::from_iter([
+            ("package".into(), package.into()),
+            ("workspace".into(), toml::Table::new().into()),
+        ]))?,
         main: include_str!("facet_rustc.rs").to_owned(),
     };
     let (executable, _, _, _) = build_host_program(

@@ -196,12 +196,12 @@ mod tests {
             .find(|(key, _)| *key == "BOOMERANG_USER_RUSTC_WRAPPER")
             .and_then(|(_, value)| value);
         assert_eq!(
-            user_wrapper,
+            user_wrapper.map(Path::new),
             Some(
                 directory
                     .path()
                     .join("federate/bin/federate-wrapper")
-                    .as_os_str()
+                    .as_path()
             )
         );
         assert!(!command

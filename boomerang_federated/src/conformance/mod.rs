@@ -1,3 +1,30 @@
+//! Deterministic coordination conformance support.
+//!
+//! Boomerang federations coordinate logical time through a central RTI. A Federate publishes its
+//! next event tag (NET), reports completion (LTC), and submits tagged payloads on compiled routes.
+//! The RTI may optimize when it sends grants or suppresses reports, but it must never permit an
+//! outcome that changes the federation's logical-time semantics.
+//!
+//! This module provides a small, unoptimized oracle for testing that boundary.
+//! [`crate::conformance::Topology`] and [`crate::conformance::VectorStep`] describe a compiled
+//! coordination scenario with portable typed keys; [`crate::conformance::ReferenceCoordinator`]
+//! applies the scenario and emits its permitted [`crate::conformance::Outcome`]s. It does not
+//! call the production RTI or duplicate its implementation. A projection test runs the same
+//! vector through its production coordinator, converts keys once at its test boundary, and checks
+//! the complete observed outcome trace against this oracle.
+//!
+//! [`crate::conformance::OrderedFaultScheduler`] drives vector steps through virtual
+//! reliable-ordered lanes. [`crate::conformance::FaultScript`] injects deterministic loss,
+//! duplication, delay, corruption, and explicit
+//! failure reports. A fault may be recovered before delivery or become the first terminal
+//! [`crate::conformance::Failure`], but it cannot expose a later frame before an earlier frame on
+//! the same lane.
+//!
+//! The API is test support, enabled with the `conformance` feature. It is deliberately absent
+//! from normal portable execution and contains no hosted runtime, transport I/O, payload bytes,
+//! or wire-format behavior. It covers the Phase 6 baseline only; PTAG, ABS, membership/rejoin,
+//! and constructive zero-delay coordination are not modeled here.
+
 use crate::WireTag;
 use tinymap::TinyMap;
 

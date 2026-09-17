@@ -11,9 +11,6 @@ use crate::{
     load_manifest, Binding, CommandOutput, Deployment, Federate, RecoveryPolicy, Topology,
 };
 
-const DESCRIPTOR_FEATURE: &str = "__boomerang_descriptor";
-const PAYLOAD_FEATURE: &str = "__boomerang_payload";
-
 /// Exact Cargo identity and location for a selected workspace package.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CargoPackage {
@@ -29,8 +26,6 @@ pub struct CargoPackage {
     pub id: PackageId,
     /// Absolute path to the selected package manifest.
     pub manifest_path: PathBuf,
-    /// Whether the package exposes the legacy reserved feature pair.
-    pub legacy_facets: bool,
 }
 
 /// Resolved target and runtime configuration for one Federate.
@@ -356,11 +351,7 @@ fn resolve_package(
 ) -> Result<CargoPackage> {
     let package = workspace_member(metadata, name)?;
 
-    validate_facets(package)?;
     for feature in selected_features {
-        if matches!(feature.as_str(), DESCRIPTOR_FEATURE | PAYLOAD_FEATURE) {
-            bail!("package '{name}' feature '{feature}' is reserved for cargo-boomerang");
-        }
         if !package.features.contains_key(feature) {
             bail!("package '{name}' does not declare selected feature '{feature}'");
         }
@@ -420,8 +411,6 @@ fn cargo_package(package: &Package) -> CargoPackage {
             .map(|target| target.name.clone()),
         id: package.id.clone(),
         manifest_path: normalize_metadata_manifest_path(package.manifest_path.as_std_path()),
-        legacy_facets: package.features.contains_key(DESCRIPTOR_FEATURE)
-            && package.features.contains_key(PAYLOAD_FEATURE),
     }
 }
 
@@ -438,24 +427,6 @@ fn workspace_member<'a>(metadata: &'a Metadata, name: &str) -> Result<&'a Packag
                 anyhow!("package '{name}' was not found in the application workspace metadata")
             }
         })
-}
-
-/// Confirms that a package supports both reserved deployment facets.
-fn validate_facets(package: &Package) -> Result<()> {
-    if !package.features.contains_key(DESCRIPTOR_FEATURE)
-        && !package.features.contains_key(PAYLOAD_FEATURE)
-    {
-        return Ok(());
-    }
-    for feature in [DESCRIPTOR_FEATURE, PAYLOAD_FEATURE] {
-        if !package.features.contains_key(feature) {
-            bail!(
-                "package '{}' must declare reserved feature '{feature}'",
-                package.name
-            );
-        }
-    }
-    Ok(())
 }
 
 /// Resolves workspace-relative Federate configuration paths.

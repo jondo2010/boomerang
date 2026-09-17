@@ -65,9 +65,6 @@ fn render_host_driver(resolved: &ResolvedWorkspace, topology: bool) -> Result<Ge
         let mut aliases = BTreeMap::new();
         for (index, (name, mut features)) in selected.into_iter().enumerate() {
             let package = resolved.package(&name).expect("implementation resolved");
-            if package.legacy_facets {
-                features.push("__boomerang_descriptor".to_owned());
-            }
             features.sort();
             features.dedup();
             let alias = format!("implementation_{index}");

@@ -87,7 +87,7 @@ pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
 
 fn helper(item: TokenStream) -> TokenStream {
     quote! {
-        #[cfg(not(any(boomerang_facet = "descriptor", feature = "__boomerang_descriptor")))]
+        #[cfg(not(boomerang_facet = "descriptor"))]
         #item
     }
 }

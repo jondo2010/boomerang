@@ -599,20 +599,10 @@ fn generated_central_deployment_publishes_isolated_artifacts_and_exchanges_tagge
         "vehicle-topology",
         "vehicle-control",
         "sensor-host",
-        "transitive-host",
     ] {
         assert!(
             !packages.contains(&forbidden),
             "RTI links {forbidden}: {packages:?}"
-        );
-    }
-    for node in &metadata.resolve.unwrap().nodes {
-        assert!(
-            node.features
-                .iter()
-                .all(|feature| feature.as_str() != "__boomerang_payload"),
-            "RTI activates a payload facet in {}",
-            node.id
         );
     }
     for (federate, present, absent) in [

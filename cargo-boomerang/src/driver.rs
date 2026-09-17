@@ -465,13 +465,6 @@ fn validate_generated_graph(
     }
     for node in graph.nodes.iter().filter(|node| node.id != root.id) {
         let id = node.id.to_string();
-        if node
-            .features
-            .iter()
-            .any(|feature| *feature == "__boomerang_payload")
-        {
-            bail!("package {id} activates reserved payload facet");
-        }
         if !resolved.locked_package_ids().contains(&id) && !tool_packages.contains(&node.id) {
             bail!("package {id} was absent from source metadata");
         }

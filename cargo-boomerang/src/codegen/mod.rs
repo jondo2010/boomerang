@@ -469,7 +469,6 @@ pub(crate) fn generate_analyzed_launcher(
         analyzed,
         configuration,
         configured_files,
-        aliases,
         manifest,
         source,
         compile_inputs,
@@ -483,7 +482,6 @@ fn prepare_launcher(
     analyzed: &AnalyzedDeployment,
     configuration: ResolvedFederate,
     configured_files: ConfiguredFiles,
-    aliases: BTreeMap<String, String>,
     manifest: String,
     source: String,
     compile_inputs: Vec<(String, String)>,
@@ -539,7 +537,6 @@ fn prepare_launcher(
                 directory,
                 &configuration,
                 &compile_inputs,
-                &aliases,
                 &analyzed.resolved,
                 &cargo_program,
                 &compiler_wrapper,
@@ -672,7 +669,6 @@ fn validate_launcher_graph(
     directory: &Path,
     federate: &ResolvedFederate,
     compile_inputs: &[(String, String)],
-    aliases: &BTreeMap<String, String>,
     resolved: &ResolvedWorkspace,
     cargo_program: &OsStr,
     wrapper: &Path,
@@ -753,38 +749,8 @@ fn validate_launcher_graph(
             .expect("Cargo resolve graph contains every dependency");
         pending.extend(node.deps.iter().map(|dependency| dependency.pkg.clone()));
     }
-    let implementation_ids = resolved
-        .deployment()
-        .bindings
-        .values()
-        .map(|binding| {
-            &resolved
-                .package(&binding.package)
-                .expect("resolved implementation package is retained")
-                .id
-        })
-        .collect::<BTreeSet<_>>();
-    let selected_ids = aliases
-        .keys()
-        .map(|implementation| {
-            &resolved
-                .implementation(implementation)
-                .expect("selected implementation package is retained")
-                .0
-                .id
-        })
-        .collect::<BTreeSet<_>>();
     for node in graph.nodes.iter().filter(|node| node.id != root.id) {
         let id = node.id.to_string();
-        if node
-            .features
-            .iter()
-            .any(|feature| *feature == "__boomerang_payload")
-            && implementation_ids.contains(&node.id)
-            && !selected_ids.contains(&node.id)
-        {
-            bail!("unselected implementation package {id} activates reserved payload facet");
-        }
         if !resolved.locked_package_ids().contains(&id) && !launcher_dependencies.contains(&node.id)
         {
             bail!("generated launcher package {id} was absent from source metadata");
@@ -894,9 +860,6 @@ fn render_manifest(
             .expect("payload alias requires resolved selection");
         let mut features =
             selected_payload_features(&resolved.deployment().bindings, aliases, &package.name);
-        if package.legacy_facets {
-            features.push("__boomerang_payload".to_owned());
-        }
         features.sort();
         features.dedup();
         // Generated aliases contain a validated crate identifier followed by an
@@ -1187,7 +1150,6 @@ pub(crate) fn generate_analyzed_rti(
         analyzed,
         configuration,
         configured_files,
-        aliases,
         manifest,
         source,
         Vec::new(),

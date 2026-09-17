@@ -1646,7 +1646,7 @@ impl ToTokens for ArgsModel {
             TokenStream::new()
         };
         let conflict_output = quote! {
-            compile_error!("__boomerang_descriptor and __boomerang_payload cannot both be enabled");
+            compile_error!("boomerang_facet cannot select both descriptor and payload");
         };
         let Self(
             reactor_args,
@@ -2102,27 +2102,27 @@ impl ToTokens for ArgsModel {
         tokens.append_all(quote! {
             #[allow(non_snake_case, unexpected_cfgs)]
             mod #facet_module {
-                #[cfg(not(any(any(boomerang_facet = "descriptor", feature = "__boomerang_descriptor"), any(boomerang_facet = "payload", feature = "__boomerang_payload"))))]
+                #[cfg(not(any(boomerang_facet = "descriptor", boomerang_facet = "payload")))]
                 macro_rules! hosted { ($($tokens:tt)*) => { $($tokens)* }; }
-                #[cfg(any(any(boomerang_facet = "descriptor", feature = "__boomerang_descriptor"), any(boomerang_facet = "payload", feature = "__boomerang_payload")))]
+                #[cfg(any(boomerang_facet = "descriptor", boomerang_facet = "payload"))]
                 macro_rules! hosted { ($($tokens:tt)*) => {} }
                 pub(super) use hosted;
 
-                #[cfg(all(any(boomerang_facet = "descriptor", feature = "__boomerang_descriptor"), not(any(boomerang_facet = "payload", feature = "__boomerang_payload"))))]
+                #[cfg(all(boomerang_facet = "descriptor", not(boomerang_facet = "payload")))]
                 macro_rules! descriptor { ($($tokens:tt)*) => { $($tokens)* }; }
-                #[cfg(not(all(any(boomerang_facet = "descriptor", feature = "__boomerang_descriptor"), not(any(boomerang_facet = "payload", feature = "__boomerang_payload")))))]
+                #[cfg(not(all(boomerang_facet = "descriptor", not(boomerang_facet = "payload"))))]
                 macro_rules! descriptor { ($($tokens:tt)*) => {} }
                 pub(super) use descriptor;
 
-                #[cfg(all(any(boomerang_facet = "descriptor", feature = "__boomerang_descriptor"), any(boomerang_facet = "payload", feature = "__boomerang_payload")))]
+                #[cfg(all(boomerang_facet = "descriptor", boomerang_facet = "payload"))]
                 macro_rules! conflict { ($($tokens:tt)*) => { $($tokens)* }; }
-                #[cfg(not(all(any(boomerang_facet = "descriptor", feature = "__boomerang_descriptor"), any(boomerang_facet = "payload", feature = "__boomerang_payload"))))]
+                #[cfg(not(all(boomerang_facet = "descriptor", boomerang_facet = "payload")))]
                 macro_rules! conflict { ($($tokens:tt)*) => {} }
                 pub(super) use conflict;
 
-                #[cfg(all(any(boomerang_facet = "payload", feature = "__boomerang_payload"), not(any(boomerang_facet = "descriptor", feature = "__boomerang_descriptor"))))]
+                #[cfg(all(boomerang_facet = "payload", not(boomerang_facet = "descriptor")))]
                 macro_rules! payload { ($($tokens:tt)*) => { $($tokens)* }; }
-                #[cfg(not(all(any(boomerang_facet = "payload", feature = "__boomerang_payload"), not(any(boomerang_facet = "descriptor", feature = "__boomerang_descriptor")))))]
+                #[cfg(not(all(boomerang_facet = "payload", not(boomerang_facet = "descriptor"))))]
                 macro_rules! payload { ($($tokens:tt)*) => {} }
                 pub(super) use payload;
             }

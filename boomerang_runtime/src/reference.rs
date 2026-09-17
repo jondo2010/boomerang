@@ -1361,7 +1361,11 @@ pub fn execute_owned<'image>(
 
 #[cfg(test)]
 mod scoped_spawn_tests {
-    use std::{io::ErrorKind, sync::mpsc, time::Duration};
+    use std::{
+        io::{ErrorKind, Write},
+        sync::{mpsc, Arc, Mutex},
+        time::Duration,
+    };
 
     use tinymap::TinyMapView;
 
@@ -1377,6 +1381,28 @@ mod scoped_spawn_tests {
         keepalive, EnclaveKey, FederateAcquisition, FederateCompletion,
         FederateCoordinationBackend, FederateCoordinationError, FederatePublication, SendContext,
     };
+
+    #[derive(Clone, Default)]
+    struct TraceCapture(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for TraceCapture {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for TraceCapture {
+        type Writer = Self;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
 
     static REACTORS: [ReactorImage; 1] = [ReactorImage::new(
         BindingSlotIndex::new(0),
@@ -1582,15 +1608,44 @@ mod scoped_spawn_tests {
         }
     }
 
-    fn execute_with_spawn_failure(failed_spawn: Option<EnclaveIndex>) -> ExecuteOwnedFederateError {
-        execute_owned_federate_with_spawn_guard(
-            DEPLOYMENT,
-            FederateIndex::new(0),
-            bindings(),
-            Config::default().with_fast_forward(true),
-            move |spawn| spawn == failed_spawn,
-        )
-        .expect_err("the selected scoped thread creation must fail")
+    fn execute_with_spawn_failure(
+        failed_spawn: Option<EnclaveIndex>,
+    ) -> (ExecuteOwnedFederateError, Vec<serde_json::Value>) {
+        let output = TraceCapture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .without_time()
+            .with_writer(output.clone())
+            .with_env_filter("boomerang=debug")
+            .finish();
+        let error = tracing::subscriber::with_default(subscriber, || {
+            execute_owned_federate_with_spawn_guard(
+                DEPLOYMENT,
+                FederateIndex::new(0),
+                bindings(),
+                Config::default().with_fast_forward(true),
+                move |spawn| spawn == failed_spawn,
+            )
+            .expect_err("the selected scoped thread creation must fail")
+        });
+        let bytes = output.0.lock().unwrap();
+        let events = std::str::from_utf8(&bytes)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        (error, events)
+    }
+
+    fn assert_spawn_failure_event(events: &[serde_json::Value]) {
+        assert!(
+            events.iter().any(|event| {
+                event["fields"]["event"] == "runtime.construction.failed"
+                    && event["fields"]["phase"] == "workers"
+                    && event["fields"]["reason"] == "spawn"
+            }),
+            "missing worker spawn failure event in {events:#?}"
+        );
     }
 
     /// Verifies compiled coordination preserves the complete selected Federate layout and policy.
@@ -1705,20 +1760,23 @@ mod scoped_spawn_tests {
             return;
         }
 
-        let coordinator = execute_with_spawn_failure(None);
+        let (coordinator, coordinator_events) = execute_with_spawn_failure(None);
         assert!(matches!(
             coordinator,
             ExecuteOwnedFederateError::CoordinatorThreadSpawn { source }
                 if source.kind() == ErrorKind::Other
         ));
+        assert_spawn_failure_event(&coordinator_events);
 
         let failed_enclave = EnclaveIndex::new(1);
-        let scheduler = execute_with_spawn_failure(Some(failed_enclave));
+        let (scheduler, scheduler_events) =
+            execute_with_spawn_failure(Some(failed_enclave));
         assert!(matches!(
             scheduler,
             ExecuteOwnedFederateError::ThreadSpawn { enclave, source }
                 if enclave == failed_enclave && source.kind() == ErrorKind::Other
         ));
+        assert_spawn_failure_event(&scheduler_events);
     }
 
     /// Coordinator authority wins over a secondary panic that reaches the result channel first.

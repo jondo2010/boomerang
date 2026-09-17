@@ -11,7 +11,3 @@ readme = "README.md"
 boomerang = { workspace = true }
 snake-game = { path = "game" }
 snake-keyboard = { path = "keyboard" }
-
-[dev-dependencies]
-serde_json.workspace = true
-boomerang_builder = { workspace = true, features = ["host-interchange"] }

@@ -3,6 +3,18 @@
 //! Dense keys are server-local bindings; transports identify members by their stable compiled
 //! identity before dispatch. The in-memory adapters serve testing/reference execution.
 //! Image dependencies are authoritative and are never recomputed from a topology.
+//!
+//! ## Coordination tracing
+//!
+//! Compiled execution emits optional structured [`tracing`] events at the
+//! `boomerang::coordination` target. Every event uses the compiler-issued coordination
+//! fingerprint and the owning typed Federate key; route, tag, and revision fields are included
+//! when that event concerns them. The `event` field identifies a lifecycle action such as
+//! `coordination.payload.sent` or `coordination.grant.received`.
+//!
+//! No event includes application payload bytes, stable display labels, or an error's diagnostic
+//! text. Applications select off, bounded retention, or hosted export by configuring their
+//! `tracing` subscriber; the runtime itself owns no trace buffer or exporter.
 mod client;
 pub mod hosted;
 pub mod in_memory;

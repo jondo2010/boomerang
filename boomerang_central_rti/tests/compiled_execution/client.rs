@@ -6,6 +6,29 @@ use std::{
     sync::Mutex,
     time::Duration as StdDuration,
 };
+#[derive(Clone, Default)]
+struct TraceOutput(Arc<Mutex<Vec<u8>>>);
+
+struct TraceWriter(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for TraceWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for TraceOutput {
+    type Writer = TraceWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        TraceWriter(self.0.clone())
+    }
+}
 
 #[derive(Default)]
 struct Script {
@@ -307,4 +330,78 @@ fn outbound_payload_tightens_dnet_before_the_next_publication() {
         RtiRequest::Hello { .. }, RtiRequest::Payload { .. },
         RtiRequest::Publish { revision: 2, next_event: Some(tag) }
     ] if *tag == WireTag::finite(2_000_000, 0)));
+}
+
+#[test]
+fn outbound_payload_emits_a_structured_coordination_event() {
+    use boomerang_runtime::TaggedPayload;
+
+    let script = Arc::new(Mutex::new(Script::default()));
+    let output = TraceOutput::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(output.clone())
+        .without_time()
+        .with_target(true)
+        .with_ansi(false)
+        .with_max_level(tracing::Level::DEBUG)
+        .finish();
+    let view = CompiledDeploymentView::new(DEPLOYMENT).unwrap();
+    let bindings = RtiClientBindings::new(&view, MEMBERS[0], IDENTITY).unwrap();
+    let outbound = bindings
+        .outbound_sink(Arc::new(RequestRecorder(script)), BoundaryId::new("pipe"))
+        .unwrap();
+
+    tracing::subscriber::with_default(subscriber, || {
+        tracing::callsite::rebuild_interest_cache();
+        outbound
+            .send(TaggedPayload {
+                tag: Tag::new(Duration::milliseconds(1), 0),
+                payload: vec![42],
+            })
+            .unwrap();
+    });
+
+    let output = String::from_utf8(output.0.lock().unwrap().clone()).unwrap();
+    assert!(output.contains("DEBUG boomerang::coordination"));
+    assert!(output.contains("event=\"coordination.payload.sent\""));
+    assert!(output.contains("coordination=CoordinationFingerprint"));
+    assert!(output.contains("federate=FederateIndex(0)"));
+    assert!(output.contains("route=RtiRouteIndex(0)"));
+    assert!(output.contains("tag=Tag"));
+    assert!(
+        !output.contains("42"),
+        "payload bytes must not enter tracing output"
+    );
+}
+
+#[test]
+fn rti_decision_emits_a_structured_coordination_event() {
+    let output = TraceOutput::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(output.clone())
+        .without_time()
+        .with_target(true)
+        .with_ansi(false)
+        .with_max_level(tracing::Level::DEBUG)
+        .finish();
+    let mut rti = admitted_rti();
+
+    tracing::subscriber::with_default(subscriber, || {
+        tracing::callsite::rebuild_interest_cache();
+        rti.handle(
+            MEMBERS[0],
+            RtiRequest::Publish {
+                revision: 1,
+                next_event: Some(WireTag::ZERO),
+            },
+        );
+    });
+
+    let output = String::from_utf8(output.0.lock().unwrap().clone()).unwrap();
+    assert!(output.contains("DEBUG boomerang::coordination"));
+    assert!(output.contains("event=\"coordination.rti.decision\""));
+    assert!(output.contains("coordination=CoordinationFingerprint"));
+    assert!(output.contains("federate=FederateIndex(0)"));
+    assert!(output.contains("request=\"publication\""));
+    assert!(output.contains("deliveries="));
 }

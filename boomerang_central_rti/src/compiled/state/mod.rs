@@ -163,10 +163,53 @@ impl<'a> CompiledRti<'a> {
                 },
             }];
         }
+        let request_kind = match &request {
+            RtiRequest::Hello { .. } => "hello",
+            RtiRequest::Publish { .. } => "publication",
+            RtiRequest::Complete { .. } => "completion",
+            RtiRequest::Payload { .. } => "payload",
+            RtiRequest::ConfirmIdle { .. } => "confirm-idle",
+            RtiRequest::Stop => "stop",
+            RtiRequest::Abort { .. } => "abort",
+        };
         match self.apply(member, request) {
-            Ok(deliveries) => deliveries,
-            Err(CentralRtiError::Coordination(message)) => self.abort(message),
-            Err(error) => self.abort(error.to_string()),
+            Ok(deliveries) => {
+                tracing::event!(
+                    target: "boomerang::coordination",
+                    tracing::Level::DEBUG,
+                    event = "coordination.rti.decision",
+                    coordination = ?self.identity,
+                    federate = ?member,
+                    request = request_kind,
+                    deliveries = deliveries.len(),
+                    "RTI coordination decision"
+                );
+                deliveries
+            }
+            Err(CentralRtiError::Coordination(message)) => {
+                tracing::event!(
+                    target: "boomerang::coordination",
+                    tracing::Level::ERROR,
+                    event = "coordination.failure.first",
+                    coordination = ?self.identity,
+                    federate = ?member,
+                    request = request_kind,
+                    "RTI rejected a coordination request"
+                );
+                self.abort(message)
+            }
+            Err(error) => {
+                tracing::event!(
+                    target: "boomerang::coordination",
+                    tracing::Level::ERROR,
+                    event = "coordination.failure.first",
+                    coordination = ?self.identity,
+                    federate = ?member,
+                    request = request_kind,
+                    "RTI rejected a coordination request"
+                );
+                self.abort(error.to_string())
+            }
         }
     }
     /// Validates transitions and orders payload delivery before consequent control replies.

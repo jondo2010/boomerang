@@ -328,57 +328,76 @@ impl ReferenceVectorAdapter {
         }
     }
 
-    fn semantic_outcome(delivery: boomerang_central_rti::compiled::RtiDelivery) -> Option<Outcome> {
-        match delivery.reply {
-            RtiReply::Grant { revision, tag } => Some(Outcome::grant(
-                Self::vector_member(delivery.member),
+    fn observation(delivery: boomerang_central_rti::compiled::RtiDelivery) -> VectorObservation {
+        let boomerang_central_rti::compiled::RtiDelivery { member, reply } = delivery;
+        match reply {
+            RtiReply::Grant { revision, tag } => VectorObservation::Semantic(Outcome::grant(
+                Self::vector_member(member),
                 revision,
                 tag,
             )),
-            RtiReply::Payload { route, tag, .. } => Some(Outcome::payload(
-                Self::vector_member(delivery.member),
+            RtiReply::Payload { route, tag, .. } => VectorObservation::Semantic(Outcome::payload(
+                Self::vector_member(member),
                 Self::vector_route(route),
                 tag,
             )),
-            RtiReply::Stopped => Some(Outcome::Stopped {
-                member: Self::vector_member(delivery.member),
+            RtiReply::Stopped => VectorObservation::Semantic(Outcome::Stopped {
+                member: Self::vector_member(member),
             }),
-            RtiReply::Started
-            | RtiReply::Idle { .. }
-            | RtiReply::Failed { .. }
-            | RtiReply::SuppressPublication { .. } => None,
+            RtiReply::Started => VectorObservation::Started {
+                member: Self::vector_member(member),
+            },
+            RtiReply::Idle { revision } => VectorObservation::Idle {
+                member: Self::vector_member(member),
+                revision,
+            },
+            RtiReply::Failed { message } => VectorObservation::Failed {
+                member: Self::vector_member(member),
+                message,
+            },
+            RtiReply::SuppressPublication { tag } => VectorObservation::Suppress {
+                member: Self::vector_member(member),
+                tag,
+            },
         }
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum VectorObservation {
+    Semantic(Outcome),
+    Started { member: Member },
+    Idle { member: Member, revision: u64 },
+    Failed { member: Member, message: String },
+    Suppress { member: Member, tag: WireTag },
+}
+
 struct VectorExecution {
+    observations: Vec<VectorObservation>,
     semantic_outcomes: Vec<Outcome>,
     dnet_controls: usize,
-    causal_round_trips: usize,
 }
 
 fn run_reference_vector(vector: impl IntoIterator<Item = VectorStep>) -> VectorExecution {
     let mut rti = admitted_rti();
+    let mut observations = Vec::new();
     let mut semantic_outcomes = Vec::new();
     let mut dnet_controls = 0;
-    let mut causal_round_trips = 0;
     for step in vector {
-        causal_round_trips += 1;
         let (member, request) = ReferenceVectorAdapter::request(step);
         for delivery in rti.handle(member, request) {
-            dnet_controls += usize::from(matches!(
-                delivery.reply,
-                RtiReply::SuppressPublication { .. }
-            ));
-            if let Some(outcome) = ReferenceVectorAdapter::semantic_outcome(delivery) {
-                semantic_outcomes.push(outcome);
+            let observation = ReferenceVectorAdapter::observation(delivery);
+            dnet_controls += usize::from(matches!(observation, VectorObservation::Suppress { .. }));
+            if let VectorObservation::Semantic(outcome) = &observation {
+                semantic_outcomes.push(*outcome);
             }
+            observations.push(observation);
         }
     }
     VectorExecution {
+        observations,
         semantic_outcomes,
         dnet_controls,
-        causal_round_trips,
     }
 }
 
@@ -394,8 +413,8 @@ fn compiled_rti_outcomes_are_permitted_by_the_reference_vector() {
         VectorStep::publish(destination, 0, Some(destination_tag)),
         VectorStep::payload(source, route, destination_tag),
         VectorStep::complete(source, WireTag::ZERO),
-        VectorStep::complete(destination, destination_tag),
         VectorStep::publish(source, 1, None),
+        VectorStep::complete(destination, destination_tag),
         VectorStep::publish(destination, 1, None),
     ];
     let expected = [
@@ -416,12 +435,22 @@ fn compiled_rti_outcomes_are_permitted_by_the_reference_vector() {
     assert_eq!(oracle_outcomes, expected);
 
     let execution = run_reference_vector(vector);
-    assert!(execution
-        .semantic_outcomes
-        .iter()
-        .all(|outcome| oracle_outcomes.contains(outcome)));
+    let expected_observations = [
+        VectorObservation::Semantic(Outcome::grant(source, 0, WireTag::FOREVER)),
+        VectorObservation::Suppress {
+            member: source,
+            tag: WireTag::finite(0, u64::MAX),
+        },
+        VectorObservation::Suppress {
+            member: destination,
+            tag: WireTag::FOREVER,
+        },
+        VectorObservation::Semantic(Outcome::payload(destination, route, destination_tag)),
+        VectorObservation::Semantic(Outcome::grant(destination, 0, WireTag::FOREVER)),
+    ];
+    assert_eq!(execution.observations, expected_observations);
+    assert_eq!(execution.semantic_outcomes, expected);
     assert_eq!(execution.dnet_controls, 2);
-    assert_eq!(execution.causal_round_trips, 7);
 }
 
 /// Rejects payload submission before the delayed source completion frontier.

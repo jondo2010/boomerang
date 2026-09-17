@@ -4,10 +4,6 @@ version = "0.0.0"
 edition = "2021"
 publish = false
 
-[features]
-default = ["__boomerang_payload"]
-__boomerang_payload = []
-
 [dependencies]
 boomerang_macros = { path = "../../../../boomerang_macros" }
 boomerang_runtime = { path = "../../../../boomerang_runtime", default-features = false }

@@ -5,6 +5,7 @@ mod bundle;
 mod check;
 mod codegen;
 mod driver;
+mod facet;
 mod generated;
 mod generated_cache;
 mod manifest;

@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+vehicle-control = { path = "../vehicle-control" }
+sensor-host = { path = "../sensor-host" }
 boomerang = { path = "../../../../../boomerang" }
 boomerang_builder = { path = "../../../../../boomerang_builder", features = ["host-interchange"] }
 

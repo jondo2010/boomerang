@@ -16,10 +16,6 @@ default = ["hosted"]
 ## Hosted reactor construction and dynamic assembly support
 hosted = ["dep:boomerang_builder"]
 
-# Reserved deployment facets selected by generated Cargo invocations.
-__boomerang_descriptor = ["hosted"]
-__boomerang_payload = []
-
 # Support for serialization
 serde = ["boomerang_runtime/serde"]
 
@@ -35,10 +31,12 @@ document-features = { workspace = true }
 thiserror.workspace = true
 
 # repo dependencies
-boomerang_builder = { workspace = true, optional = true }
 boomerang_runtime = { workspace = true }
 boomerang_macros = { workspace = true }
 
+
+[target.'cfg(not(boomerang_facet = "payload"))'.dependencies]
+boomerang_builder = { workspace = true, optional = true }
 
 [dev-dependencies]
 boomerang_util = { path = "../boomerang_util", features = ["runner", "replay", "test-tracing"] }

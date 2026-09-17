@@ -9,6 +9,8 @@ use syn::{
 
 use crate::util::convert_from_snake_case;
 
+mod topology;
+
 /// Top-level arguments for the #[reactor] macro
 #[derive(attribute_derive::FromAttr)]
 pub struct ReactorArgs {
@@ -1066,6 +1068,7 @@ fn payload_output(
     state_type: &syn::Path,
     state_struct: &Option<TokenStream>,
     state_impl: &Option<TokenStream>,
+    component: bool,
 ) -> TokenStream {
     if reactor_args.contract.is_none() && reactor_args.contract_version.is_none() {
         return TokenStream::new();
@@ -1122,13 +1125,68 @@ fn payload_output(
         Ok(exports) => exports,
         Err(error) => return error.to_compile_error(),
     };
-    let (fingerprint, fingerprint_key) =
-        match payload_compile_inputs(contract, contract_version, &reactor_name) {
-            Ok(inputs) => inputs,
-            Err(error) => return error.to_compile_error(),
-        };
     let macro_abi = boomerang_runtime::binding::COMPONENT_DESCRIPTOR_MACRO_ABI;
     let macro_abi_key = boomerang_runtime::binding::PAYLOAD_MACRO_ABI_COMPILE_INPUT;
+    let (fingerprint_declaration, binding_manifest) = if component {
+        let manifest_dir = match std::env::var_os("CARGO_MANIFEST_DIR")
+            .and_then(|path| std::fs::canonicalize(path).ok())
+        {
+            Some(path) => path,
+            None => {
+                return syn::Error::new(
+                    contract.span(),
+                    "missing canonical payload package directory",
+                )
+                .to_compile_error()
+            }
+        };
+        let Some(manifest_dir) = manifest_dir.to_str() else {
+            return syn::Error::new(contract.span(), "payload package directory must be UTF-8")
+                .to_compile_error();
+        };
+        let key = boomerang_runtime::binding::component_payload_fingerprint_compile_inputs_key(
+            manifest_dir,
+            &contract.value(),
+            contract_version,
+            &reactor_name,
+        );
+        (
+            quote! {
+                const __BOOMERANG_COMPONENT_INPUTS: ::core::option::Option<&str> = option_env!(#key);
+                const __BOOMERANG_COMPONENT_MODULE: &str = module_path!();
+            },
+            quote! {
+                /// Resolves this selected component's compatibility header.
+                /// Generated launchers call this function during const validation.
+                pub const fn binding_manifest() -> ::boomerang::runtime::binding::BindingManifest {
+                    ::boomerang::runtime::binding::component_payload_binding_manifest(
+                        super::__BOOMERANG_COMPONENT_INPUTS,
+                        super::__BOOMERANG_COMPONENT_MODULE,
+                        option_env!(#macro_abi_key),
+                    )
+                }
+            },
+        )
+    } else {
+        let (fingerprint, key) =
+            match payload_compile_inputs(contract, contract_version, &reactor_name) {
+                Ok(inputs) => inputs,
+                Err(error) => return error.to_compile_error(),
+            };
+        (
+            quote! { const _: &str = env!(#key); },
+            quote! {
+                #[doc(hidden)]
+                const _: () = ::boomerang::runtime::binding::validate_payload_macro_abi_compile_input(env!(#macro_abi_key));
+                /// Compatibility header for this legacy payload facet.
+                pub const BINDING_MANIFEST: ::boomerang::runtime::binding::BindingManifest =
+                    ::boomerang::runtime::binding::BindingManifest::new(
+                        ::boomerang::runtime::binding::DescriptorFingerprint::new([#(#fingerprint),*]),
+                        #macro_abi,
+                    );
+            },
+        )
+    };
     let binding_exports = model.args.iter().filter_map(|arg| {
         let name = ident_text(&arg.name.ident);
         let (symbol, payload_type, kind) = match (&arg.kind, &arg.ty) {
@@ -1168,21 +1226,12 @@ fn payload_output(
         #state_struct
         #state_impl
 
+        #fingerprint_declaration
         pub mod __boomerang {
             #[allow(unused_imports)]
             use super::*;
 
-            #[doc(hidden)]
-            const _: &str = env!(#macro_abi_key);
-            #[doc(hidden)]
-            const _: &str = env!(#fingerprint_key);
-
-            /// Compatibility header for this payload facet.
-            pub const BINDING_MANIFEST: ::boomerang::runtime::binding::BindingManifest =
-                ::boomerang::runtime::binding::BindingManifest::new(
-                    ::boomerang::runtime::binding::DescriptorFingerprint::new([#(#fingerprint),*]),
-                    #macro_abi,
-                );
+            #binding_manifest
 
             /// Constructs this reactor's concrete payload state.
             #[allow(non_snake_case)]
@@ -1582,7 +1631,7 @@ impl Parse for Model {
     }
 }
 
-pub struct ArgsModel(pub ReactorArgs, pub Model);
+pub struct ArgsModel(pub ReactorArgs, pub Model, pub bool);
 
 impl ToTokens for ArgsModel {
     fn to_tokens(&self, tokens: &mut TokenStream) {
@@ -1591,8 +1640,13 @@ impl ToTokens for ArgsModel {
             return;
         }
         let descriptor_output = descriptor_output(&self.0, &self.1);
+        let topology_output = if self.2 {
+            topology::output(&self.0, &self.1)
+        } else {
+            TokenStream::new()
+        };
         let conflict_output = quote! {
-            compile_error!("__boomerang_descriptor and __boomerang_payload cannot both be enabled");
+            compile_error!("boomerang_facet cannot select both descriptor and payload");
         };
         let Self(
             reactor_args,
@@ -1604,6 +1658,7 @@ impl ToTokens for ArgsModel {
                 args,
                 body,
             },
+            component,
         ) = self;
 
         // Extract generics parts
@@ -1736,6 +1791,7 @@ impl ToTokens for ArgsModel {
             &state_type_path,
             &payload_state_struct,
             &state_impl,
+            *component,
         );
 
         let port_idents = args
@@ -2046,32 +2102,32 @@ impl ToTokens for ArgsModel {
         tokens.append_all(quote! {
             #[allow(non_snake_case, unexpected_cfgs)]
             mod #facet_module {
-                #[cfg(not(any(feature = "__boomerang_descriptor", feature = "__boomerang_payload")))]
+                #[cfg(not(any(boomerang_facet = "descriptor", boomerang_facet = "payload")))]
                 macro_rules! hosted { ($($tokens:tt)*) => { $($tokens)* }; }
-                #[cfg(any(feature = "__boomerang_descriptor", feature = "__boomerang_payload"))]
+                #[cfg(any(boomerang_facet = "descriptor", boomerang_facet = "payload"))]
                 macro_rules! hosted { ($($tokens:tt)*) => {} }
                 pub(super) use hosted;
 
-                #[cfg(all(feature = "__boomerang_descriptor", not(feature = "__boomerang_payload")))]
+                #[cfg(all(boomerang_facet = "descriptor", not(boomerang_facet = "payload")))]
                 macro_rules! descriptor { ($($tokens:tt)*) => { $($tokens)* }; }
-                #[cfg(not(all(feature = "__boomerang_descriptor", not(feature = "__boomerang_payload"))))]
+                #[cfg(not(all(boomerang_facet = "descriptor", not(boomerang_facet = "payload"))))]
                 macro_rules! descriptor { ($($tokens:tt)*) => {} }
                 pub(super) use descriptor;
 
-                #[cfg(all(feature = "__boomerang_descriptor", feature = "__boomerang_payload"))]
+                #[cfg(all(boomerang_facet = "descriptor", boomerang_facet = "payload"))]
                 macro_rules! conflict { ($($tokens:tt)*) => { $($tokens)* }; }
-                #[cfg(not(all(feature = "__boomerang_descriptor", feature = "__boomerang_payload")))]
+                #[cfg(not(all(boomerang_facet = "descriptor", boomerang_facet = "payload")))]
                 macro_rules! conflict { ($($tokens:tt)*) => {} }
                 pub(super) use conflict;
 
-                #[cfg(all(feature = "__boomerang_payload", not(feature = "__boomerang_descriptor")))]
+                #[cfg(all(boomerang_facet = "payload", not(boomerang_facet = "descriptor")))]
                 macro_rules! payload { ($($tokens:tt)*) => { $($tokens)* }; }
-                #[cfg(not(all(feature = "__boomerang_payload", not(feature = "__boomerang_descriptor"))))]
+                #[cfg(not(all(boomerang_facet = "payload", not(boomerang_facet = "descriptor"))))]
                 macro_rules! payload { ($($tokens:tt)*) => {} }
                 pub(super) use payload;
             }
 
-            #facet_module::hosted! { #output }
+            #facet_module::hosted! { #output #topology_output }
             #facet_module::descriptor! { #descriptor_output }
             #facet_module::payload! { #payload_output }
             #facet_module::conflict! { #conflict_output }

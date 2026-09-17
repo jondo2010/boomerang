@@ -4,6 +4,8 @@ mod build;
 mod check;
 #[path = "toolchain/codegen.rs"]
 mod codegen;
+#[path = "toolchain/components.rs"]
+mod components;
 #[path = "toolchain/descriptor_driver.rs"]
 mod descriptor_driver;
 #[path = "toolchain/run.rs"]

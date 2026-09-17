@@ -1,74 +1,49 @@
 #[cfg(not(boomerang_workspace_config_probe))]
 compile_error!("Cargo command ignored workspace configuration");
 
+use boomerang::prelude::Duration;
 use boomerang_builder::compiler::{
-    ApplicationTopology, TopologyBuildError,
+    ApplicationTopology, ConnectionSemantics, TopologyAuthoringError, TopologyBuilder,
 };
-use boomerang_builder::{Assembly, Reactor};
-use boomerang::prelude::*;
 
 const _: () = assert!(
     option_env!("BOOMERANG_DESCRIPTOR_DRIVER").is_some(),
     "workspace resolution must not compile topology packages"
 );
 
-#[reactor(
-    contract = "vehicle.controller",
-    contract_version = 1,
-    bounds(
-        queue_capacity = 16,
-        payload_bytes = 1024,
-        state_bytes = 512,
-        scratch_bytes = 256,
-    )
-)]
-fn ControllerTopology(#[output] command: u32) -> impl Reactor {
-    reaction! { control (startup) -> command { *command = Some(42); } }
-    mode! { initial active {
-        reaction! { (shutdown) {} }
-    } }
-}
-
-#[reactor(
-    contract = "vehicle.sensor",
-    contract_version = 1,
-    bounds(
-        queue_capacity = 8,
-        payload_bytes = 512,
-        state_bytes = 256,
-        scratch_bytes = 128,
-    )
-)]
-fn SensorTopology(#[input] command: u32) -> impl Reactor {
-    reaction! { sample (command) { ctx.schedule_shutdown(None); } }
-}
-
 /// Builds the fixture's canonical logical topology without constructing a runtime graph.
-pub fn topology() -> Result<ApplicationTopology, TopologyBuildError> {
+pub fn topology() -> Result<ApplicationTopology, TopologyAuthoringError> {
     topology_with_delay(None)
 }
 
 /// Uses a nonzero route tag for independent-process transport verification.
-pub fn tagged_topology() -> Result<ApplicationTopology, TopologyBuildError> {
+pub fn tagged_topology() -> Result<ApplicationTopology, TopologyAuthoringError> {
     topology_with_delay(Some(Duration::milliseconds(1)))
 }
 
 /// Builds the shared fixture with the requested logical boundary delay.
-fn topology_with_delay(delay: Option<Duration>) -> Result<ApplicationTopology, TopologyBuildError> {
-    let mut assembly = Assembly::new();
-    let controller = ControllerTopology()
-        .build("controller", (), None, None, None, true, &mut assembly)
-        .expect("fixture controller Assembly is valid");
-    ControllerTopology()
-        .build("backup", (), None, None, None, true, &mut assembly)
-        .expect("fixture backup controller Assembly is valid");
-    let sensor = SensorTopology()
-        .build("sensor", (), None, None, None, true, &mut assembly)
-        .expect("fixture sensor Assembly is valid");
-    assembly
-        .add_port_connection::<u32, _, _>(controller.command, sensor.command, delay, false)
-        .expect("fixture route is valid");
-    Ok(assembly
-        .application_topology()
-        .expect("fixture topology projection is valid"))
+fn topology_with_delay(
+    delay: Option<Duration>,
+) -> Result<ApplicationTopology, TopologyAuthoringError> {
+    let mut app = TopologyBuilder::new("application/backup/controller/sensor")?;
+    let controller_enclave = app.enclave("controller")?;
+    let backup_enclave = app.enclave("backup")?;
+    let sensor_enclave = app.enclave("sensor")?;
+    let controller = app.component(
+        "controller",
+        vehicle_control::controller::definition(),
+        &controller_enclave,
+    )?;
+    app.component(
+        "backup",
+        vehicle_control::controller::definition(),
+        &backup_enclave,
+    )?;
+    let sensor = app.component("sensor", sensor_host::sensor::definition(), &sensor_enclave)?;
+    app.connect_with_semantics(
+        &controller.command,
+        &sensor.command,
+        ConnectionSemantics::Logical { after: delay },
+    )?;
+    app.finish()
 }

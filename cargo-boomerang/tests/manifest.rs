@@ -45,6 +45,42 @@ recovery = "fail-stop"
 }
 
 #[test]
+fn bindings_select_named_component_modules_and_reject_expressions() {
+    for entry in ["keyboard", "input::keyboard", "input::r#type"] {
+        let source = format!(
+            "{}\n[deployments.production.bindings.keys]\npackage = \"components\"\ncomponent = {entry:?}\n",
+            one_federate_without_coordination(),
+        );
+        let manifest = cargo_boomerang::parse_manifest(&source).unwrap();
+        assert_eq!(
+            manifest.deployment("production").unwrap().bindings["keys"]
+                .component
+                .as_deref(),
+            Some(entry)
+        );
+    }
+    for entry in [
+        "",
+        "::keyboard",
+        "crate::keyboard",
+        "super::keyboard",
+        "self::keyboard",
+        "keyboard::<u8>",
+        "keyboard()",
+        "keyboard; panic!()",
+    ] {
+        let source = format!(
+            "{}\n[deployments.production.bindings.keys]\npackage = \"components\"\ncomponent = {entry:?}\n",
+            one_federate_without_coordination(),
+        );
+        assert!(
+            cargo_boomerang::parse_manifest(&source).is_err(),
+            "accepted {entry}"
+        );
+    }
+}
+
+#[test]
 fn valid_manifest_preserves_the_complete_schema() {
     let manifest = load_manifest(fixture("valid")).unwrap();
     assert_eq!(manifest.schema, 1);

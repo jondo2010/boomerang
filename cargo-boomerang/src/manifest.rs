@@ -87,6 +87,13 @@ pub struct Deployment<F = Federate> {
 
 impl Deployment<Federate> {
     fn validate(&self, name: &str) -> Result<()> {
+        for (instance, binding) in &self.bindings {
+            if let Some(component) = &binding.component {
+                validate_component_path(component).map_err(|error| {
+                    invalid_deployment(name, format!("bindings.{instance}.component: {error}"))
+                })?;
+            }
+        }
         match self.federates.len() {
             0 => {
                 return Err(invalid_deployment(
@@ -168,9 +175,61 @@ where
 pub struct Binding {
     /// Cargo package providing the selected implementation descriptor.
     pub package: String,
+    /// Public component module relative to the package's library root.
+    #[serde(default)]
+    pub component: Option<String>,
     /// Cargo features enabled while compiling that implementation descriptor.
     #[serde(default)]
     pub features: Vec<String>,
+}
+
+impl Binding {
+    /// Stable implementation selection, distinct from the logical instance identity.
+    pub(crate) fn implementation_id(&self) -> String {
+        self.component.as_ref().map_or_else(
+            || self.package.clone(),
+            |_| self.exported_path(&self.package).replace("r#", ""),
+        )
+    }
+
+    /// Resolves this component's public exports through a generated crate alias.
+    pub(crate) fn exported_path(&self, alias: &str) -> String {
+        self.component.as_ref().map_or_else(
+            || alias.to_owned(),
+            |component| {
+                let path: syn::Path =
+                    syn::parse_str(component).expect("component path is validated");
+                let module = path
+                    .segments
+                    .iter()
+                    .map(|segment| segment.ident.to_string())
+                    .collect::<Vec<_>>()
+                    .join("::");
+                format!("{alias}::{module}")
+            },
+        )
+    }
+}
+
+/// Accepts only relative Rust module paths, never expressions or generic arguments.
+fn validate_component_path(value: &str) -> Result<()> {
+    let path: syn::Path = syn::parse_str(value)
+        .map_err(|_| anyhow::anyhow!("expected a relative Rust module path"))?;
+    if path.leading_colon.is_some()
+        || path.segments.is_empty()
+        || path.segments.iter().any(|segment| {
+            !matches!(segment.arguments, syn::PathArguments::None)
+                || matches!(
+                    segment.ident.to_string().as_str(),
+                    "self" | "super" | "crate" | "Self"
+                )
+        })
+    {
+        return Err(anyhow::anyhow!(
+            "expected a relative Rust module path without generic arguments"
+        ));
+    }
+    Ok(())
 }
 
 /// Placement and Cargo build configuration for one Federate.

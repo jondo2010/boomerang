@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::{anyhow, Result};
+use quote::quote;
 
 use crate::{CargoPackage, ResolvedWorkspace};
 
@@ -15,64 +16,89 @@ pub(crate) struct GeneratedCrate {
 }
 /// Renders a standalone driver crate for one resolved deployment.
 pub(crate) fn render_descriptor_driver(resolved: &ResolvedWorkspace) -> Result<GeneratedCrate> {
-    let topology_package = resolved
-        .package(&resolved.topology().package)
-        .expect("resolved topology package is retained");
-    let topology_crate = topology_package.lib_target.as_deref().ok_or_else(|| {
-        anyhow!(
-            "topology package '{}' does not expose a library target",
-            topology_package.name
-        )
-    })?;
-    let topology_entry = aliased_topology_entry(&resolved.topology().entry, topology_crate)?;
+    render_host_driver(resolved, false)
+}
 
+/// Generates the ordinary authoring stage without any descriptor dependencies.
+pub(crate) fn render_topology_driver(resolved: &ResolvedWorkspace) -> Result<GeneratedCrate> {
+    render_host_driver(resolved, true)
+}
+
+fn render_host_driver(resolved: &ResolvedWorkspace, topology: bool) -> Result<GeneratedCrate> {
     let mut dependencies = BTreeMap::new();
     dependencies.insert(
-        String::from("boomerang_builder"),
+        "boomerang_builder".to_owned(),
         dependency(
             resolved.host_builder(),
             false,
-            vec![String::from("host-interchange")],
+            vec!["host-interchange".to_owned()],
         )?,
     );
-    dependencies.insert(
-        String::from("topology_package"),
-        dependency(topology_package, true, Vec::new())?,
-    );
-
-    let mut selected_packages = BTreeMap::<String, Vec<String>>::new();
-    for binding in resolved.deployment().bindings.values() {
-        selected_packages
-            .entry(binding.package.clone())
-            .or_default()
-            .extend(binding.features.iter().cloned());
-    }
-    let mut package_aliases = BTreeMap::new();
-    for (index, (implementation, mut features)) in selected_packages.into_iter().enumerate() {
-        let alias = format!("implementation_{index}");
+    let body = if topology {
         let package = resolved
-            .package(&implementation)
-            .expect("resolved implementation package is retained");
-        features.push(String::from("__boomerang_descriptor"));
-        features.sort();
-        features.dedup();
-        dependencies.insert(alias.clone(), dependency(package, false, features)?);
-        package_aliases.insert(implementation, alias);
-    }
-
-    let mut binding_expressions = Vec::new();
-    for (component, binding) in &resolved.deployment().bindings {
-        let alias = package_aliases
-            .get(&binding.package)
-            .expect("selected implementation package has an alias");
-        binding_expressions.push(format!(
-            "DescriptorDriverBinding::new({component:?}, {package:?}, {alias}::__boomerang::descriptor())?",
-            package = binding.package,
-        ));
-    }
-
+            .package(&resolved.topology().package)
+            .expect("topology resolved");
+        let entry = aliased_topology_entry(
+            &resolved.topology().entry,
+            package
+                .lib_target
+                .as_deref()
+                .ok_or_else(|| anyhow!("topology package has no library"))?,
+        )?;
+        dependencies.insert(
+            "topology_package".to_owned(),
+            dependency(package, true, Vec::new())?,
+        );
+        let entry: syn::Path = syn::parse_str(&entry)?;
+        quote! {
+            let topology = #entry()?;
+            boomerang_builder::host_interchange::encode_topology_output(std::io::stdout().lock(), topology)?;
+        }
+    } else {
+        let mut selected = BTreeMap::<String, Vec<String>>::new();
+        for binding in resolved.deployment().bindings.values() {
+            selected
+                .entry(binding.package.clone())
+                .or_default()
+                .extend(binding.features.iter().cloned());
+        }
+        let mut aliases = BTreeMap::new();
+        for (index, (name, mut features)) in selected.into_iter().enumerate() {
+            let package = resolved.package(&name).expect("implementation resolved");
+            features.sort();
+            features.dedup();
+            let alias = format!("implementation_{index}");
+            dependencies.insert(alias.clone(), dependency(package, false, features)?);
+            aliases.insert(name, alias);
+        }
+        let bindings = resolved
+            .deployment()
+            .bindings
+            .iter()
+            .map(|(component, binding)| {
+                let path: syn::Path =
+                    syn::parse_str(&binding.exported_path(&aliases[&binding.package]))?;
+                let implementation = binding.implementation_id();
+                Ok(quote! {
+                    boomerang_builder::host_interchange::DescriptorDriverBinding::new(
+                        #component, #implementation, #path::__boomerang::descriptor(),
+                    )?
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        quote! {
+            boomerang_builder::host_interchange::encode_descriptor_output(
+                std::io::stdout().lock(), vec![#(#bindings),*],
+            )?;
+        }
+    };
+    let name = if topology {
+        "boomerang-topology-driver"
+    } else {
+        "boomerang-descriptor-driver"
+    };
     let package = toml::Table::from_iter([
-        ("name".into(), "boomerang-descriptor-driver".into()),
+        ("name".into(), name.into()),
         ("version".into(), "0.0.0".into()),
         ("edition".into(), "2021".into()),
         ("publish".into(), false.into()),
@@ -84,21 +110,19 @@ pub(crate) fn render_descriptor_driver(resolved: &ResolvedWorkspace) -> Result<G
             dependencies.into_iter().collect::<toml::Table>().into(),
         ),
         ("workspace".into(), toml::Table::new().into()),
-    ]))
-    .map_err(anyhow::Error::from)?;
-    let bindings = binding_expressions.join(",\n        ");
-    let main = format!(
-        "use boomerang_builder::host_interchange::{{encode_descriptor_driver_output, \
-         DescriptorDriverBinding, DescriptorDriverOutput}};\n\n\
-         fn run() -> Result<(), Box<dyn std::error::Error>> {{\n\
-         let topology_entry: fn() -> Result<boomerang_builder::compiler::ApplicationTopology, \
-         boomerang_builder::compiler::TopologyBuildError> = {topology_entry};\n\
-         let topology = topology_entry()?;\n\
-         let output = DescriptorDriverOutput::try_new(topology, vec![{bindings}])?;\n\
-         encode_descriptor_driver_output(std::io::stdout().lock(), output)?; Ok(()) }}\n\n\
-         fn main() {{ if let Err(error) = run() {{ eprintln!(\"{{error}}\"); \
-         std::process::exit(1); }} }}\n",
-    );
+    ]))?;
+    let main = crate::codegen::format_rust(quote! {
+        fn run() -> Result<(), Box<dyn std::error::Error>> {
+            #body
+            Ok(())
+        }
+        fn main() {
+            if let Err(error) = run() {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+    })?;
     Ok(GeneratedCrate { manifest, main })
 }
 /// Converts one Cargo package identity into an exact generated dependency.

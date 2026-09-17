@@ -2,6 +2,7 @@
 
 extern crate self as boomerang;
 
+pub use boomerang_macros::component;
 /// Runtime API expected by the payload facet's generated symbols.
 pub use boomerang_runtime as runtime;
 
@@ -11,15 +12,9 @@ pub mod prelude {
     pub use boomerang_runtime::{self as runtime, CommonContext};
 }
 
-/// Controller payload compiled directly from the fixture-owned source.
-pub mod controller {
-    include!("../../workspace/vehicle-control/src/lib.rs");
-}
-
-/// Sensor payload compiled directly from the fixture-owned source.
-pub mod sensor {
-    include!("../../workspace/sensor-host/src/lib.rs");
-}
+// Compile the original owned declarations independently, without facade feature unification.
+include!("../../workspace/vehicle-control/src/lib.rs");
+include!("../../workspace/sensor-host/src/lib.rs");
 
 use boomerang::runtime::{
     image::{BindingSlotIndex, BoundaryId, EnclaveIndex},

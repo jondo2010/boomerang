@@ -16,6 +16,10 @@ const GENERATED_CACHE_SCHEMA: u32 = 1;
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum GeneratedRole {
+    /// Host compiler wrapper preserving Cargo's effective compiler flags.
+    CompilerWrapper,
+    /// Ordinary authoring executable that emits logical topology.
+    Topology,
     /// Host-only executable that emits descriptor data for deployment analysis.
     Descriptor,
     /// Target executable that runs a fully lowered deployment image.
@@ -24,6 +28,8 @@ pub(crate) enum GeneratedRole {
 impl GeneratedRole {
     fn directory_name(self) -> &'static str {
         match self {
+            Self::CompilerWrapper => "compiler-wrapper",
+            Self::Topology => "topology",
             Self::Descriptor => "descriptor",
             Self::Launcher => "launcher",
         }
@@ -38,6 +44,8 @@ impl RequestIdentity {
     }
     fn short_target_name(self, role: GeneratedRole) -> String {
         let prefix = match role {
+            GeneratedRole::CompilerWrapper => 'w',
+            GeneratedRole::Topology => 't',
             GeneratedRole::Descriptor => 'd',
             GeneratedRole::Launcher => 'l',
         };

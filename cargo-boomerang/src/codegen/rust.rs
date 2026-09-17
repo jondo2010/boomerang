@@ -21,7 +21,7 @@ use tinymap::{IndexSpan, SliceRange};
 use crate::{codegen::LauncherCapabilities, manifest::ExecutionPolicy, DriverOutput};
 
 /// Validates and deterministically formats one complete generated Rust file.
-pub(super) fn format_rust(tokens: TokenStream) -> Result<String> {
+pub(crate) fn format_rust(tokens: TokenStream) -> Result<String> {
     let file = syn::parse2(tokens).context("generated Rust syntax is invalid")?;
     Ok(prettyplease::unparse(&file))
 }
@@ -168,15 +168,21 @@ fn render_compatibility_checks(
             .fingerprint()
             .to_bytes();
         let bytes = bytes.iter();
-        let alias = rust_ident(alias, "crate alias")?;
+        let alias: syn::Path =
+            syn::parse_str(alias).context("invalid generated component export path")?;
         let abi = descriptor.macro_abi();
+        let manifest = if alias.segments.len() > 1 {
+            quote!(#alias::__boomerang::binding_manifest())
+        } else {
+            quote!(#alias::__boomerang::BINDING_MANIFEST)
+        };
         checks.extend(quote! {
             const _: () = boomerang_runtime::binding::assert_descriptor_fingerprint(
                 boomerang_runtime::binding::DescriptorFingerprint::new([#(#bytes),*]),
-                #alias::__boomerang::BINDING_MANIFEST.descriptor_fingerprint(),
+                #manifest.descriptor_fingerprint(),
             );
             const _: () = assert!(
-                #abi == #alias::__boomerang::BINDING_MANIFEST.macro_abi(),
+                #abi == #manifest.macro_abi(),
                 "macro ABI mismatch",
             );
         });
@@ -430,7 +436,8 @@ fn rust_ident(value: &str, role: &str) -> Result<syn::Ident> {
 
 /// Renders a generated payload binding path from validated identifier segments.
 fn binding_path(alias: &str, symbol: &str) -> Result<TokenStream> {
-    let alias = rust_ident(alias, "crate alias")?;
+    let alias: syn::Path =
+        syn::parse_str(alias).context("invalid generated component export path")?;
     let symbol = rust_ident(symbol, "binding symbol")?;
     Ok(quote!(#alias::__boomerang::#symbol))
 }

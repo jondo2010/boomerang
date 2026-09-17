@@ -1,11 +1,11 @@
 use boomerang::prelude::*;
 
-#[cfg(not(feature = "__boomerang_descriptor"))]
+#[cfg(not(boomerang_facet = "descriptor"))]
 fn initial_count() -> usize {
     3
 }
 
-#[cfg(not(feature = "__boomerang_descriptor"))]
+#[cfg(not(boomerang_facet = "descriptor"))]
 fn target_only_reaction_payload() {}
 
 #[reactor(
@@ -54,7 +54,7 @@ pub mod custom {
         pub count: usize,
     }
 
-    #[cfg(feature = "__boomerang_payload")]
+    #[cfg(boomerang_facet = "payload")]
     fn init_custom_state() -> CustomState {
         CustomState { count: 11 }
     }
@@ -204,12 +204,12 @@ mod lexical_relation {
     }
 }
 
-#[cfg(feature = "__boomerang_descriptor")]
+#[cfg(boomerang_facet = "descriptor")]
 pub fn descriptor() -> boomerang::builder::ComponentDescriptor {
     __boomerang::descriptor()
 }
 
-#[cfg(all(test, feature = "__boomerang_descriptor"))]
+#[cfg(all(test, boomerang_facet = "descriptor"))]
 mod descriptor_tests {
     #[test]
     fn descriptor_contains_only_source_observable_structure() {
@@ -281,7 +281,7 @@ mod descriptor_tests {
     }
 }
 
-#[cfg(all(test, feature = "__boomerang_payload"))]
+#[cfg(all(test, boomerang_facet = "payload"))]
 mod payload_compile_input_tests {
     #[test]
     fn payload_mode_embeds_host_provided_compatibility_values() {

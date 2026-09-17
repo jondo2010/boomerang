@@ -1,4 +1,4 @@
-//! Support module for the snake game example.
+//! Support module owned by the Snake game component.
 
 use std::ops::{Index, IndexMut};
 

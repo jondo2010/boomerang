@@ -1,0 +1,15 @@
+schema = 1
+
+[topology]
+package = "snake"
+entry = "snake::keyboard_topology"
+
+[deployments.keyboard]
+bindings.keyboard = { package = "snake-keyboard", component = "keyboard" }
+bindings.display = { package = "snake-keyboard", component = "display" }
+
+federates.host = { groups = [
+    "placement/keyboard",
+], runtime = "std", recovery = "fail-stop" }
+
+execution = { fast-forward = false, keep-alive = true }

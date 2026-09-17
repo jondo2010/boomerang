@@ -303,7 +303,11 @@ impl CommonContext for Context {
             return Some(false);
         }
 
-        self.async_tx.try_send(event).map(|_| true).ok()
+        match self.async_tx.try_send(event) {
+            Ok(true) => Some(true),
+            Ok(false) => None,
+            Err(_) => Some(false),
+        }
     }
 }
 
@@ -348,7 +352,11 @@ impl CommonContext for SendContext {
             return Some(false);
         }
 
-        self.async_tx.try_send(event).map(|_| true).ok()
+        match self.async_tx.try_send(event) {
+            Ok(true) => Some(true),
+            Ok(false) => None,
+            Err(_) => Some(false),
+        }
     }
 }
 
@@ -415,6 +423,37 @@ mod tests {
         assert_eq!(tags.len(), 2);
         assert_eq!(tags[0].offset(), tags[1].offset());
         assert_eq!(tags[1].microstep(), tags[0].microstep() + 1);
+    }
+
+    #[test]
+    fn nonblocking_sends_distinguish_acceptance_backpressure_and_disconnection() {
+        let (async_tx, async_rx) = kanal::bounded::<AsyncEvent>(1);
+        let (_shutdown_tx, shutdown_rx) = keepalive::channel();
+        let ctx = Context::new(
+            EnclaveKey::from(0),
+            std::time::Instant::now(),
+            None,
+            async_tx,
+            shutdown_rx,
+        );
+        let sender = ctx.make_send_context();
+        let event = || AsyncEvent::shutdown(Duration::ZERO);
+
+        assert_eq!(ctx.try_schedule_async(event()), Some(true));
+        assert_eq!(ctx.try_schedule_async(event()), None);
+        assert_eq!(sender.try_schedule_async(event()), None);
+        assert!(matches!(
+            async_rx.recv().unwrap(),
+            AsyncEvent::Shutdown { .. }
+        ));
+        assert_eq!(sender.try_schedule_async(event()), Some(true));
+        assert!(matches!(
+            async_rx.recv().unwrap(),
+            AsyncEvent::Shutdown { .. }
+        ));
+        drop(async_rx);
+        assert_eq!(ctx.try_schedule_async(event()), Some(false));
+        assert_eq!(sender.try_schedule_async(event()), Some(false));
     }
 
     #[test]

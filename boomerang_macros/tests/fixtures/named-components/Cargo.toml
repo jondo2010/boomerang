@@ -1,0 +1,20 @@
+[package]
+name = "named-components"
+version = "0.0.0"
+edition = "2021"
+publish = false
+[features]
+sentinel = []
+descriptor-assert = []
+payload-assert = []
+duplicate = []
+invalid = []
+cfg-root = []
+cfg-attr-root = []
+deprecated-root = []
+subset-assert = []
+[dependencies]
+boomerang = { path = "../../../../boomerang" }
+[target.'cfg(boomerang_facet = "descriptor")'.dev-dependencies]
+boomerang_builder = { path = "../../../../boomerang_builder", features = ["descriptor-fingerprint"] }
+[workspace]

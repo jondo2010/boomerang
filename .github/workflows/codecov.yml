@@ -42,11 +42,10 @@ jobs:
       - name: Generate code coverage
         run: |
           cargo fetch
-          cargo llvm-cov --no-report --all-features --workspace --exclude boomerang
-          # The facade's descriptor and payload features are mutually exclusive.
-          cargo llvm-cov --no-clean -p boomerang --features hosted,serde,parallel,replay
-          cargo llvm-cov --no-clean -p boomerang --lib --no-default-features --features __boomerang_payload
-          cargo llvm-cov --no-clean -p boomerang --lib --no-default-features --features __boomerang_descriptor
+          cargo llvm-cov --no-report --all-features --workspace
+          # Exercise the tool-owned facet cfg values independently of Cargo features.
+          RUSTFLAGS='--cfg boomerang_facet="payload"' cargo llvm-cov --no-clean -p boomerang --lib --no-default-features
+          RUSTFLAGS='--cfg boomerang_facet="descriptor"' cargo llvm-cov --no-clean -p boomerang --lib --no-default-features --features hosted
           # Generated workspaces fall outside cargo-llvm-cov's object discovery.
           # Use Cargo outputs; publication tests deliberately corrupt bundled copies.
           objects=()

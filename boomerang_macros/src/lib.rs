@@ -1,5 +1,6 @@
 use quote::quote;
 
+mod component;
 mod ports;
 mod reaction;
 mod reactor;
@@ -68,7 +69,7 @@ pub fn reactor(
 
     match syn::parse::<reactor::Model>(s) {
         Ok(model) => {
-            let args_model = reactor::ArgsModel(args, model);
+            let args_model = reactor::ArgsModel(args, model, false);
             quote! { #args_model }
         }
         Err(e) => {
@@ -123,4 +124,19 @@ pub fn reaction(s: proc_macro::TokenStream) -> proc_macro::TokenStream {
 pub fn timer(s: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let model = syn::parse_macro_input!(s as timer::Model);
     quote! { #model }.into()
+}
+
+/// Declares one named component in an inline Rust module.
+///
+/// The module must contain exactly one root `#[reactor]` declaration. Helper
+/// items remain ordinary owning-crate code and are omitted in descriptor builds.
+/// Root attributes other than documentation are rejected; put conditional and lint
+/// attributes on the component module instead.
+#[proc_macro_error2::proc_macro_error]
+#[proc_macro]
+pub fn component(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    match component::expand(input.into()) {
+        Ok(output) => output.into(),
+        Err(error) => error.to_compile_error().into(),
+    }
 }

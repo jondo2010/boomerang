@@ -161,6 +161,9 @@ pub(crate) struct DescriptorDocument {
     pub(crate) component: String,
     /// Selected implementation package name.
     pub(crate) package: String,
+    /// Selected named component module, absent for legacy crate-root exports.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) module: Option<String>,
     /// Stable external contract identity.
     pub(crate) contract: String,
     /// Stable external contract version.

@@ -109,6 +109,8 @@ fn verbose_colored_build_preserves_compiler_diagnostics() {
             "Analyzing",
             "Generating",
             "Building",
+            "Generating",
+            "Building",
             "Validating",
             "Generating",
             "Building",
@@ -232,6 +234,8 @@ fn build_publishes_reuses_and_protects_a_fingerprinted_bundle() {
             "Analyzing",
             "Generating",
             "Building",
+            "Generating",
+            "Building",
             "Validating",
             "Generating",
             "Building",
@@ -336,7 +340,20 @@ fn build_publishes_reuses_and_protects_a_fingerprinted_bundle() {
         .iter()
         .map(|package| package.name.as_str())
         .collect::<Vec<_>>();
-    assert!(!package_names.contains(&"boomerang_builder"));
+    // Reuse the generated build to inspect the exact target artifacts, since unfiltered
+    // metadata also includes the facade's cfg-disabled hosted dependencies.
+    let launcher = support::with_target_directory(&target, || {
+        cargo_boomerang::generate_launcher(fixture_workspace(), "production", "host")
+    })
+    .unwrap();
+    let built = launcher.build_locked_offline().unwrap();
+    let payload_crates = support::launcher_payload_crates(built.executable_path());
+    assert!(payload_crates.contains("sensor_host"));
+    assert!(payload_crates.contains("vehicle_control"));
+    assert!(
+        !payload_crates.contains("boomerang_builder"),
+        "{payload_crates:?}"
+    );
     assert!(!package_names.contains(&"vehicle-topology"));
     assert!(package_names.contains(&"sensor-host"));
     assert!(package_names.contains(&"vehicle-control"));
@@ -582,20 +599,10 @@ fn generated_central_deployment_publishes_isolated_artifacts_and_exchanges_tagge
         "vehicle-topology",
         "vehicle-control",
         "sensor-host",
-        "transitive-host",
     ] {
         assert!(
             !packages.contains(&forbidden),
             "RTI links {forbidden}: {packages:?}"
-        );
-    }
-    for node in &metadata.resolve.unwrap().nodes {
-        assert!(
-            node.features
-                .iter()
-                .all(|feature| feature.as_str() != "__boomerang_payload"),
-            "RTI activates a payload facet in {}",
-            node.id
         );
     }
     for (federate, present, absent) in [
@@ -613,10 +620,26 @@ fn generated_central_deployment_publishes_isolated_artifacts_and_exchanges_tagge
             .map(|p| p.name.as_str())
             .collect::<Vec<_>>();
         assert!(packages.contains(&present), "{packages:?}");
-        for forbidden in [absent, "vehicle-topology", "boomerang_builder"] {
+        for forbidden in [absent, "vehicle-topology"] {
             assert!(!packages.contains(&forbidden), "{packages:?}");
         }
         assert!(packages.contains(&"boomerang_central_rti"));
+        let launcher = support::with_target_directory(&target, || {
+            cargo_boomerang::generate_launcher(fixture_workspace(), "sensor-slice", federate)
+        })
+        .unwrap();
+        let built = launcher.build_locked_offline().unwrap();
+        let payload_crates = support::launcher_payload_crates(built.executable_path());
+        for required in ["boomerang_runtime", &present.replace('-', "_")] {
+            assert!(payload_crates.contains(required), "{payload_crates:?}");
+        }
+        for forbidden in [
+            "boomerang_builder",
+            "vehicle_topology",
+            &absent.replace('-', "_"),
+        ] {
+            assert!(!payload_crates.contains(forbidden), "{payload_crates:?}");
+        }
     }
     assert!(sensor_source.contains(".bind_enclave("), "{sensor_source}");
     assert!(

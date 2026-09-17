@@ -295,8 +295,13 @@ site.
 
 ## Dual-facet component packages
 
-A deployment-capable component implementation is a Cargo package in the application workspace. The
-Boomerang macros generate two mutually exclusive facets from one source declaration.
+A deployment-capable component implementation is a Cargo package in the application workspace.
+Each implementation owns its reactor source and helpers; topology packages consume its public API
+through an ordinary Cargo dependency rather than including source files. A package declares a
+named implementation with `component! { pub mod name { ... } }`. The module contains exactly one
+`#[reactor]` declaration plus any implementation-owned helpers, and the package may expose several
+such named modules. The Boomerang macros generate two mutually exclusive facets from each named
+source declaration.
 
 The Cargo package is the minimum strict-slicing unit. Code that must be independently placed or
 compiled for incompatible targets must live in separate packages. One package may expose multiple
@@ -341,9 +346,12 @@ wrappers do not define a separate graph or lowering path.
 
 ### Build mode
 
-`cargo-boomerang` selects a reserved, tool-owned descriptor or payload build mode through separate
-Cargo invocations. The mode is not a Federate feature and does not encode placement. Enabling both
-facets is an error.
+`cargo-boomerang` selects a tool-owned descriptor or payload build mode through separate Cargo
+invocations using `cfg(boomerang_facet = "descriptor")` or
+`cfg(boomerang_facet = "payload")`. The mode is not a user Cargo feature, is not declared in the
+component manifest, and does not encode placement. Selecting both facets is an error. With neither
+facet selected, the same named module is the hosted authoring API used by topology crates and local
+composition tests.
 
 Target dependencies must be absent from descriptor mode through generated `cfg` boundaries and
 Cargo dependency configuration. Deployment-capable reaction and topology declarations must use
@@ -411,10 +419,12 @@ entry = "vehicle::topology"
 
 [deployments.production.bindings."vehicle/sensor"]
 package = "sensor-stm32"
+component = "sensor"
 features = ["board-a"]
 
 [deployments.production.bindings."vehicle/controller"]
 package = "vehicle-control"
+component = "controller"
 
 [deployments.production.federates.sensor-edge]
 groups = ["sensor"]

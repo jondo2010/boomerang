@@ -3,9 +3,6 @@ name = "vehicle-control"
 version = "0.1.0"
 edition = "2021"
 [features]
-default = ["boomerang/hosted"]
-__boomerang_descriptor = ["boomerang/__boomerang_descriptor"]
-__boomerang_payload = ["boomerang/__boomerang_payload"]
 broken-payload = []
 broken-descriptor = []
 controller-selected = []
@@ -14,7 +11,7 @@ profile-config-probe = []
 warning-diagnostic = []
 
 [dependencies]
-boomerang = { path = "../../../../../boomerang", default-features = false }
+boomerang = { path = "../../../../../boomerang" }
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(boomerang_cargo_config_probe)"] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(boomerang_facet, values("descriptor", "payload"))', "cfg(boomerang_cargo_config_probe)"] }

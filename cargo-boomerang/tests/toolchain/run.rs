@@ -136,6 +136,8 @@ fn generated_monolith_cli_matches_owned_execution() {
             "Analyzing",
             "Generating",
             "Building",
+            "Generating",
+            "Building",
             "Validating",
             "Generating",
             "Building",

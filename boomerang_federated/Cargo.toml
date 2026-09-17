@@ -14,6 +14,9 @@ exclude.workspace = true
 [features]
 default = ["serde"]
 
+## Portable semantic oracle and deterministic fault harness for coordination tests.
+conformance = []
+
 ## Additional Serde derives for portable wire delays
 serde = []
 

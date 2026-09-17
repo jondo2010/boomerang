@@ -13,7 +13,7 @@ use boomerang_central_rti::compiled::{
 };
 use boomerang_central_rti::WireTag;
 use boomerang_federated::conformance::{
-    Member, Outcome, ReferenceCoordinator, Route, RouteTopology, Topology, VectorStep,
+    tagged_payload_exchange, Member, Outcome, ReferenceCoordinator, Route, VectorStep,
 };
 use boomerang_runtime::{execute_owned_federate_with_backend, image::*};
 use std::sync::Arc;
@@ -404,30 +404,18 @@ fn run_reference_vector(vector: impl IntoIterator<Item = VectorStep>) -> VectorE
 /// Checks one hand-authored NET/DNET/LTC exchange against the portable oracle.
 #[test]
 fn compiled_rti_outcomes_are_permitted_by_the_reference_vector() {
-    let source = Member::new(0);
-    let destination = Member::new(1);
-    let route = Route::new(0);
-    let destination_tag = WireTag::finite(1_000_000, 0);
-    let vector = [
-        VectorStep::publish(source, 0, Some(WireTag::ZERO)),
-        VectorStep::publish(destination, 0, Some(destination_tag)),
-        VectorStep::payload(source, route, destination_tag),
-        VectorStep::complete(source, WireTag::ZERO),
-        VectorStep::publish(source, 1, None),
-        VectorStep::complete(destination, destination_tag),
-        VectorStep::publish(destination, 1, None),
-    ];
-    let expected = [
-        Outcome::grant(source, 0, WireTag::FOREVER),
-        Outcome::payload(destination, route, destination_tag),
-        Outcome::grant(destination, 0, WireTag::FOREVER),
-    ];
-    let mut oracle = ReferenceCoordinator::new(
-        [source, destination],
-        Topology::new([(route, RouteTopology::new(source, destination))]).unwrap(),
-        1,
-    )
-    .unwrap();
+    let exchange = tagged_payload_exchange();
+    let (source, destination, route, tag, members, topology, vector, expected) = (
+        exchange.source,
+        exchange.destination,
+        exchange.route,
+        exchange.tag,
+        exchange.members,
+        exchange.topology,
+        exchange.steps,
+        exchange.expected_outcomes,
+    );
+    let mut oracle = ReferenceCoordinator::new(members, topology, 1).unwrap();
     let oracle_outcomes = vector
         .into_iter()
         .flat_map(|step| oracle.apply(step))
@@ -445,7 +433,7 @@ fn compiled_rti_outcomes_are_permitted_by_the_reference_vector() {
             member: destination,
             tag: WireTag::FOREVER,
         },
-        VectorObservation::Semantic(Outcome::payload(destination, route, destination_tag)),
+        VectorObservation::Semantic(Outcome::payload(destination, route, tag)),
         VectorObservation::Semantic(Outcome::grant(destination, 0, WireTag::FOREVER)),
     ];
     assert_eq!(execution.observations, expected_observations);

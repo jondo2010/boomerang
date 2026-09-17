@@ -63,6 +63,62 @@ pub struct Topology {
     routes: TinyMap<Route, RouteTopology>,
 }
 
+/// One portable NET/LTC/payload exchange shared by coordination projections.
+///
+/// The scenario is deliberately small: a source publishes, forwards one tagged payload, completes,
+/// and both participants become idle. Projection tests retain their own assertions for transport,
+/// control-message counts, and deployment-specific behavior.
+pub struct TaggedPayloadExchange {
+    /// Source participant for the compiled route.
+    pub source: Member,
+    /// Destination participant for the compiled route.
+    pub destination: Member,
+    /// Route carrying the tagged payload.
+    pub route: Route,
+    /// Payload's final destination tag.
+    pub tag: WireTag,
+    /// Complete participant domain for this vector.
+    pub members: [Member; 2],
+    /// Single compiled source-to-destination route.
+    pub topology: Topology,
+    /// Ordered protocol inputs applied to the oracle and projection.
+    pub steps: [VectorStep; 7],
+    /// Logical outcomes permitted by the unoptimized oracle.
+    pub expected_outcomes: [Outcome; 3],
+}
+
+/// Creates the baseline tagged-payload exchange conformance vector.
+#[must_use]
+pub fn tagged_payload_exchange() -> TaggedPayloadExchange {
+    let source = Member::new(0);
+    let destination = Member::new(1);
+    let route = Route::new(0);
+    let tag = WireTag::finite(1_000_000, 0);
+    TaggedPayloadExchange {
+        source,
+        destination,
+        route,
+        tag,
+        members: [source, destination],
+        topology: Topology::new([(route, RouteTopology::new(source, destination))])
+            .expect("a literal one-route topology is valid"),
+        steps: [
+            VectorStep::publish(source, 0, Some(WireTag::ZERO)),
+            VectorStep::publish(destination, 0, Some(tag)),
+            VectorStep::payload(source, route, tag),
+            VectorStep::complete(source, WireTag::ZERO),
+            VectorStep::publish(source, 1, None),
+            VectorStep::complete(destination, tag),
+            VectorStep::publish(destination, 1, None),
+        ],
+        expected_outcomes: [
+            Outcome::grant(source, 0, WireTag::FOREVER),
+            Outcome::payload(destination, route, tag),
+            Outcome::grant(destination, 0, WireTag::FOREVER),
+        ],
+    }
+}
+
 impl Topology {
     /// Builds a dense route table whose supplied keys must match its table positions.
     pub fn new(

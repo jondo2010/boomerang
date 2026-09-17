@@ -6,6 +6,18 @@ use super::{
 use crate::WireTag;
 
 #[test]
+fn tagged_payload_exchange_is_a_reusable_oracle_vector() {
+    let exchange = super::tagged_payload_exchange();
+    let mut oracle = ReferenceCoordinator::new(exchange.members, exchange.topology, 1).unwrap();
+    let outcomes = exchange
+        .steps
+        .into_iter()
+        .flat_map(|step| oracle.apply(step))
+        .collect::<Vec<_>>();
+    assert_eq!(outcomes, exchange.expected_outcomes);
+}
+
+#[test]
 fn completion_releases_only_the_accounted_frontier() {
     let source = Member::new(0);
     let destination = Member::new(1);

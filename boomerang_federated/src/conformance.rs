@@ -1,7 +1,8 @@
 #[cfg(test)]
 mod tests {
     use super::{
-        Member, Outcome, ReferenceCoordinator, Route, RouteTopology, Topology, VectorStep,
+        ConstructionError, Failure, Member, Outcome, ReferenceCoordinator, Route, RouteTopology,
+        Topology, VectorStep,
     };
     use crate::WireTag;
 
@@ -50,6 +51,49 @@ mod tests {
         assert_eq!(
             oracle.apply(VectorStep::complete(destination, earlier)),
             vec![Outcome::grant(destination, 1, WireTag::finite(0, 9))]
+        );
+    }
+
+    #[test]
+    fn construction_rejects_route_endpoints_outside_the_member_table() {
+        let member = Member::new(0);
+        let missing = Member::new(1);
+        let route = Route::new(0);
+        let topology = Topology::new([(route, RouteTopology::new(member, missing))]).unwrap();
+
+        assert!(matches!(
+            ReferenceCoordinator::new([member], topology, 1),
+            Err(ConstructionError::RouteEndpoint {
+                route: actual_route,
+                member: actual_member,
+            })
+            if actual_route == route && actual_member == missing
+        ));
+    }
+
+    #[test]
+    fn terminal_failure_retains_the_first_distinct_invalid_step() {
+        let member = Member::new(0);
+        let mut oracle = ReferenceCoordinator::new(
+            [member],
+            Topology::new([] as [(Route, RouteTopology); 0]).unwrap(),
+            1,
+        )
+        .unwrap();
+
+        assert_eq!(
+            oracle.apply(VectorStep::payload(member, Route::new(0), WireTag::ZERO)),
+            vec![Outcome::Failed {
+                member,
+                failure: Failure::UnknownRoute,
+            }]
+        );
+        assert_eq!(
+            oracle.apply(VectorStep::complete(member, WireTag::NEVER)),
+            vec![Outcome::Failed {
+                member,
+                failure: Failure::UnknownRoute,
+            }]
         );
     }
 }
@@ -122,6 +166,13 @@ pub enum ConstructionError {
     },
     /// The route key domain cannot represent another complete route-table entry.
     RouteCapacity,
+    /// A route endpoint was absent from the fixed complete member table.
+    RouteEndpoint {
+        /// Route whose endpoint cannot participate in this coordinator.
+        route: Route,
+        /// Missing source or target member endpoint.
+        member: Member,
+    },
 }
 
 /// One input event in a portable coordination vector.
@@ -299,6 +350,13 @@ impl ReferenceCoordinator {
                 || states.keys().last() != Some(member)
             {
                 return Err(ConstructionError::MemberKey { member });
+            }
+        }
+        for (route, route_topology) in topology.routes.iter() {
+            for member in [route_topology.source, route_topology.target] {
+                if states.get(member).is_none() {
+                    return Err(ConstructionError::RouteEndpoint { route, member });
+                }
             }
         }
         Ok(Self {

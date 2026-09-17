@@ -97,19 +97,24 @@ named-components = { path = "../components" }
 "#,
     )
     .unwrap();
-    std::fs::write(root.join("topology/src/lib.rs"), r#"
+    std::fs::write(
+        root.join("topology/src/lib.rs"),
+        r#"
 #![allow(unexpected_cfgs)]
 #[cfg(not(any(component_configured_flag, component_encoded_flag)))]
 compile_error!("the generated compiler wrapper must preserve Cargo's effective flags");
-use boomerang::prelude::*;
-pub fn topology() -> Result<boomerang::builder::compiler::ApplicationTopology, boomerang::builder::compiler::TopologyBuildError> {
-    let mut assembly = Assembly::new();
-    let source = named_components::nodes::source::Node().build("source", (), None, None, None, false, &mut assembly).unwrap();
-    let sink = named_components::nodes::sink::Node().build("sink", (), None, None, None, false, &mut assembly).unwrap();
-    assembly.add_port_connection::<u32, _, _>(source.value, sink.value, None, false).unwrap();
-    Ok(assembly.application_topology().unwrap())
+use boomerang::builder::compiler::{ApplicationTopology, TopologyAuthoringError, TopologyBuilder};
+pub fn topology() -> Result<ApplicationTopology, TopologyAuthoringError> {
+    let mut app = TopologyBuilder::new("application/source")?;
+    let enclave = app.enclave("source")?;
+    let source = app.component("source", named_components::nodes::source::definition(), &enclave)?;
+    let sink = app.component("sink", named_components::nodes::sink::definition(), &enclave)?;
+    app.connect(&source.value, &sink.value)?;
+    app.finish()
 }
-"#).unwrap();
+"#,
+    )
+    .unwrap();
     std::fs::write(
         root.join("Boomerang.toml"),
         r#"

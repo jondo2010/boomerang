@@ -36,7 +36,7 @@ fn generated_manifest_unions_features_for_one_selected_package() {
     let features = &manifest["dependencies"]["implementation_0"]["features"];
     assert_eq!(
         features.to_string(),
-        r#"["__boomerang_payload", "controller-selected", "sensor-selected"]"#
+        r#"["controller-selected", "sensor-selected"]"#
     );
 }
 
@@ -76,6 +76,14 @@ fn generated_single_federate_launcher_executes_typed_local_route_without_builder
         .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
     launcher.run_locked_offline().unwrap();
     launcher.check_locked_offline().unwrap();
+    let payload_crates = support::launcher_payload_crates(first.executable_path());
+    for present in ["boomerang_runtime", "sensor_host", "vehicle_control"] {
+        assert!(payload_crates.contains(present), "{payload_crates:?}");
+    }
+    assert!(
+        !payload_crates.contains("boomerang_builder"),
+        "{payload_crates:?}"
+    );
 }
 
 /// Rejects reserved payload activation through an unselected transitive dependency.
@@ -86,8 +94,13 @@ fn generated_launcher_rejects_transitive_payload_for_unselected_implementation()
     let _manifest = support::fixture_variant("transitive-peer", "sensor-slice", |deployment| {
         deployment["bindings"].as_table_mut().unwrap().insert(
             "sensor".into(),
-            toml::toml! { package = "transitive-host" }.into(),
+            toml::toml! { package = "transitive-host"
+            component = "sensor" }
+            .into(),
         );
+        for component in ["controller", "backup"] {
+            deployment["bindings"][component]["package"] = "legacy-peer".into();
+        }
     });
     let result = support::with_target_directory(target.path(), || {
         cargo_boomerang::generate_launcher(fixture_workspace(), "transitive-peer", "sensor")

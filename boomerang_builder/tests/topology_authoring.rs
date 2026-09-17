@@ -89,3 +89,44 @@ fn invalid_names_and_finish_validation_are_returned() {
         Err(TopologyAuthoringError::Topology(_))
     ));
 }
+
+#[test]
+fn explicit_connection_semantics_preserve_delays_and_reject_foreign_handles() {
+    use boomerang_runtime::Duration;
+    let mut app = TopologyBuilder::new("application/a/b").unwrap();
+    let enclave = app.enclave("a").unwrap();
+    let a = app.component("a", Definition, &enclave).unwrap();
+    let b = app.component("b", Definition, &enclave).unwrap();
+    let logical = ConnectionSemantics::Logical {
+        after: Some(Duration::milliseconds(1)),
+    };
+    let physical = ConnectionSemantics::Physical {
+        after: Some(Duration::milliseconds(2)),
+    };
+    let mut other = TopologyBuilder::new("application/a/b").unwrap();
+    let foreign_enclave = other.enclave("a").unwrap();
+    let foreign = other.component("a", Definition, &foreign_enclave).unwrap();
+    for semantics in [logical, physical] {
+        assert!(matches!(
+            app.connect_with_semantics(&foreign.1, &b.0, semantics),
+            Err(TopologyAuthoringError::ForeignHandle)
+        ));
+        assert!(matches!(
+            app.connect_with_semantics(&a.1, &foreign.0, semantics),
+            Err(TopologyAuthoringError::ForeignHandle)
+        ));
+        app.connect_with_semantics(&a.1, &b.0, semantics).unwrap();
+    }
+    let topology = app.finish().unwrap();
+    let connections = topology
+        .connections()
+        .map(|(id, connection)| (id.to_string(), connection.semantics()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        connections,
+        vec![
+            ("boundary/a%2Fout/b%2Fin/c0".into(), logical),
+            ("boundary/a%2Fout/b%2Fin/c1".into(), physical)
+        ]
+    );
+}

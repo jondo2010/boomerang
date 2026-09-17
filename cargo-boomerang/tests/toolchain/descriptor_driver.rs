@@ -44,6 +44,7 @@ fn repeated_descriptor_analysis_uses_workspace_configuration_and_cargo_freshness
     assert!(!first.build_log().contains("payload-only"));
 
     let _manifest = support::fixture_variant("payload-alias", "production", |deployment| {
+        deployment["bindings"]["sensor"]["package"] = "transitive-host".into();
         deployment["bindings"]["sensor"]
             .as_table_mut()
             .unwrap()

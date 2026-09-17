@@ -1,4 +1,4 @@
 [workspace]
-members = ["sensor-host", "transitive-host", "vehicle-control", "vehicle-topology"]
+members = ["sensor-host", "transitive-host", "legacy-peer", "vehicle-control", "vehicle-topology"]
 exclude = ["outside-member"]
 resolver = "2"

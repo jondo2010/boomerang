@@ -236,6 +236,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "legacy-peer"
+version = "0.1.0"
+dependencies = [
+ "vehicle-control",
+]
+
+[[package]]
 name = "litrs"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -422,7 +429,6 @@ name = "sensor-host"
 version = "0.1.0"
 dependencies = [
  "boomerang",
- "boomerang_builder",
 ]
 
 [[package]]
@@ -590,8 +596,8 @@ dependencies = [
 name = "transitive-host"
 version = "0.1.0"
 dependencies = [
+ "legacy-peer",
  "sensor-host",
- "vehicle-control",
 ]
 
 [[package]]
@@ -631,6 +637,8 @@ dependencies = [
  "boomerang",
  "boomerang_builder",
  "outside-member",
+ "sensor-host",
+ "vehicle-control",
 ]
 
 [[package]]

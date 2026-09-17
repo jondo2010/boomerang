@@ -162,10 +162,12 @@ pub fn owned_reference_summary(deployment_name: &str) -> Value {
     let driver = cargo_boomerang::run_descriptor_driver(&workspace, deployment_name).unwrap();
     for binding in driver.bindings() {
         let payload = match binding.implementation().as_str() {
-            "vehicle-control" => {
-                owned_reference_payloads::controller::__boomerang::BINDING_MANIFEST
+            "vehicle-control::controller" => {
+                owned_reference_payloads::controller::__boomerang::binding_manifest()
             }
-            "sensor-host" => owned_reference_payloads::sensor::__boomerang::BINDING_MANIFEST,
+            "sensor-host::sensor" => {
+                owned_reference_payloads::sensor::__boomerang::binding_manifest()
+            }
             implementation => panic!("unexpected fixture implementation {implementation}"),
         };
         assert_eq!(
@@ -312,4 +314,40 @@ pub fn with_target_directory<T>(target: &Path, operation: impl FnOnce() -> T) ->
     let _guard = TargetDirectoryGuard(std::env::var_os("CARGO_TARGET_DIR"));
     unsafe { std::env::set_var("CARGO_TARGET_DIR", target) };
     operation()
+}
+
+/// Inspect emitted target libraries from generated launcher builds, excluding host tooling builds.
+/// Unfiltered Cargo metadata also lists the facade's cfg-disabled hosted dependencies.
+pub fn launcher_payload_crates(executable: &Path) -> std::collections::BTreeSet<String> {
+    fn collect(directory: &Path, crates: &mut std::collections::BTreeSet<String>) {
+        for entry in std::fs::read_dir(directory).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if entry.file_type().unwrap().is_dir() {
+                collect(&path, crates);
+            } else if matches!(
+                path.extension().and_then(|value| value.to_str()),
+                Some("rlib" | "rmeta")
+            ) {
+                let filename = path.file_stem().unwrap().to_str().unwrap();
+                if let Some(name) = filename
+                    .strip_prefix("lib")
+                    .and_then(|value| value.split('-').next())
+                {
+                    crates.insert(name.to_owned());
+                }
+            }
+        }
+    }
+    // BuiltLauncher returns a private executable copy directly below its build target.
+    // Inspect only this launcher's explicit target tree, not host tooling or other builds.
+    let build_target = executable.parent().unwrap().parent().unwrap();
+    let payload = build_target.join(target_lexicon::HOST.to_string());
+    let mut crates = std::collections::BTreeSet::new();
+    collect(&payload, &mut crates);
+    assert!(
+        crates.contains("boomerang_runtime"),
+        "no target runtime artifact found: {crates:?}"
+    );
+    crates
 }

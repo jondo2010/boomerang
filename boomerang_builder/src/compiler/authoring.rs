@@ -180,6 +180,15 @@ impl TopologyBuilder {
         output: &TopologyOutput<T>,
         input: &TopologyInput<T>,
     ) -> Result<(), TopologyAuthoringError> {
+        self.connect_with_semantics(output, input, ConnectionSemantics::Logical { after: None })
+    }
+    /// Connect matching payloads with explicit logical or physical timing semantics.
+    pub fn connect_with_semantics<T>(
+        &mut self,
+        output: &TopologyOutput<T>,
+        input: &TopologyInput<T>,
+        semantics: ConnectionSemantics,
+    ) -> Result<(), TopologyAuthoringError> {
         for (id, declaration) in [
             (&output.id, &output.declaration),
             (&input.id, &input.declaration),
@@ -202,7 +211,7 @@ impl TopologyBuilder {
             BoundaryId::from_path(path),
             output.id.clone(),
             input.id.clone(),
-            ConnectionSemantics::Logical { after: None },
+            semantics,
         )?;
         // No graph can contain enough connections to exhaust this counter in memory.
         self.connections.insert(pair, ordinal + 1);

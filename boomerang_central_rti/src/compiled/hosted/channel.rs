@@ -91,9 +91,18 @@ impl<T> Sender<T> {
         deadline: Instant,
     ) -> Result<Reservation<'_, T>, HostedError> {
         if Instant::now() >= deadline {
+            tracing::warn!(target: "boomerang::coordination",
+                event = "coordination.transport.deadline", ?class, reason = "reservation");
             return Err(HostedError::Lifecycle(
                 "hosted channel reservation timed out",
             ));
+        }
+        if self.tx.capacity() == 0
+            || (class == Class::Payload && self.payloads.available_permits() == 0)
+        {
+            tracing::debug!(target: "boomerang::coordination",
+                event = "coordination.transport.backpressure", ?class,
+                queue_available = self.tx.capacity(), payload_available = self.payloads.available_permits());
         }
         timeout_at(deadline, async {
             let payload = if class == Class::Payload {
@@ -111,7 +120,11 @@ impl<T> Sender<T> {
             Ok(Reservation { slot, payload })
         })
         .await
-        .map_err(|_| HostedError::Lifecycle("hosted channel reservation timed out"))?
+        .map_err(|_| {
+            tracing::warn!(target: "boomerang::coordination",
+                event = "coordination.transport.deadline", ?class, reason = "reservation");
+            HostedError::Lifecycle("hosted channel reservation timed out")
+        })?
     }
     /// Submits without waiting; Tokio owns storage, synchronization, and wakeups.
     pub fn send(&self, value: T, class: Class, deadline: Instant) -> Result<(), HostedError> {
@@ -173,6 +186,27 @@ mod tests {
     }
     #[tokio::test(start_paused = true)]
     async fn reservation_deadline_survives_cancellation_and_reclaims_permits() {
+        #[derive(Clone, Default)]
+        struct Output(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Output {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let output = Output::default();
+        let writer = output.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .without_time()
+            .with_env_filter("boomerang::coordination=debug")
+            .with_writer(move || writer.clone())
+            .finish();
+        // This test runs on a current-thread executor, so the scoped dispatcher spans awaits.
+        let _subscriber = tracing::subscriber::set_default(subscriber);
         let (tx, _rx) = bounded();
         let duration = std::time::Duration::from_secs(1);
         let deadline = Instant::now() + duration;
@@ -192,6 +226,22 @@ mod tests {
         assert_eq!(Instant::now(), deadline);
         assert_eq!(tx.payloads.available_permits(), PAYLOAD_CAPACITY);
         assert!(tx.reserve(Class::Coordination, deadline).await.is_err());
+        let bytes = output.0.lock().unwrap();
+        let events: Vec<serde_json::Value> = bytes
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice(line).unwrap())
+            .collect();
+        assert!(events
+            .iter()
+            .any(|event| event["fields"]["event"] == "coordination.transport.backpressure"));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event["fields"]["event"] == "coordination.transport.deadline")
+                .count(),
+            2
+        );
     }
     #[test]
     fn payload_reservation_preserves_fifo_and_releases_at_dequeue() {

@@ -142,6 +142,10 @@ impl<'a> CompiledRti<'a> {
     }
     /// Fails the session and releases every peer, preserving the first cause.
     pub fn abort(&mut self, message: impl Into<String>) -> Vec<RtiDelivery> {
+        if self.failure.is_none() {
+            tracing::error!(target: "boomerang::coordination",
+                event = "coordination.rti.failure.first", coordination = ?self.identity);
+        }
         let message = self.failure.get_or_insert_with(|| message.into()).clone();
         self.states
             .keys()
@@ -190,7 +194,7 @@ impl<'a> CompiledRti<'a> {
                 tracing::event!(
                     target: "boomerang::coordination",
                     tracing::Level::ERROR,
-                    event = "coordination.failure.first",
+                    event = "coordination.rti.request.rejected",
                     coordination = ?self.identity,
                     federate = ?member,
                     request = request_kind,
@@ -202,7 +206,7 @@ impl<'a> CompiledRti<'a> {
                 tracing::event!(
                     target: "boomerang::coordination",
                     tracing::Level::ERROR,
-                    event = "coordination.failure.first",
+                    event = "coordination.rti.request.rejected",
                     coordination = ?self.identity,
                     federate = ?member,
                     request = request_kind,
@@ -283,6 +287,10 @@ impl<'a> CompiledRti<'a> {
                 self.states[member]
                     .in_transit
                     .retain(|pending| *pending > tag);
+                tracing::debug!(target: "boomerang::coordination",
+                    event = "coordination.rti.accounting.completed",
+                    coordination = ?self.identity, federate = ?member, ?tag,
+                    pending_tags = self.states[member].in_transit.len());
             }
             RtiRequest::Payload {
                 route: route_key,
@@ -349,6 +357,10 @@ impl<'a> CompiledRti<'a> {
                         payload,
                     },
                 });
+                tracing::debug!(target: "boomerang::coordination",
+                    event = "coordination.rti.payload.forwarded",
+                    coordination = ?self.identity, federate = ?member, destination = ?target,
+                    route = ?route_key, ?tag, pending_tags = self.states[target].in_transit.len());
             }
             RtiRequest::ConfirmIdle { revision } => {
                 if state.publication != Some((revision, None)) {
@@ -389,6 +401,9 @@ impl<'a> CompiledRti<'a> {
                     member: candidate,
                     reply: RtiReply::Grant { revision, tag },
                 });
+                tracing::debug!(target: "boomerang::coordination",
+                    event = "coordination.rti.grant.issued",
+                    coordination = ?self.identity, federate = ?candidate, revision, ?tag);
             }
         }
         if self.states.values().all(|state| {
@@ -401,6 +416,9 @@ impl<'a> CompiledRti<'a> {
                 let revision = state.publication.expect("all members published").0;
                 if !state.stopped && state.idle != Some(revision) {
                     state.idle = Some(revision);
+                    tracing::debug!(target: "boomerang::coordination",
+                        event = "coordination.rti.idle.issued", coordination = ?self.identity,
+                        federate = ?member, revision);
                     deliveries.push(RtiDelivery {
                         member,
                         reply: RtiReply::Idle { revision },
@@ -435,6 +453,9 @@ impl<'a> CompiledRti<'a> {
             // Always send tightenings; only useful increases need transmission.
             if tag != old && (tag < old || next.is_some_and(|next| next <= tag)) {
                 self.states[member].dnet = Some(tag);
+                tracing::debug!(target: "boomerang::coordination",
+                    event = "coordination.rti.dnet.issued", coordination = ?self.identity,
+                    federate = ?member, ?tag);
                 deliveries.push(RtiDelivery {
                     member,
                     reply: RtiReply::SuppressPublication { tag },

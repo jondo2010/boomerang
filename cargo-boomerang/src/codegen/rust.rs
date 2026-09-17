@@ -87,6 +87,7 @@ pub(super) fn render_launcher(
                 .parse()?;
             let view = RtiImageView::new(COORDINATION_IMAGE, COORDINATION_MEMBERS)?;
             let rti_bindings = RtiClientBindings::from_image(view, FEDERATE, COORDINATION_IDENTITY)?;
+            let _execution_span = rti_bindings.execution_span().entered();
             let connection = hosted::connect(address, FEDERATE, wire_contract(), timeout)?;
             let sink = connection.sink();
             let bindings = generated_bindings(&rti_bindings, sink.clone())?;

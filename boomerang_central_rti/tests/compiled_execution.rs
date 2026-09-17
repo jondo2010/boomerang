@@ -128,7 +128,8 @@ fn execute_pair(mismatch: bool, fail_rti: bool, fail_scheduler: bool) {
         )
         .unwrap();
         let (source, sink, server) = transport::start(rti, fail_rti);
-        let source_thread = std::thread::spawn(move || {
+        let source_thread = spawn_traced(move || {
+            let _member = source_rti.execution_span().entered();
             let outbound = source_rti
                 .outbound_sink(source.0.clone(), BoundaryId::new("pipe"))
                 .unwrap();
@@ -162,7 +163,8 @@ fn execute_pair(mismatch: bool, fail_rti: bool, fail_scheduler: bool) {
                 },
             )
         });
-        let sink_thread = std::thread::spawn(move || {
+        let sink_thread = spawn_traced(move || {
+            let _member = sink_rti.execution_span().entered();
             execute_owned_federate_with_backend(
                 MEMBERS[1],
                 &FEDERATES[1],
@@ -237,7 +239,103 @@ fn execute_pair(mismatch: bool, fail_rti: bool, fail_scheduler: bool) {
 /// Runs separate compiled schedulers through the production RTI state and client.
 #[test]
 fn compiled_federates_exchange_tagged_payload_through_rti() {
-    execute_pair(false, false, false);
+    let (_, events) = client::capture_coordination(|| execute_pair(false, false, false));
+    for kind in [
+        "coordination.reaction.started",
+        "coordination.codec.encoded",
+        "coordination.payload.sent",
+        "coordination.rti.decision",
+        "coordination.rti.payload.forwarded",
+        "coordination.rti.grant.issued",
+        "coordination.rti.accounting.completed",
+        "coordination.shutdown.requested",
+        "coordination.shutdown.completed",
+        "coordination.rti.idle.issued",
+        "coordination.rti.dnet.issued",
+        "coordination.payload.received",
+        "coordination.boundary.admitted",
+        "coordination.reaction.finished",
+    ] {
+        assert!(
+            events.iter().any(|event| event["fields"]["event"] == kind),
+            "missing {kind}: {events:#?}"
+        );
+    }
+    let reactions: Vec<_> = events
+        .iter()
+        .filter(|event| event["fields"]["event"] == "coordination.reaction.started")
+        .collect();
+    for member in ["FederateIndex(0)", "FederateIndex(1)"] {
+        assert!(reactions.iter().any(|event| event["spans"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|span| span["federate"] == member
+                && span["coordination"] == format!("{IDENTITY:?}"))));
+    }
+    let position = |kind: &str, member: &str| {
+        events
+            .iter()
+            .position(|event| {
+                event["fields"]["event"] == kind
+                    && (event["fields"]["federate"] == member
+                        || event["spans"].as_array().is_some_and(|spans| {
+                            spans.iter().any(|span| span["federate"] == member)
+                        }))
+            })
+            .unwrap_or_else(|| panic!("missing {kind} for {member}"))
+    };
+    let source = "FederateIndex(0)";
+    let sink = "FederateIndex(1)";
+    assert!(
+        position("coordination.reaction.started", source)
+            < position("coordination.codec.encoded", source)
+    );
+    assert!(
+        position("coordination.codec.encoded", source)
+            < position("coordination.rti.payload.forwarded", source)
+    );
+    assert!(
+        position("coordination.rti.payload.forwarded", source)
+            < position("coordination.boundary.admitted", sink)
+    );
+    // Admission logs after enqueue, so it need not precede a concurrently woken reaction.
+    // The RTI must forward before the destination can execute and retire its accounting.
+    assert!(
+        position("coordination.rti.payload.forwarded", source)
+            < position("coordination.reaction.started", sink)
+    );
+    assert!(
+        position("coordination.reaction.finished", sink)
+            < position("coordination.rti.accounting.completed", sink)
+    );
+    let forwarded = &events[position("coordination.rti.payload.forwarded", source)]["fields"];
+    assert_eq!(forwarded["route"], "RtiRouteIndex(0)");
+    assert_eq!(forwarded["destination"], sink);
+    assert_eq!(forwarded["pending_tags"], 1);
+    assert_eq!(forwarded["coordination"], format!("{IDENTITY:?}"));
+    assert_eq!(
+        events[position("coordination.codec.encoded", source)]["fields"]["local_route"],
+        "RouteIndex(0)"
+    );
+    let sent = &events[position("coordination.payload.sent", source)]["fields"];
+    assert_eq!(sent["route"], "RtiRouteIndex(0)");
+    assert_eq!(sent["coordination"], format!("{IDENTITY:?}"));
+    assert_eq!(
+        sent["tag"],
+        format!("{:?}", Tag::new(Duration::milliseconds(1), 0))
+    );
+    assert!(sent.as_object().unwrap().keys().all(|key| matches!(
+        key.as_str(),
+        "event" | "message" | "coordination" | "federate" | "route" | "tag"
+    )));
+    let decision = &events[position("coordination.rti.decision", source)]["fields"];
+    assert_eq!(decision["request"], "hello");
+    assert!(decision["deliveries"].is_u64());
+    assert_eq!(
+        events[position("coordination.rti.accounting.completed", sink)]["fields"]["pending_tags"],
+        0
+    );
 }
 /// Rejects mismatched artifact identities before execution.
 #[test]
@@ -247,7 +345,14 @@ fn coordination_identity_mismatch_rejects_both_federates() {
 /// Propagates a terminal RTI failure to both blocked executors.
 #[test]
 fn rti_failure_releases_both_compiled_federates() {
-    execute_pair(false, true, false);
+    let (_, events) = client::capture_coordination(|| execute_pair(false, true, false));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event["fields"]["event"] == "coordination.rti.failure.first")
+            .count(),
+        1
+    );
 }
 
 /// Starts a pure RTI without a transport for protocol-boundary assertions.
@@ -582,7 +687,16 @@ fn positive_delay_completion_does_not_cover_later_source_microsteps() {
 /// Aborts the blocked receiver after a local encoder failure.
 #[test]
 fn scheduler_failure_releases_blocked_peer() {
-    execute_pair(false, false, true);
+    let (_, events) = client::capture_coordination(|| execute_pair(false, false, true));
+    assert!(events
+        .iter()
+        .any(|event| event["fields"]["event"] == "coordination.reaction.cancelled"));
+    assert!(!events
+        .iter()
+        .any(|event| event["fields"]["event"] == "coordination.codec.encoded"));
+    assert!(!serde_json::to_string(&events)
+        .unwrap()
+        .contains("injected codec failure"));
 }
 
 /// Preserves authority when local work is discovered below an existing grant.
@@ -795,12 +909,19 @@ fn owned_federate_watchdog_timeout() -> std::time::Duration {
 
 fn bounded<T: Send + 'static>(run: impl FnOnce() -> T + Send + 'static) -> T {
     let (tx, rx) = std::sync::mpsc::channel();
-    let worker = std::thread::spawn(move || tx.send(run()).unwrap());
+    let worker = spawn_traced(move || tx.send(run()).unwrap());
     let result = rx
         .recv_timeout(owned_federate_watchdog_timeout())
         .expect("owned Federate execution must complete within the watchdog timeout");
     worker.join().unwrap();
     result
+}
+
+fn spawn_traced<T: Send + 'static>(
+    run: impl FnOnce() -> T + Send + 'static,
+) -> std::thread::JoinHandle<T> {
+    let dispatch = tracing::dispatcher::get_default(Clone::clone);
+    std::thread::spawn(move || tracing::dispatcher::with_default(&dispatch, run))
 }
 
 #[path = "compiled_execution/client.rs"]

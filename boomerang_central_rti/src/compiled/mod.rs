@@ -7,14 +7,33 @@
 //! ## Coordination tracing
 //!
 //! Compiled execution emits optional structured [`tracing`] events at the
-//! `boomerang::coordination` target. Every event uses the compiler-issued coordination
-//! fingerprint and the owning typed Federate key; route, tag, and revision fields are included
-//! when that event concerns them. The `event` field identifies a lifecycle action such as
+//! `boomerang::coordination` target. Client/RTI events carry the compiler-issued coordination
+//! fingerprint and an owning typed Federate key where applicable (a server-wide failure has
+//! no single owner). Runtime and channel events inherit context from
+//! [`RtiClientBindings::execution_span`](crate::compiled::RtiClientBindings::execution_span);
+//! enter it before connecting and executing a Federate.
+//! Generated launchers do this automatically and propagate the subscriber to worker threads.
+//! Route, tag, and revision fields are included when that event concerns them.
+//! The `event` field identifies a lifecycle action such as
 //! `coordination.payload.sent` or `coordination.grant.received`.
 //!
 //! No event includes application payload bytes, stable display labels, or an error's diagnostic
 //! text. Applications select off, bounded retention, or hosted export by configuring their
 //! `tracing` subscriber; the runtime itself owns no trace buffer or exporter.
+//!
+//! Publications are NET, cumulative completions are LTC, and suppression advice is DNET.
+//! `publication.suppressed` records a locally skipped NET; `publication.restored` records its
+//! transmission after tightened DNET. `rti.grant.issued` records revision-specific TAG authority;
+//! `rti.accounting.completed` records retirement, not merely receipt, of queued input.
+//! Reaction completion includes outbound encoding/submission; cancellation means that execution
+//! or this outbound work returned an error or unwound. Boundary rejection reasons are static
+//! categories, never decoder diagnostics.
+//!
+//! Correlate `local_route` with the owning Enclave's `RouteIndex` table; `route` on RTI/client
+//! events is the distinct deployment-wide `RtiRouteIndex`. Resolve their common boundary and
+//! display labels from compiled artifacts outside execution. Events describe local transitions,
+//! not a global clock: an enqueue can wake another thread before its sender logs completion.
+//! Use FIFO, tags, revisions, and these typed keys to reconstruct causal order.
 mod client;
 pub mod hosted;
 pub mod in_memory;

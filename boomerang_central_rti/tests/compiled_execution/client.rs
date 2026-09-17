@@ -30,6 +30,25 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for TraceOutput {
     }
 }
 
+/// Capture the formatter's bytes, including events from runtime-owned worker threads.
+pub(super) fn capture_coordination<T>(run: impl FnOnce() -> T) -> (T, Vec<serde_json::Value>) {
+    let output = TraceOutput::default();
+    let subscriber = tracing_subscriber::fmt()
+        .json()
+        .without_time()
+        .with_writer(output.clone())
+        .with_env_filter("boomerang::coordination=debug")
+        .finish();
+    let result = tracing::subscriber::with_default(subscriber, run);
+    let bytes = output.0.lock().unwrap();
+    let events = std::str::from_utf8(&bytes)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    (result, events)
+}
+
 #[derive(Default)]
 struct Script {
     replies: VecDeque<RtiReply>,
@@ -152,7 +171,7 @@ fn multiple_payloads_are_admitted_in_order_before_grant_and_execute_at_their_tag
             .into(),
             ..Script::default()
         }));
-        let result = execute_script(script.clone()).unwrap();
+        let (result, events) = capture_coordination(|| execute_script(script.clone()).unwrap());
         let sink = result.enclave(EnclaveIndex::new(1)).unwrap();
         assert_eq!(
             sink.state::<RoutedSinkState>(StateSlotIndex::new(0))
@@ -165,6 +184,36 @@ fn multiple_payloads_are_admitted_in_order_before_grant_and_execute_at_their_tag
         assert_eq!(script.decoded, [41, 42]);
         assert!(script.observed_grants > 0);
         assert!(matches!(script.requests.last(), Some(RtiRequest::Stop)));
+        let payload_events: Vec<_> = events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event["fields"]["event"].as_str(),
+                    Some("coordination.payload.received" | "coordination.boundary.admitted")
+                )
+            })
+            .collect();
+        assert_eq!(payload_events.len(), 4, "{events:#?}");
+        for pair in payload_events.as_chunks::<2>().0 {
+            assert_eq!(pair[0]["fields"]["event"], "coordination.payload.received");
+            assert_eq!(pair[1]["fields"]["event"], "coordination.boundary.admitted");
+            assert_eq!(pair[0]["fields"]["tag"], pair[1]["fields"]["tag"]);
+            for event in pair {
+                assert_eq!(event["fields"]["federate"], "FederateIndex(1)");
+                assert_eq!(event["fields"]["route"], "RtiRouteIndex(0)");
+                assert_eq!(event["fields"]["coordination"], format!("{IDENTITY:?}"));
+                assert!(event["fields"].get("payload").is_none());
+            }
+        }
+        let first_grant = events
+            .iter()
+            .position(|event| event["fields"]["event"] == "coordination.grant.received")
+            .unwrap();
+        let last_admission = events
+            .iter()
+            .rposition(|event| event["fields"]["event"] == "coordination.boundary.admitted")
+            .unwrap();
+        assert!(last_admission < first_grant);
     });
 }
 
@@ -205,40 +254,54 @@ fn one_horizon_executes_multiple_events_without_another_rti_grant() {
 
 #[test]
 fn decode_failure_terminates_execution_before_queued_grant() {
-    bounded(|| {
-        let script = Arc::new(Mutex::new(Script {
-            replies: [
-                RtiReply::Started,
-                RtiReply::Payload {
-                    route: RtiRouteIndex::new(0),
-                    tag: WireTag::finite(1_000_000, 0),
-                    payload: vec![0xff],
-                },
-                RtiReply::Grant {
-                    revision: 1,
-                    tag: WireTag::finite(1_000_000, 0),
-                },
-            ]
-            .into(),
-            ..Script::default()
-        }));
-        let error = execute_script(script.clone()).unwrap_err().to_string();
-        assert!(error.contains("scripted malformed payload"), "{error}");
-        let script = script.lock().unwrap();
-        assert!(script.decoded.is_empty());
-        assert_eq!(script.observed_grants, 0);
-        assert!(matches!(
-            script.replies.front(),
-            Some(RtiReply::Grant { .. })
-        ));
-        assert!(!script
-            .requests
-            .iter()
-            .any(|request| matches!(request, RtiRequest::Complete { .. })));
-        assert!(
-            matches!(script.requests.last(), Some(RtiRequest::Abort { message }) if message.contains("scripted malformed payload"))
-        );
+    let (_, events) = capture_coordination(|| {
+        bounded(|| {
+            let script = Arc::new(Mutex::new(Script {
+                replies: [
+                    RtiReply::Started,
+                    RtiReply::Payload {
+                        route: RtiRouteIndex::new(0),
+                        tag: WireTag::finite(1_000_000, 0),
+                        payload: vec![0xff],
+                    },
+                    RtiReply::Grant {
+                        revision: 1,
+                        tag: WireTag::finite(1_000_000, 0),
+                    },
+                ]
+                .into(),
+                ..Script::default()
+            }));
+            let error = execute_script(script.clone()).unwrap_err().to_string();
+            assert!(error.contains("scripted malformed payload"), "{error}");
+            let script = script.lock().unwrap();
+            assert!(script.decoded.is_empty());
+            assert_eq!(script.observed_grants, 0);
+            assert!(matches!(
+                script.replies.front(),
+                Some(RtiReply::Grant { .. })
+            ));
+            assert!(!script
+                .requests
+                .iter()
+                .any(|request| matches!(request, RtiRequest::Complete { .. })));
+            assert!(
+                matches!(script.requests.last(), Some(RtiRequest::Abort { message }) if message.contains("scripted malformed payload"))
+            );
+        })
     });
+    let rejected = events
+        .iter()
+        .find(|event| event["fields"]["event"] == "coordination.boundary.rejected")
+        .unwrap();
+    assert_eq!(rejected["fields"]["reason"], "decode");
+    assert!(!events.iter().any(|event| matches!(
+        event["fields"]["event"].as_str(),
+        Some("coordination.grant.received" | "coordination.boundary.admitted")
+    )));
+    assert!(!serde_json::to_string(&events)
+        .unwrap()
+        .contains("scripted malformed payload"));
 }
 
 #[test]
@@ -333,75 +396,56 @@ fn outbound_payload_tightens_dnet_before_the_next_publication() {
 }
 
 #[test]
-fn outbound_payload_emits_a_structured_coordination_event() {
-    use boomerang_runtime::TaggedPayload;
-
-    let script = Arc::new(Mutex::new(Script::default()));
-    let output = TraceOutput::default();
-    let subscriber = tracing_subscriber::fmt()
-        .with_writer(output.clone())
-        .without_time()
-        .with_target(true)
-        .with_ansi(false)
-        .with_max_level(tracing::Level::DEBUG)
-        .finish();
-    let view = CompiledDeploymentView::new(DEPLOYMENT).unwrap();
-    let bindings = RtiClientBindings::new(&view, MEMBERS[0], IDENTITY).unwrap();
-    let outbound = bindings
-        .outbound_sink(Arc::new(RequestRecorder(script)), BoundaryId::new("pipe"))
+fn tightened_dnet_trace_explains_the_restored_net() {
+    use boomerang_runtime::{
+        CoordinationRevision, FederateCoordinationBackend, FederatePublication,
+    };
+    let (_, events) = capture_coordination(|| {
+        let view = CompiledDeploymentView::new(DEPLOYMENT).unwrap();
+        let script = Arc::new(Mutex::new(Script {
+            replies: [
+                RtiReply::Started,
+                RtiReply::SuppressPublication {
+                    tag: WireTag::FOREVER,
+                },
+                RtiReply::SuppressPublication { tag: WireTag::ZERO },
+            ]
+            .into(),
+            ..Script::default()
+        }));
+        let mut client = CentralRtiClient::connect(
+            Arc::new(RequestRecorder(script.clone())),
+            OrderedReplies(script),
+            RtiClientBindings::new(&view, MEMBERS[0], IDENTITY).unwrap(),
+            BTreeMap::new(),
+            StdDuration::from_secs(1),
+        )
         .unwrap();
-
-    tracing::subscriber::with_default(subscriber, || {
-        tracing::callsite::rebuild_interest_cache();
-        outbound
-            .send(TaggedPayload {
-                tag: Tag::new(Duration::milliseconds(1), 0),
-                payload: vec![42],
-            })
+        client.progress(StdDuration::ZERO).unwrap();
+        client
+            .publish(
+                FederatePublication::new(
+                    CoordinationRevision::new(3),
+                    Some(Tag::new(Duration::milliseconds(1), 0)),
+                )
+                .with_grant_horizon(Some(Tag::FOREVER)),
+            )
             .unwrap();
+        client.progress(StdDuration::ZERO).unwrap();
     });
-
-    let output = String::from_utf8(output.0.lock().unwrap().clone()).unwrap();
-    assert!(output.contains("DEBUG boomerang::coordination"));
-    assert!(output.contains("event=\"coordination.payload.sent\""));
-    assert!(output.contains("coordination=CoordinationFingerprint"));
-    assert!(output.contains("federate=FederateIndex(0)"));
-    assert!(output.contains("route=RtiRouteIndex(0)"));
-    assert!(output.contains("tag=Tag"));
-    assert!(
-        !output.contains("42"),
-        "payload bytes must not enter tracing output"
+    let kinds: Vec<_> = events
+        .iter()
+        .map(|event| event["fields"]["event"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            "coordination.dnet.received",
+            "coordination.publication.suppressed",
+            "coordination.dnet.received",
+            "coordination.publication.restored"
+        ]
     );
-}
-
-#[test]
-fn rti_decision_emits_a_structured_coordination_event() {
-    let output = TraceOutput::default();
-    let subscriber = tracing_subscriber::fmt()
-        .with_writer(output.clone())
-        .without_time()
-        .with_target(true)
-        .with_ansi(false)
-        .with_max_level(tracing::Level::DEBUG)
-        .finish();
-    let mut rti = admitted_rti();
-
-    tracing::subscriber::with_default(subscriber, || {
-        tracing::callsite::rebuild_interest_cache();
-        rti.handle(
-            MEMBERS[0],
-            RtiRequest::Publish {
-                revision: 1,
-                next_event: Some(WireTag::ZERO),
-            },
-        );
-    });
-
-    let output = String::from_utf8(output.0.lock().unwrap().clone()).unwrap();
-    assert!(output.contains("DEBUG boomerang::coordination"));
-    assert!(output.contains("event=\"coordination.rti.decision\""));
-    assert!(output.contains("coordination=CoordinationFingerprint"));
-    assert!(output.contains("federate=FederateIndex(0)"));
-    assert!(output.contains("request=\"publication\""));
-    assert!(output.contains("deliveries="));
+    assert_eq!(events[1]["fields"]["revision"], 3);
+    assert_eq!(events[3]["fields"]["revision"], 3);
 }

@@ -1006,6 +1006,8 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
         backend,
     )?;
     let origin = Instant::now();
+    let dispatch = tracing::dispatcher::get_default(Clone::clone);
+    let parent_span = tracing::Span::current();
     let (results, failure) = std::thread::scope(|scope| {
         let (result_tx, result_rx) = std::sync::mpsc::channel();
         let coordinator_thread = if fail_spawn(None) {
@@ -1013,9 +1015,15 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
                 "injected scoped thread spawn failure",
             ))
         } else {
+            let dispatch = dispatch.clone();
+            let parent_span = parent_span.clone();
             std::thread::Builder::new()
                 .name("federate-coordination".to_owned())
-                .spawn_scoped(scope, move || coordinator.run())
+                .spawn_scoped(scope, move || {
+                    let _dispatch = tracing::dispatcher::set_default(&dispatch);
+                    let _parent = parent_span.entered();
+                    coordinator.run()
+                })
         };
         let coordinator_thread = match coordinator_thread {
             Ok(handle) => handle,
@@ -1055,9 +1063,16 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
                     "injected scoped thread spawn failure",
                 ))
             } else {
+                let dispatch = dispatch.clone();
+                let parent_span = parent_span.clone();
                 std::thread::Builder::new()
                     .name(format!("enclave-{enclave}"))
                     .spawn_scoped(scope, move || {
+                        let _dispatch = tracing::dispatcher::set_default(&dispatch);
+                        let _parent = parent_span.entered();
+                        let _enclave = tracing::debug_span!(target: "boomerang::coordination",
+                            "enclave", ?enclave)
+                        .entered();
                         let execution = std::panic::catch_unwind(AssertUnwindSafe(|| {
                             run_owned_scheduler_with_coordination(
                                 &mut storage,

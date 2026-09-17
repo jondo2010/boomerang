@@ -1,8 +1,9 @@
 #[cfg(test)]
 mod tests {
     use super::{
-        ConstructionError, Failure, Member, Outcome, ReferenceCoordinator, Route, RouteTopology,
-        Topology, VectorStep,
+        ConstructionError, Failure, FaultEffect, FaultScript, Lane, Member, OrderedFaultScheduler,
+        Outcome, ReferenceCoordinator, Route, RouteTopology, ScheduledOutcome, Topology,
+        VectorStep,
     };
     use crate::WireTag;
 
@@ -96,6 +97,48 @@ mod tests {
             }]
         );
     }
+
+    #[test]
+    fn delayed_first_frame_prevents_later_frame_overtaking() {
+        let lane = Lane::new(0);
+        let source = Member::new(0);
+        let route = Route::new(0);
+        let first = VectorStep::payload(source, route, WireTag::ZERO);
+        let later = VectorStep::payload(source, route, WireTag::finite(0, 1));
+        let script = FaultScript::new([FaultEffect::delay(0, 0, 2)]).unwrap();
+        let mut scheduler = OrderedFaultScheduler::new([lane], script).unwrap();
+
+        assert!(scheduler.submit(0, lane, first).is_empty());
+        assert!(scheduler.submit(0, lane, later).is_empty());
+        assert!(scheduler.advance(1).is_empty());
+        assert_eq!(
+            scheduler.advance(2),
+            vec![
+                ScheduledOutcome::delivered(lane, first),
+                ScheduledOutcome::delivered(lane, later),
+            ]
+        );
+    }
+
+    #[test]
+    fn corruption_retains_exactly_one_terminal_failure() {
+        let lane = Lane::new(0);
+        let source = Member::new(0);
+        let route = Route::new(0);
+        let first = VectorStep::payload(source, route, WireTag::ZERO);
+        let later = VectorStep::payload(source, route, WireTag::finite(0, 1));
+        let script = FaultScript::new([FaultEffect::corrupt(0, 0)]).unwrap();
+        let mut scheduler = OrderedFaultScheduler::new([lane], script).unwrap();
+
+        assert_eq!(
+            scheduler.submit(0, lane, first),
+            vec![ScheduledOutcome::failed(Failure::Corrupted)]
+        );
+        assert_eq!(
+            scheduler.submit(1, lane, later),
+            vec![ScheduledOutcome::failed(Failure::Corrupted)]
+        );
+    }
 }
 
 use crate::WireTag;
@@ -108,6 +151,10 @@ tinymap::key_type!(
 tinymap::key_type!(
     /// Identifies one route in a dense, trace-local topology table.
     pub Route
+);
+tinymap::key_type!(
+    /// Identifies one dense FIFO delivery lane in a portable fault trace.
+    pub Lane
 );
 
 /// One directed portable route between two members.
@@ -154,6 +201,11 @@ impl Topology {
 /// Construction failed because a supplied topology key was not its dense table position.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConstructionError {
+    /// A lane key did not match the generated complete lane-table key.
+    LaneKey {
+        /// Supplied key that was not the next dense lane key.
+        lane: Lane,
+    },
     /// A member key did not match the generated complete member-table key.
     MemberKey {
         /// Supplied key that was not the next dense member key.
@@ -301,6 +353,262 @@ pub enum Failure {
     InTransitCapacity,
     /// A stopped member attempted another active lifecycle step.
     Stopped,
+    /// A scripted lost lower-layer frame could not be delivered reliably.
+    Lost,
+    /// A scripted corrupted lower-layer frame entered a terminal failure state.
+    Corrupted,
+    /// A submitted frame addressed a lane outside the fixed lane table.
+    UnknownLane,
+    /// A submission or advance attempted to move the scheduler clock backwards.
+    TickRegression,
+    /// The generated ordinal could not represent another submitted frame.
+    OrdinalExhausted,
+    /// Delaying a frame would exceed the representable scheduler tick range.
+    DelayOverflow,
+}
+
+/// A deterministic lower-layer event selected by submission ordinal and logical tick.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FaultEffect {
+    /// Declares an unrecoverable loss for the selected frame.
+    Drop { ordinal: u64, tick: u64 },
+    /// Duplicates the selected lower-layer frame, which the ordered lane deduplicates.
+    Duplicate { ordinal: u64, tick: u64 },
+    /// Holds the selected lower-layer frame for a finite number of logical ticks.
+    Delay { ordinal: u64, tick: u64, ticks: u64 },
+    /// Declares the selected lower-layer frame corrupted.
+    Corrupt { ordinal: u64, tick: u64 },
+    /// Injects an explicit terminal failure report for the selected frame.
+    Fail {
+        ordinal: u64,
+        tick: u64,
+        failure: Failure,
+    },
+}
+
+impl FaultEffect {
+    /// Scripts loss for one submission ordinal at one logical tick.
+    pub const fn drop(ordinal: u64, tick: u64) -> Self {
+        Self::Drop { ordinal, tick }
+    }
+
+    /// Scripts a lower-layer duplicate that must not surface to the application lane.
+    pub const fn duplicate(ordinal: u64, tick: u64) -> Self {
+        Self::Duplicate { ordinal, tick }
+    }
+
+    /// Scripts a finite delay for one submission ordinal at one logical tick.
+    pub const fn delay(ordinal: u64, tick: u64, ticks: u64) -> Self {
+        Self::Delay {
+            ordinal,
+            tick,
+            ticks,
+        }
+    }
+
+    /// Scripts corruption for one submission ordinal at one logical tick.
+    pub const fn corrupt(ordinal: u64, tick: u64) -> Self {
+        Self::Corrupt { ordinal, tick }
+    }
+
+    /// Scripts an explicit retained failure report for one submission ordinal and tick.
+    pub const fn fail(ordinal: u64, tick: u64, failure: Failure) -> Self {
+        Self::Fail {
+            ordinal,
+            tick,
+            failure,
+        }
+    }
+
+    const fn key(self) -> (u64, u64) {
+        match self {
+            Self::Drop { ordinal, tick }
+            | Self::Duplicate { ordinal, tick }
+            | Self::Delay { ordinal, tick, .. }
+            | Self::Corrupt { ordinal, tick }
+            | Self::Fail { ordinal, tick, .. } => (ordinal, tick),
+        }
+    }
+}
+
+/// A validated deterministic sequence of lower-layer fault effects.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FaultScript {
+    effects: Vec<FaultEffect>,
+}
+
+impl FaultScript {
+    /// Builds a script ordered strictly by `(submission ordinal, logical tick)`.
+    pub fn new(effects: impl IntoIterator<Item = FaultEffect>) -> Result<Self, FaultScriptError> {
+        let effects = effects.into_iter().collect::<Vec<_>>();
+        for pair in effects.windows(2) {
+            let previous = pair[0].key();
+            let current = pair[1].key();
+            if current == previous {
+                return Err(FaultScriptError::Duplicate {
+                    ordinal: current.0,
+                    tick: current.1,
+                });
+            }
+            if current < previous {
+                return Err(FaultScriptError::Order { previous, current });
+            }
+        }
+        Ok(Self { effects })
+    }
+
+    fn effect(&self, ordinal: u64, tick: u64) -> Option<FaultEffect> {
+        self.effects
+            .iter()
+            .copied()
+            .find(|effect| effect.key() == (ordinal, tick))
+    }
+}
+
+/// A fault script was ambiguous or non-deterministically ordered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FaultScriptError {
+    /// Two effects selected the same submission ordinal and logical tick.
+    Duplicate { ordinal: u64, tick: u64 },
+    /// An effect appeared before a lower ordinal/tick script position.
+    Order {
+        previous: (u64, u64),
+        current: (u64, u64),
+    },
+}
+
+/// An observable ordered-lane delivery or retained scheduler failure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScheduledOutcome {
+    /// One vector step was delivered once to its lane's application boundary.
+    Delivered { lane: Lane, step: VectorStep },
+    /// The first scheduler failure was retained and reported.
+    Failed { failure: Failure },
+}
+
+impl ScheduledOutcome {
+    /// Creates a literal expected delivery.
+    pub const fn delivered(lane: Lane, step: VectorStep) -> Self {
+        Self::Delivered { lane, step }
+    }
+
+    /// Creates a literal expected retained failure.
+    pub const fn failed(failure: Failure) -> Self {
+        Self::Failed { failure }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PendingFrame {
+    release_tick: u64,
+    step: VectorStep,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct LaneState {
+    pending: Vec<PendingFrame>,
+}
+
+/// Deterministically applies a fault script while preserving each dense lane's FIFO boundary.
+#[derive(Clone, Debug)]
+pub struct OrderedFaultScheduler {
+    lanes: TinyMap<Lane, LaneState>,
+    script: FaultScript,
+    tick: u64,
+    next_ordinal: u64,
+    failure: Option<Failure>,
+}
+
+impl OrderedFaultScheduler {
+    /// Creates a scheduler over a fixed complete dense lane table.
+    pub fn new(
+        lanes: impl IntoIterator<Item = Lane>,
+        script: FaultScript,
+    ) -> Result<Self, ConstructionError> {
+        let mut states = TinyMap::new();
+        for lane in lanes {
+            if states.try_insert(LaneState::default()).is_err()
+                || states.keys().last() != Some(lane)
+            {
+                return Err(ConstructionError::LaneKey { lane });
+            }
+        }
+        Ok(Self {
+            lanes: states,
+            script,
+            tick: 0,
+            next_ordinal: 0,
+            failure: None,
+        })
+    }
+
+    /// Submits one frame at `tick`, applying its scripted lower-layer fault if selected.
+    pub fn submit(&mut self, tick: u64, lane: Lane, step: VectorStep) -> Vec<ScheduledOutcome> {
+        if let Some(failure) = self.failure {
+            return vec![ScheduledOutcome::failed(failure)];
+        }
+        if tick < self.tick {
+            return self.fail(Failure::TickRegression);
+        }
+        self.tick = tick;
+        if self.lanes.get(lane).is_none() {
+            return self.fail(Failure::UnknownLane);
+        }
+        let ordinal = self.next_ordinal;
+        let Some(next_ordinal) = ordinal.checked_add(1) else {
+            return self.fail(Failure::OrdinalExhausted);
+        };
+        self.next_ordinal = next_ordinal;
+        match self.script.effect(ordinal, tick) {
+            Some(FaultEffect::Drop { .. }) => self.fail(Failure::Lost),
+            Some(FaultEffect::Corrupt { .. }) => self.fail(Failure::Corrupted),
+            Some(FaultEffect::Fail { failure, .. }) => self.fail(failure),
+            Some(FaultEffect::Delay { ticks, .. }) => {
+                let Some(release_tick) = tick.checked_add(ticks) else {
+                    return self.fail(Failure::DelayOverflow);
+                };
+                self.lanes[lane]
+                    .pending
+                    .push(PendingFrame { release_tick, step });
+                self.advance(tick)
+            }
+            Some(FaultEffect::Duplicate { .. }) | None => {
+                self.lanes[lane].pending.push(PendingFrame {
+                    release_tick: tick,
+                    step,
+                });
+                self.advance(tick)
+            }
+        }
+    }
+
+    /// Advances logical time and releases only a FIFO prefix from each lane.
+    pub fn advance(&mut self, tick: u64) -> Vec<ScheduledOutcome> {
+        if let Some(failure) = self.failure {
+            return vec![ScheduledOutcome::failed(failure)];
+        }
+        if tick < self.tick {
+            return self.fail(Failure::TickRegression);
+        }
+        self.tick = tick;
+        let mut outcomes = Vec::new();
+        for lane in self.lanes.keys().collect::<Vec<_>>() {
+            let pending = &mut self.lanes[lane].pending;
+            while pending
+                .first()
+                .is_some_and(|frame| frame.release_tick <= tick)
+            {
+                let frame = pending.remove(0);
+                outcomes.push(ScheduledOutcome::delivered(lane, frame.step));
+            }
+        }
+        outcomes
+    }
+
+    fn fail(&mut self, failure: Failure) -> Vec<ScheduledOutcome> {
+        let failure = *self.failure.get_or_insert(failure);
+        vec![ScheduledOutcome::failed(failure)]
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

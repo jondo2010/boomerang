@@ -5,9 +5,12 @@
 //! or a snapshot reader. Oldest records are overwritten when full; oversized and contended
 //! records are discarded in full. [`TraceRing::dropped_records`](crate::trace::TraceRing::dropped_records) counts all three cases.
 //!
-//! These are retention bounds, not bounds on the subscriber's own formatting buffers. Select
-//! a formatter appropriate to the platform and record only bounded fields. An absent or
-//! disabled subscriber provides off mode; the standard stderr/file writer provides streaming.
+//! These are retention bounds, not bounds on the subscriber's own formatting buffers. The hosted
+//! `tracing-appender` writer bounds pending output and allocates each line; it does not retain the
+//! latest records. `tracing-flight-recorder` 0.3.0 instead blocks producers on a mutex and allocates
+//! captured `String` fields. Neither replaces this optional strict byte-record adapter, and this
+//! adapter alone is not a complete embedded-tracing guarantee. Select a formatter appropriate to
+//! the platform and record only bounded fields.
 //!
 //! ```
 //! use boomerang_util::trace::TraceRing;

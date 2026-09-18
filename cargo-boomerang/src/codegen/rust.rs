@@ -66,7 +66,7 @@ pub(super) fn render_launcher(
     );
     let init_tracing = capabilities
         .hosted
-        .then(|| quote!(boomerang_util::launcher::init_tracing();));
+        .then(|| quote!(let _tracing_guard = boomerang_util::launcher::init_tracing();));
     let write_execution_summary = capabilities
         .hosted
         .then(|| quote!(boomerang_util::launcher::write_execution_summary(&execution)?;));

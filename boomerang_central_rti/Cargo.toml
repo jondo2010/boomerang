@@ -15,6 +15,7 @@ exclude.workspace = true
 boomerang_federated.workspace = true
 boomerang_runtime.workspace = true
 tinymap.workspace = true
+tracing.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -26,3 +27,4 @@ tokio-util = { version = "0.7", features = ["codec", "rt"] }
 [dev-dependencies]
 boomerang_federated = { workspace = true, features = ["conformance"] }
 tokio = { version = "1", features = ["test-util"] }
+tracing-subscriber.workspace = true

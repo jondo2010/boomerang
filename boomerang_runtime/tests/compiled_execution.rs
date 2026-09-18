@@ -1,7 +1,10 @@
 //! Owned runtime image, binding, scheduler, and backend contracts.
 
 use std::{
-    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
     time::Instant,
 };
 
@@ -68,6 +71,73 @@ const fn fixture_route(
 
 const fn fixture_binding(id: &'static str, kind: BindingKind) -> RequiredBindingImage<'static> {
     RequiredBindingImage::new(BindingSlotId::new(id), kind)
+}
+
+#[derive(Clone, Default)]
+struct TraceOutput(Arc<Mutex<Vec<u8>>>);
+
+struct TraceWriter(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for TraceWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for TraceOutput {
+    type Writer = TraceWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        TraceWriter(self.0.clone())
+    }
+}
+
+fn capture_runtime<T>(run: impl FnOnce() -> T) -> (T, Vec<serde_json::Value>) {
+    let output = TraceOutput::default();
+    let subscriber = tracing_subscriber::fmt()
+        .json()
+        .without_time()
+        .with_writer(output.clone())
+        .with_env_filter("boomerang=debug")
+        .finish();
+    let result = tracing::subscriber::with_default(subscriber, run);
+    let bytes = output.0.lock().unwrap();
+    let events = std::str::from_utf8(&bytes)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    (result, events)
+}
+
+fn run_runtime_trace_test(test: &str) -> bool {
+    // Miri cannot spawn processes; its nextest runner already isolates each test.
+    if cfg!(miri) || std::env::var_os("BOOMERANG_RUNTIME_TRACE_CHILD").is_some() {
+        return true;
+    }
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", test])
+        .env("BOOMERANG_RUNTIME_TRACE_CHILD", "1")
+        .status()
+        .expect("runtime trace child starts");
+    assert!(status.success(), "runtime trace child failed: {status}");
+    false
+}
+
+fn lifecycle_events(events: &[serde_json::Value]) -> Vec<&serde_json::Value> {
+    events
+        .iter()
+        .filter(|event| {
+            event["fields"]["event"].as_str().is_some_and(|name| {
+                name.starts_with("runtime.preflight") || name.starts_with("runtime.construction")
+            })
+        })
+        .collect()
 }
 
 /// Mutable reactor state whose startup reaction records one execution.

@@ -212,7 +212,8 @@ fn generated_launcher_honors_rust_log_trace() {
     );
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("TRACE"), "{stderr}");
-    assert!(stderr.contains("boomerang_runtime"), "{stderr}");
+    assert!(stderr.contains("boomerang::runtime"), "{stderr}");
+    assert!(stderr.contains("runtime.scheduler"), "{stderr}");
 }
 
 #[test]

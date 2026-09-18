@@ -113,7 +113,6 @@ pub trait CommonContext {
     /// Schedule a new value for this action asynchronously
     ///
     /// Returns true if the event was successfully scheduled, false if the channel was disconnected.
-    #[tracing::instrument(skip(self, action, value, delay), fields(logical = action.is_logical()))]
     fn schedule_action_async<T: ReactorData>(
         &self,
         action: &impl ActionCommon<T>,
@@ -125,13 +124,10 @@ pub trait CommonContext {
 
         let event = if action.is_logical() {
             // Logical actions are scheduled at the current logical time + tag_delay
-            //tracing::info!(tag_delay = %tag_delay, key = ?action.key(), "Sched");
-            //AsyncEvent::logical(action.key(), tag_delay, value)
             todo!("Logical actions are not supported here");
         } else {
             // Physical actions are scheduled at the current physical time + tag_delay
             let time = self.get_physical_time() + tag_delay;
-            tracing::info!(time = ?time, key = ?action.key(), "Sched");
             AsyncEvent::physical(action.key(), time, value)
         };
 
@@ -278,7 +274,6 @@ impl CommonContext for Context {
         self.shutdown_rx.is_shutdwon()
     }
 
-    #[tracing::instrument]
     fn schedule_shutdown(&mut self, offset: Option<Duration>) -> bool {
         let tag = self.tag.delay(offset.unwrap_or_default());
 
@@ -290,7 +285,6 @@ impl CommonContext for Context {
     }
 
     /// Schedule an asynchronous event
-    #[tracing::instrument(skip(self), fields(enclave = %self.enclave_id(), event = %event))]
     fn schedule_external(&self, event: AsyncEvent) -> bool {
         if self.shutdown_rx.is_shutdwon() {
             return false;
@@ -339,7 +333,6 @@ impl CommonContext for SendContext {
     }
 
     /// Send an external event to the scheduler.
-    #[tracing::instrument(skip(self), fields(enclave = %self.enclave_id(), event = %event))]
     fn schedule_external(&self, event: AsyncEvent) -> bool {
         if self.is_shutdown() {
             return false;

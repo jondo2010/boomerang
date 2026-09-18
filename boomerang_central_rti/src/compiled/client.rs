@@ -29,6 +29,16 @@ pub struct RtiClientBindings<'a> {
     pub(super) reports: Arc<Mutex<ReportState>>,
 }
 impl<'a> RtiClientBindings<'a> {
+    /// Creates the parent span for this Federate's compiled execution.
+    ///
+    /// Enter it around binding installation and execution. Runtime workers inherit this
+    /// context, correlating reaction and codec events with RTI events. When the coordination
+    /// target is disabled, no identity formatting or subscriber storage is required.
+    pub fn execution_span(&self) -> tracing::Span {
+        tracing::debug_span!(target: "boomerang::coordination", "federate",
+            coordination = ?self.identity, federate = ?self.member)
+    }
+
     /// Selects an existing member from a validated central-RTI deployment without retaining Enclaves.
     pub fn new(
         view: &CompiledDeploymentView<'a>,
@@ -85,6 +95,8 @@ impl<'a> RtiClientBindings<'a> {
             .ok_or_else(|| CentralRtiError::new("unknown outbound boundary for member"))?;
         Ok(Arc::new(CompiledOutbound {
             sink,
+            identity: self.identity,
+            member: self.member,
             route,
             reports: self.reports.clone(),
         }))
@@ -116,6 +128,10 @@ impl<'a> RtiClientBindings<'a> {
 /// No transport thread or channel is created here. The connection owner supplies bounded
 /// receive and nonblocking submission, shared with every outbound boundary producer.
 pub struct CentralRtiClient {
+    /// Opaque compiler-issued identity shared by every member of this coordination deployment.
+    identity: CoordinationIdentity,
+    /// Federate owning this client and its ordered RTI connection.
+    member: FederateIndex,
     /// Shared DNET and latest suppressed publication.
     reports: Arc<Mutex<ReportState>>,
     /// Ordered connection shared by payload and coordination producers.
@@ -145,6 +161,8 @@ impl CentralRtiClient {
     ) -> Result<Self, FederateCoordinationError> {
         let inbound = bindings.inbound(inbound);
         let mut client = Self {
+            identity: bindings.identity,
+            member: bindings.member,
             reports: bindings.reports,
             sink,
             source: Box::new(source),
@@ -178,9 +196,19 @@ impl CentralRtiClient {
     }
     /// Records the first failure so cleanup can release peers without replacing its cause.
     fn failed(&mut self, error: impl std::fmt::Display) -> String {
-        self.failure
-            .get_or_insert_with(|| error.to_string())
-            .clone()
+        if self.failure.is_none() {
+            let message = error.to_string();
+            tracing::event!(
+                target: "boomerang::coordination",
+                tracing::Level::ERROR,
+                event = "coordination.failure.first",
+                coordination = ?self.identity,
+                federate = ?self.member,
+                "first coordination failure"
+            );
+            self.failure = Some(message);
+        }
+        self.failure.clone().expect("first failure was recorded")
     }
     /// Receives one ordered reply and admits payloads before exposing subsequent grants.
     fn receive(
@@ -198,22 +226,41 @@ impl CentralRtiClient {
                     .lock()
                     .map_err(|_| CentralRtiError::new("report state lock poisoned"))?;
                 reports.dnet = tag;
+                tracing::debug!(target: "boomerang::coordination",
+                    event = "coordination.dnet.received", coordination = ?self.identity,
+                    federate = ?self.member, ?tag);
                 if let Some((revision, next)) = reports.skipped {
                     if next > tag {
                         self.sink.send(RtiRequest::Publish {
                             revision,
                             next_event: Some(next),
                         })?;
+                        tracing::debug!(target: "boomerang::coordination",
+                            event = "coordination.publication.restored", coordination = ?self.identity,
+                            federate = ?self.member, revision, next_event = ?next);
                         reports.skipped = None;
                     }
                 }
                 Ok(None)
             }
-            Some(RtiReply::Grant { revision, tag }) => Ok(Some(FederateAcquisition::new(
-                CoordinationRevision::new(revision),
-                crate::tag_conversion::runtime_horizon_from_wire(tag)
-                    .map_err(|e| CentralRtiError::new(e.to_string()))?,
-            ))),
+            Some(RtiReply::Grant { revision, tag }) => {
+                let tag = crate::tag_conversion::runtime_horizon_from_wire(tag)
+                    .map_err(|e| CentralRtiError::new(e.to_string()))?;
+                tracing::event!(
+                    target: "boomerang::coordination",
+                    tracing::Level::DEBUG,
+                    event = "coordination.grant.received",
+                    coordination = ?self.identity,
+                    federate = ?self.member,
+                    revision,
+                    tag = ?tag,
+                    "grant received"
+                );
+                Ok(Some(FederateAcquisition::new(
+                    CoordinationRevision::new(revision),
+                    tag,
+                )))
+            }
             Some(RtiReply::Payload {
                 route,
                 tag,
@@ -225,13 +272,36 @@ impl CentralRtiClient {
                     .ok_or_else(|| CentralRtiError::new("unknown inbound RTI route key"))?;
                 let tag = crate::runtime_tag_from_wire(tag)
                     .map_err(|e| CentralRtiError::new(e.to_string()))?;
-                adapter
-                    .admit(tag, &payload)
-                    .map_err(|e| CentralRtiError::new(e.to_string()))?;
+                tracing::event!(target: "boomerang::coordination", tracing::Level::DEBUG,
+                    event = "coordination.payload.received", federate = ?self.member,
+                    coordination = ?self.identity,
+                    route = ?route, tag = ?tag, "payload received");
+                if let Err(error) = adapter.admit(tag, &payload) {
+                    use boomerang_runtime::BoundaryAdmissionError;
+                    let reason = match &error {
+                        BoundaryAdmissionError::InvalidTag(_) => "invalid_tag",
+                        BoundaryAdmissionError::Decode(_) => "decode",
+                        BoundaryAdmissionError::MailboxFull => "mailbox_full",
+                        BoundaryAdmissionError::MailboxClosed => "mailbox_closed",
+                    };
+                    tracing::event!(target: "boomerang::coordination", tracing::Level::WARN,
+                    event = "coordination.boundary.rejected", federate = ?self.member,
+                    coordination = ?self.identity,
+                    route = ?route, tag = ?tag, reason, "boundary rejected payload");
+                    return Err(CentralRtiError::new(error.to_string()));
+                }
+                tracing::event!(target: "boomerang::coordination", tracing::Level::DEBUG,
+                    event = "coordination.boundary.admitted", federate = ?self.member,
+                    coordination = ?self.identity,
+                    route = ?route, tag = ?tag, "boundary admitted payload");
                 Ok(None)
             }
             Some(RtiReply::Idle { revision }) => {
                 self.idle = Some(revision);
+                tracing::event!(target: "boomerang::coordination", tracing::Level::DEBUG,
+                    event = "coordination.idle.received", federate = ?self.member, revision,
+                    coordination = ?self.identity,
+                    "idle authorization received");
                 Ok(None)
             }
             Some(RtiReply::Failed { message }) => Err(CentralRtiError::new(message)),
@@ -263,6 +333,9 @@ impl FederateCoordinationBackend for CentralRtiClient {
                         .is_some_and(|(candidate, horizon)| candidate <= horizon)
                     {
                         reports.skipped = Some((revision, next));
+                        tracing::debug!(target: "boomerang::coordination",
+                            event = "coordination.publication.suppressed", coordination = ?self.identity,
+                            federate = ?self.member, revision, next_event = ?next, dnet = ?reports.dnet);
                         return Ok(());
                     }
                 }
@@ -270,6 +343,10 @@ impl FederateCoordinationBackend for CentralRtiClient {
                     revision,
                     next_event,
                 })?;
+                tracing::event!(target: "boomerang::coordination", tracing::Level::DEBUG,
+                    event = "coordination.publication.sent", federate = ?self.member, revision,
+                    coordination = ?self.identity,
+                    next_event = ?publication.next_event(), "publication sent");
                 reports.skipped = None;
                 Ok(())
             });
@@ -301,6 +378,10 @@ impl FederateCoordinationBackend for CentralRtiClient {
                     .lock()
                     .map_err(|_| CentralRtiError::new("report state lock poisoned"))?;
                 self.sink.send(RtiRequest::Complete { tag })?;
+                tracing::event!(target: "boomerang::coordination", tracing::Level::DEBUG,
+                    event = "coordination.completion.sent", federate = ?self.member,
+                    coordination = ?self.identity,
+                    tag = ?completion.completed(), "completion sent");
                 if reports.skipped.is_some_and(|(_, next)| next <= tag) {
                     reports.skipped = None;
                 }
@@ -326,6 +407,9 @@ impl FederateCoordinationBackend for CentralRtiClient {
         Ok(self.idle == Some(revision))
     }
     fn stop(&mut self) -> Result<(), FederateCoordinationError> {
+        tracing::debug!(target: "boomerang::coordination",
+            event = "coordination.shutdown.requested", coordination = ?self.identity,
+            federate = ?self.member, graceful = self.failure.is_none() && self.idle.is_some());
         let result = if self.failure.is_some() || self.idle.is_none() {
             let message = self
                 .failure
@@ -344,7 +428,12 @@ impl FederateCoordinationBackend for CentralRtiClient {
                         return Err(CentralRtiError::new("stop acknowledgement timed out"));
                     }
                     match self.source.receive(remaining)? {
-                        Some(RtiReply::Stopped) => return Ok(()),
+                        Some(RtiReply::Stopped) => {
+                            tracing::debug!(target: "boomerang::coordination",
+                                event = "coordination.shutdown.completed", coordination = ?self.identity,
+                                federate = ?self.member);
+                            return Ok(());
+                        }
                         Some(RtiReply::Failed { message }) => {
                             return Err(CentralRtiError::new(message))
                         }
@@ -372,6 +461,10 @@ struct CompiledOutbound {
     reports: Arc<Mutex<ReportState>>,
     /// Shared ordered connection.
     sink: Arc<dyn RtiRequestSink>,
+    /// Opaque compiler-issued identity shared by every member of this coordination deployment.
+    identity: CoordinationIdentity,
+    /// Federate that owns this compiled route binding.
+    member: FederateIndex,
     /// Shared coordination route resolved and authorized during preflight.
     route: RtiRouteIndex,
 }
@@ -390,7 +483,18 @@ impl OutboundBoundarySink for CompiledOutbound {
                 tag,
                 payload: message.payload,
             })
-            .map_err(|e| BoundarySubmissionError::new(e.to_string()))
+            .map_err(|e| BoundarySubmissionError::new(e.to_string()))?;
+        tracing::event!(
+            target: "boomerang::coordination",
+            tracing::Level::DEBUG,
+            event = "coordination.payload.sent",
+            coordination = ?self.identity,
+            federate = ?self.member,
+            route = ?self.route,
+            tag = ?message.tag,
+            "payload sent"
+        );
+        Ok(())
     }
 }
 

@@ -1,7 +1,7 @@
 //! External route binding and owned-slice entry point for compiled Federate execution.
 use super::*;
 use crate::{
-    image::{FederateImage, RouteImage},
+    image::{FederateImage, RouteImage, RouteIndex},
     InboundBoundaryAdapter, OutboundBoundarySink, PayloadDecoder, PayloadEncoder,
 };
 use std::sync::Arc;
@@ -9,6 +9,7 @@ use std::sync::Arc;
 /// Installs a type-checked external adapter after all initializer-free validation.
 type InstallRoute<'binding> = dyn for<'image> FnOnce(
         &mut OwnedStorage<'image>,
+        RouteIndex,
         &'image RouteImage<'image>,
     ) -> Option<InboundBoundaryAdapter>
     + Send
@@ -42,10 +43,11 @@ impl<'binding> FederateBindings<'binding> {
             boundary,
             direction: RouteDirection::Outbound,
             payload_type: (TypeId::of::<T>(), std::any::type_name::<T>()),
-            install: Box::new(move |storage, route| {
+            install: Box::new(move |storage, local_route, route| {
                 storage.bind_external_outbound(
                     route.local_port(),
                     Box::new(EncodedOutbound {
+                        local_route,
                         route,
                         encoder,
                         payload_type: std::marker::PhantomData::<fn() -> T>,
@@ -72,7 +74,7 @@ impl<'binding> FederateBindings<'binding> {
             boundary,
             direction: RouteDirection::Inbound,
             payload_type: (TypeId::of::<T>(), std::any::type_name::<T>()),
-            install: Box::new(move |storage, route| {
+            install: Box::new(move |storage, _, route| {
                 Some(InboundBoundaryAdapter::for_port(
                     storage.scheduler_event_tx(),
                     route.local_port(),
@@ -86,6 +88,8 @@ impl<'binding> FederateBindings<'binding> {
 
 /// Encodes an owned port value and submits the already delay-adjusted logical tag.
 struct EncodedOutbound<'image, T: ReactorData, C> {
+    /// Typed key within the owning Enclave's route table, not an RTI route key.
+    local_route: RouteIndex,
     /// Compiled outbound half defining source port, identity, and delay.
     route: &'image RouteImage<'image>,
     /// Typed encoder selected by direct generated bindings.
@@ -131,6 +135,9 @@ impl<T: ReactorData, C: PayloadEncoder<T>> crate::storage::owned::OutboundRoute
                 source: crate::PayloadCodecError::new(source.to_string()),
             }
         })?;
+        tracing::debug!(target: "boomerang::coordination",
+            event = "coordination.codec.encoded", local_route = ?self.local_route, port = ?source.get_key(),
+            source_tag = ?tag, tag = ?target);
         self.sink
             .send(crate::TaggedPayload {
                 tag: target,
@@ -165,10 +172,27 @@ pub fn execute_owned_federate_with_backend<'image, B: FederateCoordinationBacken
         BTreeMap<BoundaryId<'image>, InboundBoundaryAdapter>,
     ) -> Result<B, crate::FederateCoordinationError>,
 ) -> Result<FederateExecution, ExecuteOwnedFederateError> {
-    let images = prepare_images(image, images)?;
-    preflight_enclave_bindings(federate, &images, &bindings)?;
-    let (endpoints, external) = resolve_routes(federate, &images, &bindings)?;
-    preflight_local_bindings(federate, &images, &endpoints, &bindings)?;
+    tracing::debug!(target: "boomerang::runtime",
+        event = "runtime.preflight.started", owner = "federate", %federate);
+    let preflight = || {
+        let images = prepare_images(image, images)?;
+        preflight_enclave_bindings(federate, &images, &bindings)?;
+        let (endpoints, external) = resolve_routes(federate, &images, &bindings)?;
+        preflight_local_bindings(federate, &images, &endpoints, &bindings)?;
+        Ok((images, endpoints, external))
+    };
+    let (images, endpoints, external) = match preflight() {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            tracing::warn!(target: "boomerang::runtime", event = "runtime.preflight.rejected",
+                owner = "federate", %federate, reason = preflight_reason(&error));
+            return Err(error);
+        }
+    };
+    let span = federate_span(federate, image, "distributed");
+    let _span = span.enter();
+    tracing::debug!(target: "boomerang::runtime",
+        event = "runtime.preflight.completed", owner = "federate", %federate);
     let adapters = std::mem::take(&mut bindings.external_routes);
     let lifecycle = if config.keep_alive {
         LifecyclePolicy::KeepAlive
@@ -182,13 +206,13 @@ pub fn execute_owned_federate_with_backend<'image, B: FederateCoordinationBacken
         lifecycle,
         move |storages| {
             let mut inbound = BTreeMap::new();
-            for (adapter, (enclave, route)) in adapters.into_iter().zip(external) {
+            for (adapter, (enclave, index, route)) in adapters.into_iter().zip(external) {
                 let storage = &mut storages
                     .iter_mut()
                     .find(|(key, _)| *key == enclave)
                     .expect("validated external route belongs to owned storage")
                     .1;
-                if let Some(adapter) = (adapter.install)(storage, route) {
+                if let Some(adapter) = (adapter.install)(storage, index, route) {
                     inbound.insert(route.boundary(), adapter);
                 }
             }
@@ -243,7 +267,7 @@ fn prepare_images<'image>(
 /// Local route pairs plus external coordinates in caller binding order.
 type ResolvedRoutes<'image> = (
     Vec<ResolvedLocalRoute<'image>>,
-    Vec<(EnclaveIndex, &'image RouteImage<'image>)>,
+    Vec<(EnclaveIndex, RouteIndex, &'image RouteImage<'image>)>,
 );
 
 /// Matches compiled halves by stable boundary identity without inferring peer key domains.
@@ -297,8 +321,8 @@ fn resolve_routes<'image>(
                     delay_nanos: out.delay_nanos(),
                 });
             }
-            (Some((enclave, _, route)), None) | (None, Some((enclave, _, route))) => {
-                external.insert(boundary, (enclave, route));
+            (Some((enclave, index, route)), None) | (None, Some((enclave, index, route))) => {
+                external.insert(boundary, (enclave, index, route));
             }
             (None, None) => unreachable!("each boundary has at least one compiled half"),
         }
@@ -311,7 +335,7 @@ fn resolve_routes<'image>(
                 boundary: binding.boundary.as_str().to_owned(),
             });
         }
-        let (enclave, route) = external.remove(&binding.boundary).ok_or_else(|| {
+        let (enclave, index, route) = external.remove(&binding.boundary).ok_or_else(|| {
             ExecuteOwnedFederateError::UnexpectedRouteBinding {
                 boundary: binding.boundary.as_str().to_owned(),
                 federate,
@@ -345,7 +369,7 @@ fn resolve_routes<'image>(
                 found,
             });
         }
-        resolved.push((enclave, route));
+        resolved.push((enclave, index, route));
     }
     if let Some(boundary) = external.keys().next() {
         return Err(ExecuteOwnedFederateError::MissingRouteBinding {

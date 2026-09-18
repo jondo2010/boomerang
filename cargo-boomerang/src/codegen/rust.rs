@@ -66,7 +66,7 @@ pub(super) fn render_launcher(
     );
     let init_tracing = capabilities
         .hosted
-        .then(|| quote!(boomerang_util::launcher::init_tracing();));
+        .then(|| quote!(let _tracing_guard = boomerang_util::launcher::init_tracing();));
     let write_execution_summary = capabilities
         .hosted
         .then(|| quote!(boomerang_util::launcher::write_execution_summary(&execution)?;));
@@ -87,6 +87,7 @@ pub(super) fn render_launcher(
                 .parse()?;
             let view = RtiImageView::new(COORDINATION_IMAGE, COORDINATION_MEMBERS)?;
             let rti_bindings = RtiClientBindings::from_image(view, FEDERATE, COORDINATION_IDENTITY)?;
+            let _execution_span = rti_bindings.execution_span().entered();
             let connection = hosted::connect(address, FEDERATE, wire_contract(), timeout)?;
             let sink = connection.sink();
             let bindings = generated_bindings(&rti_bindings, sink.clone())?;

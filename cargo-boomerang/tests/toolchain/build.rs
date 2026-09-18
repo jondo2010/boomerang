@@ -420,6 +420,7 @@ fn generated_central_deployment_publishes_isolated_artifacts_and_exchanges_tagge
         .arg(fixture_workspace())
         .args(["run", "--deployment", "sensor-slice", "--summary"])
         .arg(&summary)
+        .env("RUST_LOG", "boomerang::coordination=debug")
         .env("CARGO_TARGET_DIR", &target)
         .output()
         .unwrap();
@@ -428,6 +429,59 @@ fn generated_central_deployment_publishes_isolated_artifacts_and_exchanges_tagge
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
+    let trace = String::from_utf8_lossy(&result.stderr);
+    for event in [
+        "coordination.codec.encoded",
+        "coordination.transport.encoded",
+        "coordination.transport.decoded",
+        "coordination.rti.payload.forwarded",
+        "coordination.boundary.admitted",
+        "coordination.reaction.finished",
+    ] {
+        assert!(trace.contains(event), "missing {event}: {trace}");
+    }
+    for (event, member) in [
+        ("coordination.transport.encoded", 0),
+        ("coordination.transport.decoded", 1),
+        ("coordination.boundary.admitted", 1),
+    ] {
+        let line = trace.lines().find(|line| line.contains(event)).unwrap();
+        assert!(
+            line.contains(&format!("federate=FederateIndex({member})")),
+            "{line}"
+        );
+        assert!(
+            line.contains("coordination=CoordinationFingerprint"),
+            "{line}"
+        );
+        assert!(line.contains("route=RtiRouteIndex(0)"), "{line}");
+    }
+    let fingerprint = |line: &str| {
+        line.split("coordination=")
+            .nth(1)
+            .and_then(|rest| rest.split_once("])").map(|(value, _)| value.to_owned()))
+            .unwrap()
+    };
+    let encoded = trace
+        .lines()
+        .find(|line| line.contains("coordination.transport.encoded"))
+        .unwrap();
+    for event in [
+        "coordination.transport.decoded",
+        "coordination.boundary.admitted",
+        "coordination.rti.payload.forwarded",
+    ] {
+        let line = trace.lines().find(|line| line.contains(event)).unwrap();
+        assert_eq!(fingerprint(line), fingerprint(encoded));
+    }
+    let queued = trace
+        .lines()
+        .find(|line| {
+            line.contains("coordination.transport.queued")
+                && line.contains("federate=FederateIndex(1)")
+        })
+        .expect("server queue trace has peer context");
+    assert_eq!(fingerprint(queued), fingerprint(encoded));
 
     assert!(String::from_utf8_lossy(&result.stdout).contains("sensor received command 42"));
     let summary: Value = serde_json::from_slice(&fs::read(summary).unwrap()).unwrap();

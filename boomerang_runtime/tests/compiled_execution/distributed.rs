@@ -68,6 +68,40 @@ fn decode_u32(bytes: &[u8]) -> Result<u32, std::array::TryFromSliceError> {
     Ok(u32::from_le_bytes(bytes.try_into()?))
 }
 
+#[test]
+fn distributed_federate_trace_retains_validated_compiler_identity() {
+    if !run_runtime_trace_test(
+        "distributed::distributed_federate_trace_retains_validated_compiler_identity",
+    ) {
+        return;
+    }
+    let (_, events) = capture_runtime(|| {
+        execute_owned_federate_with_backend(
+            FederateIndex::new(3),
+            &fixture_federate("source", "host", "std", IndexSpan::new(5, 1)),
+            &[ROUTED_SOURCE_IMAGE],
+            FederateBindings::new()
+                .bind_enclave(EnclaveIndex::new(5), source_bindings())
+                .bind_outbound_route(
+                    route_boundary(),
+                    PayloadType::<u32>::new(),
+                    |value: &u32| Ok::<_, std::convert::Infallible>(value.to_le_bytes().to_vec()),
+                    Arc::new(CaptureSink::default()),
+                ),
+            Config::default().with_fast_forward(true),
+            |_| Ok(GrantBackend::default()),
+        )
+        .unwrap()
+    });
+    let completed = lifecycle_events(&events)
+        .into_iter()
+        .find(|event| event["fields"]["event"] == "runtime.preflight.completed")
+        .unwrap();
+    assert_eq!(completed["span"]["federate"], "FederateIndex(3)");
+    assert_eq!(completed["span"]["federate_id"], "source");
+    assert_eq!(completed["span"]["ownership"], "distributed");
+}
+
 /// Proves independent owned slices exchange the encoded value with one delay application.
 #[test]
 fn isolated_slices_execute_encoded_route_halves_at_canonical_enclave_keys() {

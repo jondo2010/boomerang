@@ -227,14 +227,10 @@ impl<K: tinymap::Key, A: Copy + PartialEq> EventQueue<K, A> {
     /// If the event queue still has events on it, report that.
     pub(crate) fn shutdown(&mut self) {
         if !self.event_queue.is_empty() {
-            tracing::warn!(
-                "---- There are {} unprocessed future events on the event queue.",
-                self.event_queue.len()
-            );
             let event = self.event_queue.peek().unwrap();
-            tracing::warn!(
-                "---- The first future event has timestamp {} after start time.",
-                event.tag.offset()
+            tracing::warn!(target: "boomerang::runtime",
+                event = "runtime.queue.pending_at_shutdown",
+                pending = self.event_queue.len(), first_tag = %event.tag,
             );
         }
     }

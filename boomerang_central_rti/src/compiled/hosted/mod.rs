@@ -287,9 +287,13 @@ pub fn connect(
     stream.set_nodelay(true).map_err(failure)?;
     let (shared, requests, replies) = shared(timeout);
     let worker_shared = shared.clone();
+    let dispatcher = tracing::dispatcher::get_default(Clone::clone);
+    let parent = tracing::Span::current();
     let worker = thread::Builder::new()
         .name("compiled-rti-tokio".into())
         .spawn(move || {
+            let _dispatcher = tracing::dispatcher::set_default(&dispatcher);
+            let _parent = parent.enter();
             let result = runtime.block_on(client_loop(
                 stream,
                 member,
@@ -339,6 +343,10 @@ async fn client_loop(
     let mut writers = JoinSet::new();
     writers.spawn(writer_loop(writer, writes, shared.timeout));
     let mut session = WireSession::new(contract, member).map_err(HostedError::from)?;
+    let coordination = contract
+        .handshake(member)
+        .map_err(HostedError::from)?
+        .coordination;
     let admission = Instant::now() + shared.timeout;
     let mut awaiting_echo = false;
     let mut admitted = false;
@@ -401,6 +409,10 @@ async fn client_loop(
                     } else {
                         let message = canonical::Message::Request(request.borrowed());
                         pending = Some((encode(&mut session, &message)?, class(&message), deadline));
+                        if let RtiRequest::Payload { route, tag, .. } = &request {
+                            tracing::debug!(target: "boomerang::coordination", event = "coordination.transport.encoded",
+                                ?coordination, federate = ?member, ?route, ?tag);
+                        }
                         terminal_sent = matches!(request, RtiRequest::Abort { .. });
                     }
                 }
@@ -414,6 +426,10 @@ async fn client_loop(
                         let message = session.decode(&bytes).map_err(HostedError::from)?;
                         let class = class(&message);
                         let reply = reply_from(message)?;
+                        if let RtiReply::Payload { route, tag, .. } = &reply {
+                            tracing::debug!(target: "boomerang::coordination", event = "coordination.transport.decoded",
+                                ?coordination, federate = ?member, ?route, ?tag);
+                        }
                         let terminal = matches!(reply, RtiReply::Stopped | RtiReply::Failed { .. });
                         let mut state = shared.state.lock().unwrap();
                         if let Some(error) = &state.failure { return Err(error.clone()); }

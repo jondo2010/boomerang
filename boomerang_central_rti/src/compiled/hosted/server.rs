@@ -6,9 +6,12 @@ use futures_util::{future::LocalBoxFuture, stream::FuturesUnordered, FutureExt, 
 use tinymap::TinySecondaryMap;
 use tokio::{net::TcpListener as AsyncListener, task::JoinSet, time::Instant as Deadline};
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 
 /// Admitted member state owned alongside the borrowed coordinator.
 struct Peer<'a, 'image> {
+    /// Validated peer context inherited by asynchronous queue admission and socket writes.
+    span: tracing::Span,
     /// FIFO transfer to the independently scheduled socket writer.
     output: channel::Sender<Vec<u8>>,
     /// Exact wire admission and typed route validation for this member.
@@ -159,11 +162,15 @@ impl RunningServer<'_, '_, '_> {
                 if let Some(peer) = self.peers.get_mut(delivery.member) {
                     if let Ok((bytes, class)) = peer.encode(&delivery.reply) {
                         let output = peer.output.clone();
-                        terminal.push(async move {
-                            if let Ok(reservation) = output.reserve(class, deadline).await {
-                                reservation.send(bytes, deadline);
+                        let span = peer.span.clone();
+                        terminal.push(
+                            async move {
+                                if let Ok(reservation) = output.reserve(class, deadline).await {
+                                    reservation.send(bytes, deadline);
+                                }
                             }
-                        });
+                            .instrument(span),
+                        );
                     }
                 }
             }
@@ -230,8 +237,10 @@ impl RunningServer<'_, '_, '_> {
                         let (output, receiver) = channel::bounded();
                         // Queue the exact echo before any coordinator reply for this member.
                         output.send(frame.to_vec(), Class::Coordination, admission)?;
-                        self.writers.spawn(writer_loop(input.writer.expect("pending writer"), receiver, self.timeout));
-                        self.peers.insert(member, Peer { output, session, stopped: false });
+                        let span = tracing::debug_span!(target: "boomerang::coordination",
+                            "rti_peer", coordination = ?hello.coordination, federate = ?member);
+                        self.writers.spawn(writer_loop(input.writer.expect("pending writer"), receiver, self.timeout).instrument(span.clone()));
+                        self.peers.insert(member, Peer { output, session, span, stopped: false });
                         pending -= 1;
                         self.inputs.push(receive(Some(member), input.reader, None, self.cancel.clone()));
                         dispatch(&mut self.rti, member, RtiRequest::Hello { identity: hello.coordination })?
@@ -251,6 +260,7 @@ impl RunningServer<'_, '_, '_> {
                     Deadline::now() + self.timeout,
                     &mut self.writers,
                 )
+                .instrument(peer.span.clone())
                 .await?;
             }
         }
@@ -273,6 +283,8 @@ async fn transfer(
         }
         reservation = output.reserve(class, deadline) => {
             reservation?.send(bytes, deadline);
+            tracing::debug!(target: "boomerang::coordination",
+                event = "coordination.transport.queued", ?class);
             Ok(())
         }
     }

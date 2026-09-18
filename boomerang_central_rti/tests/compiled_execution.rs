@@ -21,6 +21,9 @@ use std::sync::Arc;
 #[path = "compiled_execution/transport.rs"]
 mod transport;
 
+#[path = "compiled_execution/conformance.rs"]
+mod conformance;
+
 /// Shared compiler-issued identity for this immutable test deployment.
 const IDENTITY: CoordinationIdentity = CoordinationIdentity::new([7; 32]);
 /// Stable names in the same canonical order as the Federate and RTI member tables.
@@ -435,7 +438,16 @@ impl ReferenceVectorAdapter {
                     payload: vec![],
                 },
             ),
-            VectorStep::Stop { .. } => panic!("this NET/DNET/LTC vector does not stop members"),
+            VectorStep::Stop { member } => (Self::member(member), RtiRequest::Stop),
+            VectorStep::ConfirmIdle { member, revision } => {
+                (Self::member(member), RtiRequest::ConfirmIdle { revision })
+            }
+            VectorStep::Fail { member, failure } => (
+                Self::member(member),
+                RtiRequest::Abort {
+                    message: format!("conformance transport: {failure:?}"),
+                },
+            ),
         }
     }
 
@@ -483,33 +495,35 @@ enum VectorObservation {
     Suppress { member: Member, tag: WireTag },
 }
 
+#[derive(Default)]
 struct VectorExecution {
     observations: Vec<VectorObservation>,
     semantic_outcomes: Vec<Outcome>,
     dnet_controls: usize,
 }
 
-fn run_reference_vector(vector: impl IntoIterator<Item = VectorStep>) -> VectorExecution {
-    let mut rti = admitted_rti();
-    let mut observations = Vec::new();
-    let mut semantic_outcomes = Vec::new();
-    let mut dnet_controls = 0;
-    for step in vector {
-        let (member, request) = ReferenceVectorAdapter::request(step);
-        for delivery in rti.handle(member, request) {
+impl VectorExecution {
+    fn record(&mut self, deliveries: Vec<boomerang_central_rti::compiled::RtiDelivery>) {
+        for delivery in deliveries {
             let observation = ReferenceVectorAdapter::observation(delivery);
-            dnet_controls += usize::from(matches!(observation, VectorObservation::Suppress { .. }));
+            self.dnet_controls +=
+                usize::from(matches!(observation, VectorObservation::Suppress { .. }));
             if let VectorObservation::Semantic(outcome) = &observation {
-                semantic_outcomes.push(*outcome);
+                self.semantic_outcomes.push(*outcome);
             }
-            observations.push(observation);
+            self.observations.push(observation);
         }
     }
-    VectorExecution {
-        observations,
-        semantic_outcomes,
-        dnet_controls,
+}
+
+fn run_reference_vector(vector: impl IntoIterator<Item = VectorStep>) -> VectorExecution {
+    let mut rti = admitted_rti();
+    let mut execution = VectorExecution::default();
+    for step in vector {
+        let (member, request) = ReferenceVectorAdapter::request(step);
+        execution.record(rti.handle(member, request));
     }
+    execution
 }
 
 /// Checks one hand-authored NET/DNET/LTC exchange against the portable oracle.

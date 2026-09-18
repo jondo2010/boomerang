@@ -6,6 +6,112 @@ use super::{
 use crate::WireTag;
 
 #[test]
+fn stop_requires_global_idle_authority() {
+    let exchange = super::tagged_payload_exchange();
+    let mut oracle = ReferenceCoordinator::new(exchange.members, exchange.topology, 1).unwrap();
+    assert!(matches!(
+        oracle
+            .apply(VectorStep::Stop {
+                member: exchange.source
+            })
+            .as_slice(),
+        [Outcome::Failed { .. }]
+    ));
+}
+
+#[test]
+fn idle_confirmation_tracks_revisions_and_pending_input() {
+    let exchange = super::tagged_payload_exchange();
+    let [source, destination] = exchange.members;
+    for (pending, revise, expected) in [
+        (false, false, Outcome::Stopped { member: source }),
+        (
+            true,
+            false,
+            Outcome::Failed {
+                member: source,
+                failure: Failure::IdleAuthority,
+            },
+        ),
+        (
+            false,
+            true,
+            Outcome::Failed {
+                member: source,
+                failure: Failure::IdleAuthority,
+            },
+        ),
+    ] {
+        let mut oracle =
+            ReferenceCoordinator::new(exchange.members, exchange.topology.clone(), 1).unwrap();
+        if pending {
+            oracle.apply(VectorStep::payload(source, exchange.route, exchange.tag));
+        }
+        for member in [source, destination] {
+            oracle.apply(VectorStep::publish(member, 0, None));
+        }
+        oracle.apply(VectorStep::ConfirmIdle {
+            member: source,
+            revision: 0,
+        });
+        if revise {
+            oracle.apply(VectorStep::publish(source, 1, None));
+        }
+        oracle.apply(VectorStep::ConfirmIdle {
+            member: destination,
+            revision: 0,
+        });
+        assert_eq!(
+            oracle.apply(VectorStep::Stop { member: source }),
+            [expected]
+        );
+    }
+}
+
+#[test]
+fn stale_idle_confirmation_fails_instead_of_authorizing_stop() {
+    let member = Member::new(0);
+    let mut oracle = ReferenceCoordinator::new([member], Topology::new([]).unwrap(), 1).unwrap();
+    oracle.apply(VectorStep::publish(member, 1, None));
+    assert_eq!(
+        oracle.apply(VectorStep::ConfirmIdle {
+            member,
+            revision: 0
+        }),
+        [Outcome::Failed {
+            member,
+            failure: Failure::IdleConfirmation
+        }]
+    );
+}
+
+#[test]
+fn injected_failure_wins_over_later_semantic_and_transport_failures() {
+    let member = Member::new(0);
+    let mut oracle = ReferenceCoordinator::new([member], Topology::new([]).unwrap(), 1).unwrap();
+    for step in [
+        VectorStep::Fail {
+            member,
+            failure: Failure::Lost,
+        },
+        VectorStep::complete(member, WireTag::NEVER),
+        VectorStep::Fail {
+            member,
+            failure: Failure::Corrupted,
+        },
+        VectorStep::publish(member, 0, Some(WireTag::ZERO)),
+    ] {
+        assert_eq!(
+            oracle.apply(step),
+            [Outcome::Failed {
+                member,
+                failure: Failure::Lost
+            }]
+        );
+    }
+}
+
+#[test]
 fn tagged_payload_exchange_is_a_reusable_oracle_vector() {
     let exchange = super::tagged_payload_exchange();
     let mut oracle = ReferenceCoordinator::new(exchange.members, exchange.topology, 1).unwrap();
@@ -15,6 +121,50 @@ fn tagged_payload_exchange_is_a_reusable_oracle_vector() {
         .flat_map(|step| oracle.apply(step))
         .collect::<Vec<_>>();
     assert_eq!(outcomes, exchange.expected_outcomes);
+}
+
+#[test]
+fn delivered_input_does_not_block_its_own_execution_grant() {
+    let exchange = super::tagged_payload_exchange();
+    let mut oracle = ReferenceCoordinator::new(exchange.members, exchange.topology, 1).unwrap();
+    for step in &exchange.steps[..4] {
+        oracle.apply(*step);
+    }
+    assert_eq!(
+        oracle.apply(exchange.steps[4]),
+        [Outcome::grant(exchange.destination, 0, WireTag::FOREVER)]
+    );
+    assert!(oracle.apply(exchange.steps[5]).is_empty());
+}
+
+#[test]
+fn direct_route_delay_and_completion_bound_the_grant() {
+    let [source, destination] = [Member::new(0), Member::new(1)];
+    for (delay, expected) in [
+        (0, WireTag::finite(5, 0)),
+        (10, WireTag::finite(14, u64::MAX)),
+    ] {
+        let mut oracle = ReferenceCoordinator::new(
+            [source, destination],
+            Topology::new([(
+                Route::new(0),
+                RouteTopology::with_delay(source, destination, delay),
+            )])
+            .unwrap(),
+            1,
+        )
+        .unwrap();
+        oracle.apply(VectorStep::publish(source, 0, Some(WireTag::ZERO)));
+        oracle.apply(VectorStep::complete(source, WireTag::finite(5, 0)));
+        assert_eq!(
+            oracle.apply(VectorStep::publish(
+                destination,
+                0,
+                Some(WireTag::finite(5, 0))
+            )),
+            [Outcome::grant(destination, 0, expected)]
+        );
+    }
 }
 
 #[test]
@@ -42,13 +192,18 @@ fn destination_waits_for_upstream_publication_before_idle_releases_it() {
 #[test]
 fn completion_releases_only_the_accounted_frontier() {
     let source = Member::new(0);
-    let destination = Member::new(1);
+    let middle = Member::new(1);
+    let destination = Member::new(2);
     let route = Route::new(0);
     let earlier = WireTag::finite(0, 5);
     let later = WireTag::finite(0, 10);
     let mut oracle = ReferenceCoordinator::new(
-        [source, destination],
-        Topology::new([(route, RouteTopology::new(source, destination))]).unwrap(),
+        [source, middle, destination],
+        Topology::new([
+            (route, RouteTopology::new(source, middle)),
+            (Route::new(1), RouteTopology::new(middle, destination)),
+        ])
+        .unwrap(),
         1,
     )
     .unwrap();
@@ -59,16 +214,16 @@ fn completion_releases_only_the_accounted_frontier() {
     );
     assert_eq!(
         oracle.apply(VectorStep::payload(source, route, earlier)),
-        vec![Outcome::payload(destination, route, earlier)]
+        vec![Outcome::payload(middle, route, earlier)]
     );
     assert!(oracle
-        .apply(VectorStep::complete(source, earlier))
+        .apply(VectorStep::publish(source, 2, None))
         .is_empty());
 
-    // A later NET does not erase B's delivered, still-accounted earlier tag.
+    // B can execute its input, but that queued input still constrains C until B's LTC.
     assert_eq!(
-        oracle.apply(VectorStep::publish(source, 2, Some(later))),
-        vec![Outcome::grant(source, 2, WireTag::FOREVER)]
+        oracle.apply(VectorStep::publish(middle, 1, Some(later))),
+        vec![Outcome::grant(middle, 1, WireTag::FOREVER)]
     );
     assert!(oracle
         .apply(VectorStep::publish(
@@ -78,11 +233,11 @@ fn completion_releases_only_the_accounted_frontier() {
         ))
         .is_empty());
     assert!(oracle
-        .apply(VectorStep::complete(destination, WireTag::finite(0, 4)))
+        .apply(VectorStep::complete(middle, WireTag::finite(0, 4)))
         .is_empty());
 
     assert_eq!(
-        oracle.apply(VectorStep::complete(destination, earlier)),
+        oracle.apply(VectorStep::complete(middle, earlier)),
         vec![Outcome::grant(destination, 1, WireTag::finite(0, 9))]
     );
 }
@@ -181,46 +336,6 @@ fn zero_delay_fault_is_rejected_as_excluded_configuration() {
             tick: 0,
         })
     );
-}
-
-#[test]
-fn separate_net_and_ltc_lane_ticks_drive_the_oracle_without_coarrival() {
-    let source = Member::new(0);
-    let destination = Member::new(1);
-    let net_lane = Lane::new(0);
-    let ltc_lane = Lane::new(1);
-    let route = Route::new(0);
-    let tag = WireTag::finite(5, 0);
-    let mut scheduler =
-        OrderedFaultScheduler::new([net_lane, ltc_lane], FaultScript::new([]).unwrap()).unwrap();
-    let mut oracle = ReferenceCoordinator::new(
-        [source, destination],
-        Topology::new([(route, RouteTopology::new(source, destination))]).unwrap(),
-        1,
-    )
-    .unwrap();
-
-    assert_eq!(
-        scheduler.submit(0, net_lane, VectorStep::publish(source, 1, Some(tag))),
-        vec![ScheduledOutcome::delivered(
-            net_lane,
-            VectorStep::publish(source, 1, Some(tag)),
-        )]
-    );
-    assert_eq!(
-        oracle.apply(VectorStep::publish(source, 1, Some(tag))),
-        vec![Outcome::grant(source, 1, WireTag::FOREVER)]
-    );
-    assert_eq!(
-        scheduler.submit(2, ltc_lane, VectorStep::complete(destination, tag)),
-        vec![ScheduledOutcome::delivered(
-            ltc_lane,
-            VectorStep::complete(destination, tag),
-        )]
-    );
-    assert!(oracle
-        .apply(VectorStep::complete(destination, tag))
-        .is_empty());
 }
 
 #[test]

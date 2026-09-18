@@ -20,6 +20,19 @@
 //! [`crate::conformance::Failure`], but it cannot expose a later frame before an earlier frame on
 //! the same lane.
 //!
+//! An adapter assigns one lane per participant's reliable ordered channel, not per message
+//! kind: a delayed NET must also hold that participant's later LTC and payloads. Scheduler
+//! failures enter the oracle as `VectorStep::Fail` and the RTI as an abort. Compare the first
+//! terminal cause separately from reply fan-out: the RTI wakes every peer, whereas the oracle
+//! reports failure to the member observing the step.
+//!
+//! Local idle is reversible. `ConfirmIdle` validates the current idle revision; only when all
+//! members have confirmed and no delivered input remains uncompleted does `Stop` become legal.
+//! Idle replies and DNET optimizations are adapter-level observations, not oracle outcomes.
+//! Grants use direct route constraints (NET plus queued input, or LTC, with route delay), not
+//! compiled transitive dependency tables or DNET. The single-edge fixture supports comparison
+//! after every delivered request; this is not an oracle for all optimized multi-hop grant timings.
+//!
 //! The API is test support, enabled with the `conformance` feature. It is deliberately absent
 //! from normal portable execution and contains no hosted runtime, transport I/O, payload bytes,
 //! or wire-format behavior. It covers the Phase 6 baseline only; PTAG, ABS, membership/rejoin,
@@ -48,12 +61,23 @@ pub struct RouteTopology {
     pub source: Member,
     /// Member that receives payloads submitted on this route.
     pub target: Member,
+    /// Logical route delay in nanoseconds; zero preserves the source microstep.
+    pub delay_nanos: u64,
 }
 
 impl RouteTopology {
     /// Creates a directed route without deriving any compiled routing decision.
     pub const fn new(source: Member, target: Member) -> Self {
-        Self { source, target }
+        Self::with_delay(source, target, 0)
+    }
+
+    /// Creates a route with the logical delay supplied by the test topology.
+    pub const fn with_delay(source: Member, target: Member, delay_nanos: u64) -> Self {
+        Self {
+            source,
+            target,
+            delay_nanos,
+        }
     }
 }
 
@@ -100,8 +124,11 @@ pub fn tagged_payload_exchange() -> TaggedPayloadExchange {
         route,
         tag,
         members: [source, destination],
-        topology: Topology::new([(route, RouteTopology::new(source, destination))])
-            .expect("a literal one-route topology is valid"),
+        topology: Topology::new([(
+            route,
+            RouteTopology::with_delay(source, destination, 1_000_000),
+        )])
+        .expect("a literal one-route topology is valid"),
         steps: [
             VectorStep::publish(source, 0, Some(WireTag::ZERO)),
             VectorStep::publish(destination, 0, Some(tag)),
@@ -195,7 +222,21 @@ pub enum VectorStep {
         /// Destination tag carried by the payload.
         tag: WireTag,
     },
-    /// Commits the member's terminal lifecycle transition.
+    /// Confirms that a local idle publication survived the member's mailbox check.
+    ConfirmIdle {
+        /// Member confirming its publication.
+        member: Member,
+        /// Revision of the member's current idle publication.
+        revision: u64,
+    },
+    /// Reports an unrecoverable fault at the ordered transport boundary.
+    Fail {
+        /// Member observing the fault (not necessarily its origin).
+        member: Member,
+        /// Terminal cause to retain unless a previous failure already won.
+        failure: Failure,
+    },
+    /// Commits the member's terminal lifecycle transition after global idle authority.
     Stop {
         /// Member that is stopping.
         member: Member,
@@ -293,6 +334,10 @@ pub enum Failure {
     InTransitCapacity,
     /// A stopped member attempted another active lifecycle step.
     Stopped,
+    /// An idle confirmation did not match the current idle publication.
+    IdleConfirmation,
+    /// A stop or active step conflicted with global idle authority.
+    IdleAuthority,
     /// A scripted lost lower-layer frame could not be delivered reliably.
     Lost,
     /// A scripted corrupted lower-layer frame entered a terminal failure state.
@@ -572,6 +617,7 @@ struct MemberState {
     completion: Option<WireTag>,
     granted: Option<(u64, WireTag)>,
     stopped: bool,
+    idle_confirmation: Option<u64>,
     in_transit: Vec<WireTag>,
 }
 
@@ -587,10 +633,6 @@ impl MemberState {
             .copied()
             .map_or(published, |tag| tag.min(published))
     }
-
-    fn earliest_in_transit(&self) -> WireTag {
-        self.in_transit.first().copied().unwrap_or(WireTag::FOREVER)
-    }
 }
 
 /// A portable semantic coordinator that owns trace-local coordination state.
@@ -599,6 +641,7 @@ pub struct ReferenceCoordinator {
     topology: Topology,
     in_transit_capacity: usize,
     failure: Option<Failure>,
+    idle_authorized: bool,
 }
 
 impl ReferenceCoordinator {
@@ -628,6 +671,7 @@ impl ReferenceCoordinator {
             topology,
             in_transit_capacity,
             failure: None,
+            idle_authorized: false,
         })
     }
 
@@ -637,6 +681,8 @@ impl ReferenceCoordinator {
             VectorStep::Publish { member, .. }
             | VectorStep::Complete { member, .. }
             | VectorStep::Payload { member, .. }
+            | VectorStep::ConfirmIdle { member, .. }
+            | VectorStep::Fail { member, .. }
             | VectorStep::Stop { member } => member,
         };
         if let Some(failure) = self.failure {
@@ -653,10 +699,26 @@ impl ReferenceCoordinator {
             } => self.publish(member, revision, next_event),
             VectorStep::Complete { member, tag } => self.complete(member, tag),
             VectorStep::Payload { member, route, tag } => self.payload(member, route, tag),
+            VectorStep::ConfirmIdle { member, revision } => {
+                if self.members[member].stopped {
+                    self.fail(member, Failure::Stopped)
+                } else if self.members[member].publication != Some((revision, None)) {
+                    self.fail(member, Failure::IdleConfirmation)
+                } else {
+                    self.members[member].idle_confirmation = Some(revision);
+                    Vec::new()
+                }
+            }
+            VectorStep::Fail { member, failure } => self.fail(member, failure),
             VectorStep::Stop { member } => self.stop(member),
         };
         if self.failure.is_none() {
             outcomes.extend(self.grants());
+            self.idle_authorized |= self.members.values().all(|state| {
+                state.publication.is_some_and(|(revision, next)| {
+                    next.is_none() && state.idle_confirmation == Some(revision)
+                }) && state.in_transit.is_empty()
+            });
         }
         outcomes
     }
@@ -670,6 +732,9 @@ impl ReferenceCoordinator {
         let state = &self.members[member];
         if state.stopped {
             return self.fail(member, Failure::Stopped);
+        }
+        if self.idle_authorized && next_event.is_some() {
+            return self.fail(member, Failure::IdleAuthority);
         }
         if next_event.is_some_and(|tag| !event_tag(tag))
             || state
@@ -685,7 +750,11 @@ impl ReferenceCoordinator {
                 },
             );
         }
-        self.members[member].publication = Some((revision, next_event));
+        let state = &mut self.members[member];
+        if state.publication != Some((revision, next_event)) {
+            state.idle_confirmation = None;
+        }
+        state.publication = Some((revision, next_event));
         Vec::new()
     }
 
@@ -709,6 +778,9 @@ impl ReferenceCoordinator {
     fn payload(&mut self, member: Member, route: Route, tag: WireTag) -> Vec<Outcome> {
         if self.members[member].stopped {
             return self.fail(member, Failure::Stopped);
+        }
+        if self.idle_authorized {
+            return self.fail(member, Failure::IdleAuthority);
         }
         if !event_tag(tag) {
             return self.fail(member, Failure::InvalidTag);
@@ -739,6 +811,9 @@ impl ReferenceCoordinator {
         if self.members[member].stopped {
             return self.fail(member, Failure::Stopped);
         }
+        if !self.idle_authorized {
+            return self.fail(member, Failure::IdleAuthority);
+        }
         self.members[member].stopped = true;
         vec![Outcome::Stopped { member }]
     }
@@ -755,7 +830,17 @@ impl ReferenceCoordinator {
             if self.members[member].stopped {
                 continue;
             }
-            let horizon = self.permitted(member);
+            let horizon = match self.permitted(member) {
+                Ok(horizon) => horizon.max(
+                    self.members[member]
+                        .granted
+                        .map_or(WireTag::NEVER, |(_, tag)| tag),
+                ),
+                Err(failure) => {
+                    grants.extend(self.fail(member, failure));
+                    return grants;
+                }
+            };
             if horizon < requested
                 || self.members[member]
                     .granted
@@ -769,17 +854,40 @@ impl ReferenceCoordinator {
         grants
     }
 
-    fn permitted(&self, member: Member) -> WireTag {
-        let mut frontier = self.members[member].earliest_in_transit();
+    fn permitted(&self, member: Member) -> Result<WireTag, Failure> {
+        let mut frontier = WireTag::FOREVER;
         for (_, route) in self
             .topology
             .routes
             .iter()
             .filter(|(_, route)| route.target == member)
         {
-            frontier = frontier.min(self.members[route.source].earliest());
+            let source = &self.members[route.source];
+            let delay = crate::WireDelay::from_nanos(route.delay_nanos);
+            let earliest = source
+                .earliest()
+                .checked_delay(delay)
+                .ok_or(Failure::InvalidTag)?;
+            let completed = source
+                .completion
+                .unwrap_or(WireTag::NEVER)
+                .checked_delay(delay)
+                .ok_or(Failure::InvalidTag)?;
+            // At positive delay, later source microsteps can still arrive at the same
+            // destination tag. Only a zero-delay completion covers that tag inclusively.
+            let completed = if route.delay_nanos == 0 {
+                completed
+            } else {
+                completed.checked_predecessor().unwrap_or(WireTag::NEVER)
+            };
+            frontier = frontier.min(
+                earliest
+                    .checked_predecessor()
+                    .unwrap_or(WireTag::NEVER)
+                    .max(completed),
+            );
         }
-        frontier.checked_predecessor().unwrap_or(WireTag::NEVER)
+        Ok(frontier)
     }
 
     fn fail(&mut self, member: Member, failure: Failure) -> Vec<Outcome> {

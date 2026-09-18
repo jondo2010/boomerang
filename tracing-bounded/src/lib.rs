@@ -1,8 +1,9 @@
 //! Bounded, loss-aware capture for native tracing events and spans.
 //!
-//! This package currently contains the public design specification and a tested
-//! internal explicit-root event backend. It does not yet expose a subscriber or
-//! implement producer/span context, and is not ready for publication or runtime use.
+//! Install [`BoundedSubscriber`] through native tracing APIs, then prepare each
+//! emitting thread with [`CaptureHandle::prepare_current_thread`]. Events retain
+//! owned scope snapshots; overflow, rejection and context loss remain observable.
+//! The crate is unpublished pending application integration and target qualification.
 //!
 //! See [`specification`] for the intended contract, supported deployment profile,
 //! explicit exclusions, and the evidence required before release.
@@ -15,10 +16,14 @@
 #[allow(unsafe_code)]
 mod test_allocation;
 
-// The internal capture backend is deliberately gated until context and span
-// lifecycle support are implemented by the public subscriber.
-#[allow(dead_code)]
 mod capture;
+pub use capture::{
+    BoundedSubscriber, BuildError, CaptureHandle, Config, LifecycleLoss, LossCount, LossSnapshot,
+    OwnedField, PrepareError, ProducerGuard, Record, Scope, Value,
+};
 
 #[doc = include_str!("../SPEC.md")]
 pub mod specification {}
+
+#[cfg(test)]
+mod subscriber_tests;

@@ -5,7 +5,7 @@ use std::{
 
 use super::{LossCount, LossSnapshot, Reject};
 
-struct Counter {
+pub(super) struct Counter {
     value: AtomicU32,
     ceiling: NonZeroU16,
 }
@@ -21,7 +21,7 @@ pub(super) struct Loss {
 }
 
 impl Counter {
-    fn new(ceiling: NonZeroU16) -> Self {
+    pub(super) fn new(ceiling: NonZeroU16) -> Self {
         Self {
             value: AtomicU32::new(0),
             ceiling,
@@ -32,7 +32,7 @@ impl Counter {
     // work bound at the cost of earlier saturation. The maximum is 65,535 CAS
     // attempts; this does not claim a hardware retry bound, timing bound, or
     // hard WCET.
-    fn increment(&self) {
+    pub(super) fn increment(&self) {
         let mut seen = self.value.load(Ordering::Relaxed);
         for _ in 0..self.ceiling.get() {
             if seen == u32::from(self.ceiling.get()) {
@@ -48,7 +48,7 @@ impl Counter {
         }
     }
 
-    fn snapshot(&self) -> LossCount {
+    pub(super) fn snapshot(&self) -> LossCount {
         let value = self.value.load(Ordering::Relaxed);
         LossCount {
             value,

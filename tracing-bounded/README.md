@@ -1,13 +1,13 @@
 # tracing-bounded
 
-A proposed bounded, loss-aware subscriber for native Rust `tracing` events and
+A bounded, loss-aware subscriber for native Rust `tracing` events and
 spans. Intended for applications where diagnostics may lose data but must not
 wait for output capacity, allocate during capture, or corrupt execution context.
 
-**Status: unpublished partial implementation.** A tested internal backend now
-captures explicit-root native primitive events into fixed record/field/byte
-storage. There is still no public subscriber, producer/span context, complete
-allocation qualification, or conformance claim. Publication is disabled. The
+**Status: unpublished initial implementation.** The public native subscriber
+captures primitive events with copied span context, bounded producer admission,
+span updates, reference handling and reuse. Application integration and complete
+target qualification remain outstanding; full conformance is not claimed. The
 package name is provisional; checking registry search results does not reserve it.
 
 [QUALIFICATION.md](QUALIFICATION.md) records a native emission-path
@@ -25,6 +25,30 @@ Applications keep standard `tracing` macros and spans. They supply bounded nativ
 field values and an immutable target/level filter. The subscriber owns capture
 storage, span context, loss accounting, and off-path inspection.
 
+## Use
+
+```rust
+use tracing_bounded::{BoundedSubscriber, Config};
+
+let (subscriber, capture) = BoundedSubscriber::new(Config::default())?;
+tracing::subscriber::set_global_default(subscriber)?;
+let producer = capture.prepare_current_thread()?;
+let span = tracing::info_span!("request", id = 42u64);
+span.in_scope(|| tracing::info!(done = true));
+// Inspection may allocate and wait; keep it outside sensitive execution.
+assert_eq!(capture.snapshot()[0].scopes[0].metadata.name(), "request");
+drop(producer);
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+Keep the fixed global subscriber installed throughout execution. Prepare each
+emitting thread and retain its non-Send guard until that thread stops emitting.
+Enter async task spans per poll; a prepared thread is not a task identity.
+Failed admission propagates an invalid span, never another span or a healthy root.
+Depth overflow or unbalanced exit invalidates that producer until teardown and
+fresh preparation. `loss`, `lifecycle_loss` and `current_thread_is_valid` expose
+event loss and context health independently of ring contents.
+
 ## Intended guarantees
 
 - Fixed limits cover records, fields, bytes, live spans, producer contexts, and
@@ -38,8 +62,8 @@ storage, span context, loss accounting, and off-path inspection.
 - Invalid context is reported or rejected; it is never replaced with another
   task's or thread's context.
 
-These are requirements for the complete implementation, **not guarantees
-established by the current partial backend**. [SPEC.md](SPEC.md) is the normative
+These claims are conditional on the supported profile and target qualification;
+passing hosted tests does not qualify every deployment. [SPEC.md](SPEC.md) is the normative
 contract and release conformance checklist. It is also rendered as the
 `specification` rustdoc module.
 The adopted closed-callsite profile also requires an application-established
@@ -56,21 +80,33 @@ execution, with a bounded set of producer threads. Setup and snapshot inspection
 may allocate. Dynamic subscriber composition and replacement are outside the
 bounded guarantee.
 
-For configured record, field and copied-byte limits `R`, `F` and `B`, the current
-internal backend reserves `R + 1` slots (the ring plus scratch). Its logical data
-bound is `(R + 1) * (size_of::<Slot>() + F *
-size_of::<Option<StoredField>>() + B)`, plus the shared allocation and `Arc`,
-`Mutex`/`Storage` header (ring pointer/length and indices), atomic loss counters
-and fixed callback stack state. The ring uses a `Box<[Slot]>` of length `R`, so
-those `R` slot headers are the outer table in the formula; scratch is one
-embedded `Slot`. Every slot owns boxed field and byte arrays of exactly `F` and
-`B` logical elements. Some targets also allocate platform mutex storage during
-constructor initialization; this is separate from the logical slot/`Shared`
-struct bound. Allocator bookkeeping, alignment and size-class rounding
-are implementation-dependent and are not exact requested bytes. Snapshot-owned
-`Vec`, `String` and byte storage, along with upstream callsite/dispatcher/TLS
-storage, is separate. Span, producer, depth and reclamation storage is not
-implemented, so this is not yet a complete P3 bound.
+For `R` records, `S` spans, `P` producers and depth `D`, the owned logical storage
+consists of the following fixed allocations (`sizeof` uses the build's layouts):
+
+- Ring table: `R * sizeof(Slot)`; span table: `S * sizeof(SpanSlot)`.
+- Record arrays including scratch: `(R + 1) * (F * sizeof(Option<StoredField>)
+  + B + D * sizeof(Option<StoredScope>))`.
+- Span arrays including update scratch: `(S + 1) * (SF * sizeof(Option<StoredField>)
+  + SB)`, with `SF`/`SB` the per-span limits.
+- References: `S * sizeof(References)`; producer stacks:
+  `P * (sizeof(Producer) + D * sizeof(Entry))`.
+- The capture `Shared` and subscriber `State` headers, including both embedded
+  scratch-slot headers, mutex/header state and loss counters; two Arc control blocks.
+
+All arrays are boxed at construction. No reclamation queue is allocated. Platform
+mutex storage for the `P + 2` warmed mutexes, allocator bookkeeping/rounding,
+upstream dispatcher/callsite storage and off-path snapshots are additional.
+Subscriber TLS holds only a token/index pair per prepared thread. Callbacks use
+fixed stack locals, not capacity-sized stack arrays or recursive traversal.
+
+Each reference admission uses one strong CAS; failure is visible. Owned reference
+release uses one atomic subtraction independent of capture locks. A last release
+can leave deferred work in its fixed span slot; bounded sweeps reclaim it before
+subsequent span admission. Sweeps take at most `S` passes over `S` slots; context
+copying takes at most `D²` ancestry steps. Generations never wrap: exhausted slots
+retire. Span updates rebuild scratch (at most `SF²` field comparisons), preserving
+unmodified values without accumulating obsolete byte storage. Failed updates
+invalidate the span and its descendants. These are source-level bounds, not WCET.
 
 Ring, field and byte arrays use fallible reservations that return
 `BuildError::Allocation` on reservation failure. `Arc`/shared allocation and
@@ -78,14 +114,16 @@ standard platform mutex initialization do not promise recoverable global
 allocation failure. Setup may allocate and block; the constructor acquires and
 releases its new mutex before returning either backend handle.
 
-The private backend's visitation work bound currently assumes macro-generated
-events with matching metadata/value sets and a bounded number of visited entries.
-Manually constructed native events are not yet qualified: tracing-core 0.1.36
-permits explicit value sets with repeated fields independently of metadata count,
-and continues visiting entries after the visitor has latched rejection. Resolving
-this native-input qualification gap is a gate for the future public Subscriber,
-alongside producer preparation, span/context and lifecycle qualification. The
-normative P1/P2 contract is unchanged.
+The supported-input profile requires macro-shaped value sets: matching metadata,
+no repeated or foreign fields, and no more entries (including empty ones) than
+declared fields. Positional entries correspond exactly to the declared fields;
+explicit entries may be sparse or reordered. Native macros satisfy this shape;
+hand-built events/span values must also comply. This is a producer/dependency
+precondition, not subscriber validation. Arbitrary value sets have no bounded-work,
+rejection or loss-accounting guarantee: upstream can scan extra entries even after
+visitor rejection. See P2 and [QUALIFICATION.md](QUALIFICATION.md). Root-event
+output tests cover conforming manual inputs. The functional subscriber has native
+context/lifecycle tests; deployment-specific qualification remains required.
 
 The process-wide callsite bound is a deployment responsibility, not a capacity
 that this subscriber can enforce. Dynamic callsite creation and runtime-loaded

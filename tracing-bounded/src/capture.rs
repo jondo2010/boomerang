@@ -8,9 +8,13 @@ use tracing_core::Event;
 
 mod loss;
 mod record;
+mod subscriber;
+pub use record::{OwnedField, Scope, Value};
+pub use subscriber::*;
 
 use loss::Loss;
-use record::{Record, Slot};
+pub use record::Record;
+use record::Slot;
 
 #[cfg(test)]
 mod tests;
@@ -22,12 +26,19 @@ pub(super) struct Limits {
     pub(super) loss_ceiling: NonZeroU16,
 }
 
+/// Configuration or setup reservation failure.
 #[derive(Debug, PartialEq, Eq)]
-pub(super) enum BuildError {
+pub enum BuildError {
+    /// Field storage must be nonzero.
     ZeroFields,
+    /// Byte storage must be nonzero.
     ZeroBytes,
+    /// Requested storage cannot be represented.
     SizeOverflow,
+    /// A fallible reservation failed.
     Allocation,
+    /// Span, producer, depth or reference capacity is invalid.
+    InvalidCapacity,
 }
 
 #[derive(Clone, Copy)]
@@ -40,21 +51,32 @@ pub(super) enum Reject {
     UnsupportedValue,
 }
 
+/// One saturating loss count, independent of retained output.
 #[derive(Debug, Default, PartialEq, Eq)]
-pub(super) struct LossCount {
-    pub(super) value: u32,
-    pub(super) saturated: bool,
+pub struct LossCount {
+    /// Exact count until saturation, then a lower bound.
+    pub value: u32,
+    /// Whether the configured ceiling has been reached.
+    pub saturated: bool,
 }
 
+/// Event rejection and overwrite counts; not an atomic view during capture.
 #[derive(Debug, Default, PartialEq, Eq)]
-pub(super) struct LossSnapshot {
-    pub(super) no_record_capacity: LossCount,
-    pub(super) contention: LossCount,
-    pub(super) invalid_context: LossCount,
-    pub(super) field_limit: LossCount,
-    pub(super) byte_limit: LossCount,
-    pub(super) unsupported_value: LossCount,
-    pub(super) overwritten_records: LossCount,
+pub struct LossSnapshot {
+    /// Events rejected because record capacity is zero.
+    pub no_record_capacity: LossCount,
+    /// Events rejected on an unsuccessful storage access attempt.
+    pub contention: LossCount,
+    /// Events whose producer or span context is unavailable.
+    pub invalid_context: LossCount,
+    /// Events exceeding their field budget.
+    pub field_limit: LossCount,
+    /// Events exceeding their byte budget.
+    pub byte_limit: LossCount,
+    /// Events containing unsupported representations.
+    pub unsupported_value: LossCount,
+    /// Complete retained records replaced by successful commits.
+    pub overwritten_records: LossCount,
 }
 
 pub(super) struct Capture {
@@ -80,7 +102,12 @@ struct Storage {
 }
 
 impl Capture {
+    #[cfg(test)]
     pub(super) fn new(limits: Limits) -> Result<(Self, Inspector), BuildError> {
+        Self::with_scopes(limits, 0)
+    }
+
+    fn with_scopes(limits: Limits, depth: usize) -> Result<(Self, Inspector), BuildError> {
         if limits.fields == 0 {
             return Err(BuildError::ZeroFields);
         }
@@ -115,9 +142,9 @@ impl Capture {
         ring.try_reserve_exact(limits.records)
             .map_err(|_| BuildError::Allocation)?;
         for _ in 0..limits.records {
-            ring.push(Slot::new(limits.fields, limits.bytes)?);
+            ring.push(Slot::with_scopes(limits.fields, limits.bytes, depth)?);
         }
-        let scratch = Slot::new(limits.fields, limits.bytes)?;
+        let scratch = Slot::with_scopes(limits.fields, limits.bytes, depth)?;
 
         let shared = Arc::new(Shared {
             loss: Loss::new(limits.loss_ceiling),
@@ -140,7 +167,18 @@ impl Capture {
         ))
     }
 
+    #[cfg(test)]
     pub(super) fn event(&self, event: &Event<'_>) {
+        self.event_with(event, |_| {
+            if event.is_root() {
+                Ok(())
+            } else {
+                Err(Reject::InvalidContext)
+            }
+        });
+    }
+
+    fn event_with(&self, event: &Event<'_>, context: impl FnOnce(&mut Slot) -> Result<(), Reject>) {
         if self.shared.limits.records == 0 {
             self.shared.loss.increment(Reject::NoRecordCapacity);
             return;
@@ -151,19 +189,20 @@ impl Capture {
             return;
         };
 
-        if !event.is_root() {
-            self.shared.loss.increment(Reject::InvalidContext);
+        storage.scratch.begin(event.metadata());
+        if let Err(rejection) = context(&mut storage.scratch) {
+            self.shared.loss.increment(rejection);
             return;
         }
-        // Internal work bound: native macro metadata and value sets match, so
-        // visitation cannot exceed this count. Manually constructed ValueSets
-        // can repeat fields; their visitation work is not yet qualified.
-        if event.metadata().fields().len() > self.shared.limits.fields {
+        // P2 requires macro-shaped value sets, including hand-built inputs:
+        // matching fields, no repeats, and at most this many underlying entries.
+        // Event exposes no raw entry count; this is a producer precondition,
+        // not shape validation. Visitor rejection does not stop upstream scans.
+        if event.metadata().fields().len() > storage.scratch.remaining_fields() {
             self.shared.loss.increment(Reject::FieldLimit);
             return;
         }
 
-        storage.scratch.begin(event.metadata());
         let rejection = {
             let mut visitor = storage.scratch.visitor();
             event.record(&mut visitor);

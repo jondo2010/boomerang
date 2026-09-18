@@ -50,10 +50,7 @@ impl<'a> From<&'a mut ReactionTriggerCtxPtrs> for ReactionTriggerCtx<'a> {
 
 impl<'a> ReactionTriggerCtx<'a> {
     /// Trigger the reaction with the given context and state.
-    #[tracing::instrument(level = "trace", skip(self, tag), fields(reactor = self.reactor.name(), reaction = self.reaction.get_name()))]
     pub(crate) fn trigger(self, tag: Tag) -> &'a TriggerRes {
-        tracing::trace!("Exec");
-
         if let Some(Deadline { deadline, handler }) = self.reaction.deadline.as_ref() {
             let lag = self.context.get_physical_time() - self.context.get_logical_time();
             if lag > *deadline {

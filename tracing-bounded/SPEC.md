@@ -3,7 +3,8 @@
 ## Status and terminology
 
 This is the normative contract for `tracing-bounded`, currently an unpublished
-documentation scaffold with an upstream audit fixture, not a conforming subscriber.
+partial implementation with an internal explicit-root event backend and an
+upstream audit test, not a public or conforming subscriber.
 **MUST**, **MUST NOT**, and **SHOULD** denote requirements and recommendations.
 A release MUST disclose unmet requirements and MUST NOT claim full conformance
 for a partial implementation.
@@ -235,7 +236,9 @@ each failed attempt implies another insertion. At most `C` callsites therefore
 bound one insertion to `C - 1` failures and one success. Same-site competitors
 do not wait for registration to finish. This bounds source-level insertion
 attempts, not all atomic operations, instructions, hardware retries or time.
-See [QUALIFICATION.md](QUALIFICATION.md) for source locations and fixture evidence.
+See [QUALIFICATION.md](QUALIFICATION.md) for source locations and test evidence.
+Development follows workspace dependency versions, not independent exact pins;
+the argument remains conditional on the audited resolved versions and features.
 
 The deployment MUST:
 

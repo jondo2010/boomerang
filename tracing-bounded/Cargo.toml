@@ -12,9 +12,16 @@ categories = ["development-tools::debugging"]
 publish = false
 include = [
     "src/**",
-    "tests/run-native-path.sh",
-    "tests/fixtures/native-path/Cargo.toml.in",
-    "tests/fixtures/native-path/Cargo.lock",
-    "tests/fixtures/native-path/src/**",
+    "tests/native_path/*.rs",
     "README.md", "SPEC.md", "QUALIFICATION.md", "LICENSE-MIT", "LICENSE-APACHE",
 ]
+
+[dependencies]
+tracing-core.workspace = true
+
+[dev-dependencies]
+tracing.workspace = true
+
+[[test]]
+name = "native_path"
+harness = false

@@ -1,5 +1,10 @@
 //! Fresh-process upstream audit, NOT the production bounded subscriber.
 
+#![deny(unsafe_code)]
+
+// Share only the test allocator across the unit-test and integration binaries.
+#[allow(unsafe_code)]
+#[path = "../../src/test_allocation.rs"]
 mod allocation;
 mod output;
 mod sites;
@@ -37,6 +42,26 @@ fn concurrent(first: fn(), second: fn()) {
 
 fn main() {
     let args: Vec<_> = std::env::args().skip(1).collect();
+    if args.is_empty() {
+        // Reuse this Cargo-built executable, but never tracing's process-global
+        // state. No build, source copy, or temporary workspace is needed.
+        for case in [
+            "allocator-control",
+            "first-use",
+            "repeated",
+            "different-sites",
+            "same-site",
+            "filtered",
+            "unsupported",
+        ] {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg(case)
+                .status()
+                .expect("start fresh audit process");
+            assert!(status.success(), "audit scenario failed: {case}: {status}");
+        }
+        return;
+    }
     let [case] = args.as_slice() else {
         eprintln!("expected exactly one audit scenario");
         std::process::exit(2);

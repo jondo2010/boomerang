@@ -30,6 +30,7 @@ thiserror = "2.0"
 toml = "1.1"
 tracing = "0.1"
 tracing-core = "0.1"
+tracing-bounded = { path = "tracing-bounded", version = "0.1.0" }
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = [
     "fmt",

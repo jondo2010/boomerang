@@ -237,8 +237,12 @@ impl RunningServer<'_, '_, '_> {
                         let (output, receiver) = channel::bounded();
                         // Queue the exact echo before any coordinator reply for this member.
                         output.send(frame.to_vec(), Class::Coordination, admission)?;
-                        let span = tracing::debug_span!(target: "boomerang::coordination",
-                            "rti_peer", coordination = ?hello.coordination, federate = ?member);
+                        let span = tracing::debug_span!(
+                            target: "boomerang::coordination",
+                            "rti_peer",
+                            coordination = hello.coordination.bytes().as_slice(),
+                            federate = member.as_u32(),
+                        );
                         self.writers.spawn(writer_loop(input.writer.expect("pending writer"), receiver, self.timeout).instrument(span.clone()));
                         self.peers.insert(member, Peer { output, session, span, stopped: false });
                         pending -= 1;
@@ -283,8 +287,11 @@ async fn transfer(
         }
         reservation = output.reserve(class, deadline) => {
             reservation?.send(bytes, deadline);
-            tracing::debug!(target: "boomerang::coordination",
-                event = "coordination.transport.queued", ?class);
+            tracing::debug!(
+                target: "boomerang::coordination",
+                event = "coordination.transport.queued",
+                class = class.kind_str(),
+            );
             Ok(())
         }
     }

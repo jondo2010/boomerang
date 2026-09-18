@@ -11,6 +11,7 @@ mod generated_cache;
 mod manifest;
 mod output;
 mod run;
+mod tracing;
 mod workspace;
 
 pub use build::{build, build_with_output};
@@ -20,10 +21,11 @@ pub use driver::{run_descriptor_driver, DriverOutput};
 pub use manifest::{
     load_manifest, parse_manifest, Binding, Boundary, BoundaryFailurePolicy, CodecPolicy,
     Coordination, CoordinationBackend, Deployment, ExecutionPolicy, Federate, Manifest,
-    RecoveryPolicy, Rti, SecurityPolicy, TimingPolicy, Topology, TransportPolicy,
+    RecoveryPolicy, Rti, SecurityPolicy, TimingPolicy, Topology, TracingBackend, TransportPolicy,
 };
 pub use output::{ColorChoice, CommandOutput};
 pub use run::{run, run_with_output, ExecutionSummary, RunOutcome};
+pub use tracing::{BoundedTracingLimits, BoundedTracingSettings};
 pub use workspace::{
     resolve_workspace, CargoPackage, LockfileIdentity, ResolvedFederate, ResolvedWorkspace,
 };

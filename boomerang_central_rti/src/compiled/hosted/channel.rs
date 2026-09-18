@@ -91,8 +91,12 @@ impl<T> Sender<T> {
         deadline: Instant,
     ) -> Result<Reservation<'_, T>, HostedError> {
         if Instant::now() >= deadline {
-            tracing::warn!(target: "boomerang::coordination",
-                event = "coordination.transport.deadline", ?class, reason = "reservation");
+            tracing::warn!(
+                target: "boomerang::coordination",
+                event = "coordination.transport.deadline",
+                class = class.kind_str(),
+                reason = "reservation",
+            );
             return Err(HostedError::Lifecycle(
                 "hosted channel reservation timed out",
             ));
@@ -100,9 +104,13 @@ impl<T> Sender<T> {
         if self.tx.capacity() == 0
             || (class == Class::Payload && self.payloads.available_permits() == 0)
         {
-            tracing::debug!(target: "boomerang::coordination",
-                event = "coordination.transport.backpressure", ?class,
-                queue_available = self.tx.capacity(), payload_available = self.payloads.available_permits());
+            tracing::debug!(
+                target: "boomerang::coordination",
+                event = "coordination.transport.backpressure",
+                class = class.kind_str(),
+                queue_available = self.tx.capacity(),
+                payload_available = self.payloads.available_permits(),
+            );
         }
         timeout_at(deadline, async {
             let payload = if class == Class::Payload {
@@ -121,8 +129,12 @@ impl<T> Sender<T> {
         })
         .await
         .map_err(|_| {
-            tracing::warn!(target: "boomerang::coordination",
-                event = "coordination.transport.deadline", ?class, reason = "reservation");
+            tracing::warn!(
+                target: "boomerang::coordination",
+                event = "coordination.transport.deadline",
+                class = class.kind_str(),
+                reason = "reservation",
+            );
             HostedError::Lifecycle("hosted channel reservation timed out")
         })?
     }

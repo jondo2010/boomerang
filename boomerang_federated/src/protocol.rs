@@ -29,6 +29,15 @@ impl WireTag {
         matches!(self, Self::Finite { .. })
     }
 
+    /// Returns the static kind name: `"never"`, `"finite"`, or `"forever"`.
+    pub const fn kind_str(self) -> &'static str {
+        match self {
+            Self::Never => "never",
+            Self::Finite { .. } => "finite",
+            Self::Forever => "forever",
+        }
+    }
+
     pub fn offset_ns(self) -> Option<i128> {
         match self {
             Self::Finite { offset_ns, .. } => Some(offset_ns),
@@ -124,6 +133,19 @@ impl WireDelay {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kind_str_distinguishes_sentinels_from_finite_tags() {
+        for (tag, kind) in [
+            (WireTag::NEVER, "never"),
+            (WireTag::FOREVER, "forever"),
+            (WireTag::ZERO, "finite"),
+            (WireTag::finite(i128::MIN, 0), "finite"),
+            (WireTag::finite(i128::MAX, u64::MAX), "finite"),
+        ] {
+            assert_eq!(tag.kind_str(), kind);
+        }
+    }
 
     #[test]
     fn wire_tags_order_sentinels_and_finite_tags() {

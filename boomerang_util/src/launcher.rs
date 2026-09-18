@@ -1,8 +1,16 @@
 //! Hosted process policy shared by generated Boomerang launchers.
 
-use std::io::{IsTerminal as _, Write as _};
+#[cfg(feature = "hosted-tracing")]
+use std::io::IsTerminal as _;
+use std::io::Write as _;
 
+#[cfg(feature = "hosted-tracing")]
 use tracing_subscriber::filter::EnvFilter;
+#[cfg(feature = "bounded-tracing")]
+mod bounded;
+/// Native setup configuration consumed by the bounded launcher initializer.
+#[cfg(feature = "bounded-tracing")]
+pub use tracing_bounded::Config as BoundedTracingConfig;
 #[cfg(feature = "test-tracing")]
 use tracing_subscriber::fmt::format::FmtSpan;
 
@@ -32,11 +40,13 @@ struct FinalTagDocumentV1 {
 /// Keeps hosted tracing output alive and reports lines dropped by its bounded lossy queue.
 #[must_use = "retain this guard until hosted execution and shutdown are complete"]
 #[derive(Debug)]
+#[cfg(feature = "hosted-tracing")]
 pub struct TracingGuard {
     error_counter: tracing_appender::non_blocking::ErrorCounter,
     _worker: tracing_appender::non_blocking::WorkerGuard,
 }
 
+#[cfg(feature = "hosted-tracing")]
 impl TracingGuard {
     /// Returns the number of formatted lines dropped because the pending-output queue was full.
     pub fn dropped_lines(&self) -> usize {
@@ -44,6 +54,7 @@ impl TracingGuard {
     }
 }
 
+#[cfg(feature = "hosted-tracing")]
 fn non_blocking_writer(
     writer: impl std::io::Write + Send + 'static,
 ) -> (tracing_appender::non_blocking::NonBlocking, TracingGuard) {
@@ -64,6 +75,7 @@ fn non_blocking_writer(
 ///
 /// Retain the returned guard until shutdown so the final buffered events are flushed. An already
 /// installed subscriber remains active.
+#[cfg(feature = "hosted-tracing")]
 pub fn init_tracing() -> TracingGuard {
     let filter = EnvFilter::builder()
         .with_default_directive(tracing_subscriber::filter::LevelFilter::OFF.into())
@@ -77,6 +89,27 @@ pub fn init_tracing() -> TracingGuard {
         .with_writer(writer)
         .try_init();
     guard
+}
+
+/// Owns bounded coordination capture through worker shutdown and exports it on drop.
+#[must_use = "retain until execution and all workers have stopped"]
+#[cfg(feature = "bounded-tracing")]
+pub struct BoundedTracingGuard {
+    _guard: bounded::Guard,
+}
+
+/// Installs native bounded coordination capture selected at build time.
+///
+/// Captures only the native `boomerang::coordination` target at DEBUG, independent of `RUST_LOG`.
+/// It exports JSON lines to stderr when the guard drops, after workers stop.
+/// Installation fails if another global subscriber is installed.
+/// The eight storage capacities come from `config`; filtering and reference/loss
+/// ceilings are fixed by the launcher policy, regardless of their supplied values.
+#[cfg(feature = "bounded-tracing")]
+pub fn init_bounded_tracing(config: BoundedTracingConfig) -> std::io::Result<BoundedTracingGuard> {
+    Ok(BoundedTracingGuard {
+        _guard: bounded::init(config)?,
+    })
 }
 
 /// Installs captured tracing with span lifecycle events for legacy test callers.
@@ -118,14 +151,66 @@ pub fn write_execution_summary(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "hosted-tracing")]
     use std::{
         io,
         sync::{Arc, Mutex},
     };
 
+    #[cfg(feature = "bounded-tracing")]
+    #[test]
+    fn bounded_shutdown_output_retains_native_scope_and_loss() {
+        let (subscriber, capture) =
+            tracing_bounded::BoundedSubscriber::new(tracing_bounded::Config {
+                records: 1,
+                ..Default::default()
+            })
+            .unwrap();
+        let _producer = capture.prepare_current_thread().unwrap();
+        tracing::subscriber::with_default(subscriber, || {
+            let span = tracing::info_span!(
+                "federate",
+                federate = 3u32,
+                coordination = [7u8; 32].as_slice()
+            );
+            span.in_scope(|| {
+                tracing::info!(event = "earlier");
+                tracing::info!(
+                    event = "last",
+                    tag_offset_ns = i128::MAX,
+                    tag_microstep = 7u64
+                );
+            });
+        });
+        let mut output = Vec::new();
+        super::bounded::write_capture(&mut output, &capture).unwrap();
+        let lines: Vec<serde_json::Value> = output
+            .split(|b| *b == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice(line).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0]["fields"]["event"], "last");
+        assert_eq!(
+            lines[0]["fields"]["tag_offset_ns"],
+            "170141183460469231731687303715884105727"
+        );
+        assert_eq!(lines[0]["fields"]["tag_microstep"], 7);
+        assert_eq!(lines[0]["scopes"][0]["fields"]["federate"], 3);
+        assert_eq!(
+            lines[0]["scopes"][0]["fields"]["coordination"],
+            serde_json::json!([7u8; 32].as_slice())
+        );
+        assert_eq!(lines[1]["loss"]["overwritten_records"]["value"], 1);
+        assert_eq!(lines[1]["loss"]["overwritten_records"]["saturated"], false);
+        assert_eq!(lines[1]["lifecycle_loss"]["span_admission"]["value"], 0);
+    }
+
     #[derive(Clone, Default)]
+    #[cfg(feature = "hosted-tracing")]
     struct Captured(Arc<Mutex<Vec<u8>>>);
 
+    #[cfg(feature = "hosted-tracing")]
     impl io::Write for Captured {
         fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
             self.0.lock().unwrap().extend_from_slice(bytes);
@@ -138,6 +223,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "hosted-tracing")]
     fn owned_guard_flushes_final_formatted_event() {
         let captured = Captured::default();
         let (writer, guard) = super::non_blocking_writer(captured.clone());

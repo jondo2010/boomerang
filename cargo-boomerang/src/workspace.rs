@@ -31,6 +31,8 @@ pub struct CargoPackage {
 /// Resolved target and runtime configuration for one Federate.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedFederate {
+    /// Validated, fully inherited bounded capture limits, absent for other backends.
+    pub bounded_tracing: Option<crate::BoundedTracingLimits>,
     /// Stable placement groups assigned to this Federate.
     pub groups: Vec<String>,
     /// Optional Rust target triple; absence selects the host target.
@@ -227,7 +229,12 @@ pub(crate) fn resolve_workspace_with_output(
     let federates = deployment
         .federates
         .iter()
-        .map(|(name, federate)| (name.clone(), resolve_federate(&workspace_root, federate)))
+        .map(|(name, federate)| {
+            let mut resolved = resolve_federate(&workspace_root, federate);
+            resolved.bounded_tracing =
+                deployment.bounded_tracing_limits(federate.bounded_tracing.as_ref());
+            (name.clone(), resolved)
+        })
         .collect();
     let lockfile = lockfile_identity(workspace_root.join("Cargo.lock"))?;
 
@@ -241,6 +248,8 @@ pub(crate) fn resolve_workspace_with_output(
             coordination: deployment.coordination.clone(),
             rti: deployment.rti.clone(),
             execution: deployment.execution.clone(),
+            tracing: deployment.tracing,
+            bounded_tracing: deployment.bounded_tracing.clone(),
             boundaries: deployment.boundaries.clone(),
         },
         packages,
@@ -432,6 +441,7 @@ fn workspace_member<'a>(metadata: &'a Metadata, name: &str) -> Result<&'a Packag
 /// Resolves workspace-relative Federate configuration paths.
 fn resolve_federate(workspace_root: &Path, federate: &Federate) -> ResolvedFederate {
     ResolvedFederate {
+        bounded_tracing: None,
         groups: federate.groups.clone(),
         target: federate.target.clone(),
         toolchain: federate.toolchain.clone(),

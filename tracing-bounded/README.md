@@ -6,8 +6,8 @@ wait for output capacity, allocate during capture, or corrupt execution context.
 
 **Status: unpublished initial implementation.** The public native subscriber
 captures primitive events with copied span context, bounded producer admission,
-span updates, reference handling and reuse. Application integration and complete
-target qualification remain outstanding; full conformance is not claimed. The
+span updates, reference handling and reuse. Initial Boomerang coordination integration
+is available; complete target qualification and full conformance remain outstanding. The
 package name is provisional; checking registry search results does not reserve it.
 
 [QUALIFICATION.md](QUALIFICATION.md) records a native emission-path
@@ -43,6 +43,12 @@ drop(producer);
 
 Keep the fixed global subscriber installed throughout execution. Prepare each
 emitting thread and retain its non-Send guard until that thread stops emitting.
+Libraries starting worker threads can use `prepare_current_thread()` after
+installing the inherited dispatcher. It returns an owned guard for a newly
+prepared native bounded subscriber, or `None` for other subscribers and a
+thread already prepared for the same subscriber. Nested use does not reset
+invalid context or take ownership of the outer guard. Setup failure remains
+visible through `lifecycle_loss().producer_admission`.
 Enter async task spans per poll; a prepared thread is not a task identity.
 Failed admission propagates an invalid span, never another span or a healthy root.
 Depth overflow or unbalanced exit invalidates that producer until teardown and
@@ -71,7 +77,7 @@ upper bound `C` covering all static native callsites in the process, including
 dependencies. Under the audited upstream registration algorithm, an insertion
 needs at most `C` compare-and-swap attempts. No replacement macros or callsite
 warm-up are required. This is a conditional source-level work bound, not a timing
-guarantee; implementation and full release qualification are still pending.
+guarantee; full release qualification is still pending.
 
 ## Fit and limitations
 

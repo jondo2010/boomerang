@@ -1,6 +1,66 @@
 use crate::{BoundedSubscriber, Config, Value};
 
 #[test]
+fn configuration_validation_rejects_scope_storage_overflow_without_allocating() {
+    let oversized = Config {
+        records: 2,
+        fields: 1,
+        bytes: 1,
+        spans: 1,
+        span_fields: 1,
+        span_bytes: 1,
+        producers: 1,
+        depth: (isize::MAX as usize) / 32,
+        ..Config::default()
+    };
+    crate::test_allocation::prepare();
+    let counts = crate::test_allocation::measure(|| {
+        assert!(Config::default().validate().is_ok());
+        assert!(matches!(
+            oversized.validate(),
+            Err(crate::BuildError::SizeOverflow)
+        ));
+    });
+    assert_eq!(counts.allocations, 0);
+    assert_eq!(counts.deallocations, 0);
+}
+
+#[test]
+fn dispatcher_preparation_keeps_nested_context_and_prepares_workers() {
+    let (subscriber, handle) = BoundedSubscriber::new(Config::default()).unwrap();
+    let dispatch = tracing::Dispatch::new(subscriber);
+    tracing::dispatcher::with_default(&dispatch, || {
+        let _producer = crate::prepare_current_thread().unwrap().unwrap();
+        let span = tracing::info_span!("parent", member = 7u64);
+        let _entered = span.enter();
+        assert!(crate::prepare_current_thread().unwrap().is_none());
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    tracing::dispatcher::with_default(&dispatch, || {
+                        let _producer = crate::prepare_current_thread().unwrap().unwrap();
+                        span.in_scope(|| tracing::info!(value = 42u64));
+                    })
+                })
+                .join()
+                .unwrap();
+        });
+        tracing::info!(value = 43u64);
+    });
+    let records = handle.snapshot();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].fields[0].value, Value::U64(42));
+    assert_eq!(records[1].fields[0].value, Value::U64(43));
+    for record in records {
+        assert_eq!(record.scopes[0].fields[0].value, Value::U64(7));
+    }
+    assert_eq!(handle.lifecycle_loss().producer_admission.value, 0);
+    tracing::subscriber::with_default(tracing::subscriber::NoSubscriber::default(), || {
+        assert!(crate::prepare_current_thread().unwrap().is_none());
+    });
+}
+
+#[test]
 fn native_scopes_updates_and_reclamation_keep_records_self_contained() {
     let (subscriber, handle) = BoundedSubscriber::new(Config::default()).unwrap();
     let _producer = handle.prepare_current_thread().unwrap();

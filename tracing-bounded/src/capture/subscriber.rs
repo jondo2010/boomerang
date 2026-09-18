@@ -176,11 +176,13 @@ fn prepared_mutex<T>(value: T) -> Mutex<T> {
     mutex
 }
 
-impl BoundedSubscriber {
-    /// Validate limits and allocate all callback storage. Shared `Arc` allocation
-    /// and platform mutex setup may abort on global allocation failure; explicit
-    /// array reservations return [`BuildError::Allocation`].
-    pub fn new(config: Config) -> Result<(Self, CaptureHandle), BuildError> {
+impl Config {
+    /// Checks structural capacities and storage arithmetic without allocating.
+    ///
+    /// Validation uses the current target's pointer width and layouts. It does
+    /// not guarantee that setup allocations will succeed on this or another target.
+    pub fn validate(&self) -> Result<(), BuildError> {
+        let config = self;
         if config.spans == 0
             || config.spans >= u32::MAX as usize
             || config.producers == 0
@@ -208,18 +210,33 @@ impl BoundedSubscriber {
                     )?,
                 )
             });
-        if total.is_none_or(|n| n > isize::MAX as usize) {
+        let events = Capture::validate(&self.event_limits(), self.depth)?;
+        if total
+            .and_then(|n| n.checked_add(events))
+            .is_none_or(|n| n > isize::MAX as usize)
+        {
             return Err(BuildError::SizeOverflow);
         }
-        let (capture, inspector) = Capture::with_scopes(
-            Limits {
-                records: config.records,
-                fields: config.fields,
-                bytes: config.bytes,
-                loss_ceiling: config.loss_ceiling,
-            },
-            config.depth,
-        )?;
+        Ok(())
+    }
+
+    fn event_limits(&self) -> Limits {
+        Limits {
+            records: self.records,
+            fields: self.fields,
+            bytes: self.bytes,
+            loss_ceiling: self.loss_ceiling,
+        }
+    }
+}
+
+impl BoundedSubscriber {
+    /// Validate limits and allocate all callback storage. Shared `Arc` allocation
+    /// and platform mutex setup may abort on global allocation failure; explicit
+    /// array reservations return [`BuildError::Allocation`].
+    pub fn new(config: Config) -> Result<(Self, CaptureHandle), BuildError> {
+        config.validate()?;
+        let (capture, inspector) = Capture::with_scopes(config.event_limits(), config.depth)?;
         let slots = boxed(config.spans, || {
             Ok(SpanSlot {
                 values: Slot::new(config.span_fields, config.span_bytes)?,
@@ -463,6 +480,29 @@ impl CaptureHandle {
         }
         parent.is_none()
     }
+}
+
+/// Prepare a worker for the current native bounded dispatcher, when installed.
+///
+/// Hold the returned guard until after all entered spans have exited. Returns
+/// `None` for other subscribers or a thread already prepared for this subscriber;
+/// nested callers neither reset its context nor take ownership of its guard.
+/// This setup helper belongs outside allocation-sensitive execution. Failure is
+/// counted in [`LifecycleLoss::producer_admission`]; capture never blocks work.
+pub fn prepare_current_thread() -> Result<Option<ProducerGuard>, PrepareError> {
+    tracing_core::dispatcher::get_default(|dispatch| {
+        let Some(subscriber) = dispatch.downcast_ref::<BoundedSubscriber>() else {
+            return Ok(None);
+        };
+        if subscriber.state.producer().is_some() {
+            return Ok(None);
+        }
+        CaptureHandle {
+            state: subscriber.state.clone(),
+        }
+        .prepare_current_thread()
+        .map(Some)
+    })
 }
 
 impl Drop for ProducerGuard {

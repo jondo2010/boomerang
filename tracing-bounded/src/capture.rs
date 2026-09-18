@@ -107,7 +107,7 @@ impl Capture {
         Self::with_scopes(limits, 0)
     }
 
-    fn with_scopes(limits: Limits, depth: usize) -> Result<(Self, Inspector), BuildError> {
+    fn validate(limits: &Limits, depth: usize) -> Result<usize, BuildError> {
         if limits.fields == 0 {
             return Err(BuildError::ZeroFields);
         }
@@ -130,14 +130,23 @@ impl Capture {
         let field_bytes = total_fields
             .checked_mul(mem::size_of::<Option<record::StoredField>>())
             .ok_or(BuildError::SizeOverflow)?;
+        let scope_bytes = slots
+            .checked_mul(depth)
+            .and_then(|n| n.checked_mul(mem::size_of::<Option<record::StoredScope>>()))
+            .ok_or(BuildError::SizeOverflow)?;
         let total_layout = slot_bytes
             .checked_add(field_bytes)
             .and_then(|layout| layout.checked_add(total_bytes))
+            .and_then(|layout| layout.checked_add(scope_bytes))
             .ok_or(BuildError::SizeOverflow)?;
         if total_layout > isize::MAX as usize {
             return Err(BuildError::SizeOverflow);
         }
+        Ok(total_layout)
+    }
 
+    fn with_scopes(limits: Limits, depth: usize) -> Result<(Self, Inspector), BuildError> {
+        Self::validate(&limits, depth)?;
         let mut ring = Vec::new();
         ring.try_reserve_exact(limits.records)
             .map_err(|_| BuildError::Allocation)?;

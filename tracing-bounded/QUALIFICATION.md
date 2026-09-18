@@ -225,5 +225,9 @@ process `first_native_span_lifecycle_does_not_allocate` test checks first-use na
 span creation, cloning, update, entry/current context, scoped event capture and
 final drops with zero allocator operations after preparation. It does not extend
 the audit binary's `C = 4` inventory to the library-test binary or an application.
-Boomerang integration, a complete application callsite/feature inventory and
-target-specific P8 evidence remain outstanding. Publication remains disabled.
+Boomerang now has optional coordination capture, prepared runtime/transport workers,
+and generated hosted off/streaming/bounded modes with shutdown export. Its native
+output tests cover deterministic worker preparation, first-failure retention after
+overwrite, and a concurrent exchange with explicit loss. The generated two-Federate
+test exercises all three modes. A complete application callsite/feature inventory
+and target-specific P8 evidence remain outstanding. Publication remains disabled.

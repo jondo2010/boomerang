@@ -4,7 +4,8 @@
 
 This is the normative contract for `tracing-bounded`, currently an unpublished
 initial native subscriber with bounded event/span storage and prepared producer
-contexts. Application integration and full release qualification remain incomplete.
+contexts. Initial Boomerang coordination integration is available; full release
+qualification remains incomplete.
 **MUST**, **MUST NOT**, and **SHOULD** denote requirements and recommendations.
 A release MUST disclose unmet requirements and MUST NOT claim full conformance
 for a partial implementation.

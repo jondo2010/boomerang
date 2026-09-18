@@ -18,8 +18,8 @@ mod test_allocation;
 
 mod capture;
 pub use capture::{
-    BoundedSubscriber, BuildError, CaptureHandle, Config, LifecycleLoss, LossCount, LossSnapshot,
-    OwnedField, PrepareError, ProducerGuard, Record, Scope, Value,
+    prepare_current_thread, BoundedSubscriber, BuildError, CaptureHandle, Config, LifecycleLoss,
+    LossCount, LossSnapshot, OwnedField, PrepareError, ProducerGuard, Record, Scope, Value,
 };
 
 #[doc = include_str!("../SPEC.md")]

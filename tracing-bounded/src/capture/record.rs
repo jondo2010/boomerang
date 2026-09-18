@@ -66,7 +66,7 @@ pub(super) struct Slot {
 }
 
 #[derive(Clone, Copy)]
-struct StoredScope {
+pub(super) struct StoredScope {
     metadata: &'static Metadata<'static>,
     start: usize,
     end: usize,

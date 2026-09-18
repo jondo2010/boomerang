@@ -12,6 +12,9 @@ use boomerang_central_rti::compiled::{
     CentralRtiClient, CompiledRti, CoordinationIdentity, RtiClientBindings, RtiReply, RtiRequest,
 };
 use boomerang_central_rti::WireTag;
+use boomerang_federated::conformance::{
+    tagged_payload_exchange, Member, Outcome, ReferenceCoordinator, Route, VectorStep,
+};
 use boomerang_runtime::{execute_owned_federate_with_backend, image::*};
 use std::sync::Arc;
 
@@ -255,6 +258,187 @@ fn admitted_rti() -> CompiledRti<'static> {
         rti.handle(member, RtiRequest::Hello { identity: IDENTITY });
     }
     rti
+}
+
+/// Test-only bridge between the portable vector domains and this fixture image.
+struct ReferenceVectorAdapter;
+
+impl ReferenceVectorAdapter {
+    fn member(member: Member) -> FederateIndex {
+        if member == Member::new(0) {
+            MEMBERS[0]
+        } else if member == Member::new(1) {
+            MEMBERS[1]
+        } else {
+            panic!("vector member is absent from compiled fixture")
+        }
+    }
+
+    fn vector_member(member: FederateIndex) -> Member {
+        if member == MEMBERS[0] {
+            Member::new(0)
+        } else if member == MEMBERS[1] {
+            Member::new(1)
+        } else {
+            panic!("compiled fixture member is absent from vector")
+        }
+    }
+
+    fn route(route: Route) -> RtiRouteIndex {
+        if route == Route::new(0) {
+            RtiRouteIndex::new(0)
+        } else {
+            panic!("vector route is absent from compiled fixture")
+        }
+    }
+
+    fn vector_route(route: RtiRouteIndex) -> Route {
+        if route == RtiRouteIndex::new(0) {
+            Route::new(0)
+        } else {
+            panic!("compiled fixture route is absent from vector")
+        }
+    }
+
+    fn request(step: VectorStep) -> (FederateIndex, RtiRequest) {
+        match step {
+            VectorStep::Publish {
+                member,
+                revision,
+                next_event,
+            } => (
+                Self::member(member),
+                RtiRequest::Publish {
+                    revision,
+                    next_event,
+                },
+            ),
+            VectorStep::Complete { member, tag } => {
+                (Self::member(member), RtiRequest::Complete { tag })
+            }
+            VectorStep::Payload { member, route, tag } => (
+                Self::member(member),
+                RtiRequest::Payload {
+                    route: Self::route(route),
+                    tag,
+                    payload: vec![],
+                },
+            ),
+            VectorStep::Stop { .. } => panic!("this NET/DNET/LTC vector does not stop members"),
+        }
+    }
+
+    fn observation(delivery: boomerang_central_rti::compiled::RtiDelivery) -> VectorObservation {
+        let boomerang_central_rti::compiled::RtiDelivery { member, reply } = delivery;
+        match reply {
+            RtiReply::Grant { revision, tag } => VectorObservation::Semantic(Outcome::grant(
+                Self::vector_member(member),
+                revision,
+                tag,
+            )),
+            RtiReply::Payload { route, tag, .. } => VectorObservation::Semantic(Outcome::payload(
+                Self::vector_member(member),
+                Self::vector_route(route),
+                tag,
+            )),
+            RtiReply::Stopped => VectorObservation::Semantic(Outcome::Stopped {
+                member: Self::vector_member(member),
+            }),
+            RtiReply::Started => VectorObservation::Started {
+                member: Self::vector_member(member),
+            },
+            RtiReply::Idle { revision } => VectorObservation::Idle {
+                member: Self::vector_member(member),
+                revision,
+            },
+            RtiReply::Failed { message } => VectorObservation::Failed {
+                member: Self::vector_member(member),
+                message,
+            },
+            RtiReply::SuppressPublication { tag } => VectorObservation::Suppress {
+                member: Self::vector_member(member),
+                tag,
+            },
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum VectorObservation {
+    Semantic(Outcome),
+    Started { member: Member },
+    Idle { member: Member, revision: u64 },
+    Failed { member: Member, message: String },
+    Suppress { member: Member, tag: WireTag },
+}
+
+struct VectorExecution {
+    observations: Vec<VectorObservation>,
+    semantic_outcomes: Vec<Outcome>,
+    dnet_controls: usize,
+}
+
+fn run_reference_vector(vector: impl IntoIterator<Item = VectorStep>) -> VectorExecution {
+    let mut rti = admitted_rti();
+    let mut observations = Vec::new();
+    let mut semantic_outcomes = Vec::new();
+    let mut dnet_controls = 0;
+    for step in vector {
+        let (member, request) = ReferenceVectorAdapter::request(step);
+        for delivery in rti.handle(member, request) {
+            let observation = ReferenceVectorAdapter::observation(delivery);
+            dnet_controls += usize::from(matches!(observation, VectorObservation::Suppress { .. }));
+            if let VectorObservation::Semantic(outcome) = &observation {
+                semantic_outcomes.push(*outcome);
+            }
+            observations.push(observation);
+        }
+    }
+    VectorExecution {
+        observations,
+        semantic_outcomes,
+        dnet_controls,
+    }
+}
+
+/// Checks one hand-authored NET/DNET/LTC exchange against the portable oracle.
+#[test]
+fn compiled_rti_outcomes_are_permitted_by_the_reference_vector() {
+    let exchange = tagged_payload_exchange();
+    let (source, destination, route, tag, members, topology, vector, expected) = (
+        exchange.source,
+        exchange.destination,
+        exchange.route,
+        exchange.tag,
+        exchange.members,
+        exchange.topology,
+        exchange.steps,
+        exchange.expected_outcomes,
+    );
+    let mut oracle = ReferenceCoordinator::new(members, topology, 1).unwrap();
+    let oracle_outcomes = vector
+        .into_iter()
+        .flat_map(|step| oracle.apply(step))
+        .collect::<Vec<_>>();
+    assert_eq!(oracle_outcomes, expected);
+
+    let execution = run_reference_vector(vector);
+    let expected_observations = [
+        VectorObservation::Semantic(Outcome::grant(source, 0, WireTag::FOREVER)),
+        VectorObservation::Suppress {
+            member: source,
+            tag: WireTag::finite(0, u64::MAX),
+        },
+        VectorObservation::Suppress {
+            member: destination,
+            tag: WireTag::FOREVER,
+        },
+        VectorObservation::Semantic(Outcome::payload(destination, route, tag)),
+        VectorObservation::Semantic(Outcome::grant(destination, 0, WireTag::FOREVER)),
+    ];
+    assert_eq!(execution.observations, expected_observations);
+    assert_eq!(execution.semantic_outcomes, expected);
+    assert_eq!(execution.dnet_controls, 2);
 }
 
 /// Rejects payload submission before the delayed source completion frontier.

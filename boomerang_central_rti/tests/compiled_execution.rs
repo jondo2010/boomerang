@@ -239,6 +239,9 @@ fn execute_pair(mismatch: bool, fail_rti: bool, fail_scheduler: bool) {
 /// Runs separate compiled schedulers through the production RTI state and client.
 #[test]
 fn compiled_federates_exchange_tagged_payload_through_rti() {
+    if !client::run_trace_test() {
+        return;
+    }
     let (_, events) = client::capture_coordination(|| execute_pair(false, false, false));
     for kind in [
         "coordination.reaction.started",
@@ -345,6 +348,9 @@ fn coordination_identity_mismatch_rejects_both_federates() {
 /// Propagates a terminal RTI failure to both blocked executors.
 #[test]
 fn rti_failure_releases_both_compiled_federates() {
+    if !client::run_trace_test() {
+        return;
+    }
     let (_, events) = client::capture_coordination(|| execute_pair(false, true, false));
     assert_eq!(
         events
@@ -687,6 +693,9 @@ fn positive_delay_completion_does_not_cover_later_source_microsteps() {
 /// Aborts the blocked receiver after a local encoder failure.
 #[test]
 fn scheduler_failure_releases_blocked_peer() {
+    if !client::run_trace_test() {
+        return;
+    }
     let (_, events) = client::capture_coordination(|| execute_pair(false, false, true));
     assert!(events
         .iter()

@@ -116,7 +116,8 @@ fn capture_runtime<T>(run: impl FnOnce() -> T) -> (T, Vec<serde_json::Value>) {
 }
 
 fn run_runtime_trace_test(test: &str) -> bool {
-    if std::env::var_os("BOOMERANG_RUNTIME_TRACE_CHILD").is_some() {
+    // Miri cannot spawn processes; its nextest runner already isolates each test.
+    if cfg!(miri) || std::env::var_os("BOOMERANG_RUNTIME_TRACE_CHILD").is_some() {
         return true;
     }
     let status = std::process::Command::new(std::env::current_exe().unwrap())

@@ -49,6 +49,22 @@ pub(super) fn capture_coordination<T>(run: impl FnOnce() -> T) -> (T, Vec<serde_
     (result, events)
 }
 
+/// Isolate callsite caching from parallel tests with different tracing dispatchers.
+pub(super) fn run_trace_test() -> bool {
+    if cfg!(miri) || std::env::var_os("BOOMERANG_RTI_TRACE_CHILD").is_some() {
+        return true;
+    }
+    let thread = std::thread::current();
+    let test = thread.name().expect("libtest thread name");
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", test])
+        .env("BOOMERANG_RTI_TRACE_CHILD", "1")
+        .status()
+        .expect("RTI trace child starts");
+    assert!(status.success(), "RTI trace child failed: {status}");
+    false
+}
+
 #[derive(Default)]
 struct Script {
     replies: VecDeque<RtiReply>,
@@ -161,6 +177,9 @@ fn execute_script(
 
 #[test]
 fn multiple_payloads_are_admitted_in_order_before_grant_and_execute_at_their_tags() {
+    if !run_trace_test() {
+        return;
+    }
     bounded(|| {
         let script = Arc::new(Mutex::new(Script {
             replies: [
@@ -254,6 +273,9 @@ fn one_horizon_executes_multiple_events_without_another_rti_grant() {
 
 #[test]
 fn decode_failure_terminates_execution_before_queued_grant() {
+    if !run_trace_test() {
+        return;
+    }
     let (_, events) = capture_coordination(|| {
         bounded(|| {
             let script = Arc::new(Mutex::new(Script {
@@ -397,6 +419,9 @@ fn outbound_payload_tightens_dnet_before_the_next_publication() {
 
 #[test]
 fn tightened_dnet_trace_explains_the_restored_net() {
+    if !run_trace_test() {
+        return;
+    }
     use boomerang_runtime::{
         CoordinationRevision, FederateCoordinationBackend, FederatePublication,
     };

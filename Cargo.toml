@@ -58,6 +58,7 @@ members = [
     "boomerang_macros",
     "boomerang_runtime",
     "boomerang_tinymap",
+    "tracing-bounded",
     "cargo-boomerang",
     "examples/snake",
     "examples/snake/game",

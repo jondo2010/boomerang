@@ -1,6 +1,8 @@
 use std::{fmt, num::NonZeroU16, sync::mpsc, thread, time::Duration};
 
-use tracing_core::{span, subscriber::Interest, Event, Level, LevelFilter, Metadata, Subscriber};
+use tracing_core::{
+    span, subscriber::Interest, Callsite, Event, Level, LevelFilter, Metadata, Subscriber,
+};
 
 use super::{
     record::{OwnedField, Value},
@@ -129,6 +131,70 @@ fn rejected_event_preserves_old_output_and_success_overwrites_oldest() {
     });
     assert_eq!(numbers(&inspect.snapshot()), vec![2, 3]);
     assert_eq!(inspect.loss().overwritten_records.value, 1);
+}
+
+#[test]
+fn manual_positional_values_retain_declared_field_identities() {
+    let (dispatch, inspect) = setup(1, 2, 1, 20);
+    tracing::dispatcher::with_default(&dispatch, || {
+        let callsite = tracing::callsite! {
+            name: "manual positional",
+            kind: tracing_core::metadata::Kind::EVENT,
+            target: "capture-test",
+            level: Level::INFO,
+            fields: count, ready
+        };
+        let metadata = callsite.metadata();
+        let values: [Option<&dyn tracing_core::field::Value>; 2] = [Some(&7u64), Some(&true)];
+        Event::child_of(None, metadata, &metadata.fields().value_set_all(&values));
+    });
+
+    let record = only_record(&inspect);
+    assert_eq!(record.metadata.name(), "manual positional");
+    assert_eq!(
+        record.fields,
+        vec![
+            field("count", Value::U64(7)),
+            field("ready", Value::Bool(true))
+        ]
+    );
+    assert_eq!(inspect.loss(), LossSnapshot::default());
+}
+
+#[test]
+fn manual_sparse_reordered_values_retain_supplied_field_identities() {
+    let (dispatch, inspect) = setup(1, 4, 1, 20);
+    tracing::dispatcher::with_default(&dispatch, || {
+        let callsite = tracing::callsite! {
+            name: "manual sparse",
+            kind: tracing_core::metadata::Kind::EVENT,
+            target: "capture-test",
+            level: Level::INFO,
+            fields: count, absent, ready, omitted
+        };
+        let metadata = callsite.metadata();
+        let fields = metadata.fields();
+        let count = fields.field("count").unwrap();
+        let absent = fields.field("absent").unwrap();
+        let ready = fields.field("ready").unwrap();
+        let values = [
+            (&ready, Some(&true as &dyn tracing_core::field::Value)),
+            (&absent, None),
+            (&count, Some(&7u64 as &dyn tracing_core::field::Value)),
+        ];
+        Event::child_of(None, metadata, &fields.value_set(&values));
+    });
+
+    let record = only_record(&inspect);
+    assert_eq!(record.metadata.name(), "manual sparse");
+    assert_eq!(
+        record.fields,
+        vec![
+            field("ready", Value::Bool(true)),
+            field("count", Value::U64(7))
+        ]
+    );
+    assert_eq!(inspect.loss(), LossSnapshot::default());
 }
 
 #[test]

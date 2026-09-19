@@ -5,27 +5,53 @@ use tracing_core::{
 
 use super::{BuildError, Reject};
 
+/// A complete event and its copied ancestry, independent of live span storage.
 #[derive(Debug, PartialEq)]
-pub(super) struct Record {
-    pub(super) metadata: &'static Metadata<'static>,
-    pub(super) fields: Vec<OwnedField>,
+pub struct Record {
+    /// Native static event metadata.
+    pub metadata: &'static Metadata<'static>,
+    /// Event fields, separate from scope fields with the same names.
+    pub fields: Vec<OwnedField>,
+    /// Captured ancestry, ordered root to leaf and independent of live spans.
+    pub scopes: Vec<Scope>,
 }
 
+/// An owned copy of one event's span context.
 #[derive(Debug, PartialEq)]
-pub(super) struct OwnedField {
-    pub(super) name: &'static str,
-    pub(super) value: Value,
+pub struct Scope {
+    /// Native static span metadata.
+    pub metadata: &'static Metadata<'static>,
+    /// Values as observed when the event was committed.
+    pub fields: Vec<OwnedField>,
 }
 
+/// A field name and its owned native value.
 #[derive(Debug, PartialEq)]
-pub(super) enum Value {
+pub struct OwnedField {
+    /// Static name declared by the callsite.
+    pub name: &'static str,
+    /// Captured value; strings and bytes are owned.
+    pub value: Value,
+}
+
+/// Primitive representations retained without formatting or numeric narrowing.
+#[derive(Debug, PartialEq)]
+pub enum Value {
+    /// Boolean.
     Bool(bool),
+    /// Signed integer up to 64 bits.
     I64(i64),
+    /// Unsigned integer up to 64 bits.
     U64(u64),
+    /// Signed 128-bit integer.
     I128(i128),
+    /// Unsigned 128-bit integer.
     U128(u128),
+    /// Native floating-point value, including NaNs and signed zero.
     F64(f64),
+    /// Copied UTF-8 string.
     Str(String),
+    /// Copied byte slice.
     Bytes(Vec<u8>),
 }
 
@@ -35,11 +61,21 @@ pub(super) struct Slot {
     bytes: Box<[u8]>,
     fields_used: usize,
     bytes_used: usize,
+    scopes: Box<[Option<StoredScope>]>,
+    scopes_used: usize,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct StoredScope {
+    metadata: &'static Metadata<'static>,
+    start: usize,
+    end: usize,
 }
 
 #[derive(Clone, Copy)]
 pub(super) struct StoredField {
     name: &'static str,
+    index: usize,
     value: StoredValue,
 }
 
@@ -63,6 +99,14 @@ struct ByteRange {
 
 impl Slot {
     pub(super) fn new(field_capacity: usize, byte_capacity: usize) -> Result<Self, BuildError> {
+        Self::with_scopes(field_capacity, byte_capacity, 0)
+    }
+
+    pub(super) fn with_scopes(
+        field_capacity: usize,
+        byte_capacity: usize,
+        depth: usize,
+    ) -> Result<Self, BuildError> {
         let mut fields = Vec::new();
         fields
             .try_reserve_exact(field_capacity)
@@ -74,6 +118,11 @@ impl Slot {
             .try_reserve_exact(byte_capacity)
             .map_err(|_| BuildError::Allocation)?;
         bytes.resize(byte_capacity, 0);
+        let mut scopes = Vec::new();
+        scopes
+            .try_reserve_exact(depth)
+            .map_err(|_| BuildError::Allocation)?;
+        scopes.resize(depth, None);
 
         Ok(Self {
             metadata: None,
@@ -81,6 +130,8 @@ impl Slot {
             bytes: bytes.into_boxed_slice(),
             fields_used: 0,
             bytes_used: 0,
+            scopes: scopes.into_boxed_slice(),
+            scopes_used: 0,
         })
     }
 
@@ -88,6 +139,7 @@ impl Slot {
         self.metadata = Some(metadata);
         self.fields_used = 0;
         self.bytes_used = 0;
+        self.scopes_used = 0;
     }
 
     pub(super) fn visitor(&mut self) -> SlotVisitor<'_> {
@@ -99,7 +151,30 @@ impl Slot {
 
     pub(super) fn snapshot(&self) -> Record {
         let metadata = self.metadata.expect("live slot must have metadata");
-        let fields = self.fields[..self.fields_used]
+        let event_start = self
+            .scopes_used
+            .checked_sub(1)
+            .map_or(0, |last| self.scopes[last].unwrap().end);
+        let fields = self.owned_fields(event_start, self.fields_used);
+        let scopes = self.scopes[..self.scopes_used]
+            .iter()
+            .map(|scope| {
+                let scope = scope.unwrap();
+                Scope {
+                    metadata: scope.metadata,
+                    fields: self.owned_fields(scope.start, scope.end),
+                }
+            })
+            .collect();
+        Record {
+            metadata,
+            fields,
+            scopes,
+        }
+    }
+
+    fn owned_fields(&self, start: usize, end: usize) -> Vec<OwnedField> {
+        self.fields[start..end]
             .iter()
             .map(|field| {
                 let field = field.expect("live field range must be initialized");
@@ -108,8 +183,73 @@ impl Slot {
                     value: self.owned_value(field.value),
                 }
             })
-            .collect();
-        Record { metadata, fields }
+            .collect()
+    }
+
+    pub(super) fn metadata(&self) -> &'static Metadata<'static> {
+        self.metadata.expect("initialized slot")
+    }
+
+    pub(super) fn remaining_fields(&self) -> usize {
+        self.fields.len() - self.fields_used
+    }
+
+    pub(super) fn append_scope(&mut self, source: &Self) -> Result<(), Reject> {
+        if self.scopes_used == self.scopes.len() {
+            return Err(Reject::InvalidContext);
+        }
+        let start = self.fields_used;
+        for field in source.fields[..source.fields_used].iter().flatten() {
+            self.copy_field(source, *field)?;
+        }
+        self.scopes[self.scopes_used] = Some(StoredScope {
+            metadata: source.metadata(),
+            start,
+            end: self.fields_used,
+        });
+        self.scopes_used += 1;
+        Ok(())
+    }
+
+    // Updates are first visited into scratch, then untouched values are copied.
+    // Rebuilding compacts byte storage instead of consuming capacity per update.
+    pub(super) fn retain_unmodified(&mut self, source: &Self) -> Result<(), Reject> {
+        for field in source.fields[..source.fields_used].iter().flatten() {
+            if !self.fields[..self.fields_used]
+                .iter()
+                .flatten()
+                .any(|new| new.index == field.index)
+            {
+                self.copy_field(source, *field)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn copy_field(&mut self, source: &Self, mut field: StoredField) -> Result<(), Reject> {
+        if self.remaining_fields() == 0 {
+            return Err(Reject::FieldLimit);
+        }
+        if let StoredValue::Str(range) | StoredValue::Bytes(range) = field.value {
+            let bytes = source.byte_range(range);
+            if bytes.len() > self.bytes.len() - self.bytes_used {
+                return Err(Reject::ByteLimit);
+            }
+            let copied = ByteRange {
+                start: self.bytes_used,
+                len: bytes.len(),
+            };
+            self.bytes[self.bytes_used..self.bytes_used + bytes.len()].copy_from_slice(bytes);
+            self.bytes_used += bytes.len();
+            field.value = if matches!(field.value, StoredValue::Str(_)) {
+                StoredValue::Str(copied)
+            } else {
+                StoredValue::Bytes(copied)
+            };
+        }
+        self.fields[self.fields_used] = Some(field);
+        self.fields_used += 1;
+        Ok(())
     }
 
     fn owned_value(&self, value: StoredValue) -> Value {
@@ -157,6 +297,7 @@ impl SlotVisitor<'_> {
         };
         *destination = Some(StoredField {
             name: field.name(),
+            index: field.index(),
             value,
         });
         self.slot.fields_used += 1;

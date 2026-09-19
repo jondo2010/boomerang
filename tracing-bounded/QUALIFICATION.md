@@ -5,8 +5,8 @@
 This report covers the native-path audit in `tests/native_path/`, not a production
 `tracing-bounded` subscriber. Its allocator observer is `src/test_allocation.rs`,
 shared with unit tests and absent from production builds.
-The crate now has a private root-event backend and remains unpublished; its
-separate first-event regression is described in [README.md](README.md).
+The crate also has a public native subscriber and remains unpublished; its
+separate subscriber and backend regressions are described in [README.md](README.md).
 This is evidence for the upstream part of specification P2/P8/Q1 only.
 
 The audit installs one test-only native `Subscriber`, emits ordinary `tracing`
@@ -59,6 +59,8 @@ cargo +nightly miri test -p tracing-bounded --test native_path -- first-use
 cargo +nightly miri test -p tracing-bounded --test native_path -- unsupported
 cargo +nightly miri test -p tracing-bounded --lib -- \
   --ignored --exact capture::first_backend_event_does_not_allocate
+cargo +nightly miri test -p tracing-bounded --lib -- \
+  --ignored --exact subscriber_tests::first_native_span_lifecycle_does_not_allocate
 ```
 
 Ordinary `cargo test` runs the unit tests and the native-path allocation test
@@ -166,6 +168,36 @@ about wall-clock latency, OS scheduling, hardware implementation of atomics,
 general span lifecycle, or an arbitrary subscriber's callback behavior. The
 allocation observations are additional evidence, not a proof of this retry bound.
 
+## Value-set shape and visitation bound
+
+P2 requires macro-shaped value sets from all producers, including dependencies
+and manual native emission. For `tracing-core 0.1.36`, `Event::record`
+(`src/event.rs:86–87`) delegates to `ValueSet::record`
+(`src/field.rs:1068–1090`). Its explicit branch scans every supplied pair, even
+foreign or empty entries, and continues after a visitor latches rejection.
+Explicit arrays can be larger than the metadata field set or repeat fields;
+neither subscriber storage limits nor early visitor rejection bound that scan.
+`Event::fields` exposes declared fields, not the underlying entries, and no
+public event accessor exposes their count for a constant-work preflight check.
+
+Under P2, the total entries are at most the declared field count. The backend
+checks that count against its configured field limit before visitation, so the
+upstream loop also has that bound. Positional values match the declared fields;
+sparse/reordered explicit values use each declared field at most once. The
+restriction is a deployment precondition, not a runtime validator: arbitrary
+out-of-profile value sets have no bounded-work or rejection/accounting guarantee.
+Unsupported representations within the shape still undergo P4 rejection without
+formatting. Re-audit both native macro expansion and manual producers when
+dependencies or instrumentation change.
+
+The backend's `manual_positional_values_retain_declared_field_identities` and
+`manual_sparse_reordered_values_retain_supplied_field_identities` tests dispatch
+hand-built root events through native `Event::child_of` and assert retained
+metadata, exact ordered fields and zero loss. These characterize existing root
+capture behavior; they are not shape enforcement, an allocation measurement or
+span qualification. Their callsites are in the unit-test binary and do not
+change the separate native-path audit's `C = 4` inventory.
+
 ## Component assessment
 
 The following source assessments explain why these candidates were not adopted
@@ -186,9 +218,16 @@ components exist.
 ## Remaining release conditions
 
 The audit establishes narrow upstream native-output/allocation observations
-and an artifact-specific Q1 registration argument. The reusable subscriber,
-public snapshot API, span storage and lifetime handling, complete memory bound,
-product examples, and remaining P8 matrix are **unimplemented**. The private
-backend's record storage, rejection/overflow counters and internal snapshots do
-not extend this audit's claims. Span/dispatch lifetimes and actual producer
-preparation still need their own emission-path audit. Publication remains disabled.
+and an artifact-specific Q1 registration argument. Separate public-subscriber tests
+exercise preparation, inherited snapshots, cross-thread handles, updates, slot
+reuse, invalid context, reference limits and lock-independent releases. The fresh
+process `first_native_span_lifecycle_does_not_allocate` test checks first-use native
+span creation, cloning, update, entry/current context, scoped event capture and
+final drops with zero allocator operations after preparation. It does not extend
+the audit binary's `C = 4` inventory to the library-test binary or an application.
+Boomerang now has optional coordination capture, prepared runtime/transport workers,
+and generated hosted off/streaming/bounded modes with shutdown export. Its native
+output tests cover deterministic worker preparation, first-failure retention after
+overwrite, and a concurrent exchange with explicit loss. The generated two-Federate
+test exercises all three modes. A complete application callsite/feature inventory
+and target-specific P8 evidence remain outstanding. Publication remains disabled.

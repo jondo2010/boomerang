@@ -1,16 +1,31 @@
+#![no_std]
 #![doc=include_str!( "../README.md")]
 //! ## Feature flags
 #![doc = document_features::document_features!()]
 #![deny(clippy::all)]
 
+#[cfg(feature = "alloc")]
+#[macro_use]
+pub extern crate alloc;
+#[cfg(test)]
+extern crate std;
+
+mod error;
+#[cfg(feature = "alloc")]
 pub mod key_set;
+#[cfg(feature = "alloc")]
 pub mod map;
 mod range;
+#[cfg(feature = "alloc")]
 pub mod secondary_map;
 
+pub use error::TinyMapError;
+#[cfg(feature = "alloc")]
 pub use key_set::KeySet;
+#[cfg(feature = "alloc")]
 pub use map::{CapacityError, TinyMap, TinyMapView};
 pub use range::{IndexSpan, SliceRange};
+#[cfg(feature = "alloc")]
 pub use secondary_map::TinySecondaryMap;
 
 /// A key that identifies a value by its dense table index.
@@ -76,8 +91,17 @@ macro_rules! key_type {
             }
         }
 
-        impl std::str::FromStr for $name {
-            type Err = String;
+        $crate::__key_type_from_str!($name);
+    };
+}
+
+#[cfg(feature = "alloc")]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __key_type_from_str {
+    ($name:ident) => {
+        impl ::core::str::FromStr for $name {
+            type Err = $crate::alloc::string::String;
 
             fn from_str(s: &str) -> Result<Self, Self::Err> {
                 const PREFIX: &str = concat!(stringify!($name), "(");
@@ -95,12 +119,19 @@ macro_rules! key_type {
     };
 }
 
+#[cfg(not(feature = "alloc"))]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __key_type_from_str {
+    ($name:ident) => {};
+}
+
 key_type!(pub DefaultKey);
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::str::FromStr;
+    use std::{str::FromStr, string::ToString};
 
     #[test]
     fn test_key_type() {

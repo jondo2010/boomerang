@@ -1,6 +1,6 @@
 use super::*;
 
-use std::marker::PhantomData;
+use core::marker::PhantomData;
 
 pub struct IterManyMut<'a, K: Key, V, I>
 where

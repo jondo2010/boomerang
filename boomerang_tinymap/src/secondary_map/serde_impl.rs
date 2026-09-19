@@ -31,7 +31,7 @@ where
 {
     type Value = TinySecondaryMap<K, V>;
 
-    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+    fn expecting(&self, formatter: &mut core::fmt::Formatter) -> core::fmt::Result {
         formatter.write_str("map")
     }
 

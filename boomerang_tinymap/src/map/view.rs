@@ -84,6 +84,7 @@ impl<K: Key, V> Index<K> for TinyMapView<'_, K, V> {
 #[cfg(test)]
 mod tests {
     use crate::{map::TinyMapView, IndexSpan, Key};
+    use std::vec::Vec;
 
     crate::key_type!(TestKey);
 

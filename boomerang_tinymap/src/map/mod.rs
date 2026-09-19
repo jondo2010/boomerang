@@ -19,7 +19,8 @@
 //! assert_eq!(map[key1], 10);
 //! assert_eq!(map[key2], 20);
 //! ```
-use std::{
+use alloc::{format, vec::Vec};
+use core::{
     fmt::{Debug, Display},
     iter::Enumerate,
     marker::PhantomData,
@@ -66,7 +67,7 @@ impl CapacityError {
 }
 
 impl Display for CapacityError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(
             formatter,
             "dense collection length {} exceeds key capacity {}",
@@ -75,6 +76,7 @@ impl Display for CapacityError {
     }
 }
 
+#[cfg(feature = "std")]
 impl std::error::Error for CapacityError {}
 
 /// A map that uses a custom key type to index its values.
@@ -89,14 +91,14 @@ pub struct TinyMap<K: Key, V> {
 }
 
 impl<K: Key + Debug, V: Debug> Debug for TinyMap<K, V> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_map().entries(self.iter()).finish()
     }
 }
 
 impl<K: Key + Display, V: Display> Display for TinyMap<K, V> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let ty = std::any::type_name::<Self>();
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let ty = core::any::type_name::<Self>();
         let vals = self
             .values()
             .map(|v| format!("{v}"))
@@ -117,13 +119,13 @@ impl<K: Key, V> Default for TinyMap<K, V> {
 
 #[derive(Debug)]
 pub struct Iter<'a, K: Key, V> {
-    inner: Enumerate<std::slice::Iter<'a, V>>,
+    inner: Enumerate<core::slice::Iter<'a, V>>,
     _k: PhantomData<K>,
 }
 
 #[derive(Debug)]
 pub struct IntoIter<K: Key, V> {
-    inner: Enumerate<std::vec::IntoIter<V>>,
+    inner: Enumerate<alloc::vec::IntoIter<V>>,
     _k: PhantomData<K>,
 }
 

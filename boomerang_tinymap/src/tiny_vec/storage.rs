@@ -59,12 +59,8 @@ impl<T> Default for HeapStorage<T> {
     }
 }
 
-/// Access to the backing slots used by the builder.
-///
-/// This is documentation-hidden because callers construct builders through
-/// the supported storage adapters rather than implementing storage directly.
-#[doc(hidden)]
-pub trait Storage<T> {
+/// Private access to the backing slots used by the builder.
+pub(super) trait Storage<T> {
     fn capacity(&self) -> usize;
     fn write_slot(&mut self, index: usize, value: T);
     fn drop_slot(&mut self, index: usize);

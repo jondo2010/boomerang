@@ -6,8 +6,7 @@ use crate::TinyMapError;
 
 #[cfg(feature = "alloc")]
 pub use storage::HeapStorage;
-#[doc(hidden)]
-pub use storage::Storage;
+use storage::Storage;
 pub use storage::{BorrowedStorage, InlineStorage};
 
 /// A not-yet-sealed sequence builder.
@@ -16,6 +15,7 @@ pub use storage::{BorrowedStorage, InlineStorage};
 /// storage interface remains private so callers cannot observe or alter the
 /// initialized-slot metadata. Inline and borrowed storage have fixed capacity;
 /// heap storage may grow and allocate while values are appended.
+#[allow(private_bounds)]
 pub struct TinyVecBuilder<T, B: Storage<T>> {
     backing: B,
     initialized: usize,
@@ -26,6 +26,7 @@ pub struct TinyVecBuilder<T, B: Storage<T>> {
 ///
 /// A sealed sequence can move freely. It deliberately offers only borrowed
 /// value views, not structural mutation.
+#[allow(private_bounds)]
 pub struct SealedTinyVec<T, B: Storage<T>> {
     backing: B,
     initialized: usize,
@@ -45,6 +46,7 @@ pub struct TinyVecMut<'a, T> {
     values: &'a mut [T],
 }
 
+#[allow(private_bounds)]
 impl<T, B: Storage<T>> TinyVecBuilder<T, B> {
     /// Returns the number of values currently initialized in the builder.
     pub const fn len(&self) -> usize {
@@ -163,6 +165,7 @@ impl<T, B: Storage<T>> Drop for TinyVecBuilder<T, B> {
     }
 }
 
+#[allow(private_bounds)]
 impl<T, B: Storage<T>> SealedTinyVec<T, B> {
     /// Returns the number of fixed-shape values in this sealed sequence.
     pub const fn len(&self) -> usize {
@@ -964,6 +967,10 @@ mod tests {
         );
         assert_eq!(
             core::mem::size_of::<TinyVecBuilder<u16, InlineStorage<u16, 3>>>(),
+            core::mem::size_of::<(InlineStorage<u16, 3>, usize)>(),
+        );
+        assert_eq!(
+            core::mem::size_of::<super::SealedTinyVec<u16, InlineStorage<u16, 3>>>(),
             core::mem::size_of::<(InlineStorage<u16, 3>, usize)>(),
         );
     }

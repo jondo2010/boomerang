@@ -6,6 +6,105 @@ fn panicking_initializer() -> CounterState {
 }
 
 #[test]
+#[cfg(feature = "bounded-tracing")]
+fn bounded_runtime_trace_distinguishes_physical_and_logical_admission() {
+    if !run_runtime_trace_test(
+        "lifecycle::bounded_runtime_trace_distinguishes_physical_and_logical_admission",
+    ) {
+        return;
+    }
+    use boomerang_runtime::{
+        Action, AsyncEvent, AsyncEventTarget, CommonContext, Enclave, EnclaveKey, Reactor,
+        Scheduler,
+    };
+    use tracing_bounded::Value;
+    let (subscriber, capture) = tracing_bounded::BoundedSubscriber::new(tracing_bounded::Config {
+        records: 128,
+        level: tracing::level_filters::LevelFilter::TRACE,
+        targets: &["boomerang::runtime"],
+        ..Default::default()
+    })
+    .unwrap();
+    tracing::subscriber::with_default(subscriber, || {
+        let _producer = capture.prepare_current_thread().unwrap();
+        // Include compiled preflight/construction and its identity spans in the audit.
+        execute_owned(
+            &IMAGE,
+            reference_bindings(),
+            Config::default().with_fast_forward(true),
+        )
+        .unwrap();
+        let mut enclave = Enclave::default();
+        let reactor = enclave.insert_reactor(Reactor::new("input", ()).boxed(), None);
+        let scope = enclave.root_scope(reactor);
+        let action =
+            enclave.insert_action(|key| Action::<u32>::new("key", key, None, false).boxed());
+        enclave.insert_action_scope(action, scope);
+        let sender = enclave.create_send_context(EnclaveKey::new(7));
+        let mut scheduler = Scheduler::new(
+            EnclaveKey::new(7),
+            enclave,
+            Config::default().with_fast_forward(true),
+        );
+        scheduler.startup();
+        // Use the keyboard's real nonblocking submission API. The scheduler assigns
+        // the physical tag; the logical tag must survive unchanged.
+        assert_eq!(
+            sender.try_schedule_async(AsyncEvent::Physical {
+                time: std::time::Instant::now(),
+                target: AsyncEventTarget::Action(action),
+                value: Box::new(42_u32),
+            }),
+            Some(true)
+        );
+        assert_eq!(
+            sender.try_schedule_async(AsyncEvent::Logical {
+                tag: Tag::new(Duration::seconds(1), 3),
+                target: AsyncEventTarget::Action(action),
+                value: Box::new(99_u32),
+            }),
+            Some(true)
+        );
+        while scheduler.try_next().unwrap() {}
+    });
+    let records = capture.snapshot();
+    fn field<'a>(record: &'a tracing_bounded::Record, name: &str) -> Option<&'a Value> {
+        record
+            .fields
+            .iter()
+            .find(|field| field.name == name)
+            .map(|field| &field.value)
+    }
+    let admissions: Vec<_> = records
+        .iter()
+        .filter(|record| {
+            field(record, "event") == Some(&Value::Str("runtime.event.admitted".into()))
+                && field(record, "kind") == Some(&Value::Str("action".into()))
+        })
+        .collect();
+    assert_eq!(admissions.len(), 2, "{records:?}; {:?}", capture.loss());
+    for (record, origin) in admissions.iter().zip(["physical", "logical"]) {
+        assert_eq!(field(record, "origin"), Some(&Value::Str(origin.into())));
+        assert_eq!(field(record, "enclave"), Some(&Value::U64(7)));
+        assert_eq!(field(record, "action"), Some(&Value::U64(0)));
+        assert_eq!(
+            field(record, "tag_kind"),
+            Some(&Value::Str("finite".into()))
+        );
+        assert!(field(record, "value").is_none());
+        assert!(field(record, "payload").is_none());
+    }
+    assert_eq!(
+        field(admissions[1], "tag_offset_ns"),
+        Some(&Value::I128(1_000_000_000))
+    );
+    assert_eq!(field(admissions[1], "tag_microstep"), Some(&Value::U64(3)));
+    assert_eq!(capture.loss().unsupported_value.value, 0);
+    assert_eq!(capture.loss().invalid_context.value, 0);
+    assert_eq!(capture.lifecycle_loss().span_admission.value, 0);
+}
+
+#[test]
 fn runtime_lifecycle_trace_validates_identity_before_construction() {
     if !run_runtime_trace_test(
         "lifecycle::runtime_lifecycle_trace_validates_identity_before_construction",
@@ -138,7 +237,7 @@ fn local_federate_lifecycle_trace_covers_all_construction_phases() {
     );
     assert!(lifecycle.iter().skip(1).all(|event| {
         event["span"]["name"] == "runtime.federate"
-            && event["span"]["federate"] == "FederateIndex(0)"
+            && event["span"]["federate"] == 0
             && event["span"]["federate_id"] == "host"
             && event["span"]["ownership"] == "local"
     }));

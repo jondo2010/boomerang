@@ -484,7 +484,7 @@ fn generated_central_deployment_publishes_isolated_artifacts_and_exchanges_tagge
     // capture is lossy under contention, but must report every kind of loss
     // separately and must not change the application result.
     let mut bounded_document: Option<Value> = None;
-    for variant in ["off", "bounded", "bounded-small"] {
+    for variant in ["off", "bounded", "bounded-small", "bounded-filter"] {
         let mode = if variant == "off" { "off" } else { "bounded" };
         let deployment = format!("sensor-slice-{variant}");
         support::reset_deployment_output(&target, &deployment);
@@ -511,6 +511,27 @@ fn generated_central_deployment_publishes_isolated_artifacts_and_exchanges_tagge
                     .as_table_mut()
                     .unwrap()
                     .insert("bounded-tracing".into(), toml::toml! { records = 3 }.into());
+            }
+            if variant == "bounded-filter" {
+                config.as_table_mut().unwrap().insert(
+                    "bounded-tracing".into(),
+                    toml::toml! { level = "trace"
+                    targets = ["boomerang::runtime"] }
+                    .into(),
+                );
+                config["federates"]["sensor"]
+                    .as_table_mut()
+                    .unwrap()
+                    .insert(
+                        "bounded-tracing".into(),
+                        toml::toml! { level = "debug"
+                        targets = ["boomerang::coordination"] }
+                        .into(),
+                    );
+                config["rti"].as_table_mut().unwrap().insert(
+                    "bounded-tracing".into(),
+                    toml::toml! { level = "off" }.into(),
+                );
             }
         });
         let output = Command::new(env!("CARGO_BIN_EXE_cargo-boomerang"))
@@ -583,6 +604,48 @@ fn generated_central_deployment_publishes_isolated_artifacts_and_exchanges_tagge
             .iter()
             .filter(|line| line["kind"] == "loss")
             .collect();
+        if variant == "bounded-filter" {
+            let resources = &trace_document["resources"];
+            assert_eq!(
+                resources["federates"][0]["bounded_tracing"]["level"],
+                "trace"
+            );
+            assert_eq!(
+                resources["federates"][1]["bounded_tracing"]["level"],
+                "debug"
+            );
+            assert_eq!(resources["rti_bounded_tracing"]["level"], "off");
+            assert_eq!(
+                resources["rti_bounded_tracing"]["targets"],
+                serde_json::json!(["boomerang::runtime"])
+            );
+            let previous = bounded_document.as_ref().unwrap();
+            assert_ne!(trace_document["fingerprint"], previous["fingerprint"]);
+            assert_eq!(trace_document["coordination"], previous["coordination"]);
+            assert_eq!(trace_document["federates"], previous["federates"]);
+            // Host runs TRACE runtime events; sensor overrides with DEBUG coordination;
+            // RTI inherits the target but disables its subscriber output with OFF.
+            assert!(
+                documents.iter().any(|record| record["fields"]["event"]
+                    == "runtime.scheduler.tag_processed"
+                    && record["level"] == "TRACE"),
+                "{stderr}"
+            );
+            assert!(
+                documents
+                    .iter()
+                    .any(|record| record["fields"]["event"] == "coordination.reaction.started"),
+                "{stderr}"
+            );
+            assert!(
+                documents
+                    .iter()
+                    .filter(|record| record["kind"] == "record")
+                    .all(|record| record["target"] != "boomerang::coordination"
+                        || record["level"] != "TRACE"),
+                "{stderr}"
+            );
+        }
         assert_eq!(
             losses.len(),
             3,
@@ -612,20 +675,31 @@ fn generated_central_deployment_publishes_isolated_artifacts_and_exchanges_tagge
                 loss["lifecycle_loss"]["producer_admission"]["value"], 0,
                 "{loss}"
             );
-            assert!(
-                documents
-                    .iter()
-                    .any(|record| record["kind"] == "record" && record["pid"] == loss["pid"]),
-                "{stderr}"
-            );
+            if variant != "bounded-filter" {
+                assert!(
+                    documents
+                        .iter()
+                        .any(|record| record["kind"] == "record" && record["pid"] == loss["pid"]),
+                    "{stderr}"
+                );
+            }
         }
         if variant == "bounded-small" {
             retained.sort_unstable();
             assert_eq!(retained, [1, 2, 3], "{stderr}");
         }
+        if variant == "bounded-filter" {
+            assert_eq!(
+                retained.iter().filter(|&&count| count == 0).count(),
+                1,
+                "only RTI is disabled: {stderr}"
+            );
+        }
         for record in documents.iter().filter(|line| line["kind"] == "record") {
             assert_eq!(record["trace_schema"], 1);
-            assert_eq!(record["target"], "boomerang::coordination");
+            if variant != "bounded-filter" {
+                assert_eq!(record["target"], "boomerang::coordination");
+            }
             assert!(record["fields"].get("payload").is_none());
         }
     }

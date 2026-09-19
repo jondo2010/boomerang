@@ -27,7 +27,7 @@ use crate::{
 /// Emits only the initialization for the selected build-time backend.
 pub(super) fn render_tracing_init(
     backend: TracingBackend,
-    limits: Option<crate::BoundedTracingLimits>,
+    limits: Option<&crate::BoundedTracingLimits>,
 ) -> TokenStream {
     match backend {
         TracingBackend::Off => quote! {},
@@ -36,6 +36,8 @@ pub(super) fn render_tracing_init(
         },
         TracingBackend::Bounded => {
             let limits = limits.expect("analyzed bounded launchers have resolved limits");
+            let level = format_ident!("{}", limits.level.to_string().to_ascii_uppercase());
+            let targets = &limits.targets;
             let [records, fields, bytes, spans, span_fields, span_bytes, producers, depth] = [
                 limits.records,
                 limits.fields,
@@ -50,6 +52,8 @@ pub(super) fn render_tracing_init(
             quote! {
                 let _tracing_guard = boomerang_util::launcher::init_bounded_tracing(
                     boomerang_util::launcher::BoundedTracingConfig {
+                        level: boomerang_util::launcher::LevelFilter::#level,
+                        targets: &[#(#targets),*],
                         records: #records, fields: #fields, bytes: #bytes,
                         spans: #spans, span_fields: #span_fields, span_bytes: #span_bytes,
                         producers: #producers, depth: #depth,

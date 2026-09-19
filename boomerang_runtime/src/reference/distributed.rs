@@ -182,7 +182,7 @@ pub fn execute_owned_federate_with_backend<'image, B: FederateCoordinationBacken
     ) -> Result<B, crate::FederateCoordinationError>,
 ) -> Result<FederateExecution, ExecuteOwnedFederateError> {
     tracing::debug!(target: "boomerang::runtime",
-        event = "runtime.preflight.started", owner = "federate", %federate);
+        event = "runtime.preflight.started", owner = "federate", federate = federate.as_u32());
     let preflight = || {
         let images = prepare_images(image, images)?;
         preflight_enclave_bindings(federate, &images, &bindings)?;
@@ -194,14 +194,14 @@ pub fn execute_owned_federate_with_backend<'image, B: FederateCoordinationBacken
         Ok(prepared) => prepared,
         Err(error) => {
             tracing::warn!(target: "boomerang::runtime", event = "runtime.preflight.rejected",
-                owner = "federate", %federate, reason = preflight_reason(&error));
+                owner = "federate", federate = federate.as_u32(), reason = preflight_reason(&error));
             return Err(error);
         }
     };
     let span = federate_span(federate, image, "distributed");
     let _span = span.enter();
     tracing::debug!(target: "boomerang::runtime",
-        event = "runtime.preflight.completed", owner = "federate", %federate);
+        event = "runtime.preflight.completed", owner = "federate", federate = federate.as_u32());
     let adapters = std::mem::take(&mut bindings.external_routes);
     let lifecycle = if config.keep_alive {
         LifecyclePolicy::KeepAlive

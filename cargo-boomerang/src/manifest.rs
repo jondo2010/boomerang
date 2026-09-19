@@ -120,6 +120,7 @@ impl Deployment<Federate> {
                 return Ok(());
             }
             defaults
+                .clone()
                 .with_overrides(settings)
                 .validate()
                 .map_err(|error| invalid_deployment(name, format!("{path}: {error}")))

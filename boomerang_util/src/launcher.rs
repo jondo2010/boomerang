@@ -8,6 +8,9 @@ use std::io::Write as _;
 use tracing_subscriber::filter::EnvFilter;
 #[cfg(feature = "bounded-tracing")]
 mod bounded;
+/// Native level filter used by generated bounded tracing initializers.
+#[cfg(feature = "bounded-tracing")]
+pub use tracing::level_filters::LevelFilter;
 /// Native setup configuration consumed by the bounded launcher initializer.
 #[cfg(feature = "bounded-tracing")]
 pub use tracing_bounded::Config as BoundedTracingConfig;
@@ -91,20 +94,20 @@ pub fn init_tracing() -> TracingGuard {
     guard
 }
 
-/// Owns bounded coordination capture through worker shutdown and exports it on drop.
+/// Owns bounded capture through worker shutdown and exports it on drop.
 #[must_use = "retain until execution and all workers have stopped"]
 #[cfg(feature = "bounded-tracing")]
 pub struct BoundedTracingGuard {
     _guard: bounded::Guard,
 }
 
-/// Installs native bounded coordination capture selected at build time.
+/// Installs native bounded capture selected at build time.
 ///
-/// Captures only the native `boomerang::coordination` target at DEBUG, independent of `RUST_LOG`.
+/// Uses the native level and exact-target filter in `config`, independent of `RUST_LOG`.
 /// It exports JSON lines to stderr when the guard drops, after workers stop.
 /// Installation fails if another global subscriber is installed.
-/// The eight storage capacities come from `config`; filtering and reference/loss
-/// ceilings are fixed by the launcher policy, regardless of their supplied values.
+/// Storage capacities and filtering come from `config`; reference/loss ceilings
+/// remain fixed at 1,024 by the launcher policy.
 #[cfg(feature = "bounded-tracing")]
 pub fn init_bounded_tracing(config: BoundedTracingConfig) -> std::io::Result<BoundedTracingGuard> {
     Ok(BoundedTracingGuard {

@@ -270,6 +270,7 @@ where
     /// Handle an asynchronous event from the event queue
     fn handle_async_event(&mut self, event: AsyncEvent) -> Result<(), E::Error> {
         self.stats.increment_processed_events();
+        let origin = event.kind_str();
         match event {
             AsyncEvent::TagRelease { enclave, tag } => {
                 self.upstream_enclaves
@@ -281,9 +282,11 @@ where
                 if tag <= *self.current_tag {
                     if tag < *self.current_tag {
                         tracing::warn!(target: "boomerang::runtime",
-                            event = "runtime.event.rejected", enclave = %self.key,
-                            kind = "tag_release_provisional", source = %enclave,
-                            tag = %tag, current_tag = %self.current_tag, reason = "past_tag",
+                            event = "runtime.event.rejected", enclave = self.key.as_u32(),
+                            kind = origin, source = enclave.as_u32(),
+                            tag_kind = tag.kind_str(), tag_offset_ns = tag.offset().whole_nanoseconds(), tag_microstep = tag.microstep(),
+                            current_tag_kind = self.current_tag.kind_str(), current_tag_offset_ns = self.current_tag.offset().whole_nanoseconds(), current_tag_microstep = self.current_tag.microstep(),
+                            reason = "past_tag",
                         );
                     }
                     return Ok(());
@@ -298,13 +301,15 @@ where
             AsyncEvent::Logical { tag, target, value } => {
                 if tag <= *self.current_tag {
                     tracing::warn!(target: "boomerang::runtime",
-                        event = "runtime.event.rejected", enclave = %self.key,
-                        kind = "logical", tag = %tag, current_tag = %self.current_tag,
+                        event = "runtime.event.rejected", enclave = self.key.as_u32(),
+                        kind = origin,
+                        tag_kind = tag.kind_str(), tag_offset_ns = tag.offset().whole_nanoseconds(), tag_microstep = tag.microstep(),
+                        current_tag_kind = self.current_tag.kind_str(), current_tag_offset_ns = self.current_tag.offset().whole_nanoseconds(), current_tag_microstep = self.current_tag.microstep(),
                         reason = "past_tag",
                     );
                     return Ok(());
                 }
-                self.admit_value(tag, target, value)?;
+                self.admit_value(tag, target, value, origin)?;
             }
             AsyncEvent::Physical {
                 time,
@@ -312,14 +317,14 @@ where
                 value,
             } => {
                 let tag = Tag::from_physical_time(*self.start_time, time);
-                self.admit_value(tag, target, value)?;
+                self.admit_value(tag, target, value, origin)?;
             }
             AsyncEvent::Shutdown { delay } => {
                 let tag = self.current_tag.delay(delay);
                 self.schedule_shutdown_at(tag);
                 tracing::debug!(target: "boomerang::runtime",
-                    event = "runtime.event.admitted", enclave = %self.key,
-                    kind = "shutdown", tag = %tag,
+                    event = "runtime.event.admitted", enclave = self.key.as_u32(),
+                    kind = origin, tag_kind = tag.kind_str(), tag_offset_ns = tag.offset().whole_nanoseconds(), tag_microstep = tag.microstep(),
                 );
             }
         }
@@ -332,6 +337,7 @@ where
         tag: Tag,
         target: AsyncEventTarget,
         value: Box<dyn ReactorData>,
+        origin: &'static str,
     ) -> Result<(), E::Error> {
         match target {
             AsyncEventTarget::Action(key) => {
@@ -345,8 +351,9 @@ where
                     self.schedule,
                 );
                 tracing::debug!(target: "boomerang::runtime",
-                    event = "runtime.event.admitted", enclave = %self.key,
-                    kind = "action", action = %key, tag = %tag,
+                    event = "runtime.event.admitted", enclave = self.key.as_u32(),
+                    kind = "action", origin, action = key.as_u32(),
+                    tag_kind = tag.kind_str(), tag_offset_ns = tag.offset().whole_nanoseconds(), tag_microstep = tag.microstep(),
                 );
             }
             AsyncEventTarget::NetworkBoundaryPort(key) => {
@@ -354,8 +361,9 @@ where
                 self.events
                     .push_network_event(tag, self.schedule.port_triggers(port));
                 tracing::debug!(target: "boomerang::runtime",
-                    event = "runtime.event.admitted", enclave = %self.key,
-                    kind = "network_boundary", port = %key, tag = %tag,
+                    event = "runtime.event.admitted", enclave = self.key.as_u32(),
+                    kind = "network_boundary", origin, port = key.as_u32(),
+                    tag_kind = tag.kind_str(), tag_offset_ns = tag.offset().whole_nanoseconds(), tag_microstep = tag.microstep(),
                 );
             }
             AsyncEventTarget::BoundaryPort(key) => {
@@ -363,8 +371,9 @@ where
                 self.events
                     .push_event(tag, self.schedule.port_triggers(port), false);
                 tracing::debug!(target: "boomerang::runtime",
-                    event = "runtime.event.admitted", enclave = %self.key,
-                    kind = "boundary", port = %key, tag = %tag,
+                    event = "runtime.event.admitted", enclave = self.key.as_u32(),
+                    kind = "boundary", origin, port = key.as_u32(),
+                    tag_kind = tag.kind_str(), tag_offset_ns = tag.offset().whole_nanoseconds(), tag_microstep = tag.microstep(),
                 );
             }
         }
@@ -412,14 +421,15 @@ where
         if let Some(timeout) = self.config.timeout {
             let tag = tag.delay(timeout);
             tracing::debug!(target: "boomerang::runtime",
-                event = "runtime.scheduler.shutdown_scheduled", enclave = %self.key,
-                reason = "timeout", tag = %tag,
+                event = "runtime.scheduler.shutdown_scheduled", enclave = self.key.as_u32(),
+                reason = "timeout", tag_kind = tag.kind_str(), tag_offset_ns = tag.offset().whole_nanoseconds(), tag_microstep = tag.microstep(),
             );
             self.schedule_shutdown_at(tag);
         }
 
         tracing::info!(target: "boomerang::runtime",
-            event = "runtime.scheduler.started", enclave = %self.key, tag = %tag,
+            event = "runtime.scheduler.started", enclave = self.key.as_u32(),
+            tag_kind = tag.kind_str(), tag_offset_ns = tag.offset().whole_nanoseconds(), tag_microstep = tag.microstep(),
         );
 
         *self.current_tag = tag.decrement();
@@ -431,10 +441,13 @@ where
     /// Final shutdown of the Scheduler. The last tag has already been processed.
     fn shutdown(&mut self) {
         self.events.shutdown();
+        let tag = self
+            .shutdown_tag
+            .expect("shutdown tag established before shutdown");
 
         tracing::info!(target: "boomerang::runtime",
-            event = "runtime.scheduler.stopped", enclave = %self.key,
-            tag = %self.shutdown_tag.expect("shutdown tag established before shutdown"),
+            event = "runtime.scheduler.stopped", enclave = self.key.as_u32(),
+            tag_kind = tag.kind_str(), tag_offset_ns = tag.offset().whole_nanoseconds(), tag_microstep = tag.microstep(),
             processed_tags = self.stats.processed_tags(),
             processed_reactions = self.stats.processed_reactions(),
             processed_events = self.stats.processed_events(),
@@ -449,8 +462,8 @@ where
             let abs = shutdown.to_logical_time(*self.start_time);
             if let Some(timeout) = abs.checked_duration_since(std::time::Instant::now()) {
                 tracing::debug!(target: "boomerang::runtime",
-                    event = "runtime.scheduler.waiting", enclave = %self.key,
-                    reason = "shutdown_deadline", tag = %shutdown,
+                    event = "runtime.scheduler.waiting", enclave = self.key.as_u32(),
+                    reason = "shutdown_deadline", tag_kind = shutdown.kind_str(), tag_offset_ns = shutdown.offset().whole_nanoseconds(), tag_microstep = shutdown.microstep(),
                 );
                 self.event_rx.recv_timeout(timeout).ok()
             } else {
@@ -458,7 +471,7 @@ where
             }
         } else if self.config.keep_alive {
             tracing::debug!(target: "boomerang::runtime",
-                event = "runtime.scheduler.waiting", enclave = %self.key,
+                event = "runtime.scheduler.waiting", enclave = self.key.as_u32(),
                 reason = "keep_alive",
             );
             self.event_rx.recv().ok()
@@ -473,8 +486,9 @@ where
             let event = AsyncEvent::release(self.key, current_tag);
             if !ctx.schedule_external(event) && self.shutdown_tag.is_none() {
                 tracing::warn!(target: "boomerang::runtime",
-                    event = "runtime.scheduler.release_failed", enclave = %self.key,
-                    downstream = %key, tag = %current_tag, reason = "downstream_closed",
+                    event = "runtime.scheduler.release_failed", enclave = self.key.as_u32(),
+                    downstream = key.as_u32(), reason = "downstream_closed",
+                    tag_kind = current_tag.kind_str(), tag_offset_ns = current_tag.offset().whole_nanoseconds(), tag_microstep = current_tag.microstep(),
                 );
             }
         }
@@ -778,8 +792,8 @@ where
 
         self.stats.increment_processed_tags();
         tracing::trace!(target: "boomerang::runtime",
-            event = "runtime.scheduler.tag_processed", enclave = %self.key,
-            tag = %self.current_tag, terminal = event.terminal,
+            event = "runtime.scheduler.tag_processed", enclave = self.key.as_u32(),
+            tag_kind = self.current_tag.kind_str(), tag_offset_ns = self.current_tag.offset().whole_nanoseconds(), tag_microstep = self.current_tag.microstep(), terminal = event.terminal,
             network_input = event.network_input,
         );
 
@@ -800,7 +814,7 @@ where
     fn wait_for_next_event(&mut self) -> Result<bool, SchedulerError<E::Error>> {
         if let Some(coordination) = self.federate_coordination.as_deref_mut() {
             tracing::debug!(target: "boomerang::runtime",
-                event = "runtime.scheduler.waiting", enclave = %self.key,
+                event = "runtime.scheduler.waiting", enclave = self.key.as_u32(),
                 reason = "federate_coordination",
             );
             match coordination
@@ -830,7 +844,7 @@ where
                 .map_err(SchedulerError::Execution)?;
         } else {
             tracing::debug!(target: "boomerang::runtime",
-                event = "runtime.scheduler.waiting", enclave = %self.key,
+                event = "runtime.scheduler.waiting", enclave = self.key.as_u32(),
                 reason = "empty_queue",
             );
             // Shutdown event will be processed at the next event loop iteration
@@ -913,8 +927,8 @@ where
             std::cmp::Ordering::Less => {
                 let advance = target - now;
                 tracing::debug!(target: "boomerang::runtime",
-                    event = "runtime.scheduler.waiting", enclave = %self.key,
-                    reason = "wall_clock", duration = ?advance,
+                    event = "runtime.scheduler.waiting", enclave = self.key.as_u32(),
+                    reason = "wall_clock", duration_ns = advance.as_nanos(),
                 );
 
                 return receive_until_wall_clock_deadline(
@@ -934,8 +948,8 @@ where
             std::cmp::Ordering::Greater => {
                 let delay = now - target;
                 tracing::warn!(target: "boomerang::runtime",
-                    event = "runtime.scheduler.deadline_missed", enclave = %self.key,
-                    delay = ?delay,
+                    event = "runtime.scheduler.deadline_missed", enclave = self.key.as_u32(),
+                    delay_ns = delay.as_nanos(),
                 );
             }
 

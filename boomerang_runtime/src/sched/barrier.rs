@@ -30,8 +30,9 @@ impl LogicalTimeBarrier {
         if tag < self.released_tag {
             tracing::warn!(target: "boomerang::runtime",
                 event = "runtime.barrier.release_rejected",
-                upstream = %self.upstream_ctx.enclave_id(), tag = %tag,
-                released_tag = %self.released_tag, reason = "tag_regression",
+                upstream = self.upstream_ctx.enclave_id().as_u32(),
+                tag_kind = tag.kind_str(), tag_offset_ns = tag.offset().whole_nanoseconds(), tag_microstep = tag.microstep(),
+                released_tag_kind = self.released_tag.kind_str(), released_tag_offset_ns = self.released_tag.offset().whole_nanoseconds(), released_tag_microstep = self.released_tag.microstep(), reason = "tag_regression",
             );
         } else {
             self.released_tag = tag;
@@ -86,8 +87,9 @@ impl LogicalTimeBarrier {
                 // The upstream has terminated try to return a queued event here. If the upstream terminated, we probably
                 // have an event queued from it. This prevents pre-mature termination of this enclave.
                 tracing::warn!(target: "boomerang::runtime",
-                    event = "runtime.barrier.wait_interrupted", enclave = %this_enclave,
-                    upstream = %self.upstream_ctx.enclave_id(), tag = %upstream_tag,
+                    event = "runtime.barrier.wait_interrupted", enclave = this_enclave.as_u32(),
+                    upstream = self.upstream_ctx.enclave_id().as_u32(),
+                    tag_kind = upstream_tag.kind_str(), tag_offset_ns = upstream_tag.offset().whole_nanoseconds(), tag_microstep = upstream_tag.microstep(),
                     reason = "upstream_closed",
                 );
                 return event_rx.try_recv().map_err(|_| {
@@ -100,9 +102,9 @@ impl LogicalTimeBarrier {
         }
 
         tracing::debug!(target: "boomerang::runtime",
-            event = "runtime.scheduler.waiting", enclave = %this_enclave,
-            reason = "upstream_release", upstream = %self.upstream_ctx.enclave_id(),
-            tag = %upstream_tag,
+            event = "runtime.scheduler.waiting", enclave = this_enclave.as_u32(),
+            reason = "upstream_release", upstream = self.upstream_ctx.enclave_id().as_u32(),
+            tag_kind = upstream_tag.kind_str(), tag_offset_ns = upstream_tag.offset().whole_nanoseconds(), tag_microstep = upstream_tag.microstep(),
         );
         event_rx
             .recv()

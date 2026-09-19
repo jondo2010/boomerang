@@ -95,8 +95,8 @@ fn federate_span(
     ownership: &'static str,
 ) -> tracing::Span {
     tracing::debug_span!(target: "boomerang::runtime", "runtime.federate",
-        %federate, federate_id = %image.id().as_str(), target = %image.target().as_str(),
-        runtime = %image.runtime().as_str(), ownership)
+        federate = federate.as_u32(), federate_id = image.id().as_str(), target = image.target().as_str(),
+        runtime = image.runtime().as_str(), ownership)
 }
 
 /// Failure while validating, initializing, or synchronously executing a compiled image.
@@ -934,13 +934,13 @@ fn execute_owned_federate_with_spawn_guard(
     fail_spawn: impl FnMut(Option<EnclaveIndex>) -> bool,
 ) -> Result<FederateExecution, ExecuteOwnedFederateError> {
     tracing::debug!(target: "boomerang::runtime",
-        event = "runtime.preflight.started", owner = "federate", %federate);
+        event = "runtime.preflight.started", owner = "federate", federate = federate.as_u32());
     let identity = deployment.federates.get(federate).cloned();
     let prepared = match preflight_owned_federate(deployment, federate, &bindings) {
         Ok(prepared) => prepared,
         Err(error) => {
             tracing::warn!(target: "boomerang::runtime", event = "runtime.preflight.rejected",
-                owner = "federate", %federate, reason = preflight_reason(&error));
+                owner = "federate", federate = federate.as_u32(), reason = preflight_reason(&error));
             return Err(error);
         }
     };
@@ -951,7 +951,7 @@ fn execute_owned_federate_with_spawn_guard(
     );
     let _span = span.enter();
     tracing::debug!(target: "boomerang::runtime",
-        event = "runtime.preflight.completed", owner = "federate", %federate);
+        event = "runtime.preflight.completed", owner = "federate", federate = federate.as_u32());
     let lifecycle = if config.keep_alive {
         LifecyclePolicy::KeepAlive
     } else {
@@ -1001,7 +1001,7 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
         let image = EnclaveImageView::new(images[enclave])
             .expect("Federate preflight validated every selected Enclave image");
         let span = tracing::debug_span!(target: "boomerang::runtime", "runtime.enclave",
-            %enclave, enclave_id = %image.enclave_id().as_str());
+            enclave = enclave.as_u32(), enclave_id = image.enclave_id().as_str());
         let _span = span.enter();
         let enclave_key = runtime_enclave_key(enclave);
         let storage = match OwnedStorage::new_for_enclave(image, owned, enclave_key) {
@@ -1334,7 +1334,7 @@ pub fn execute_owned<'image>(
         }
     };
     let span = tracing::debug_span!(target: "boomerang::runtime", "runtime.enclave",
-        enclave_id = %image.enclave_id().as_str());
+        enclave_id = image.enclave_id().as_str());
     let _span = span.enter();
     let unsupported_routes = image.routes().len();
     if unsupported_routes != 0 {

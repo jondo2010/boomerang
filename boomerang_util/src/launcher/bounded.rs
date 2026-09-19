@@ -9,8 +9,6 @@ pub(super) struct Guard {
 }
 
 pub(super) fn init(mut config: tracing_bounded::Config) -> io::Result<Guard> {
-    config.level = tracing::level_filters::LevelFilter::DEBUG;
-    config.targets = &["boomerang::coordination"];
     config.references = std::num::NonZeroU16::new(1024).unwrap();
     config.loss_ceiling = std::num::NonZeroU16::new(1024).unwrap();
     let (subscriber, capture) =

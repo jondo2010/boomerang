@@ -26,6 +26,7 @@ pub use manifest::{
 pub use output::{ColorChoice, CommandOutput};
 pub use run::{run, run_with_output, ExecutionSummary, RunOutcome};
 pub use tracing::{BoundedTracingLimits, BoundedTracingSettings};
+pub use tracing_core::LevelFilter;
 pub use workspace::{
     resolve_workspace, CargoPackage, LockfileIdentity, ResolvedFederate, ResolvedWorkspace,
 };

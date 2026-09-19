@@ -136,8 +136,83 @@ fn bounded_tracing_overrides_inherit_each_field() {
         serde_json::json!({
             "records": 0, "fields": 10, "bytes": 2048, "spans": 11,
             "span_fields": 15, "span_bytes": 512, "producers": 13, "depth": 14,
+            "level": "debug", "targets": ["boomerang::coordination"],
         })
     );
+}
+
+#[test]
+fn bounded_trace_filters_resolve_and_validate_at_the_manifest_boundary() {
+    let source = format!(
+        "{}\n[deployments.production]\ntracing = \"bounded\"\n\
+         [deployments.production.bounded-tracing]\nlevel = \"trace\"\n\
+         targets = [\"boomerang::runtime\", \"boomerang::coordination\"]\n\
+         [deployments.production.federates.host.bounded-tracing]\nlevel = \"info\"\n",
+        one_federate_without_coordination(),
+    );
+    let resolve = |source: &str| {
+        let manifest = parse_manifest(source).unwrap();
+        let deployment = manifest.deployment("production").unwrap();
+        let limits = deployment
+            .bounded_tracing_limits(deployment.federates["host"].bounded_tracing.as_ref())
+            .unwrap();
+        // Configuration passes directly to the native subscriber without conversion.
+        let config = tracing_bounded::Config {
+            level: limits.level,
+            ..Default::default()
+        };
+        let encoded = serde_json::to_value(&limits).unwrap();
+        let decoded: cargo_boomerang::BoundedTracingLimits =
+            serde_json::from_value(encoded.clone()).unwrap();
+        assert_eq!(decoded.level, config.level);
+        assert_eq!(decoded, limits);
+        encoded
+    };
+    let resolved = resolve(&source);
+    assert_eq!(resolved["level"], "info");
+    assert_eq!(
+        resolved["targets"],
+        serde_json::json!(["boomerang::runtime", "boomerang::coordination"])
+    );
+    assert_eq!(
+        resolve(&format!("{source}targets = []\n"))["targets"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        resolve(&format!("{source}targets = [\"application\"]\n"))["targets"],
+        serde_json::json!(["application"])
+    );
+    for level in ["off", "error", "warn", "info", "debug", "trace"] {
+        assert_eq!(
+            resolve(&source.replace("level = \"info\"", &format!("level = {level:?}")))["level"],
+            level
+        );
+    }
+    for invalid in [
+        "", "0", "1", "5", "6", "DEBUG", " debug", "debug ", "verbose",
+    ] {
+        let invalid_source = source.replace("level = \"info\"", &format!("level = {invalid:?}"));
+        assert!(parse_manifest(&invalid_source)
+            .unwrap_err()
+            .to_string()
+            .contains("bounded-tracing"));
+        let mut invalid_report = resolved.clone();
+        invalid_report["level"] = serde_json::json!(invalid);
+        assert!(
+            serde_json::from_value::<cargo_boomerang::BoundedTracingLimits>(invalid_report)
+                .is_err()
+        );
+    }
+    for invalid in [
+        source.replace("level = \"info\"", "level = \"verbose\""),
+        format!("{source}targets = [\"\"]\n"),
+        format!("{source}targets = [\" boomerang::runtime\"]\n"),
+    ] {
+        assert!(parse_manifest(&invalid)
+            .unwrap_err()
+            .to_string()
+            .contains("bounded-tracing"));
+    }
 }
 
 #[test]

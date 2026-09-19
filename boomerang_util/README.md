@@ -34,7 +34,7 @@ tracing = "bounded" # "off", "bounded", or "hosted" (default)
   streaming output is filtered by `RUST_LOG` (off by default).
 - `off`: enable only `launcher` and emit no subscriber initialization.
 - `bounded`: enable `bounded-tracing` and call `launcher::init_bounded_tracing(config)`;
-  capture `boomerang::coordination` through DEBUG independently of `RUST_LOG`,
+  by default capture `boomerang::coordination` through DEBUG independently of `RUST_LOG`,
   then write JSON lines to stderr after execution and worker shutdown.
 
 Changing this setting rebuilds the generated artifacts. There is no runtime
@@ -45,11 +45,13 @@ features independently. These modes do not compile out ordinary `tracing`
 instrumentation or prevent an application from installing its own subscriber.
 The library features are additive, but generated launchers select one initializer.
 
-Bounded limits are compiled from optional tables. Each omitted field inherits
+Bounded limits and filters are compiled from optional tables. Each omitted field inherits
 the deployment value, then the defaults shown here:
 
 ```toml
 [deployments.production.bounded-tracing]
+level = "debug"
+targets = ["boomerang::coordination"]
 records = 1024
 fields = 32       # event plus inherited field occurrences per record
 bytes = 1024      # copied event plus inherited value bytes per record
@@ -66,7 +68,7 @@ records = 128   # other fields still inherit the deployment values
 records = 2048
 ```
 
-These tables require `tracing = "bounded"`. Values are unsigned 32-bit integers;
+These tables require `tracing = "bounded"`. Capacity values are unsigned 32-bit integers;
 all except `records` must be positive, and `spans` must be below `u32::MAX`.
 Zero records selects loss-only capture. Analysis rejects unknown fields,
 invalid capacities and storage arithmetic overflow without allocating the
@@ -74,18 +76,47 @@ requested buffers. Validation uses the build host's layouts; target setup
 validates again and may fail to reserve storage. This is not a RAM-budget or
 embedded-target qualification guarantee.
 
-Check/build resource reports include resolved `bounded_tracing` capacities for
+`level` accepts `off`, `error`, `warn`, `info`, `debug`, or `trace`. `targets` is
+an exact-name list, not a prefix match or `RUST_LOG` expression. An override
+replaces the entire inherited list; `targets = []` enables all targets at the
+selected level. Empty target names and surrounding whitespace are rejected.
+Use `level = "off"` to disable capture while retaining the final loss report.
+
+To include keyboard input admission and runtime construction in Snake, keep
+`tracing = "bounded"` under `[deployments.snake]` and configure:
+
+```toml
+[deployments.snake.bounded-tracing]
+targets = ["boomerang::coordination", "boomerang::runtime"]
+level = "debug"
+records = 1024
+```
+
+This rebuilds the generated executable. At orderly shutdown, stderr includes
+`runtime.event.admitted` with `kind = "action"`, `origin = "physical"` or
+`"logical"`, numeric `enclave`/`action` keys, and `tag_kind`, `tag_offset_ns`,
+`tag_microstep`. These describe scheduler admission, not producer submission or
+reaction completion. Keys are local to their documented domain: action keys
+are Enclave-local; generated scheduler Enclave keys are deployment-global.
+No action payload (including the pressed key) is recorded. Internally scheduled
+logical actions are not asynchronous mailbox admissions and do not emit this event.
+Runtime identity spans, scheduler, queue and barrier events use native fields;
+durations use nanoseconds. TRACE additionally includes processed-tag events.
+Application/third-party targets may still contain unsupported formatted fields;
+selecting them does not make their values bounded-compatible.
+
+Check/build resource reports include resolved `bounded_tracing` capacities and filters for
 each Federate and `rti_bounded_tracing` for the RTI. They describe a process-wide
 capture budget, separate from Enclave execution storage, not total RAM usage:
 scratch buffers, scope copies, metadata and synchronization have additional
-target-dependent overhead. Changing limits changes generated source and the
+target-dependent overhead. Changing limits or filters changes generated source and the
 artifact fingerprint, but not coordination or Federate-image compatibility.
 
-The coordination-only DEBUG filter and reference/loss-counter ceilings (1,024)
-are fixed. Full rings overwrite the oldest complete record; other capture
+Reference/loss-counter ceilings remain fixed at 1,024. Full rings overwrite
+the oldest complete record; other capture
 failures reject whole events or invalidate context and increment separate
 counters. Small budgets may therefore produce incomplete traces without
-changing application execution. There are no environment-based limit overrides.
+changing application execution. There are no environment-based limit or filter overrides.
 
 Shutdown JSON has `trace_schema: 1` and a process `pid`. A `kind: "record"`
 line contains target, level, native fields, and root-to-leaf copied scopes.
@@ -99,6 +130,6 @@ Export I/O failure reports to stderr and does not replace an execution failure.
 The coordination schema and key domains are documented in
 [boomerang_central_rti](../boomerang_central_rti/README.md#coordination-tracing).
 This is diagnostic capture, not payload recording/replay, and incomplete traces
-must not be treated as complete causal evidence. Hosted runtime-construction
-events remain available in streaming mode. Neither this integration nor hosted
+must not be treated as complete causal evidence. Runtime-construction events
+are also available in hosted streaming mode. Neither this integration nor hosted
 tests qualify an embedded target's timing or allocator guarantees.

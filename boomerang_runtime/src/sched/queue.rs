@@ -230,7 +230,8 @@ impl<K: tinymap::Key, A: Copy + PartialEq> EventQueue<K, A> {
             let event = self.event_queue.peek().unwrap();
             tracing::warn!(target: "boomerang::runtime",
                 event = "runtime.queue.pending_at_shutdown",
-                pending = self.event_queue.len(), first_tag = %event.tag,
+                pending = self.event_queue.len(), first_tag_kind = event.tag.kind_str(),
+                first_tag_offset_ns = event.tag.offset().whole_nanoseconds(), first_tag_microstep = event.tag.microstep(),
             );
         }
     }

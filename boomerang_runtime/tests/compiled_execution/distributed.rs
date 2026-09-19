@@ -156,7 +156,7 @@ fn distributed_federate_trace_retains_validated_compiler_identity() {
         .into_iter()
         .find(|event| event["fields"]["event"] == "runtime.preflight.completed")
         .unwrap();
-    assert_eq!(completed["span"]["federate"], "FederateIndex(3)");
+    assert_eq!(completed["span"]["federate"], 3);
     assert_eq!(completed["span"]["federate_id"], "source");
     assert_eq!(completed["span"]["ownership"], "distributed");
 }

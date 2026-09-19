@@ -696,7 +696,7 @@ pub fn execute_enclaves(
         if enclave.env.reactions.is_empty() {
             // If there are no reactions, there is nothing to do
             tracing::debug!(target: "boomerang::runtime",
-                event = "runtime.scheduler.skipped", enclave = %enclave_key,
+                event = "runtime.scheduler.skipped", enclave = enclave_key.as_u32(),
                 reason = "no_reactions",
             );
             None
@@ -887,28 +887,28 @@ mod tests {
         let output = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
         assert!(
             output.contains(
-                "boomerang::runtime: event=\"runtime.scheduler.started\" enclave=EnclaveKey(0) tag=[0s+0]"
+                "boomerang::runtime: event=\"runtime.scheduler.started\" enclave=0 tag_kind=\"finite\" tag_offset_ns=0 tag_microstep=0"
             ),
             "{output}"
         );
         assert!(
             output.contains(
-                "boomerang::runtime: event=\"runtime.scheduler.waiting\" enclave=EnclaveKey(0) reason=\"empty_queue\""
+                "boomerang::runtime: event=\"runtime.scheduler.waiting\" enclave=0 reason=\"empty_queue\""
             ),
             "{output}"
         );
         assert!(
             output.contains(
-                "boomerang::runtime: event=\"runtime.event.admitted\" enclave=EnclaveKey(1) kind=\"shutdown\" tag=[0s+0]"
+                "boomerang::runtime: event=\"runtime.event.admitted\" enclave=1 kind=\"shutdown\" tag_kind=\"finite\" tag_offset_ns=0 tag_microstep=0"
             ),
             "{output}"
         );
         assert!(
-            output.contains("event=\"runtime.scheduler.tag_processed\" enclave=EnclaveKey(0) tag=[0s+0] terminal=true network_input=false"),
+            output.contains("event=\"runtime.scheduler.tag_processed\" enclave=0 tag_kind=\"finite\" tag_offset_ns=0 tag_microstep=0 terminal=true network_input=false"),
             "{output}"
         );
         assert!(
-            output.contains("event=\"runtime.scheduler.stopped\" enclave=EnclaveKey(0) tag=[0s+0] processed_tags=1 processed_reactions=0 processed_events=0"),
+            output.contains("event=\"runtime.scheduler.stopped\" enclave=0 tag_kind=\"finite\" tag_offset_ns=0 tag_microstep=0 processed_tags=1 processed_reactions=0 processed_events=0"),
             "{output}"
         );
         for legacy in [

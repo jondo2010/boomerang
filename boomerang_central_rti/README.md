@@ -77,8 +77,10 @@ themselves before entering inherited spans. Setup failure counts as diagnostic
 loss; it does not fail scheduling or transport. No subscriber is installed by
 these libraries. Without the feature, they have no `tracing-bounded` dependency.
 
-Filter bounded capture to `boomerang::coordination`; other targets, including
-hosted runtime-construction diagnostics, are not yet native-field qualified.
+Generated bounded capture defaults to `boomerang::coordination`. Add the exact
+`boomerang::runtime` target to include native runtime-construction, scheduler,
+and asynchronous action-admission events. Application/third-party targets may
+still contain unsupported formatted values.
 See the [launcher modes](../boomerang_util/README.md#launcher-trace-modes) for
 generated executables. Bounded output can be incomplete under contention or
 capacity pressure; always inspect both event and lifecycle loss counters.

@@ -463,7 +463,7 @@ pub(crate) fn generate_analyzed_launcher(
         &execution,
         rust::render_tracing_init(
             analyzed.resolved.deployment().tracing,
-            configuration.bounded_tracing,
+            configuration.bounded_tracing.as_ref(),
         ),
         coordination,
         capabilities,
@@ -1146,7 +1146,7 @@ pub(crate) fn generate_analyzed_rti(
     )?;
     let init_tracing = rust::render_tracing_init(
         analyzed.resolved.deployment().tracing,
-        configuration.bounded_tracing,
+        configuration.bounded_tracing.as_ref(),
     );
     let source = rust::format_rust(quote::quote! {
         use boomerang_runtime::image::*;

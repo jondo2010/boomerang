@@ -282,7 +282,9 @@ pub(crate) fn resource_report(
         .federates()
         .values()
         .map(|federate| FederateResourceReport {
-            bounded_tracing: deployment.federates[federate.id().as_str()].bounded_tracing,
+            bounded_tracing: deployment.federates[federate.id().as_str()]
+                .bounded_tracing
+                .clone(),
             id: federate.id().to_string(),
             target: federate.target().to_string(),
             runtime: federate.runtime().to_string(),

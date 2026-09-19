@@ -127,6 +127,17 @@ impl Display for AsyncEvent {
 }
 
 impl AsyncEvent {
+    /// Stable event category for native tracing, without inspecting its payload.
+    pub fn kind_str(&self) -> &'static str {
+        match self {
+            Self::TagRelease { .. } => "tag_release",
+            Self::TagReleaseProvisional { .. } => "tag_release_provisional",
+            Self::Logical { .. } => "logical",
+            Self::Physical { .. } => "physical",
+            Self::Shutdown { .. } => "shutdown",
+        }
+    }
+
     /// Create a release event.
     pub(crate) fn release(enclave: EnclaveKey, tag: Tag) -> Self {
         AsyncEvent::TagRelease { enclave, tag }

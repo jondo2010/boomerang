@@ -19,3 +19,19 @@ pub enum Class {
     /// Application data subject to the smaller admission quota.
     Payload,
 }
+
+impl Class {
+    /// Returns the static kind name: `"coordination"` or `"payload"`.
+    pub const fn kind_str(self) -> &'static str {
+        match self {
+            Self::Coordination => "coordination",
+            Self::Payload => "payload",
+        }
+    }
+}
+
+#[test]
+fn kind_str_distinguishes_channel_classes() {
+    assert_eq!(Class::Coordination.kind_str(), "coordination");
+    assert_eq!(Class::Payload.kind_str(), "payload");
+}

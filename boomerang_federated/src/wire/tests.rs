@@ -1,5 +1,41 @@
 use super::*;
 use core::error::Error as _;
+
+#[test]
+fn request_kind_str_classifies_variants_without_inspecting_contents() {
+    struct Opaque;
+    let cases: [(Request<Opaque, Opaque, Opaque>, &str); 7] = [
+        (
+            Request::Hello {
+                identity: CoordinationFingerprint::new([1; 32]),
+            },
+            "hello",
+        ),
+        (
+            Request::Publish {
+                revision: 1,
+                next_event: None,
+            },
+            "publication",
+        ),
+        (Request::Complete { tag: WireTag::ZERO }, "completion"),
+        (
+            Request::Payload {
+                route: Opaque,
+                tag: WireTag::ZERO,
+                payload: Opaque,
+            },
+            "payload",
+        ),
+        (Request::ConfirmIdle { revision: 1 }, "confirm-idle"),
+        (Request::Stop, "stop"),
+        (Request::Abort { message: Opaque }, "abort"),
+    ];
+    for (request, kind) in cases {
+        assert_eq!(request.kind_str(), kind);
+    }
+}
+
 tinymap::key_type!(Member);
 tinymap::key_type!(Route);
 static MEMBERS: [&str; 2] = ["alpha", "beta"];

@@ -271,15 +271,18 @@ fn compiled_federates_exchange_tagged_payload_through_rti() {
         .iter()
         .filter(|event| event["fields"]["event"] == "coordination.reaction.started")
         .collect();
-    for member in ["FederateIndex(0)", "FederateIndex(1)"] {
-        assert!(reactions.iter().any(|event| event["spans"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|span| span["federate"] == member
-                && span["coordination"] == format!("{IDENTITY:?}"))));
+    for member in [0, 1] {
+        assert!(
+            reactions.iter().any(|event| event["spans"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|span| span["federate"] == member
+                    && span["coordination"] == serde_json::json!([7; 32].as_slice()))),
+            "{reactions:#?}"
+        );
     }
-    let position = |kind: &str, member: &str| {
+    let position = |kind: &str, member: u64| {
         events
             .iter()
             .position(|event| {
@@ -291,8 +294,8 @@ fn compiled_federates_exchange_tagged_payload_through_rti() {
             })
             .unwrap_or_else(|| panic!("missing {kind} for {member}"))
     };
-    let source = "FederateIndex(0)";
-    let sink = "FederateIndex(1)";
+    let source = 0;
+    let sink = 1;
     assert!(
         position("coordination.reaction.started", source)
             < position("coordination.codec.encoded", source)
@@ -316,24 +319,29 @@ fn compiled_federates_exchange_tagged_payload_through_rti() {
             < position("coordination.rti.accounting.completed", sink)
     );
     let forwarded = &events[position("coordination.rti.payload.forwarded", source)]["fields"];
-    assert_eq!(forwarded["route"], "RtiRouteIndex(0)");
+    assert_eq!(forwarded["route"], 0);
     assert_eq!(forwarded["destination"], sink);
     assert_eq!(forwarded["pending_tags"], 1);
-    assert_eq!(forwarded["coordination"], format!("{IDENTITY:?}"));
+    assert_eq!(forwarded["coordination"], client::HOSTED_IDENTITY);
     assert_eq!(
         events[position("coordination.codec.encoded", source)]["fields"]["local_route"],
-        "RouteIndex(0)"
+        0
     );
     let sent = &events[position("coordination.payload.sent", source)]["fields"];
-    assert_eq!(sent["route"], "RtiRouteIndex(0)");
-    assert_eq!(sent["coordination"], format!("{IDENTITY:?}"));
-    assert_eq!(
-        sent["tag"],
-        format!("{:?}", Tag::new(Duration::milliseconds(1), 0))
-    );
+    assert_eq!(sent["route"], 0);
+    assert_eq!(sent["coordination"], client::HOSTED_IDENTITY);
+    assert_eq!(sent["tag_kind"], "finite");
+    assert_eq!(sent["tag_offset_ns"], "1000000");
+    assert_eq!(sent["tag_microstep"], 0);
     assert!(sent.as_object().unwrap().keys().all(|key| matches!(
         key.as_str(),
-        "event" | "message" | "coordination" | "federate" | "route" | "tag"
+        "event"
+            | "coordination"
+            | "federate"
+            | "route"
+            | "tag_kind"
+            | "tag_offset_ns"
+            | "tag_microstep"
     )));
     let decision = &events[position("coordination.rti.decision", source)]["fields"];
     assert_eq!(decision["request"], "hello");
@@ -342,6 +350,157 @@ fn compiled_federates_exchange_tagged_payload_through_rti() {
         events[position("coordination.rti.accounting.completed", sink)]["fields"]["pending_tags"],
         0
     );
+}
+
+/// Native output must retain correlation without Debug fields or unprepared workers.
+#[cfg(feature = "bounded-tracing")]
+#[test]
+fn bounded_capture_prepares_hosted_transport_worker() {
+    if !client::run_trace_test() {
+        return;
+    }
+    use boomerang_central_rti::compiled::{hosted, RtiReplySource};
+    use boomerang_federated::wire::Contract;
+    let timeout = std::time::Duration::from_secs(3);
+    let contract = || {
+        Contract::new(
+            IDENTITY,
+            [3; 32],
+            TinyMapView::new(&MEMBER_NAMES),
+            TinyMapView::new(&RTI_ROUTES),
+            |route: &RtiRouteImage<'_>| (route.source(), route.target()),
+        )
+    };
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let view = CompiledDeploymentView::new(DEPLOYMENT).unwrap();
+    let rti = CompiledRti::from_image(rti_view(&view), IDENTITY).unwrap();
+    let server = std::thread::spawn(move || {
+        hosted::Server::new(listener, rti, contract(), timeout)
+            .unwrap()
+            .serve()
+    });
+    // Only the source I/O worker gets this dispatcher, so capture has no rival
+    // producer. The real RTI and destination still drive canonical admission.
+    let mut sink = hosted::connect(address, MEMBERS[1], contract(), timeout).unwrap();
+    let (subscriber, capture) = tracing_bounded::BoundedSubscriber::new(tracing_bounded::Config {
+        level: tracing::level_filters::LevelFilter::DEBUG,
+        targets: &["boomerang::coordination"],
+        ..Default::default()
+    })
+    .unwrap();
+    let mut source = tracing::subscriber::with_default(subscriber, || {
+        let _producer = capture.prepare_current_thread().unwrap();
+        hosted::connect(address, MEMBERS[0], contract(), timeout).unwrap()
+    });
+    for connection in [&source, &sink] {
+        connection
+            .sink()
+            .send(RtiRequest::Hello { identity: IDENTITY })
+            .unwrap();
+    }
+    for connection in [&mut source, &mut sink] {
+        assert!(matches!(
+            connection.receive(timeout).unwrap(),
+            Some(RtiReply::Started)
+        ));
+    }
+    source
+        .sink()
+        .send(RtiRequest::Publish {
+            revision: 1,
+            next_event: Some(WireTag::ZERO),
+        })
+        .unwrap();
+    while !matches!(
+        source
+            .receive(timeout)
+            .unwrap()
+            .expect("grant before deadline"),
+        RtiReply::Grant { .. }
+    ) {}
+    source
+        .sink()
+        .send(RtiRequest::Payload {
+            route: RtiRouteIndex::new(0),
+            tag: WireTag::finite(1_000_000, 0),
+            payload: vec![42],
+        })
+        .unwrap();
+    loop {
+        if let RtiReply::Payload { payload, .. } = sink
+            .receive(timeout)
+            .unwrap()
+            .expect("payload before deadline")
+        {
+            assert_eq!(payload, [42]);
+            break;
+        }
+    }
+    source
+        .sink()
+        .send(RtiRequest::Abort {
+            message: "test complete".into(),
+        })
+        .unwrap();
+    drop(source);
+    drop(sink);
+    let _ = server.join().unwrap();
+    let records = capture.snapshot();
+    assert_eq!(records.len(), 1, "{:?}", capture.loss());
+    assert!(records[0].fields.iter().any(|field| field.name == "event"
+        && field.value == tracing_bounded::Value::Str("coordination.transport.encoded".into())));
+    assert_eq!(capture.loss().invalid_context.value, 0);
+}
+
+/// The parallel exchange can lose context, but never use formatting callbacks.
+#[cfg(feature = "bounded-tracing")]
+#[test]
+fn bounded_subscriber_captures_compiled_exchange() {
+    if !client::run_trace_test() {
+        return;
+    }
+    let (subscriber, handle) = tracing_bounded::BoundedSubscriber::new(tracing_bounded::Config {
+        records: 512,
+        producers: 16,
+        level: tracing::level_filters::LevelFilter::DEBUG,
+        targets: &["boomerang::coordination"],
+        ..Default::default()
+    })
+    .unwrap();
+    tracing::subscriber::with_default(subscriber, || {
+        let _producer = tracing_bounded::prepare_current_thread().unwrap();
+        execute_pair(false, false, false);
+    });
+    let records = handle.snapshot();
+    assert!(
+        !records.is_empty(),
+        "no exchange captured: {:?}",
+        handle.loss()
+    );
+    assert_eq!(
+        handle.loss().unsupported_value.value,
+        0,
+        "{:?}",
+        handle.loss()
+    );
+    assert_eq!(handle.lifecycle_loss().producer_admission.value, 0);
+    assert_eq!(handle.loss().field_limit.value, 0);
+    assert_eq!(handle.loss().byte_limit.value, 0);
+    // Contended capture or span admission may lose part of a concurrent exchange.
+    // Exact causal completeness is checked by the hosted test above; native
+    // deterministic transitions below check precise retention and overflow.
+    for record in &records {
+        for field in record
+            .fields
+            .iter()
+            .chain(record.scopes.iter().flat_map(|scope| &scope.fields))
+        {
+            if field.name == "coordination" {
+                assert_eq!(field.value, tracing_bounded::Value::Bytes(vec![7; 32]));
+            }
+        }
+    }
 }
 /// Rejects mismatched artifact identities before execution.
 #[test]
@@ -944,7 +1103,13 @@ fn spawn_traced<T: Send + 'static>(
     run: impl FnOnce() -> T + Send + 'static,
 ) -> std::thread::JoinHandle<T> {
     let dispatch = tracing::dispatcher::get_default(Clone::clone);
-    std::thread::spawn(move || tracing::dispatcher::with_default(&dispatch, run))
+    std::thread::spawn(move || {
+        tracing::dispatcher::with_default(&dispatch, || {
+            #[cfg(feature = "bounded-tracing")]
+            let _producer = tracing_bounded::prepare_current_thread().unwrap();
+            run()
+        })
+    })
 }
 
 #[path = "compiled_execution/client.rs"]

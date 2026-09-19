@@ -12,5 +12,5 @@ pub mod runner;
 #[cfg(feature = "test-tracing")]
 pub mod test_tracing;
 /// Bounded output retention for standard tracing subscribers.
-#[cfg(feature = "launcher")]
+#[cfg(feature = "hosted-tracing")]
 pub mod trace;

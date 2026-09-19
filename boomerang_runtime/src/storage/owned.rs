@@ -908,8 +908,14 @@ impl<'image> OwnedStorage<'image> {
             tag,
             finished: false,
         };
-        tracing::debug!(target: "boomerang::coordination",
-            event = "coordination.reaction.started", ?reaction, ?tag);
+        tracing::debug!(
+            target: "boomerang::coordination",
+            event = "coordination.reaction.started",
+            reaction = reaction.as_u32(),
+            tag_kind = tag.kind_str(),
+            tag_offset_ns = tag.offset().whole_nanoseconds(),
+            tag_microstep = tag.microstep(),
+        );
         let reaction_image = &self.image.reactions()[reaction];
         let reactor = reaction_image.reactor();
         let state_slot = self.image.reactors()[reactor].state_slot();
@@ -949,8 +955,14 @@ impl<'image> OwnedStorage<'image> {
         }
         self.emit_outbound_routes(tag)?;
         observation.finished = true;
-        tracing::debug!(target: "boomerang::coordination",
-            event = "coordination.reaction.finished", ?reaction, ?tag);
+        tracing::debug!(
+            target: "boomerang::coordination",
+            event = "coordination.reaction.finished",
+            reaction = reaction.as_u32(),
+            tag_kind = tag.kind_str(),
+            tag_offset_ns = tag.offset().whole_nanoseconds(),
+            tag_microstep = tag.microstep(),
+        );
         Ok(())
     }
 
@@ -976,9 +988,14 @@ struct ReactionObservation {
 impl Drop for ReactionObservation {
     fn drop(&mut self) {
         if !self.finished {
-            tracing::debug!(target: "boomerang::coordination",
+            tracing::debug!(
+                target: "boomerang::coordination",
                 event = "coordination.reaction.cancelled",
-                reaction = ?self.reaction, tag = ?self.tag);
+                reaction = self.reaction.as_u32(),
+                tag_kind = self.tag.kind_str(),
+                tag_offset_ns = self.tag.offset().whole_nanoseconds(),
+                tag_microstep = self.tag.microstep(),
+            );
         }
     }
 }

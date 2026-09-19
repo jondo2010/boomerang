@@ -250,6 +250,23 @@ pub enum Reply<R, P, D> {
     },
 }
 
+impl<R, P, D> Request<R, P, D> {
+    /// Returns the static request-kind label used by coordination diagnostics.
+    ///
+    /// Classification never inspects or formats route, payload, or diagnostic contents.
+    pub const fn kind_str(&self) -> &'static str {
+        match self {
+            Self::Hello { .. } => "hello",
+            Self::Publish { .. } => "publication",
+            Self::Complete { .. } => "completion",
+            Self::Payload { .. } => "payload",
+            Self::ConfirmIdle { .. } => "confirm-idle",
+            Self::Stop => "stop",
+            Self::Abort { .. } => "abort",
+        }
+    }
+}
+
 impl<R: Copy, P, D> Request<R, P, D> {
     /// Maps route and storage representations without changing message semantics.
     /// Only `route` is fallible, so typed-domain admission remains explicit at the boundary.

@@ -1,5 +1,6 @@
 //! Ordered scripted replies exercise the production client and real compiled scheduler.
 use super::*;
+pub(super) const HOSTED_IDENTITY: &str = "[07 07 07 07 07 07 07 07 07 07 07 07 07 07 07 07 07 07 07 07 07 07 07 07 07 07 07 07 07 07 07 07]";
 use boomerang_central_rti::compiled::{CentralRtiError, RtiReplySource, RtiRequestSink};
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -216,11 +217,14 @@ fn multiple_payloads_are_admitted_in_order_before_grant_and_execute_at_their_tag
         for pair in payload_events.as_chunks::<2>().0 {
             assert_eq!(pair[0]["fields"]["event"], "coordination.payload.received");
             assert_eq!(pair[1]["fields"]["event"], "coordination.boundary.admitted");
-            assert_eq!(pair[0]["fields"]["tag"], pair[1]["fields"]["tag"]);
+            for field in ["tag_kind", "tag_offset_ns", "tag_microstep"] {
+                assert_eq!(pair[0]["fields"][field], pair[1]["fields"][field]);
+                assert!(!pair[0]["fields"][field].is_null());
+            }
             for event in pair {
-                assert_eq!(event["fields"]["federate"], "FederateIndex(1)");
-                assert_eq!(event["fields"]["route"], "RtiRouteIndex(0)");
-                assert_eq!(event["fields"]["coordination"], format!("{IDENTITY:?}"));
+                assert_eq!(event["fields"]["federate"], 1);
+                assert_eq!(event["fields"]["route"], 0);
+                assert_eq!(event["fields"]["coordination"], HOSTED_IDENTITY);
                 assert!(event["fields"].get("payload").is_none());
             }
         }

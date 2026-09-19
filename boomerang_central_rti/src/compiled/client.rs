@@ -35,8 +35,12 @@ impl<'a> RtiClientBindings<'a> {
     /// context, correlating reaction and codec events with RTI events. When the coordination
     /// target is disabled, no identity formatting or subscriber storage is required.
     pub fn execution_span(&self) -> tracing::Span {
-        tracing::debug_span!(target: "boomerang::coordination", "federate",
-            coordination = ?self.identity, federate = ?self.member)
+        tracing::debug_span!(
+            target: "boomerang::coordination",
+            "federate",
+            coordination = self.identity.bytes().as_slice(),
+            federate = self.member.as_u32(),
+        )
     }
 
     /// Selects an existing member from a validated central-RTI deployment without retaining Enclaves.
@@ -202,9 +206,8 @@ impl CentralRtiClient {
                 target: "boomerang::coordination",
                 tracing::Level::ERROR,
                 event = "coordination.failure.first",
-                coordination = ?self.identity,
-                federate = ?self.member,
-                "first coordination failure"
+                coordination = self.identity.bytes().as_slice(),
+                federate = self.member.as_u32(),
             );
             self.failure = Some(message);
         }
@@ -226,18 +229,31 @@ impl CentralRtiClient {
                     .lock()
                     .map_err(|_| CentralRtiError::new("report state lock poisoned"))?;
                 reports.dnet = tag;
-                tracing::debug!(target: "boomerang::coordination",
-                    event = "coordination.dnet.received", coordination = ?self.identity,
-                    federate = ?self.member, ?tag);
+                tracing::debug!(
+                    target: "boomerang::coordination",
+                    event = "coordination.dnet.received",
+                    coordination = self.identity.bytes().as_slice(),
+                    federate = self.member.as_u32(),
+                    tag_kind = tag.kind_str(),
+                    tag_offset_ns = (tag).offset_ns(),
+                    tag_microstep = (tag).microstep(),
+                );
                 if let Some((revision, next)) = reports.skipped {
                     if next > tag {
                         self.sink.send(RtiRequest::Publish {
                             revision,
                             next_event: Some(next),
                         })?;
-                        tracing::debug!(target: "boomerang::coordination",
-                            event = "coordination.publication.restored", coordination = ?self.identity,
-                            federate = ?self.member, revision, next_event = ?next);
+                        tracing::debug!(
+                            target: "boomerang::coordination",
+                            event = "coordination.publication.restored",
+                            coordination = self.identity.bytes().as_slice(),
+                            federate = self.member.as_u32(),
+                            revision,
+                            next_event_kind = next.kind_str(),
+                            next_event_offset_ns = (next).offset_ns(),
+                            next_event_microstep = (next).microstep(),
+                        );
                         reports.skipped = None;
                     }
                 }
@@ -250,11 +266,12 @@ impl CentralRtiClient {
                     target: "boomerang::coordination",
                     tracing::Level::DEBUG,
                     event = "coordination.grant.received",
-                    coordination = ?self.identity,
-                    federate = ?self.member,
+                    coordination = self.identity.bytes().as_slice(),
+                    federate = self.member.as_u32(),
                     revision,
-                    tag = ?tag,
-                    "grant received"
+                    tag_kind = tag.kind_str(),
+                    tag_offset_ns = tag.offset().whole_nanoseconds(),
+                    tag_microstep = tag.microstep(),
                 );
                 Ok(Some(FederateAcquisition::new(
                     CoordinationRevision::new(revision),
@@ -272,36 +289,55 @@ impl CentralRtiClient {
                     .ok_or_else(|| CentralRtiError::new("unknown inbound RTI route key"))?;
                 let tag = crate::runtime_tag_from_wire(tag)
                     .map_err(|e| CentralRtiError::new(e.to_string()))?;
-                tracing::event!(target: "boomerang::coordination", tracing::Level::DEBUG,
-                    event = "coordination.payload.received", federate = ?self.member,
-                    coordination = ?self.identity,
-                    route = ?route, tag = ?tag, "payload received");
+                tracing::event!(
+                    target: "boomerang::coordination",
+                    tracing::Level::DEBUG,
+                    event = "coordination.payload.received",
+                    federate = self.member.as_u32(),
+                    coordination = self.identity.bytes().as_slice(),
+                    route = route.as_u32(),
+                    tag_kind = tag.kind_str(),
+                    tag_offset_ns = tag.offset().whole_nanoseconds(),
+                    tag_microstep = tag.microstep(),
+                );
                 if let Err(error) = adapter.admit(tag, &payload) {
-                    use boomerang_runtime::BoundaryAdmissionError;
-                    let reason = match &error {
-                        BoundaryAdmissionError::InvalidTag(_) => "invalid_tag",
-                        BoundaryAdmissionError::Decode(_) => "decode",
-                        BoundaryAdmissionError::MailboxFull => "mailbox_full",
-                        BoundaryAdmissionError::MailboxClosed => "mailbox_closed",
-                    };
-                    tracing::event!(target: "boomerang::coordination", tracing::Level::WARN,
-                    event = "coordination.boundary.rejected", federate = ?self.member,
-                    coordination = ?self.identity,
-                    route = ?route, tag = ?tag, reason, "boundary rejected payload");
+                    tracing::event!(
+                        target: "boomerang::coordination",
+                        tracing::Level::WARN,
+                        event = "coordination.boundary.rejected",
+                        federate = self.member.as_u32(),
+                        coordination = self.identity.bytes().as_slice(),
+                        route = route.as_u32(),
+                        tag_kind = tag.kind_str(),
+                        tag_offset_ns = tag.offset().whole_nanoseconds(),
+                        tag_microstep = tag.microstep(),
+                        reason = error.kind_str(),
+                    );
                     return Err(CentralRtiError::new(error.to_string()));
                 }
-                tracing::event!(target: "boomerang::coordination", tracing::Level::DEBUG,
-                    event = "coordination.boundary.admitted", federate = ?self.member,
-                    coordination = ?self.identity,
-                    route = ?route, tag = ?tag, "boundary admitted payload");
+                tracing::event!(
+                    target: "boomerang::coordination",
+                    tracing::Level::DEBUG,
+                    event = "coordination.boundary.admitted",
+                    federate = self.member.as_u32(),
+                    coordination = self.identity.bytes().as_slice(),
+                    route = route.as_u32(),
+                    tag_kind = tag.kind_str(),
+                    tag_offset_ns = tag.offset().whole_nanoseconds(),
+                    tag_microstep = tag.microstep(),
+                );
                 Ok(None)
             }
             Some(RtiReply::Idle { revision }) => {
                 self.idle = Some(revision);
-                tracing::event!(target: "boomerang::coordination", tracing::Level::DEBUG,
-                    event = "coordination.idle.received", federate = ?self.member, revision,
-                    coordination = ?self.identity,
-                    "idle authorization received");
+                tracing::event!(
+                    target: "boomerang::coordination",
+                    tracing::Level::DEBUG,
+                    event = "coordination.idle.received",
+                    federate = self.member.as_u32(),
+                    revision,
+                    coordination = self.identity.bytes().as_slice(),
+                );
                 Ok(None)
             }
             Some(RtiReply::Failed { message }) => Err(CentralRtiError::new(message)),
@@ -333,9 +369,19 @@ impl FederateCoordinationBackend for CentralRtiClient {
                         .is_some_and(|(candidate, horizon)| candidate <= horizon)
                     {
                         reports.skipped = Some((revision, next));
-                        tracing::debug!(target: "boomerang::coordination",
-                            event = "coordination.publication.suppressed", coordination = ?self.identity,
-                            federate = ?self.member, revision, next_event = ?next, dnet = ?reports.dnet);
+                        tracing::debug!(
+                            target: "boomerang::coordination",
+                            event = "coordination.publication.suppressed",
+                            coordination = self.identity.bytes().as_slice(),
+                            federate = self.member.as_u32(),
+                            revision,
+                            next_event_kind = next.kind_str(),
+                            next_event_offset_ns = (next).offset_ns(),
+                            next_event_microstep = (next).microstep(),
+                            dnet_kind = reports.dnet.kind_str(),
+                            dnet_offset_ns = (reports.dnet).offset_ns(),
+                            dnet_microstep = (reports.dnet).microstep(),
+                        );
                         return Ok(());
                     }
                 }
@@ -343,10 +389,17 @@ impl FederateCoordinationBackend for CentralRtiClient {
                     revision,
                     next_event,
                 })?;
-                tracing::event!(target: "boomerang::coordination", tracing::Level::DEBUG,
-                    event = "coordination.publication.sent", federate = ?self.member, revision,
-                    coordination = ?self.identity,
-                    next_event = ?publication.next_event(), "publication sent");
+                tracing::event!(
+                    target: "boomerang::coordination",
+                    tracing::Level::DEBUG,
+                    event = "coordination.publication.sent",
+                    federate = self.member.as_u32(),
+                    revision,
+                    coordination = self.identity.bytes().as_slice(),
+                    next_event_kind = next_event.map_or("none", crate::WireTag::kind_str),
+                    next_event_offset_ns = next_event.and_then(crate::WireTag::offset_ns),
+                    next_event_microstep = next_event.and_then(crate::WireTag::microstep),
+                );
                 reports.skipped = None;
                 Ok(())
             });
@@ -378,10 +431,16 @@ impl FederateCoordinationBackend for CentralRtiClient {
                     .lock()
                     .map_err(|_| CentralRtiError::new("report state lock poisoned"))?;
                 self.sink.send(RtiRequest::Complete { tag })?;
-                tracing::event!(target: "boomerang::coordination", tracing::Level::DEBUG,
-                    event = "coordination.completion.sent", federate = ?self.member,
-                    coordination = ?self.identity,
-                    tag = ?completion.completed(), "completion sent");
+                tracing::event!(
+                    target: "boomerang::coordination",
+                    tracing::Level::DEBUG,
+                    event = "coordination.completion.sent",
+                    federate = self.member.as_u32(),
+                    coordination = self.identity.bytes().as_slice(),
+                    tag_kind = completion.completed().kind_str(),
+                    tag_offset_ns = completion.completed().offset().whole_nanoseconds(),
+                    tag_microstep = completion.completed().microstep(),
+                );
                 if reports.skipped.is_some_and(|(_, next)| next <= tag) {
                     reports.skipped = None;
                 }
@@ -407,9 +466,13 @@ impl FederateCoordinationBackend for CentralRtiClient {
         Ok(self.idle == Some(revision))
     }
     fn stop(&mut self) -> Result<(), FederateCoordinationError> {
-        tracing::debug!(target: "boomerang::coordination",
-            event = "coordination.shutdown.requested", coordination = ?self.identity,
-            federate = ?self.member, graceful = self.failure.is_none() && self.idle.is_some());
+        tracing::debug!(
+            target: "boomerang::coordination",
+            event = "coordination.shutdown.requested",
+            coordination = self.identity.bytes().as_slice(),
+            federate = self.member.as_u32(),
+            graceful = self.failure.is_none() && self.idle.is_some(),
+        );
         let result = if self.failure.is_some() || self.idle.is_none() {
             let message = self
                 .failure
@@ -429,9 +492,12 @@ impl FederateCoordinationBackend for CentralRtiClient {
                     }
                     match self.source.receive(remaining)? {
                         Some(RtiReply::Stopped) => {
-                            tracing::debug!(target: "boomerang::coordination",
-                                event = "coordination.shutdown.completed", coordination = ?self.identity,
-                                federate = ?self.member);
+                            tracing::debug!(
+                                target: "boomerang::coordination",
+                                event = "coordination.shutdown.completed",
+                                coordination = self.identity.bytes().as_slice(),
+                                federate = self.member.as_u32(),
+                            );
                             return Ok(());
                         }
                         Some(RtiReply::Failed { message }) => {
@@ -488,11 +554,12 @@ impl OutboundBoundarySink for CompiledOutbound {
             target: "boomerang::coordination",
             tracing::Level::DEBUG,
             event = "coordination.payload.sent",
-            coordination = ?self.identity,
-            federate = ?self.member,
-            route = ?self.route,
-            tag = ?message.tag,
-            "payload sent"
+            coordination = self.identity.bytes().as_slice(),
+            federate = self.member.as_u32(),
+            route = self.route.as_u32(),
+            tag_kind = message.tag.kind_str(),
+            tag_offset_ns = message.tag.offset().whole_nanoseconds(),
+            tag_microstep = message.tag.microstep(),
         );
         Ok(())
     }

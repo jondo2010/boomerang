@@ -2,7 +2,10 @@
 //!
 //! [`KeySet`] is more efficient than a [`super::TinySecondaryMap<K, ()>`] in memory and compute since it uses a
 //! [`FixedBitSet`] to store the keys under the hood.
-use std::{marker::PhantomData, ops::Index};
+use alloc::string::ToString;
+#[cfg(any(feature = "serde", test))]
+use alloc::vec::Vec;
+use core::{marker::PhantomData, ops::Index};
 
 use fixedbitset::{FixedBitSet, Ones};
 
@@ -18,8 +21,8 @@ pub struct KeySet<K: Key> {
     _k: PhantomData<K>,
 }
 
-impl<K: Key + std::fmt::Debug> std::fmt::Debug for KeySet<K> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl<K: Key + core::fmt::Debug> core::fmt::Debug for KeySet<K> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_set().entries(self.iter()).finish()
     }
 }
@@ -66,8 +69,8 @@ impl<K: Key> KeySet<K> {
     }
 }
 
-impl<K: Key + std::fmt::Display> std::fmt::Display for KeySet<K> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl<K: Key + core::fmt::Display> core::fmt::Display for KeySet<K> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_list()
             .entries(self.iter().map(|k| k.to_string()))
             .finish()

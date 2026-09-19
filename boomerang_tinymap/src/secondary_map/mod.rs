@@ -1,4 +1,5 @@
-use std::{
+use alloc::vec::Vec;
+use core::{
     fmt::Debug,
     iter::Enumerate,
     marker::PhantomData,
@@ -21,7 +22,7 @@ pub struct TinySecondaryMap<K: Key, V> {
 }
 
 impl<K: Key + Debug, V: Debug> Debug for TinySecondaryMap<K, V> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_map().entries(self.iter()).finish()
     }
 }
@@ -67,14 +68,14 @@ pub struct IterMut<'a, K: Key, V: 'a> {
 #[derive(Debug)]
 pub struct IntoIter<K: Key, V> {
     values_left: usize,
-    inner: Enumerate<std::vec::IntoIter<Option<V>>>,
+    inner: Enumerate<alloc::vec::IntoIter<Option<V>>>,
     _k: PhantomData<(K, V)>,
 }
 
 #[derive(Debug)]
 pub struct ValuesIter<'a, V: 'a> {
     num_values: usize,
-    inner: std::iter::Flatten<std::slice::Iter<'a, Option<V>>>,
+    inner: core::iter::Flatten<core::slice::Iter<'a, Option<V>>>,
 }
 
 impl<K: Key, V> Iterator for IntoIter<K, V> {
@@ -188,7 +189,7 @@ impl<K: Key, V> TinySecondaryMap<K, V> {
         self.data
             .extend((self.data.len()..=key.index()).map(|_| None));
         if let Some(v) = &mut self.data[key.index()] {
-            Some(std::mem::replace(v, value))
+            Some(core::mem::replace(v, value))
         } else {
             self.num_values += 1;
             self.data[key.index()] = Some(value);

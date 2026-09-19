@@ -1,4 +1,4 @@
-use std::marker::PhantomData;
+use core::marker::PhantomData;
 
 use super::{Key, TinyMap};
 
@@ -233,6 +233,7 @@ impl<K: Key, V> TinyMap<K, V> {
 #[cfg(test)]
 mod tests {
     use crate::DefaultKey;
+    use std::vec::Vec;
 
     use super::*;
 

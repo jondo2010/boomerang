@@ -1,4 +1,4 @@
-use std::marker::PhantomData;
+use core::marker::PhantomData;
 
 use crate::{Key, TinyMap};
 
@@ -217,6 +217,7 @@ mod tests {
     use super::*;
     use crate::DefaultKey;
     use itertools::Itertools;
+    use std::vec::Vec;
 
     /// Make a map containing `N` elements and a vector of keys.
     fn make_map<const N: usize>() -> (TinyMap<DefaultKey, usize>, Vec<DefaultKey>) {

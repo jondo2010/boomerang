@@ -97,6 +97,7 @@ dependencies = [
  "document-features",
  "fixedbitset",
  "serde",
+ "thiserror",
 ]
 
 [[package]]

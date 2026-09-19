@@ -58,6 +58,11 @@ impl<T, B> TinyVecBuilder<T, B> {
         self.initialized
     }
 
+    /// Returns whether the builder contains no initialized values.
+    pub const fn is_empty(&self) -> bool {
+        self.initialized == 0
+    }
+
     /// Transfers initialized values into a move-safe, fixed-shape sequence.
     pub fn seal(self) -> SealedTinyVec<T, B> {
         let builder = ManuallyDrop::new(self);
@@ -123,7 +128,7 @@ impl<T, B> TinyVecBuilder<T, B> {
         }
 
         let mut actual = expected;
-        while let Some(extra) = values.next() {
+        for extra in values {
             actual = actual.saturating_add(1);
             drop(extra);
         }
@@ -179,6 +184,11 @@ impl<T, B> SealedTinyVec<T, B> {
         self.initialized
     }
 
+    /// Returns whether the sealed sequence has no values.
+    pub const fn is_empty(&self) -> bool {
+        self.initialized == 0
+    }
+
     /// Returns a read-only borrowed view of the initialized values.
     pub fn as_ref(&self) -> TinyVecRef<'_, T> {
         TinyVecRef {
@@ -206,6 +216,11 @@ impl<'a, T> TinyVecRef<'a, T> {
         self.values.len()
     }
 
+    /// Returns whether the view has no values.
+    pub const fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+
     /// Iterates over the borrowed values.
     pub fn iter(&self) -> core::slice::Iter<'a, T> {
         self.values.iter()
@@ -216,6 +231,11 @@ impl<'a, T> TinyVecMut<'a, T> {
     /// Returns the number of values in this view.
     pub const fn len(&self) -> usize {
         self.values.len()
+    }
+
+    /// Returns whether the view has no values.
+    pub const fn is_empty(&self) -> bool {
+        self.values.is_empty()
     }
 
     /// Iterates over the borrowed values.
@@ -860,17 +880,18 @@ mod tests {
         let mut moved = [builder.seal()].into_iter().next().unwrap();
 
         assert_eq!(drops(), [0, 0, 0, 0]);
-        let mut values = moved.as_mut();
-        let mut iter = values.iter_mut();
-        let first = iter.next().unwrap();
-        let second = iter.next().unwrap();
-        core::mem::swap(first, second);
-        assert_eq!(values.len(), 2);
-        assert_eq!(
-            values.iter().map(|value| value.0).collect::<Vec<_>>(),
-            [1, 0]
-        );
-        drop(values);
+        {
+            let mut values = moved.as_mut();
+            let mut iter = values.iter_mut();
+            let first = iter.next().unwrap();
+            let second = iter.next().unwrap();
+            core::mem::swap(first, second);
+            assert_eq!(values.len(), 2);
+            assert_eq!(
+                values.iter().map(|value| value.0).collect::<Vec<_>>(),
+                [1, 0]
+            );
+        }
         assert_eq!(moved.as_ref().len(), 2);
         drop(moved);
         assert_eq!(drops(), [1, 1, 0, 0]);
@@ -907,11 +928,12 @@ mod tests {
         builder.try_extend_exact([10, 20].into_iter()).unwrap();
         let mut sealed = builder.seal();
 
-        let mut values = sealed.as_mut();
-        values.iter_mut().for_each(|value| *value += 1);
-        assert_eq!(values.len(), 2);
-        assert_eq!(values.iter().copied().collect::<Vec<_>>(), [11, 21]);
-        drop(values);
+        {
+            let mut values = sealed.as_mut();
+            values.iter_mut().for_each(|value| *value += 1);
+            assert_eq!(values.len(), 2);
+            assert_eq!(values.iter().copied().collect::<Vec<_>>(), [11, 21]);
+        }
 
         let values = sealed.as_ref();
         assert_eq!(values.len(), 2);

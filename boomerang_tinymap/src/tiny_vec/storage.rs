@@ -17,6 +17,12 @@ impl<T, const N: usize> InlineStorage<T, N> {
     }
 }
 
+impl<T, const N: usize> Default for InlineStorage<T, N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Caller-provided fixed-capacity storage for a [`super::TinyVecBuilder`].
 pub struct BorrowedStorage<'a, T> {
     slots: &'a mut [MaybeUninit<T>],
@@ -43,6 +49,13 @@ impl<T> HeapStorage<T> {
     /// Creates empty heap-backed storage.
     pub fn new() -> Self {
         Self { values: Vec::new() }
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl<T> Default for HeapStorage<T> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

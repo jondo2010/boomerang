@@ -39,11 +39,14 @@ boomerang_macros = { workspace = true }
 boomerang_builder = { workspace = true, optional = true }
 
 [dev-dependencies]
-boomerang_util = { path = "../boomerang_util", features = ["runner", "replay", "test-tracing"] }
 criterion = "0.5"
 serde = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing-tracy = { workspace = true }
+
+# Hosted test helpers require the builder API, which the payload facet omits.
+[target.'cfg(not(boomerang_facet = "payload"))'.dev-dependencies]
+boomerang_util = { path = "../boomerang_util", features = ["runner", "replay", "test-tracing"] }
 
 # Deps for Snake example
 [target.'cfg(not(windows))'.dev-dependencies]

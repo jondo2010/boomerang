@@ -68,7 +68,11 @@ impl<T, B> TinyVecBuilder<T, B> {
             rollback.builder.try_push(value)?;
         }
 
-        let actual = expected.saturating_add(values.count());
+        let mut actual = expected;
+        while let Some(extra) = values.next() {
+            actual = actual.saturating_add(1);
+            drop(extra);
+        }
         if actual != expected {
             return Err(TinyMapError::ExactLength { expected, actual });
         }
@@ -78,10 +82,12 @@ impl<T, B> TinyVecBuilder<T, B> {
     }
 
     fn drop_suffix_from(&mut self, original: usize) {
-        while self.initialized > original {
-            self.initialized -= 1;
-            (self.drop_slot)(&mut self.backing, self.initialized);
-        }
+        drop_initialized(
+            &mut self.backing,
+            &mut self.initialized,
+            original,
+            self.drop_slot,
+        );
     }
 }
 
@@ -101,7 +107,7 @@ impl<'a, T> TinyVecBuilder<T, BorrowedStorage<'a, T>> {
 
 impl<T, B> Drop for TinyVecBuilder<T, B> {
     fn drop(&mut self) {
-        drop_initialized(&mut self.backing, &mut self.initialized, self.drop_slot);
+        drop_initialized(&mut self.backing, &mut self.initialized, 0, self.drop_slot);
     }
 }
 
@@ -133,10 +139,60 @@ fn drop_slot<T, B: Storage<T>>(backing: &mut B, index: usize) {
     }
 }
 
-fn drop_initialized<B>(backing: &mut B, initialized: &mut usize, drop_slot: fn(&mut B, usize)) {
-    while *initialized > 0 {
-        *initialized -= 1;
-        drop_slot(backing, *initialized);
+fn drop_initialized<B>(
+    backing: &mut B,
+    initialized: &mut usize,
+    original: usize,
+    drop_slot: fn(&mut B, usize),
+) {
+    let mut cleanup = DropRemaining {
+        backing,
+        initialized,
+        original,
+        drop_slot,
+        active: true,
+    };
+    cleanup.run();
+    cleanup.active = false;
+}
+
+/// Cleans a remaining initialized suffix, including while a value destructor unwinds.
+///
+/// Each slot is protected by a nested guard. If one value destructor panics,
+/// that guard cleans the remaining valid slots during the active unwind. A
+/// second destructor panic is intentionally left to Rust's normal double-panic
+/// abort behavior.
+struct DropRemaining<'a, B> {
+    backing: &'a mut B,
+    initialized: &'a mut usize,
+    original: usize,
+    drop_slot: fn(&mut B, usize),
+    active: bool,
+}
+
+impl<B> DropRemaining<'_, B> {
+    fn run(&mut self) {
+        while *self.initialized > self.original {
+            *self.initialized -= 1;
+            let index = *self.initialized;
+            let mut remaining = DropRemaining {
+                backing: &mut *self.backing,
+                initialized: &mut *self.initialized,
+                original: self.original,
+                drop_slot: self.drop_slot,
+                active: true,
+            };
+            (remaining.drop_slot)(&mut *remaining.backing, index);
+            remaining.active = false;
+        }
+    }
+}
+
+impl<B> Drop for DropRemaining<'_, B> {
+    fn drop(&mut self) {
+        if self.active {
+            self.run();
+        }
     }
 }
 
@@ -189,6 +245,7 @@ mod tests {
         AtomicUsize::new(0),
         AtomicUsize::new(0),
     ];
+    static PANIC_ON_DROP: AtomicUsize = AtomicUsize::new(usize::MAX);
 
     #[derive(Debug)]
     struct DropCounter(usize);
@@ -202,6 +259,9 @@ mod tests {
     impl Drop for DropCounter {
         fn drop(&mut self) {
             DROPS[self.0].fetch_add(1, Ordering::SeqCst);
+            if PANIC_ON_DROP.swap(usize::MAX, Ordering::SeqCst) == self.0 {
+                panic!("value destructor panic");
+            }
         }
     }
 
@@ -209,6 +269,7 @@ mod tests {
         for count in &DROPS {
             count.store(0, Ordering::SeqCst);
         }
+        PANIC_ON_DROP.store(usize::MAX, Ordering::SeqCst);
     }
 
     fn drops() -> [usize; 4] {
@@ -251,6 +312,45 @@ mod tests {
     impl<I: Iterator> ExactSizeIterator for LyingExact<I> {
         fn len(&self) -> usize {
             self.expected
+        }
+    }
+
+    struct CountLiar {
+        values: core::array::IntoIter<DropCounter, 3>,
+    }
+
+    impl CountLiar {
+        fn new() -> Self {
+            Self {
+                values: [
+                    DropCounter::new(1),
+                    DropCounter::new(2),
+                    DropCounter::new(3),
+                ]
+                .into_iter(),
+            }
+        }
+    }
+
+    impl Iterator for CountLiar {
+        type Item = DropCounter;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            self.values.next()
+        }
+
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            (2, Some(2))
+        }
+
+        fn count(self) -> usize {
+            0
+        }
+    }
+
+    impl ExactSizeIterator for CountLiar {
+        fn len(&self) -> usize {
+            2
         }
     }
 
@@ -356,6 +456,42 @@ mod tests {
             core::array::from_fn(|_| MaybeUninit::uninit());
         let mut borrowed = TinyVecBuilder::borrowed(BorrowedStorage::new(&mut slots));
         borrowed.try_push(DropCounter::new(0)).unwrap();
+        let error = borrowed.try_push(DropCounter::new(1)).unwrap_err();
+        assert_eq!(
+            error,
+            TinyMapError::Capacity {
+                limit: 1,
+                requested: 2
+            }
+        );
+        assert_eq!(borrowed.len(), 1);
+        assert_eq!(drops(), [0, 1, 0, 0]);
+        drop(borrowed);
+        assert_eq!(drops(), [1, 1, 0, 0]);
+
+        reset_drops();
+        let mut inline = TinyVecBuilder::<DropCounter, InlineStorage<DropCounter, 1>>::inline();
+        inline.try_push(DropCounter::new(0)).unwrap();
+        let error = inline
+            .try_extend_exact(LyingExact::short([DropCounter::new(1)]))
+            .unwrap_err();
+        assert_eq!(
+            error,
+            TinyMapError::Capacity {
+                limit: 1,
+                requested: 3
+            }
+        );
+        assert_eq!(inline.len(), 1);
+        assert_eq!(drops(), [0, 1, 0, 0]);
+        drop(inline);
+        assert_eq!(drops(), [1, 1, 0, 0]);
+
+        reset_drops();
+        let mut slots: [MaybeUninit<DropCounter>; 1] =
+            core::array::from_fn(|_| MaybeUninit::uninit());
+        let mut borrowed = TinyVecBuilder::borrowed(BorrowedStorage::new(&mut slots));
+        borrowed.try_push(DropCounter::new(0)).unwrap();
         let error = borrowed
             .try_extend_exact(LyingExact::short([DropCounter::new(1)]))
             .unwrap_err();
@@ -421,6 +557,109 @@ mod tests {
         assert_eq!(drops(), [0, 1, 1, 1]);
         drop(borrowed);
         assert_eq!(drops(), [1, 1, 1, 1]);
+    }
+
+    #[test]
+    fn inline_and_borrowed_backing_reject_count_override_that_hides_extra_values() {
+        let _lock = TEST_LOCK.lock().unwrap();
+
+        reset_drops();
+        let mut inline = TinyVecBuilder::<DropCounter, InlineStorage<DropCounter, 4>>::inline();
+        inline.try_push(DropCounter::new(0)).unwrap();
+        let error = inline.try_extend_exact(CountLiar::new()).unwrap_err();
+        assert_eq!(
+            error,
+            TinyMapError::ExactLength {
+                expected: 2,
+                actual: 3
+            }
+        );
+        assert_eq!(inline.len(), 1);
+        assert_eq!(drops(), [0, 1, 1, 1]);
+        drop(inline);
+        assert_eq!(drops(), [1, 1, 1, 1]);
+
+        reset_drops();
+        let mut slots: [MaybeUninit<DropCounter>; 4] =
+            core::array::from_fn(|_| MaybeUninit::uninit());
+        let mut borrowed = TinyVecBuilder::borrowed(BorrowedStorage::new(&mut slots));
+        borrowed.try_push(DropCounter::new(0)).unwrap();
+        let error = borrowed.try_extend_exact(CountLiar::new()).unwrap_err();
+        assert_eq!(
+            error,
+            TinyMapError::ExactLength {
+                expected: 2,
+                actual: 3
+            }
+        );
+        assert_eq!(borrowed.len(), 1);
+        assert_eq!(drops(), [0, 1, 1, 1]);
+        drop(borrowed);
+        assert_eq!(drops(), [1, 1, 1, 1]);
+    }
+
+    #[test]
+    fn inline_and_borrowed_backing_rollback_remaining_values_after_a_drop_panic() {
+        let _lock = TEST_LOCK.lock().unwrap();
+
+        reset_drops();
+        let mut inline = TinyVecBuilder::<DropCounter, InlineStorage<DropCounter, 4>>::inline();
+        inline.try_push(DropCounter::new(0)).unwrap();
+        PANIC_ON_DROP.store(2, Ordering::SeqCst);
+        assert!(catch_unwind(AssertUnwindSafe(|| {
+            inline.try_extend_exact(LyingExact::short([
+                DropCounter::new(1),
+                DropCounter::new(2),
+            ]))
+        }))
+        .is_err());
+        assert_eq!(inline.len(), 1);
+        assert_eq!(drops(), [0, 1, 1, 0]);
+        drop(inline);
+        assert_eq!(drops(), [1, 1, 1, 0]);
+
+        reset_drops();
+        let mut slots: [MaybeUninit<DropCounter>; 4] =
+            core::array::from_fn(|_| MaybeUninit::uninit());
+        let mut borrowed = TinyVecBuilder::borrowed(BorrowedStorage::new(&mut slots));
+        borrowed.try_push(DropCounter::new(0)).unwrap();
+        PANIC_ON_DROP.store(2, Ordering::SeqCst);
+        assert!(catch_unwind(AssertUnwindSafe(|| {
+            borrowed.try_extend_exact(LyingExact::short([
+                DropCounter::new(1),
+                DropCounter::new(2),
+            ]))
+        }))
+        .is_err());
+        assert_eq!(borrowed.len(), 1);
+        assert_eq!(drops(), [0, 1, 1, 0]);
+        drop(borrowed);
+        assert_eq!(drops(), [1, 1, 1, 0]);
+    }
+
+    #[test]
+    fn inline_and_borrowed_backing_drop_remaining_values_after_a_drop_panic() {
+        let _lock = TEST_LOCK.lock().unwrap();
+
+        reset_drops();
+        let mut inline = TinyVecBuilder::<DropCounter, InlineStorage<DropCounter, 3>>::inline();
+        inline.try_push(DropCounter::new(0)).unwrap();
+        inline.try_push(DropCounter::new(1)).unwrap();
+        inline.try_push(DropCounter::new(2)).unwrap();
+        PANIC_ON_DROP.store(2, Ordering::SeqCst);
+        assert!(catch_unwind(AssertUnwindSafe(|| drop(inline))).is_err());
+        assert_eq!(drops(), [1, 1, 1, 0]);
+
+        reset_drops();
+        let mut slots: [MaybeUninit<DropCounter>; 3] =
+            core::array::from_fn(|_| MaybeUninit::uninit());
+        let mut borrowed = TinyVecBuilder::borrowed(BorrowedStorage::new(&mut slots));
+        borrowed.try_push(DropCounter::new(0)).unwrap();
+        borrowed.try_push(DropCounter::new(1)).unwrap();
+        borrowed.try_push(DropCounter::new(2)).unwrap();
+        PANIC_ON_DROP.store(2, Ordering::SeqCst);
+        assert!(catch_unwind(AssertUnwindSafe(|| drop(borrowed))).is_err());
+        assert_eq!(drops(), [1, 1, 1, 0]);
     }
 
     #[test]

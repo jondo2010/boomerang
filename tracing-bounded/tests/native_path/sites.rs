@@ -1,4 +1,4 @@
-//! Closed inventory: these four native macro sites are never warmed up.
+//! Native-path inventory: these four macro sites are never warmed up.
 
 pub fn first() {
     tracing::info!(target: "audit", parent: None, sequence = 0_u64);

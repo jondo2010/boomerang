@@ -1,2 +1,0 @@
-# The audited dependency closure must survive a fresh checkout.
-!Cargo.lock

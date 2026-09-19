@@ -4,12 +4,14 @@ A proposed bounded, loss-aware subscriber for native Rust `tracing` events and
 spans. Intended for applications where diagnostics may lose data but must not
 wait for output capacity, allocate during capture, or corrupt execution context.
 
-**Status: specification and documentation scaffold only.** There is no subscriber
-implementation yet. Publication is disabled. The package name is provisional;
-checking registry search results does not reserve it.
+**Status: unpublished partial implementation.** A tested internal backend now
+captures explicit-root native primitive events into fixed record/field/byte
+storage. There is still no public subscriber, producer/span context, complete
+allocation qualification, or conformance claim. Publication is disabled. The
+package name is provisional; checking registry search results does not reserve it.
 
-[QUALIFICATION.md](QUALIFICATION.md) records a standalone native emission-path
-audit with executable fixtures. Its test-only subscriber is not the production
+[QUALIFICATION.md](QUALIFICATION.md) records a native emission-path
+audit with Cargo-managed tests. Its test-only subscriber is not the production
 implementation and does not establish full conformance.
 
 ## Why a separate crate?
@@ -36,9 +38,10 @@ storage, span context, loss accounting, and off-path inspection.
 - Invalid context is reported or rejected; it is never replaced with another
   task's or thread's context.
 
-These are requirements for the implementation, **not guarantees established by
-the current scaffold**. [SPEC.md](SPEC.md) is the normative contract and release
-conformance checklist. It is also rendered as the `specification` rustdoc module.
+These are requirements for the complete implementation, **not guarantees
+established by the current partial backend**. [SPEC.md](SPEC.md) is the normative
+contract and release conformance checklist. It is also rendered as the
+`specification` rustdoc module.
 The adopted closed-callsite profile also requires an application-established
 upper bound `C` covering all static native callsites in the process, including
 dependencies. Under the audited upstream registration algorithm, an insertion
@@ -52,6 +55,37 @@ The initial supported profile is a fixed native subscriber installed before
 execution, with a bounded set of producer threads. Setup and snapshot inspection
 may allocate. Dynamic subscriber composition and replacement are outside the
 bounded guarantee.
+
+For configured record, field and copied-byte limits `R`, `F` and `B`, the current
+internal backend reserves `R + 1` slots (the ring plus scratch). Its logical data
+bound is `(R + 1) * (size_of::<Slot>() + F *
+size_of::<Option<StoredField>>() + B)`, plus the shared allocation and `Arc`,
+`Mutex`/`Storage` header (ring pointer/length and indices), atomic loss counters
+and fixed callback stack state. The ring uses a `Box<[Slot]>` of length `R`, so
+those `R` slot headers are the outer table in the formula; scratch is one
+embedded `Slot`. Every slot owns boxed field and byte arrays of exactly `F` and
+`B` logical elements. Some targets also allocate platform mutex storage during
+constructor initialization; this is separate from the logical slot/`Shared`
+struct bound. Allocator bookkeeping, alignment and size-class rounding
+are implementation-dependent and are not exact requested bytes. Snapshot-owned
+`Vec`, `String` and byte storage, along with upstream callsite/dispatcher/TLS
+storage, is separate. Span, producer, depth and reclamation storage is not
+implemented, so this is not yet a complete P3 bound.
+
+Ring, field and byte arrays use fallible reservations that return
+`BuildError::Allocation` on reservation failure. `Arc`/shared allocation and
+standard platform mutex initialization do not promise recoverable global
+allocation failure. Setup may allocate and block; the constructor acquires and
+releases its new mutex before returning either backend handle.
+
+The private backend's visitation work bound currently assumes macro-generated
+events with matching metadata/value sets and a bounded number of visited entries.
+Manually constructed native events are not yet qualified: tracing-core 0.1.36
+permits explicit value sets with repeated fields independently of metadata count,
+and continues visiting entries after the visitor has latched rejection. Resolving
+this native-input qualification gap is a gate for the future public Subscriber,
+alongside producer preparation, span/context and lifecycle qualification. The
+normative P1/P2 contract is unchanged.
 
 The process-wide callsite bound is a deployment responsibility, not a capacity
 that this subscriber can enforce. Dynamic callsite creation and runtime-loaded
@@ -90,6 +124,42 @@ Before publication, the implementation must pass the specification's conformance
 matrix, provide runnable examples and API documentation, declare its tested Rust
 version/platform profile, and pass standalone package verification. The published
 archive must include this README, the specification, and both license texts.
+
+## Testing
+
+From this crate's root, including an extracted package, run:
+
+```sh
+cargo test -p tracing-bounded
+cargo test -p tracing-bounded --release
+```
+
+These commands run the backend unit tests, the first-backend-event regression,
+and all seven [native-path audit](QUALIFICATION.md) scenarios. The first-event
+regression lives directly in `capture` as a unit test. It starts a fresh copy of
+the unit-test executable, selecting only itself, so other tests cannot warm up
+tracing state. The native-path audit remains a harness-free executable with one
+child process per scenario. No shell runner, production-source inclusion,
+copying, or isolated build is required. Both share the test-only allocation
+observer and workspace dependencies; Cargo's usual lockfile and build cache apply.
+
+The regression accesses private backend state without a public test API. After
+dispatch and observer preparation, it measures the first
+real macro-generated explicit-root event without preceding capture or snapshot
+access, then checks retained fields and zero loss off-path. A deliberate
+allocation/deallocation validates the observer. This root-only regression is
+not full final-subscriber or cross-platform allocation qualification.
+
+Production builds forbid unsafe code. Test builds deny it except inside the
+shared allocation observer, whose `GlobalAlloc` implementation delegates to
+`System`. Miri runs the first-event test alone without spawning; see the exact
+commands in [QUALIFICATION.md](QUALIFICATION.md).
+
+Package verification remains a separate release check (`cargo package` followed
+by tests in the extracted archive). Dependency updates are allowed through the
+workspace; resolved versions/features remain part of qualification evidence,
+not independently pinned requirements. See Q1 before making boundedness claims
+for a new dependency resolution.
 
 ## License
 

@@ -14,7 +14,7 @@ exclude.workspace = true
 [features]
 default = ["alloc", "serde"]
 alloc = ["dep:fixedbitset"]
-std = ["alloc", "fixedbitset/std"]
+std = ["alloc", "fixedbitset/std", "thiserror/std"]
 
 ## Support for serialization
 serde = ["dep:serde", "alloc"]
@@ -23,6 +23,7 @@ serde = ["dep:serde", "alloc"]
 document-features = { workspace = true }
 fixedbitset = { version = "0.5", optional = true, default-features = false }
 serde = { version = "1.0", optional = true, default-features = false, features = ["derive", "alloc"] }
+thiserror = { workspace = true, default-features = false }
 
 [dev-dependencies]
 itertools = { workspace = true }

@@ -420,6 +420,8 @@ fn generated_central_deployment_publishes_isolated_artifacts_and_exchanges_tagge
         .arg(fixture_workspace())
         .args(["run", "--deployment", "sensor-slice", "--summary"])
         .arg(&summary)
+        // A legacy runtime switch must not override the compiled hosted choice.
+        .env("BOOMERANG_TRACE_MODE", "bounded")
         .env("RUST_LOG", "boomerang::coordination=debug")
         .env("CARGO_TARGET_DIR", &target)
         .output()
@@ -431,10 +433,14 @@ fn generated_central_deployment_publishes_isolated_artifacts_and_exchanges_tagge
     );
     let trace = String::from_utf8_lossy(&result.stderr);
     for event in [
+        "coordination.reaction.started",
+        "coordination.publication.sent",
         "coordination.codec.encoded",
         "coordination.transport.encoded",
         "coordination.transport.decoded",
         "coordination.rti.payload.forwarded",
+        "coordination.rti.grant.issued",
+        "coordination.rti.accounting.completed",
         "coordination.boundary.admitted",
         "coordination.reaction.finished",
     ] {
@@ -446,20 +452,14 @@ fn generated_central_deployment_publishes_isolated_artifacts_and_exchanges_tagge
         ("coordination.boundary.admitted", 1),
     ] {
         let line = trace.lines().find(|line| line.contains(event)).unwrap();
-        assert!(
-            line.contains(&format!("federate=FederateIndex({member})")),
-            "{line}"
-        );
-        assert!(
-            line.contains("coordination=CoordinationFingerprint"),
-            "{line}"
-        );
-        assert!(line.contains("route=RtiRouteIndex(0)"), "{line}");
+        assert!(line.contains(&format!("federate={member}")), "{line}");
+        assert!(line.contains("coordination=["), "{line}");
+        assert!(line.contains("route=0"), "{line}");
     }
     let fingerprint = |line: &str| {
         line.split("coordination=")
             .nth(1)
-            .and_then(|rest| rest.split_once("])").map(|(value, _)| value.to_owned()))
+            .and_then(|rest| rest.split_once(']').map(|(value, _)| value.to_owned()))
             .unwrap()
     };
     let encoded = trace
@@ -476,12 +476,159 @@ fn generated_central_deployment_publishes_isolated_artifacts_and_exchanges_tagge
     }
     let queued = trace
         .lines()
-        .find(|line| {
-            line.contains("coordination.transport.queued")
-                && line.contains("federate=FederateIndex(1)")
-        })
+        .find(|line| line.contains("coordination.transport.queued") && line.contains("federate=1"))
         .expect("server queue trace has peer context");
     assert_eq!(fingerprint(queued), fingerprint(encoded));
+
+    // Build separate artifacts for each subscriber choice. Bounded
+    // capture is lossy under contention, but must report every kind of loss
+    // separately and must not change the application result.
+    let mut bounded_document: Option<Value> = None;
+    for variant in ["off", "bounded", "bounded-small"] {
+        let mode = if variant == "off" { "off" } else { "bounded" };
+        let deployment = format!("sensor-slice-{variant}");
+        support::reset_deployment_output(&target, &deployment);
+        let _variant = support::fixture_variant(&deployment, "sensor-slice", |config| {
+            config
+                .as_table_mut()
+                .unwrap()
+                .insert("tracing".into(), mode.into());
+            if variant == "bounded-small" {
+                config.as_table_mut().unwrap().insert(
+                    "bounded-tracing".into(),
+                    toml::toml! {
+                        records = 1
+                        bytes = 2048
+                        span-bytes = 512
+                    }
+                    .into(),
+                );
+                config["federates"]["sensor"]
+                    .as_table_mut()
+                    .unwrap()
+                    .insert("bounded-tracing".into(), toml::toml! { records = 2 }.into());
+                config["rti"]
+                    .as_table_mut()
+                    .unwrap()
+                    .insert("bounded-tracing".into(), toml::toml! { records = 3 }.into());
+            }
+        });
+        let output = Command::new(env!("CARGO_BIN_EXE_cargo-boomerang"))
+            .args(["boomerang", "--workspace"])
+            .arg(fixture_workspace())
+            .args(["run", "--deployment", &deployment])
+            .env(
+                "BOOMERANG_TRACE_MODE",
+                if mode == "off" { "bounded" } else { "off" },
+            )
+            .env("RUST_LOG", "boomerang::coordination=debug")
+            .env("CARGO_TARGET_DIR", &target)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{mode}: {stderr}");
+        assert!(String::from_utf8_lossy(&output.stdout).contains("sensor received command 42"));
+        let bundles: Vec<_> = fs::read_dir(target.join("boomerang").join(&deployment))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.join("deployment.json").is_file())
+            .collect();
+        assert_eq!(bundles.len(), 1);
+        let trace_document: Value =
+            serde_json::from_slice(&fs::read(bundles[0].join("deployment.json")).unwrap()).unwrap();
+        if variant == "bounded" {
+            bounded_document = Some(trace_document.clone());
+        } else if variant == "bounded-small" {
+            let previous = bounded_document.as_ref().unwrap();
+            assert_ne!(trace_document["fingerprint"], previous["fingerprint"]);
+            assert_eq!(trace_document["coordination"], previous["coordination"]);
+            assert_eq!(trace_document["federates"], previous["federates"]);
+            for (limits, records) in [
+                (
+                    &trace_document["resources"]["federates"][0]["bounded_tracing"],
+                    1,
+                ),
+                (
+                    &trace_document["resources"]["federates"][1]["bounded_tracing"],
+                    2,
+                ),
+                (&trace_document["resources"]["rti_bounded_tracing"], 3),
+            ] {
+                assert_eq!(limits["records"], records);
+                assert_eq!(limits["bytes"], 2048);
+                assert_eq!(limits["span_bytes"], 512);
+                assert_eq!(limits["fields"], 32);
+                assert_eq!(limits["spans"], 64);
+                assert_eq!(limits["span_fields"], 16);
+                assert_eq!(limits["producers"], 64);
+                assert_eq!(limits["depth"], 16);
+            }
+        }
+        for role in ["rti", "federates/host", "federates/sensor"] {
+            assert_trace_dependencies(
+                &bundles[0].join(format!("generated/{role}/Cargo.toml")),
+                mode,
+            );
+        }
+        if mode == "off" {
+            assert!(!stderr.contains("coordination."), "{stderr}");
+            continue;
+        }
+        let documents: Vec<Value> = stderr
+            .lines()
+            .filter(|line| line.starts_with('{'))
+            .map(|line| serde_json::from_str(line).expect("complete bounded JSON line"))
+            .collect();
+        let losses: Vec<_> = documents
+            .iter()
+            .filter(|line| line["kind"] == "loss")
+            .collect();
+        assert_eq!(
+            losses.len(),
+            3,
+            "RTI and both Federates must export loss: {stderr}"
+        );
+        let mut retained = Vec::new();
+        for loss in losses {
+            retained.push(
+                documents
+                    .iter()
+                    .filter(|record| record["kind"] == "record" && record["pid"] == loss["pid"])
+                    .count(),
+            );
+            if variant == "bounded-small" {
+                assert!(
+                    loss["loss"]["overwritten_records"]["value"]
+                        .as_u64()
+                        .unwrap()
+                        > 0,
+                    "{loss}"
+                );
+            }
+            assert_eq!(loss["loss"]["unsupported_value"]["value"], 0, "{loss}");
+            assert_eq!(loss["loss"]["field_limit"]["value"], 0, "{loss}");
+            assert_eq!(loss["loss"]["byte_limit"]["value"], 0, "{loss}");
+            assert_eq!(
+                loss["lifecycle_loss"]["producer_admission"]["value"], 0,
+                "{loss}"
+            );
+            assert!(
+                documents
+                    .iter()
+                    .any(|record| record["kind"] == "record" && record["pid"] == loss["pid"]),
+                "{stderr}"
+            );
+        }
+        if variant == "bounded-small" {
+            retained.sort_unstable();
+            assert_eq!(retained, [1, 2, 3], "{stderr}");
+        }
+        for record in documents.iter().filter(|line| line["kind"] == "record") {
+            assert_eq!(record["trace_schema"], 1);
+            assert_eq!(record["target"], "boomerang::coordination");
+            assert!(record["fields"].get("payload").is_none());
+        }
+    }
 
     assert!(String::from_utf8_lossy(&result.stdout).contains("sensor received command 42"));
     let summary: Value = serde_json::from_slice(&fs::read(summary).unwrap()).unwrap();
@@ -495,6 +642,12 @@ fn generated_central_deployment_publishes_isolated_artifacts_and_exchanges_tagge
     assert_eq!(manifests.len(), 1);
     let manifest = &manifests[0];
     let bundle = manifest.parent().unwrap();
+    for role in ["rti", "federates/host", "federates/sensor"] {
+        assert_trace_dependencies(
+            &bundle.join(format!("generated/{role}/Cargo.toml")),
+            "hosted",
+        );
+    }
     let document: Value = serde_json::from_slice(&fs::read(manifest).unwrap()).unwrap();
     let host_target = target_lexicon::HOST.to_string();
     let mut federate_metadata = document["federates"].clone();
@@ -727,6 +880,42 @@ fn generated_central_deployment_publishes_isolated_artifacts_and_exchanges_tagge
     );
 }
 
+fn assert_trace_dependencies(manifest: &std::path::Path, mode: &str) {
+    let output = Command::new("cargo")
+        .args(["tree", "--manifest-path"])
+        .arg(manifest)
+        .args([
+            "--locked",
+            "--offline",
+            "--edges",
+            "normal",
+            "--prefix",
+            "none",
+            "--format",
+            "{p}",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let tree = String::from_utf8(output.stdout).unwrap();
+    for (package, present) in [
+        ("tracing-bounded", mode == "bounded"),
+        ("tracing-subscriber", mode == "hosted"),
+        ("tracing-appender", mode == "hosted"),
+    ] {
+        assert_eq!(
+            tree.lines()
+                .any(|line| line.starts_with(&format!("{package} v"))),
+            present,
+            "{mode}: {tree}"
+        );
+    }
+}
+
 /// Executes the portable codec/admission contract compiled with the actual generated RTI tables.
 fn verify_generated_wire_contract(bundle: &Path, document: &Value, target: &Path) {
     let scratch = tempfile::tempdir().unwrap();
@@ -870,7 +1059,7 @@ fn build_normalizes_deployment_execution_policy_into_every_published_artifact() 
         dependencies["boomerang_util"]["features"]
             .as_array()
             .unwrap(),
-        &[toml::Value::String("launcher".into())]
+        &[toml::Value::String("hosted-tracing".into())]
     );
     assert!(!dependencies.contains_key("tracing-subscriber"));
     let executable = published_executable(manifest.to_str().unwrap());

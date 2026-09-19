@@ -45,6 +45,102 @@ recovery = "fail-stop"
 }
 
 #[test]
+fn tracing_backend_is_a_validated_build_choice() {
+    use cargo_boomerang::TracingBackend;
+    let source = one_federate_without_coordination();
+    assert_eq!(
+        parse_manifest(source)
+            .unwrap()
+            .deployment("production")
+            .unwrap()
+            .tracing,
+        TracingBackend::Hosted,
+    );
+    for (name, expected) in [
+        ("off", TracingBackend::Off),
+        ("bounded", TracingBackend::Bounded),
+        ("hosted", TracingBackend::Hosted),
+    ] {
+        let configured = format!("{source}\n[deployments.production]\ntracing = \"{name}\"\n");
+        assert_eq!(
+            parse_manifest(&configured)
+                .unwrap()
+                .deployment("production")
+                .unwrap()
+                .tracing,
+            expected
+        );
+    }
+    let invalid = format!("{source}\n[deployments.production]\ntracing = \"automatic\"\n");
+    let error = parse_manifest(&invalid).unwrap_err().to_string();
+    assert!(error.contains("deployments.production.tracing"), "{error}");
+}
+
+#[test]
+fn bounded_tracing_tables_validate_before_building() {
+    let source = format!(
+        "{}\n[deployments.production]\ntracing = \"bounded\"\n\
+         [deployments.production.bounded-tracing]\nrecords = 0\nbytes = 2048\n\
+         [deployments.production.federates.host.bounded-tracing]\nrecords = 2\n",
+        one_federate_without_coordination(),
+    );
+    assert!(parse_manifest(&source).is_ok());
+    for (field, value) in [
+        ("fields", "0"),
+        ("bytes", "0"),
+        ("spans", "0"),
+        ("spans", "4294967295"),
+        ("span-fields", "0"),
+        ("span-bytes", "0"),
+        ("depth", "0"),
+        ("producers", "0"),
+        ("records", "-1"),
+        ("records", "4294967296"),
+        ("recordz", "1"),
+    ] {
+        let invalid = if field == "records" {
+            source.replace("records = 2", &format!("records = {value}"))
+        } else {
+            format!("{source}{field} = {value}\n")
+        };
+        let error = parse_manifest(&invalid).unwrap_err().to_string();
+        assert!(error.contains("bounded-tracing"), "{field}: {error}");
+    }
+    for backend in ["off", "hosted"] {
+        let invalid = source.replace("tracing = \"bounded\"", &format!("tracing = {backend:?}"));
+        assert!(parse_manifest(&invalid)
+            .unwrap_err()
+            .to_string()
+            .contains("bounded-tracing"));
+    }
+    let overflow = source.replace("records = 0", "records = 4294967295\nfields = 4294967295");
+    assert!(parse_manifest(&overflow).is_err());
+}
+
+#[test]
+fn bounded_tracing_overrides_inherit_each_field() {
+    let source = format!(
+        "{}\n[deployments.production]\ntracing = \"bounded\"\n\
+         [deployments.production.bounded-tracing]\nrecords = 9\nfields = 10\nbytes = 2048\n\
+         spans = 11\nspan-fields = 12\nspan-bytes = 512\nproducers = 13\ndepth = 14\n\
+         [deployments.production.federates.host.bounded-tracing]\nrecords = 0\nspan-fields = 15\n",
+        one_federate_without_coordination(),
+    );
+    let manifest = parse_manifest(&source).unwrap();
+    let deployment = manifest.deployment("production").unwrap();
+    let limits = deployment
+        .bounded_tracing_limits(deployment.federates["host"].bounded_tracing.as_ref())
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(limits).unwrap(),
+        serde_json::json!({
+            "records": 0, "fields": 10, "bytes": 2048, "spans": 11,
+            "span_fields": 15, "span_bytes": 512, "producers": 13, "depth": 14,
+        })
+    );
+}
+
+#[test]
 fn bindings_select_named_component_modules_and_reject_expressions() {
     for entry in ["keyboard", "input::keyboard", "input::r#type"] {
         let source = format!(

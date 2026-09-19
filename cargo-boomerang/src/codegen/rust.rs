@@ -18,7 +18,48 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use tinymap::{IndexSpan, SliceRange};
 
-use crate::{codegen::LauncherCapabilities, manifest::ExecutionPolicy, DriverOutput};
+use crate::{
+    codegen::LauncherCapabilities,
+    manifest::{ExecutionPolicy, TracingBackend},
+    DriverOutput,
+};
+
+/// Emits only the initialization for the selected build-time backend.
+pub(super) fn render_tracing_init(
+    backend: TracingBackend,
+    limits: Option<crate::BoundedTracingLimits>,
+) -> TokenStream {
+    match backend {
+        TracingBackend::Off => quote! {},
+        TracingBackend::Hosted => quote! {
+            let _tracing_guard = boomerang_util::launcher::init_tracing();
+        },
+        TracingBackend::Bounded => {
+            let limits = limits.expect("analyzed bounded launchers have resolved limits");
+            let [records, fields, bytes, spans, span_fields, span_bytes, producers, depth] = [
+                limits.records,
+                limits.fields,
+                limits.bytes,
+                limits.spans,
+                limits.span_fields,
+                limits.span_bytes,
+                limits.producers,
+                limits.depth,
+            ]
+            .map(proc_macro2::Literal::u32_unsuffixed);
+            quote! {
+                let _tracing_guard = boomerang_util::launcher::init_bounded_tracing(
+                    boomerang_util::launcher::BoundedTracingConfig {
+                        records: #records, fields: #fields, bytes: #bytes,
+                        spans: #spans, span_fields: #span_fields, span_bytes: #span_bytes,
+                        producers: #producers, depth: #depth,
+                        ..Default::default()
+                    }
+                )?;
+            }
+        }
+    }
+}
 
 /// Validates and deterministically formats one complete generated Rust file.
 pub(crate) fn format_rust(tokens: TokenStream) -> Result<String> {
@@ -32,6 +73,7 @@ pub(super) fn render_launcher(
     slice: &FederateSlice<'_>,
     aliases: &BTreeMap<String, String>,
     execution: &ExecutionPolicy,
+    tracing: TokenStream,
     coordination: Option<TokenStream>,
     capabilities: LauncherCapabilities,
 ) -> Result<String> {
@@ -64,9 +106,7 @@ pub(super) fn render_launcher(
             )))
         },
     );
-    let init_tracing = capabilities
-        .hosted
-        .then(|| quote!(let _tracing_guard = boomerang_util::launcher::init_tracing();));
+    let init_tracing = capabilities.hosted.then_some(tracing);
     let write_execution_summary = capabilities
         .hosted
         .then(|| quote!(boomerang_util::launcher::write_execution_summary(&execution)?;));

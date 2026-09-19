@@ -3,7 +3,9 @@
 ## Status and terminology
 
 This is the normative contract for `tracing-bounded`, currently an unpublished
-documentation scaffold with an upstream audit fixture, not a conforming subscriber.
+initial native subscriber with bounded event/span storage and prepared producer
+contexts. Initial Boomerang coordination integration is available; full release
+qualification remains incomplete.
 **MUST**, **MUST NOT**, and **SHOULD** denote requirements and recommendations.
 A release MUST disclose unmet requirements and MUST NOT claim full conformance
 for a partial implementation.
@@ -41,6 +43,18 @@ This **closed-callsite profile** requires an application-established, process-wi
 upper bound `C` on static native callsites, including dependencies and filtered
 sites. This is deployment evidence, not a subscriber-enforced capacity; Q1 defines
 the constraints.
+
+All guarantees require **macro-shaped value sets** for events, span creation and
+span updates: values MUST use the associated callsite's metadata field set.
+Explicit entries MUST reference only its declared fields, at most once each;
+the total entry count, including empty entries, MUST NOT exceed the declared
+field count. Positional entries MUST correspond exactly to the declared fields.
+Sparse or reordered explicit entries are permitted. This is a producer/dependency
+precondition, not subscriber-validated input: native macros satisfy the shape,
+and hand-built native values MUST also satisfy it. Arbitrary out-of-profile sets
+have no bounded-work, rejection or loss-accounting guarantee. P4's unsupported
+value rejection still applies within this shape; P5 permits repeated names
+across distinct scopes.
 
 Preparation MUST precede reliance on capture guarantees. Producer admission MUST
 use reserved bounded storage or fail visibly, without growing capture storage or
@@ -210,7 +224,7 @@ replace lifetime/context inspection.
 
 | Group | Mandatory checks |
 | --- | --- |
-| Interoperability | Native macros; explicit/root/contextual parents; independent consumer |
+| Interoperability | Native macros and conforming hand-built value sets; explicit/root/contextual parents; independent consumer |
 | Filtering | Exact targets/levels; excluded fields not formatted or counted as loss |
 | Values | Integer extrema; non-finite floats; exact strings/bytes; every primitive visitor; duplicate scope field names |
 | Formatter rejection | Panic/side-effect sentinels never execute; whole-event rejection |
@@ -235,7 +249,9 @@ each failed attempt implies another insertion. At most `C` callsites therefore
 bound one insertion to `C - 1` failures and one success. Same-site competitors
 do not wait for registration to finish. This bounds source-level insertion
 attempts, not all atomic operations, instructions, hardware retries or time.
-See [QUALIFICATION.md](QUALIFICATION.md) for source locations and fixture evidence.
+See [QUALIFICATION.md](QUALIFICATION.md) for source locations and test evidence.
+Development follows workspace dependency versions, not independent exact pins;
+the argument remains conditional on the audited resolved versions and features.
 
 The deployment MUST:
 
@@ -244,6 +260,8 @@ The deployment MUST:
 - Identify the artifact, build features, inventory method and dependency
   instrumentation. A conservative bound is sufficient, but a caller-supplied
   number MUST NOT be represented as a runtime-enforced registration cap.
+- Audit application and dependency producers for P2's value-set shape; metadata
+  counts alone do not bound arbitrary hand-built value sets.
 - Exclude dynamic/leaked callsites, runtime-loaded instrumentation, custom
   registration and manual duplicate registration during qualified execution.
 - Install one fixed dispatcher during setup; do not rebuild interest caches,

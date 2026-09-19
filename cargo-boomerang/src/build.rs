@@ -128,7 +128,7 @@ pub(crate) fn build_analyzed(
         .context("failed to serialize canonical topology")?;
     let topology_hash = hash_bytes(&topology);
     let bindings = binding_records(analyzed)?;
-    let resources = resource_report(&analyzed.compiled);
+    let resources = resource_report(&analyzed.compiled, &analyzed.resolved);
     let source_lock_hash = lowercase_hex(&analyzed.resolved.lockfile().digest);
     let generated_lock_hash = hash_file_collection(
         federates

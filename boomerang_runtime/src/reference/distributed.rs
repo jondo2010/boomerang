@@ -135,9 +135,18 @@ impl<T: ReactorData, C: PayloadEncoder<T>> crate::storage::owned::OutboundRoute
                 source: crate::PayloadCodecError::new(source.to_string()),
             }
         })?;
-        tracing::debug!(target: "boomerang::coordination",
-            event = "coordination.codec.encoded", local_route = ?self.local_route, port = ?source.get_key(),
-            source_tag = ?tag, tag = ?target);
+        tracing::debug!(
+            target: "boomerang::coordination",
+            event = "coordination.codec.encoded",
+            local_route = self.local_route.as_u32(),
+            port = source.get_key().as_u32(),
+            source_tag_kind = tag.kind_str(),
+            source_tag_offset_ns = tag.offset().whole_nanoseconds(),
+            source_tag_microstep = tag.microstep(),
+            tag_kind = target.kind_str(),
+            tag_offset_ns = target.offset().whole_nanoseconds(),
+            tag_microstep = target.microstep(),
+        );
         self.sink
             .send(crate::TaggedPayload {
                 tag: target,

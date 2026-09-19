@@ -1,4 +1,4 @@
-//! Test-only observation endpoint. No production storage or span semantics.
+//! Native-path observation endpoint. No production storage or span semantics.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use tracing_core::{
@@ -8,7 +8,7 @@ use tracing_core::{
     Event, Level, LevelFilter, Metadata, Subscriber,
 };
 
-// Finite fixture scenarios emit at most 1024 events; these are not production
+// Finite audit scenarios emit at most 1024 events; these are not production
 // saturating loss counters. Observe them only after all emitting workers join.
 static ACCEPTED: AtomicU64 = AtomicU64::new(0);
 static REJECTED: AtomicU64 = AtomicU64::new(0);

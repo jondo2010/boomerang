@@ -293,6 +293,8 @@ pub fn connect(
         .name("compiled-rti-tokio".into())
         .spawn(move || {
             let _dispatcher = tracing::dispatcher::set_default(&dispatcher);
+            #[cfg(feature = "bounded-tracing")]
+            let _producer = tracing_bounded::prepare_current_thread();
             let _parent = parent.enter();
             let result = runtime.block_on(client_loop(
                 stream,
@@ -410,8 +412,16 @@ async fn client_loop(
                         let message = canonical::Message::Request(request.borrowed());
                         pending = Some((encode(&mut session, &message)?, class(&message), deadline));
                         if let RtiRequest::Payload { route, tag, .. } = &request {
-                            tracing::debug!(target: "boomerang::coordination", event = "coordination.transport.encoded",
-                                ?coordination, federate = ?member, ?route, ?tag);
+                            tracing::debug!(
+                                target: "boomerang::coordination",
+                                event = "coordination.transport.encoded",
+                                coordination = coordination.bytes().as_slice(),
+                                federate = member.as_u32(),
+                                route = route.as_u32(),
+                                tag_kind = tag.kind_str(),
+                                tag_offset_ns = (*tag).offset_ns(),
+                                tag_microstep = (*tag).microstep(),
+                            );
                         }
                         terminal_sent = matches!(request, RtiRequest::Abort { .. });
                     }
@@ -427,8 +437,16 @@ async fn client_loop(
                         let class = class(&message);
                         let reply = reply_from(message)?;
                         if let RtiReply::Payload { route, tag, .. } = &reply {
-                            tracing::debug!(target: "boomerang::coordination", event = "coordination.transport.decoded",
-                                ?coordination, federate = ?member, ?route, ?tag);
+                            tracing::debug!(
+                                target: "boomerang::coordination",
+                                event = "coordination.transport.decoded",
+                                coordination = coordination.bytes().as_slice(),
+                                federate = member.as_u32(),
+                                route = route.as_u32(),
+                                tag_kind = tag.kind_str(),
+                                tag_offset_ns = (*tag).offset_ns(),
+                                tag_microstep = (*tag).microstep(),
+                            );
                         }
                         let terminal = matches!(reply, RtiReply::Stopped | RtiReply::Failed { .. });
                         let mut state = shared.state.lock().unwrap();

@@ -9,6 +9,64 @@ const SINK: Member = Member::new(1);
 const ROUTE: Route = Route::new(0);
 const TAG: WireTag = WireTag::finite(1_000_000, 0);
 
+/// An overflowing trace must not change fault delivery or erase the first cause.
+#[cfg(feature = "bounded-tracing")]
+#[test]
+fn bounded_trace_retains_first_failure_after_overwrite() {
+    if !client::run_trace_test() {
+        return;
+    }
+    let (subscriber, capture) = tracing_bounded::BoundedSubscriber::new(tracing_bounded::Config {
+        records: 2,
+        level: tracing::level_filters::LevelFilter::DEBUG,
+        targets: &["boomerang::coordination"],
+        ..Default::default()
+    })
+    .unwrap();
+    tracing::subscriber::with_default(subscriber, || {
+        let _producer = tracing_bounded::prepare_current_thread().unwrap();
+        let mut run = FaultRun::new([FaultEffect::delay(0, 0, 5), FaultEffect::drop(2, 2)]);
+        let steps = tagged_payload_exchange().steps;
+        for (tick, step) in (0..).zip(&steps[..3]) {
+            run.submit(tick, *step);
+        }
+        run.advance(10);
+        run.apply(VectorStep::Fail {
+            member: SINK,
+            failure: Failure::Publication,
+        });
+        assert_eq!(run.failure, Some(Failure::Lost));
+        assert_eq!(
+            run.failure_message.as_deref(),
+            Some("conformance transport: Lost")
+        );
+        assert!(run.execution.semantic_outcomes.is_empty());
+    });
+    let records = capture.snapshot();
+    assert_eq!(records.len(), 2);
+    let failures: Vec<_> = records
+        .iter()
+        .filter(|record| {
+            record.fields.iter().any(|field| {
+                field.name == "event"
+                    && field.value
+                        == tracing_bounded::Value::Str("coordination.rti.failure.first".into())
+            })
+        })
+        .collect();
+    assert_eq!(failures.len(), 1);
+    assert!(failures[0]
+        .fields
+        .iter()
+        .any(|field| field.name == "coordination"
+            && field.value == tracing_bounded::Value::Bytes(vec![7; 32])));
+    let loss = capture.loss();
+    assert!(loss.overwritten_records.value > 0);
+    assert_eq!(loss.unsupported_value.value, 0);
+    assert_eq!(loss.invalid_context.value, 0);
+    assert_eq!(loss.contention.value, 0);
+}
+
 /// A participant owns one channel, not separate NET/LTC/payload lanes.
 fn lane(step: VectorStep) -> Lane {
     let (member, _) = ReferenceVectorAdapter::request(step);

@@ -143,8 +143,11 @@ impl<'a> CompiledRti<'a> {
     /// Fails the session and releases every peer, preserving the first cause.
     pub fn abort(&mut self, message: impl Into<String>) -> Vec<RtiDelivery> {
         if self.failure.is_none() {
-            tracing::error!(target: "boomerang::coordination",
-                event = "coordination.rti.failure.first", coordination = ?self.identity);
+            tracing::error!(
+                target: "boomerang::coordination",
+                event = "coordination.rti.failure.first",
+                coordination = self.identity.bytes().as_slice(),
+            );
         }
         let message = self.failure.get_or_insert_with(|| message.into()).clone();
         self.states
@@ -167,26 +170,17 @@ impl<'a> CompiledRti<'a> {
                 },
             }];
         }
-        let request_kind = match &request {
-            RtiRequest::Hello { .. } => "hello",
-            RtiRequest::Publish { .. } => "publication",
-            RtiRequest::Complete { .. } => "completion",
-            RtiRequest::Payload { .. } => "payload",
-            RtiRequest::ConfirmIdle { .. } => "confirm-idle",
-            RtiRequest::Stop => "stop",
-            RtiRequest::Abort { .. } => "abort",
-        };
+        let request_kind = request.kind_str();
         match self.apply(member, request) {
             Ok(deliveries) => {
                 tracing::event!(
                     target: "boomerang::coordination",
                     tracing::Level::DEBUG,
                     event = "coordination.rti.decision",
-                    coordination = ?self.identity,
-                    federate = ?member,
+                    coordination = self.identity.bytes().as_slice(),
+                    federate = member.as_u32(),
                     request = request_kind,
                     deliveries = deliveries.len(),
-                    "RTI coordination decision"
                 );
                 deliveries
             }
@@ -195,10 +189,9 @@ impl<'a> CompiledRti<'a> {
                     target: "boomerang::coordination",
                     tracing::Level::ERROR,
                     event = "coordination.rti.request.rejected",
-                    coordination = ?self.identity,
-                    federate = ?member,
+                    coordination = self.identity.bytes().as_slice(),
+                    federate = member.as_u32(),
                     request = request_kind,
-                    "RTI rejected a coordination request"
                 );
                 self.abort(message)
             }
@@ -207,10 +200,9 @@ impl<'a> CompiledRti<'a> {
                     target: "boomerang::coordination",
                     tracing::Level::ERROR,
                     event = "coordination.rti.request.rejected",
-                    coordination = ?self.identity,
-                    federate = ?member,
+                    coordination = self.identity.bytes().as_slice(),
+                    federate = member.as_u32(),
                     request = request_kind,
-                    "RTI rejected a coordination request"
                 );
                 self.abort(error.to_string())
             }
@@ -287,10 +279,16 @@ impl<'a> CompiledRti<'a> {
                 self.states[member]
                     .in_transit
                     .retain(|pending| *pending > tag);
-                tracing::debug!(target: "boomerang::coordination",
+                tracing::debug!(
+                    target: "boomerang::coordination",
                     event = "coordination.rti.accounting.completed",
-                    coordination = ?self.identity, federate = ?member, ?tag,
-                    pending_tags = self.states[member].in_transit.len());
+                    coordination = self.identity.bytes().as_slice(),
+                    federate = member.as_u32(),
+                    tag_kind = tag.kind_str(),
+                    tag_offset_ns = (tag).offset_ns(),
+                    tag_microstep = (tag).microstep(),
+                    pending_tags = self.states[member].in_transit.len(),
+                );
             }
             RtiRequest::Payload {
                 route: route_key,
@@ -357,10 +355,18 @@ impl<'a> CompiledRti<'a> {
                         payload,
                     },
                 });
-                tracing::debug!(target: "boomerang::coordination",
+                tracing::debug!(
+                    target: "boomerang::coordination",
                     event = "coordination.rti.payload.forwarded",
-                    coordination = ?self.identity, federate = ?member, destination = ?target,
-                    route = ?route_key, ?tag, pending_tags = self.states[target].in_transit.len());
+                    coordination = self.identity.bytes().as_slice(),
+                    federate = member.as_u32(),
+                    destination = target.as_u32(),
+                    route = route_key.as_u32(),
+                    tag_kind = tag.kind_str(),
+                    tag_offset_ns = (tag).offset_ns(),
+                    tag_microstep = (tag).microstep(),
+                    pending_tags = self.states[target].in_transit.len(),
+                );
             }
             RtiRequest::ConfirmIdle { revision } => {
                 if state.publication != Some((revision, None)) {
@@ -401,9 +407,16 @@ impl<'a> CompiledRti<'a> {
                     member: candidate,
                     reply: RtiReply::Grant { revision, tag },
                 });
-                tracing::debug!(target: "boomerang::coordination",
+                tracing::debug!(
+                    target: "boomerang::coordination",
                     event = "coordination.rti.grant.issued",
-                    coordination = ?self.identity, federate = ?candidate, revision, ?tag);
+                    coordination = self.identity.bytes().as_slice(),
+                    federate = candidate.as_u32(),
+                    revision,
+                    tag_kind = tag.kind_str(),
+                    tag_offset_ns = (tag).offset_ns(),
+                    tag_microstep = (tag).microstep(),
+                );
             }
         }
         if self.states.values().all(|state| {
@@ -416,9 +429,13 @@ impl<'a> CompiledRti<'a> {
                 let revision = state.publication.expect("all members published").0;
                 if !state.stopped && state.idle != Some(revision) {
                     state.idle = Some(revision);
-                    tracing::debug!(target: "boomerang::coordination",
-                        event = "coordination.rti.idle.issued", coordination = ?self.identity,
-                        federate = ?member, revision);
+                    tracing::debug!(
+                        target: "boomerang::coordination",
+                        event = "coordination.rti.idle.issued",
+                        coordination = self.identity.bytes().as_slice(),
+                        federate = member.as_u32(),
+                        revision,
+                    );
                     deliveries.push(RtiDelivery {
                         member,
                         reply: RtiReply::Idle { revision },
@@ -453,9 +470,15 @@ impl<'a> CompiledRti<'a> {
             // Always send tightenings; only useful increases need transmission.
             if tag != old && (tag < old || next.is_some_and(|next| next <= tag)) {
                 self.states[member].dnet = Some(tag);
-                tracing::debug!(target: "boomerang::coordination",
-                    event = "coordination.rti.dnet.issued", coordination = ?self.identity,
-                    federate = ?member, ?tag);
+                tracing::debug!(
+                    target: "boomerang::coordination",
+                    event = "coordination.rti.dnet.issued",
+                    coordination = self.identity.bytes().as_slice(),
+                    federate = member.as_u32(),
+                    tag_kind = tag.kind_str(),
+                    tag_offset_ns = (tag).offset_ns(),
+                    tag_microstep = (tag).microstep(),
+                );
                 deliveries.push(RtiDelivery {
                     member,
                     reply: RtiReply::SuppressPublication { tag },

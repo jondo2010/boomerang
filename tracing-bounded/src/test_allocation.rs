@@ -1,4 +1,4 @@
-//! Thread-local allocation observer, used only by this audit executable.
+//! Test-only allocation observer shared by unit tests and the native-path audit.
 
 use std::{
     alloc::{GlobalAlloc, Layout, System},

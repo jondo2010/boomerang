@@ -1131,6 +1131,8 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
                 .name("federate-coordination".to_owned())
                 .spawn_scoped(scope, move || {
                     let _dispatch = tracing::dispatcher::set_default(&dispatch);
+                    #[cfg(feature = "bounded-tracing")]
+                    let _producer = tracing_bounded::prepare_current_thread();
                     let _parent = parent_span.entered();
                     coordinator.run()
                 })
@@ -1180,9 +1182,11 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
                     .name(format!("enclave-{enclave}"))
                     .spawn_scoped(scope, move || {
                         let _dispatch = tracing::dispatcher::set_default(&dispatch);
+                        #[cfg(feature = "bounded-tracing")]
+                        let _producer = tracing_bounded::prepare_current_thread();
                         let _parent = parent_span.entered();
                         let _enclave = tracing::debug_span!(target: "boomerang::coordination",
-                            "enclave", ?enclave)
+                            "enclave", enclave = enclave.as_u32())
                         .entered();
                         let execution = std::panic::catch_unwind(AssertUnwindSafe(|| {
                             run_owned_scheduler_with_coordination(

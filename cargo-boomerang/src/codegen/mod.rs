@@ -461,6 +461,10 @@ pub(crate) fn generate_analyzed_launcher(
         &slice,
         &aliases,
         &execution,
+        rust::render_tracing_init(
+            analyzed.resolved.deployment().tracing,
+            configuration.bounded_tracing,
+        ),
         coordination,
         capabilities,
     )?;
@@ -844,14 +848,28 @@ fn render_manifest(
             runtime_sibling_dependency(
                 resolved.runtime(),
                 "boomerang_util",
-                vec![String::from("launcher")],
+                vec![String::from(match resolved.deployment().tracing {
+                    crate::manifest::TracingBackend::Off => "launcher",
+                    crate::manifest::TracingBackend::Bounded => "bounded-tracing",
+                    crate::manifest::TracingBackend::Hosted => "hosted-tracing",
+                })],
             )?,
         );
     }
     if distributed {
         dependencies.insert(
             String::from("boomerang_central_rti"),
-            runtime_sibling_dependency(resolved.runtime(), "boomerang_central_rti", Vec::new())?,
+            runtime_sibling_dependency(
+                resolved.runtime(),
+                "boomerang_central_rti",
+                if capabilities.hosted
+                    && resolved.deployment().tracing == crate::manifest::TracingBackend::Bounded
+                {
+                    vec![String::from("bounded-tracing")]
+                } else {
+                    Vec::new()
+                },
+            )?,
         );
     }
     for (implementation, path) in aliases {
@@ -1106,6 +1124,10 @@ pub(crate) fn generate_analyzed_rti(
     };
     let selected = analyzed.resolved.deployment().rti.as_ref();
     let configuration = ResolvedFederate {
+        bounded_tracing: analyzed
+            .resolved
+            .deployment()
+            .bounded_tracing_limits(selected.and_then(|rti| rti.bounded_tracing.as_ref())),
         groups: Vec::new(),
         target: selected.map(|rti| rti.target.clone()),
         toolchain: None,
@@ -1122,13 +1144,17 @@ pub(crate) fn generate_analyzed_rti(
         true,
         LauncherCapabilities { hosted: true },
     )?;
+    let init_tracing = rust::render_tracing_init(
+        analyzed.resolved.deployment().tracing,
+        configuration.bounded_tracing,
+    );
     let source = rust::format_rust(quote::quote! {
         use boomerang_runtime::image::*;
         use tinymap::{TinyMapView, SliceRange};
         #coordination
         fn main() -> Result<(), Box<dyn std::error::Error>> {
             use std::io::Write;
-            let _tracing_guard = boomerang_util::launcher::init_tracing();
+            #init_tracing
             let view = RtiImageView::new(COORDINATION_IMAGE, COORDINATION_MEMBERS)?;
             let rti = boomerang_central_rti::compiled::CompiledRti::from_image(view, COORDINATION_IDENTITY)?;
             let bind = std::env::var("BOOMERANG_RTI_BIND").unwrap_or_else(|_| "127.0.0.1:0".into());
@@ -1205,6 +1231,7 @@ mod tests {
     #[test]
     fn metadata_reconciliation_preserves_federate_toolchain_and_cargo_config() {
         let federate = ResolvedFederate {
+            bounded_tracing: None,
             groups: Vec::new(),
             target: None,
             toolchain: Some(String::from("nightly-test")),
@@ -1259,6 +1286,7 @@ mod tests {
         let inputs = vec![(String::from("COMPATIBILITY"), String::from("fixed"))];
         let identity = |target_json: &Path, cargo_config: &Path, cargo| {
             let federate = ResolvedFederate {
+                bounded_tracing: None,
                 groups: Vec::new(),
                 target: None,
                 toolchain: None,
@@ -1297,6 +1325,7 @@ mod tests {
     fn launcher_request_identity_normalizes_an_implicit_host_target() {
         let identity = |target: Option<String>| {
             let federate = ResolvedFederate {
+                bounded_tracing: None,
                 groups: Vec::new(),
                 target,
                 toolchain: None,

@@ -5,7 +5,7 @@
 #![deny(clippy::all)]
 
 #[cfg(feature = "alloc")]
-#[macro_use]
+#[cfg_attr(test, macro_use)]
 pub extern crate alloc;
 #[cfg(any(feature = "std", test))]
 extern crate std;
@@ -112,9 +112,9 @@ macro_rules! __key_type_from_str {
                     inner
                         .parse::<u32>()
                         .map(Self)
-                        .map_err(|_| format!("Failed to parse inner value: {}", inner))
+                        .map_err(|_| $crate::alloc::format!("Failed to parse inner value: {}", inner))
                 } else {
-                    Err(format!("Invalid format for {}: {}", stringify!($name), s))
+                    Err($crate::alloc::format!("Invalid format for {}: {}", stringify!($name), s))
                 }
             }
         }

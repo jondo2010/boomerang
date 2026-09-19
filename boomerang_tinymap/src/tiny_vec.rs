@@ -136,6 +136,7 @@ impl<T, B> TinyVecBuilder<T, B> {
             return Err(TinyMapError::ExactLength { expected, actual });
         }
 
+        drop(values);
         rollback.commit();
         Ok(())
     }
@@ -533,19 +534,19 @@ mod tests {
     }
 
     struct PanicOnDropExact {
-        values: core::array::IntoIter<u16, 2>,
+        values: core::array::IntoIter<DropCounter, 2>,
     }
 
     impl PanicOnDropExact {
         fn new() -> Self {
             Self {
-                values: [10, 20].into_iter(),
+                values: [DropCounter::new(1), DropCounter::new(2)].into_iter(),
             }
         }
     }
 
     impl Iterator for PanicOnDropExact {
-        type Item = u16;
+        type Item = DropCounter;
 
         fn next(&mut self) -> Option<Self::Item> {
             self.values.next()
@@ -874,17 +875,22 @@ mod tests {
     }
 
     #[test]
-    fn exact_extension_commits_before_iterator_drop_panic() {
-        let mut builder = TinyVecBuilder::<u16, InlineStorage<u16, 2>>::inline();
+    fn iterator_drop_panic_rolls_back_exact_extension() {
+        let _lock = TEST_LOCK.lock().unwrap();
+
+        reset_drops();
+        let mut builder = TinyVecBuilder::<DropCounter, InlineStorage<DropCounter, 3>>::inline();
+        builder.try_push(DropCounter::new(0)).unwrap();
 
         assert!(catch_unwind(AssertUnwindSafe(|| {
             builder.try_extend_exact(PanicOnDropExact::new())
         }))
         .is_err());
-        assert_eq!(builder.len(), 2);
+        assert_eq!(builder.len(), 1);
+        assert_eq!(drops(), [0, 1, 1, 0]);
 
-        let sealed = builder.seal();
-        assert_eq!(sealed.as_ref().iter().copied().collect::<Vec<_>>(), [10, 20]);
+        drop(builder);
+        assert_eq!(drops(), [1, 1, 1, 0]);
     }
 
     #[test]

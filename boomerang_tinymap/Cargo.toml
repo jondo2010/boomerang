@@ -28,3 +28,4 @@ thiserror = { workspace = true, default-features = false }
 [dev-dependencies]
 itertools = { workspace = true }
 serde_json = "*"
+toml = { workspace = true }

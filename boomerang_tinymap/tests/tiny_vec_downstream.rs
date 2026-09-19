@@ -7,6 +7,15 @@ use std::{
 static NEXT_TEMP_DIRECTORY: AtomicUsize = AtomicUsize::new(0);
 
 #[test]
+fn dependency_path_is_rendered_as_a_toml_string() {
+    let manifest_dir = r"D:\work\boomerang\boomerang_tinymap";
+    let manifest = format!("path = {}", render_toml_string(manifest_dir));
+    let parsed: toml::Value = toml::from_str(&manifest).unwrap();
+
+    assert_eq!(parsed["path"].as_str(), Some(manifest_dir));
+}
+
+#[test]
 fn concrete_tinyvec_adapters_work_downstream_while_storage_operations_remain_private() {
     let lifecycle = cargo_check(
         "lifecycle",
@@ -42,6 +51,10 @@ fn main() {
     );
 }
 
+fn render_toml_string(value: &str) -> String {
+    toml::Value::String(value.into()).to_string()
+}
+
 fn cargo_check(name: &str, source: &str) -> Output {
     let directory = std::env::temp_dir().join(format!(
         "boomerang-tinymap-downstream-{name}-{}-{}",
@@ -52,8 +65,8 @@ fn cargo_check(name: &str, source: &str) -> Output {
     fs::write(
         directory.join("Cargo.toml"),
         format!(
-            "[package]\nname = \"tiny-vec-downstream-{name}\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[dependencies]\nboomerang_tinymap = {{ path = \"{}\", default-features = false }}\n",
-            env!("CARGO_MANIFEST_DIR"),
+            "[package]\nname = \"tiny-vec-downstream-{name}\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[dependencies]\nboomerang_tinymap = {{ path = {}, default-features = false }}\n",
+            render_toml_string(env!("CARGO_MANIFEST_DIR")),
         ),
     )
     .unwrap();

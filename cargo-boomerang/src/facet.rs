@@ -112,6 +112,16 @@ mod tests {
         let wrappers = CompilerWrappers::resolve(&workspace, Some(&explicit)).unwrap();
         let expected = (!expected.is_empty()).then(|| PathBuf::from(expected));
         assert_eq!(wrappers.rustc, expected);
+        let mut command = Command::new("cargo");
+        Facet::Payload.configure(&mut command, Path::new("boomerang-wrapper"), &wrappers);
+        let user_wrapper = command
+            .get_envs()
+            .find(|(key, _)| *key == "BOOMERANG_USER_RUSTC_WRAPPER")
+            .and_then(|(_, value)| value);
+        assert_eq!(user_wrapper.map(Path::new), expected.as_deref());
+        assert!(!command
+            .get_envs()
+            .any(|(key, _)| key == "RUSTC_WORKSPACE_WRAPPER"));
     }
 
     #[test]
@@ -184,29 +194,29 @@ mod tests {
         )
         .unwrap();
 
-        let wrappers = CompilerWrappers::resolve(directory.path(), Some(&explicit)).unwrap();
-        assert_eq!(
-            wrappers.rustc,
-            Some(directory.path().join("federate/bin/federate-wrapper"))
-        );
-        let mut command = Command::new("cargo");
-        Facet::Payload.configure(&mut command, Path::new("boomerang-wrapper"), &wrappers);
-        let user_wrapper = command
-            .get_envs()
-            .find(|(key, _)| *key == "BOOMERANG_USER_RUSTC_WRAPPER")
-            .and_then(|(_, value)| value);
-        assert_eq!(
-            user_wrapper.map(Path::new),
-            Some(
-                directory
-                    .path()
-                    .join("federate/bin/federate-wrapper")
-                    .as_path()
+        // Coverage tools and user shells may set wrapper overrides. Isolate this
+        // file-precedence case without mutating the parallel test process's env.
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "facet::tests::wrapper_resolution_child",
+                "--nocapture",
+            ])
+            .env(
+                CHILD_EXPECTED_WRAPPER,
+                directory.path().join("federate/bin/federate-wrapper"),
             )
+            .env(CHILD_WORKSPACE, directory.path())
+            .env(CHILD_EXPLICIT_CONFIG, &explicit)
+            .env_remove("RUSTC_WRAPPER")
+            .env_remove("CARGO_BUILD_RUSTC_WRAPPER")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
         );
-        assert!(!command
-            .get_envs()
-            .any(|(key, _)| key == "RUSTC_WORKSPACE_WRAPPER"));
     }
 
     #[test]

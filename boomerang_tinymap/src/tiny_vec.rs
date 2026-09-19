@@ -9,11 +9,12 @@ pub use storage::HeapStorage;
 use storage::Storage;
 pub use storage::{BorrowedStorage, InlineStorage};
 
-/// A not-yet-sealed, fixed-capacity sequence builder.
+/// A not-yet-sealed sequence builder.
 ///
 /// Values occupy the initialized prefix of its private backing storage. The
 /// storage interface remains private so callers cannot observe or alter the
-/// initialized-slot metadata.
+/// initialized-slot metadata. Inline and borrowed storage have fixed capacity;
+/// heap storage may grow and allocate while values are appended.
 pub struct TinyVecBuilder<T, B> {
     backing: B,
     initialized: usize,
@@ -77,7 +78,10 @@ impl<T, B> TinyVecBuilder<T, B> {
         }
     }
 
-    /// Appends one value without allocating.
+    /// Appends one value.
+    ///
+    /// Inline and borrowed storage append without allocating. Heap storage may
+    /// grow its backing vector and allocate.
     pub fn try_push(&mut self, value: T) -> Result<(), TinyMapError> {
         let limit = (self.capacity)(&self.backing);
         if self.initialized == limit {
@@ -826,6 +830,78 @@ mod tests {
     }
 
     #[test]
+    fn sealed_inline_storage_moves_drop_counters_without_dropping_them() {
+        let _lock = TEST_LOCK.lock().unwrap();
+
+        reset_drops();
+        let mut builder = TinyVecBuilder::<DropCounter, InlineStorage<DropCounter, 3>>::inline();
+        builder.try_push(DropCounter::new(0)).unwrap();
+        builder.try_push(DropCounter::new(1)).unwrap();
+
+        let moved = [builder.seal()].into_iter().next().unwrap();
+
+        assert_eq!(drops(), [0, 0, 0, 0]);
+        assert_eq!(moved.as_ref().len(), 2);
+        drop(moved);
+        assert_eq!(drops(), [1, 1, 0, 0]);
+    }
+
+    #[test]
+    fn sealed_borrowed_storage_moves_and_mutates_drop_counters_without_changing_length() {
+        let _lock = TEST_LOCK.lock().unwrap();
+
+        reset_drops();
+        let mut slots: [MaybeUninit<DropCounter>; 3] =
+            core::array::from_fn(|_| MaybeUninit::uninit());
+        let mut builder = TinyVecBuilder::borrowed(BorrowedStorage::new(&mut slots));
+        builder.try_push(DropCounter::new(0)).unwrap();
+        builder.try_push(DropCounter::new(1)).unwrap();
+
+        let mut moved = [builder.seal()].into_iter().next().unwrap();
+
+        assert_eq!(drops(), [0, 0, 0, 0]);
+        let mut values = moved.as_mut();
+        let mut iter = values.iter_mut();
+        let first = iter.next().unwrap();
+        let second = iter.next().unwrap();
+        core::mem::swap(first, second);
+        assert_eq!(values.len(), 2);
+        assert_eq!(
+            values.iter().map(|value| value.0).collect::<Vec<_>>(),
+            [1, 0]
+        );
+        drop(values);
+        assert_eq!(moved.as_ref().len(), 2);
+        drop(moved);
+        assert_eq!(drops(), [1, 1, 0, 0]);
+    }
+
+    #[test]
+    fn sealed_inline_and_borrowed_storage_drop_remaining_values_after_a_drop_panic() {
+        let _lock = TEST_LOCK.lock().unwrap();
+
+        reset_drops();
+        let mut inline = TinyVecBuilder::<DropCounter, InlineStorage<DropCounter, 3>>::inline();
+        inline.try_push(DropCounter::new(0)).unwrap();
+        inline.try_push(DropCounter::new(1)).unwrap();
+        inline.try_push(DropCounter::new(2)).unwrap();
+        PANIC_ON_DROP.store(2, Ordering::SeqCst);
+        assert!(catch_unwind(AssertUnwindSafe(|| drop(inline.seal()))).is_err());
+        assert_eq!(drops(), [1, 1, 1, 0]);
+
+        reset_drops();
+        let mut slots: [MaybeUninit<DropCounter>; 3] =
+            core::array::from_fn(|_| MaybeUninit::uninit());
+        let mut borrowed = TinyVecBuilder::borrowed(BorrowedStorage::new(&mut slots));
+        borrowed.try_push(DropCounter::new(0)).unwrap();
+        borrowed.try_push(DropCounter::new(1)).unwrap();
+        borrowed.try_push(DropCounter::new(2)).unwrap();
+        PANIC_ON_DROP.store(2, Ordering::SeqCst);
+        assert!(catch_unwind(AssertUnwindSafe(|| drop(borrowed.seal()))).is_err());
+        assert_eq!(drops(), [1, 1, 1, 0]);
+    }
+
+    #[test]
     fn sealed_mutable_view_changes_values_without_changing_length() {
         let mut builder = TinyVecBuilder::<u16, InlineStorage<u16, 3>>::inline();
         builder.try_extend_exact([10, 20].into_iter()).unwrap();
@@ -852,5 +928,38 @@ mod tests {
         let moved = [sealed].into_iter().next().unwrap();
 
         assert_eq!(moved.as_ref().iter().copied().collect::<Vec<_>>(), [10, 20]);
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn sealed_heap_storage_moves_drop_counters_without_dropping_them() {
+        let _lock = TEST_LOCK.lock().unwrap();
+
+        reset_drops();
+        let mut builder = TinyVecBuilder::<DropCounter, super::HeapStorage<DropCounter>>::heap();
+        builder.try_push(DropCounter::new(0)).unwrap();
+        builder.try_push(DropCounter::new(1)).unwrap();
+
+        let moved = [builder.seal()].into_iter().next().unwrap();
+
+        assert_eq!(drops(), [0, 0, 0, 0]);
+        assert_eq!(moved.as_ref().len(), 2);
+        drop(moved);
+        assert_eq!(drops(), [1, 1, 0, 0]);
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn sealed_heap_storage_drops_remaining_values_after_a_drop_panic() {
+        let _lock = TEST_LOCK.lock().unwrap();
+
+        reset_drops();
+        let mut heap = TinyVecBuilder::<DropCounter, super::HeapStorage<DropCounter>>::heap();
+        heap.try_push(DropCounter::new(0)).unwrap();
+        heap.try_push(DropCounter::new(1)).unwrap();
+        heap.try_push(DropCounter::new(2)).unwrap();
+        PANIC_ON_DROP.store(2, Ordering::SeqCst);
+        assert!(catch_unwind(AssertUnwindSafe(|| drop(heap.seal()))).is_err());
+        assert_eq!(drops(), [1, 1, 1, 0]);
     }
 }

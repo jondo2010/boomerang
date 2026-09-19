@@ -45,7 +45,7 @@ pub(crate) fn build_analyzed(
     let compiled_federates = analyzed.compiled.federates();
     let mut launcher_builds = Vec::with_capacity(compiled_federates.len());
     let mut federates = Vec::with_capacity(compiled_federates.len());
-    for compiled_federate in compiled_federates.values() {
+    for (federate_index, compiled_federate) in compiled_federates.iter() {
         let federate_id = compiled_federate.id().as_str();
         let configuration = analyzed
             .resolved
@@ -93,6 +93,11 @@ pub(crate) fn build_analyzed(
         groups.sort();
         groups.dedup();
         federates.push(FederateDocument {
+            image_fingerprint: Some(
+                crate::codegen::federate_image_fingerprint(analyzed, federate_index)?
+                    .to_hex()
+                    .to_string(),
+            ),
             id: federate_id.to_owned(),
             groups,
             target: compiled_federate.target().to_string(),
@@ -123,7 +128,7 @@ pub(crate) fn build_analyzed(
         .context("failed to serialize canonical topology")?;
     let topology_hash = hash_bytes(&topology);
     let bindings = binding_records(analyzed)?;
-    let resources = resource_report(&analyzed.compiled);
+    let resources = resource_report(&analyzed.compiled, &analyzed.resolved);
     let source_lock_hash = lowercase_hex(&analyzed.resolved.lockfile().digest);
     let generated_lock_hash = hash_file_collection(
         federates
@@ -171,6 +176,7 @@ pub(crate) fn build_analyzed(
             .to_owned(),
         protocol: identity.as_ref().map(|_| HOSTED_PROTOCOL.to_owned()),
         identity: identity.map(|hash| hash.to_hex().to_string()),
+        wire: crate::codegen::wire_profile(analyzed)?,
     };
     let mut document = DeploymentDocument {
         schema: DEPLOYMENT_SCHEMA,
@@ -264,9 +270,12 @@ fn binding_records(analyzed: &crate::check::AnalyzedDeployment) -> Result<Vec<Bi
             .ok_or_else(|| {
                 anyhow!("descriptor driver returned unselected component '{component}'")
             })?;
-        let package = analyzed.resolved.package(implementation).ok_or_else(|| {
-            anyhow!("descriptor driver returned unresolved package '{implementation}'")
-        })?;
+        let (package, _) = analyzed
+            .resolved
+            .implementation(implementation)
+            .ok_or_else(|| {
+                anyhow!("descriptor driver returned unresolved implementation '{implementation}'")
+            })?;
         let descriptor = binding.descriptor();
         let descriptor_hash = lowercase_hex(
             &descriptor
@@ -282,7 +291,8 @@ fn binding_records(analyzed: &crate::check::AnalyzedDeployment) -> Result<Vec<Bi
         };
         let descriptor = DescriptorDocument {
             component: component.clone(),
-            package: implementation.to_owned(),
+            package: package.name.clone(),
+            module: selection.component.clone(),
             contract: descriptor.contract_id().as_str().to_owned(),
             contract_version: descriptor.contract_version(),
             fingerprint: descriptor_hash,

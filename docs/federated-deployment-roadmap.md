@@ -2,7 +2,7 @@
 
 **Status:** Approved design; roadmap implementation pending
 **Date:** 2026-09-05
-**Last updated:** 2026-09-06
+**Last updated:** 2026-09-16
 
 ## Purpose
 
@@ -148,9 +148,19 @@ final `TAG` grants. `PTAG` and port-level `ABS` are used selectively where a fin
 deadlock a constructive zero-delay component. Earliest incoming message tag calculations include
 minimum-delay paths and bounded in-transit-message state.
 
-The implementation shall preserve optimization seams described by the efficient-coordination
-research, but correctness comes first. Protocol compression, batching, and reduced control traffic
-are later measured optimizations.
+The efficient centralized baseline follows the 2025 efficiency follow-up: `EIMT` safe-horizon
+grants, downstream next-event (`DNET`) suppression of unnecessary `NET` reports, and selective
+cumulative Latest Tag Complete (`LTC`) reporting. A grant can cover several local events;
+suppression requires existing grant authority and restores reporting when downstream bounds
+tighten. `LTC` follows completion of a tag that executed network input, including resulting output
+and all participating Enclaves, rather than receipt into a future-event queue. Local progress and
+completion tracking continue when wire reports are suppressed.
+
+These rules apply outside zero-delay cycles, including positive-delay cycles. They are baseline
+requirements, not optional post-release optimizations. Constructive zero-delay components require
+separate analysis and conformance evidence. Later compression, batching, and further control-traffic
+reductions remain measured optimizations. See the [centralized coordination contract](
+deployment-architecture.md#efficient-centralized-coordination) for ordering and resource invariants.
 
 ## Physical time and mixed criticality
 
@@ -248,11 +258,17 @@ This contract permits TCP, shared memory, SPI, and suitable datagram or field-bu
 master-polled SPI implementation may multiplex coordination and payload frames without changing
 logical-time semantics.
 
-Payload routing is compiled independently of the coordination projection. A boundary may use the
-central coordinator as a simple baseline route or a direct Federate-to-Federate data path. Direct
-senders and receivers report bounded send/delivery watermarks or acknowledgements so that the
-central RTI remains the logical-time authority and can account conservatively for messages in
-transit. Route selection and its bounds are part of the coordination fingerprint.
+The centralized baseline forwards payloads through the RTI. It records bounded in-transit tag
+obligations before forwarding and orders destination payloads before dependent grants. Selective
+cumulative `LTC` retires completed obligations; no per-payload application receipt or permission
+exchange is required. Bounded saturation must preserve completion/control progress or produce an
+explicit bounded failure without discarding accounting state.
+
+Direct Federate-to-Federate payload routing under central RTI authority is deferred to a measured
+optimization with a separate proof of conservative accounting and payload/grant ordering across
+channels. No watermark, acknowledgement, or retry scheme for that extension is prescribed here.
+If introduced, route selection and its resource bounds form part of the coordination fingerprint.
+Alternative coordination projections retain their separate conformance obligations.
 
 ## Heterogeneous wire and compatibility model
 
@@ -271,6 +287,10 @@ Before accepting dense indices, peers verify the coordination fingerprint, membe
 authenticated Federate identity when the selected security profile requires authentication. A
 mismatch fails closed. Participants do not require identical Federate-image fingerprints or
 artifact digests because those values describe different deployment slices.
+
+Payload schema compatibility follows the declared component contract ID and version; changing a
+payload schema requires a contract-version change. The compiler does not infer wire schemas from
+Rust type layouts or reaction bodies.
 
 Every boundary selects a codec and maximum encoded size. Generated codecs use a canonical,
 architecture-independent representation with specified endianness and field widths; native struct
@@ -345,9 +365,9 @@ Tests protect enduring product invariants, not historical milestone implementati
 
 1. Pure unit and property tests cover canonical lowering, graph analysis, constructiveness,
    coordination state transitions, codecs, bounds, and recovery policy.
-2. Shared protocol conformance vectors cover `NET`, `LTC`, `TAG`, `PTAG`, `ABS`, membership epochs,
-   incarnation fencing, and failure transitions. Every coordination projection runs the relevant
-   vectors.
+2. Shared protocol conformance vectors cover `NET`, `DNET`, selective cumulative `LTC`, safe-horizon
+   `TAG`, in-transit bounds, `PTAG`, `ABS`, membership epochs, incarnation fencing, and failure
+   transitions. Every coordination projection runs the relevant vectors.
 3. A small component layer checks actual compiler/runtime, codec/transport, and generated-artifact
    boundaries.
 4. A minimal system layer proves a hosted reference deployment, Pi-Pico SPI deployment,
@@ -379,6 +399,15 @@ A pure deterministic coordination state machine is the protocol oracle. A determ
 uses compiled topology and resource bounds to explore reordering, loss, duplication, delayed
 failure reports, membership transitions, zero-delay SCCs, and deadline violations. Centralized and
 later decentralized projections must make equivalent permitted decisions under the shared model.
+
+The centralized efficiency cases compare logical outcomes with a simple unoptimized semantic
+oracle and assert control-message counts and causal round trips. They cover delayed payloads,
+`LTC`/`NET` interleavings, tightened `DNET`, future queued input versus completed input, equal-tag
+payloads, multi-Enclave completion, positive-delay cycles, and capacity exhaustion. Reliable
+ordered channels retain FIFO; lower-layer faults either recover within the transport contract or
+become declared failures. Stale suppressed `NET`, permanent upstream resignation, shutdown horizons,
+and conservative `EIMT` tightening retain regression coverage. Unexpected disconnect must not be
+treated as normal resignation. Published benchmark speedups are not Boomerang acceptance promises.
 
 ### Observability
 
@@ -427,8 +456,10 @@ phase 5 while leaving ordinary live `Assembly` migration for phase 8.
 - Define the canonical compact wire protocol, dense index handshake, codecs, layered coordination
   and Federate-image fingerprints, and per-artifact digests.
 - Define the reliable ordered channel contract and implement the TCP reference projection.
-- Add bounded protocol state, queues, serialization storage, priority handling, direct data routes,
-  delivery accounting, and failure conversion.
+- Add bounded protocol state, queues, serialization storage, priority handling, centralized
+  in-transit accounting, and failure conversion.
+- Implement `EIMT` safe-horizon grants, `DNET` suppression, and selective cumulative `LTC` for the
+  supported graph class, preserving RTI-forwarded payload/grant ordering.
 - Establish the pure coordination reference model, shared conformance vectors, deterministic fault
   injection, and bounded trace interface.
 - Reserve membership epochs, incarnations, `PTAG`, and `ABS` in schemas without claiming their
@@ -436,6 +467,14 @@ phase 5 while leaving ordinary live `Assembly` migration for phase 8.
 
 The stable scheduler-admission event part of existing issue #133 moves here. MCAP-specific work from
 #134 moves to phase 12.
+
+The remaining sequence is #190 followed by #191. Issue #190 delivers two independently reviewed,
+sequential slices: bounded centralized accounting and safe-horizon grants, then `DNET` and selective
+`LTC` transitions. Each includes focused semantic and end-to-end evidence and remains below 2,000
+changed text lines unless separately approved. Issue #191 generalizes the reference model,
+conformance vectors, fault injection, and end-to-end tracing. Direct payload routing is not a
+Phase 6 prerequisite. Architecture/roadmap authority must land before implementation, and each
+slice retains its separate merge-approval gate.
 
 ### Phase 7 - Constrained heterogeneous deployment
 
@@ -466,7 +505,8 @@ This revises issues #138-#139 after the phase-5 federated cut.
 
 - Add constructive zero-delay SCC analysis and reject non-constructive programs.
 - Lower TPO/MLAA-style dependency metadata and bounded absence state.
-- Implement EIMT with bounded in-transit tracking.
+- Extend the established `EIMT` and bounded in-transit model to constructive zero-delay components;
+  do not rebuild the centralized baseline or assume direct payload delivery.
 - Implement selective `PTAG` and port-level `ABS` behavior in the reference model and central RTI
   projection.
 - Feed the completed causality analysis into end-to-end latency and blocking analysis.
@@ -515,9 +555,13 @@ transitional paths. Passing earlier milestones does not imply passing this gate.
 - Add peer-to-peer or hierarchical coordination projections against the shared conformance model.
 - Measure and implement control-message compression, batching, reduced `PTAG`/`ABS` traffic, and
   other protocol optimizations without changing semantics.
+- Evaluate direct payload routing under central RTI authority only with measured benefit and an
+  independent proof of bounded accounting and effective grant ordering; do not assume per-send
+  permission or receipt traffic is necessary.
 
 Phase 12 capabilities are independently selectable extensions and are not silently included in the
-baseline release profile.
+baseline release profile. The efficient centralized algorithm delivered by #190 is already part
+of the baseline; #213 owns only additional measured optimizations and optional energy policies.
 
 ## Roadmap maintenance actions
 
@@ -541,9 +585,21 @@ The protocol and lifecycle direction is anchored in:
 
 - Peter Donovan et al., *Strongly-Consistent Distributed Discrete-event Systems*, arXiv:2405.12117;
 - Byeonggil Jun et al., *Efficient Coordination for Distributed Discrete-Event Systems*,
-  arXiv:2410.06454; and
+  [arXiv:2410.06454](https://arxiv.org/abs/2410.06454);
+- Byeonggil Jun et al., *Improving the Efficiency of Coordinating Timed Events in Distributed
+  Systems*, SIGSIM-PADS 2025, [DOI 10.1145/3726301.3728399](https://doi.org/10.1145/3726301.3728399),
+  with its [reproducibility artifact](https://doi.org/10.5281/zenodo.15263644);
+- *Zero-Delay Cycles in Distributed Discrete-Event Systems using Lingua Franca*,
+  [DOI 10.1145/3767727](https://doi.org/10.1145/3767727), for evaluation in the constructive
+  zero-delay work; and
 - Chadlia Jerad and Edward A. Lee, *Toward Dynamism in Distributed Lingua Franca Programs*, IEEE
   Embedded Systems Letters 17(2), DOI 10.1109/LES.2024.3465408.
 
 These sources inform Boomerang's semantics. They do not override the explicit closed-world,
 bounded-resource, mixed-criticality, recovery, and backend-neutral decisions in this design.
+
+Implementation follow-ups also inform regression coverage: [reactor-c #349](
+https://github.com/lf-lang/reactor-c/pull/349) integrates DNET coordination, and [reactor-c #588](
+https://github.com/lf-lang/reactor-c/pull/588) addresses stale-NET/shutdown and EIMT issues. Import
+applicable static-membership regression scenarios without implicitly adding transient lifecycle
+machinery or assuming upstream overflow and sentinel representations match Boomerang.

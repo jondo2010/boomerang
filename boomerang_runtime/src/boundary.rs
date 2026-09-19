@@ -109,6 +109,18 @@ pub enum BoundaryAdmissionError {
     MailboxClosed,
 }
 
+impl BoundaryAdmissionError {
+    /// Returns the static rejection kind without formatting tag or decoder details.
+    pub const fn kind_str(&self) -> &'static str {
+        match self {
+            Self::InvalidTag(_) => "invalid_tag",
+            Self::Decode(_) => "decode",
+            Self::MailboxFull => "mailbox_full",
+            Self::MailboxClosed => "mailbox_closed",
+        }
+    }
+}
+
 /// Erased typed decode-and-admit operation bound after compiled image validation.
 type Admit = dyn Fn(Tag, &[u8]) -> Result<(), BoundaryAdmissionError> + Send + Sync;
 
@@ -146,7 +158,7 @@ impl InboundBoundaryAdapter {
                     .map_err(|error| PayloadCodecError::new(error.to_string()))?;
                 match sender.try_send(AsyncEvent::Logical {
                     tag,
-                    target: AsyncEventTarget::BoundaryPort(port),
+                    target: AsyncEventTarget::NetworkBoundaryPort(port),
                     value: Box::new(value),
                 }) {
                     Ok(true) => Ok(()),
@@ -166,6 +178,24 @@ impl InboundBoundaryAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn admission_error_kind_str_preserves_rejection_reasons() {
+        for (error, kind) in [
+            (
+                BoundaryAdmissionError::InvalidTag(Tag::NEVER),
+                "invalid_tag",
+            ),
+            (
+                BoundaryAdmissionError::Decode(PayloadCodecError::new("malformed")),
+                "decode",
+            ),
+            (BoundaryAdmissionError::MailboxFull, "mailbox_full"),
+            (BoundaryAdmissionError::MailboxClosed, "mailbox_closed"),
+        ] {
+            assert_eq!(error.kind_str(), kind);
+        }
+    }
 
     /// Keeps decoder rejection, capacity exhaustion and shutdown independently observable.
     #[test]

@@ -45,6 +45,213 @@ recovery = "fail-stop"
 }
 
 #[test]
+fn tracing_backend_is_a_validated_build_choice() {
+    use cargo_boomerang::TracingBackend;
+    let source = one_federate_without_coordination();
+    assert_eq!(
+        parse_manifest(source)
+            .unwrap()
+            .deployment("production")
+            .unwrap()
+            .tracing,
+        TracingBackend::Hosted,
+    );
+    for (name, expected) in [
+        ("off", TracingBackend::Off),
+        ("bounded", TracingBackend::Bounded),
+        ("hosted", TracingBackend::Hosted),
+    ] {
+        let configured = format!("{source}\n[deployments.production]\ntracing = \"{name}\"\n");
+        assert_eq!(
+            parse_manifest(&configured)
+                .unwrap()
+                .deployment("production")
+                .unwrap()
+                .tracing,
+            expected
+        );
+    }
+    let invalid = format!("{source}\n[deployments.production]\ntracing = \"automatic\"\n");
+    let error = parse_manifest(&invalid).unwrap_err().to_string();
+    assert!(error.contains("deployments.production.tracing"), "{error}");
+}
+
+#[test]
+fn bounded_tracing_tables_validate_before_building() {
+    let source = format!(
+        "{}\n[deployments.production]\ntracing = \"bounded\"\n\
+         [deployments.production.bounded-tracing]\nrecords = 0\nbytes = 2048\n\
+         [deployments.production.federates.host.bounded-tracing]\nrecords = 2\n",
+        one_federate_without_coordination(),
+    );
+    assert!(parse_manifest(&source).is_ok());
+    for (field, value) in [
+        ("fields", "0"),
+        ("bytes", "0"),
+        ("spans", "0"),
+        ("spans", "4294967295"),
+        ("span-fields", "0"),
+        ("span-bytes", "0"),
+        ("depth", "0"),
+        ("producers", "0"),
+        ("records", "-1"),
+        ("records", "4294967296"),
+        ("recordz", "1"),
+    ] {
+        let invalid = if field == "records" {
+            source.replace("records = 2", &format!("records = {value}"))
+        } else {
+            format!("{source}{field} = {value}\n")
+        };
+        let error = parse_manifest(&invalid).unwrap_err().to_string();
+        assert!(error.contains("bounded-tracing"), "{field}: {error}");
+    }
+    for backend in ["off", "hosted"] {
+        let invalid = source.replace("tracing = \"bounded\"", &format!("tracing = {backend:?}"));
+        assert!(parse_manifest(&invalid)
+            .unwrap_err()
+            .to_string()
+            .contains("bounded-tracing"));
+    }
+    let overflow = source.replace("records = 0", "records = 4294967295\nfields = 4294967295");
+    assert!(parse_manifest(&overflow).is_err());
+}
+
+#[test]
+fn bounded_tracing_overrides_inherit_each_field() {
+    let source = format!(
+        "{}\n[deployments.production]\ntracing = \"bounded\"\n\
+         [deployments.production.bounded-tracing]\nrecords = 9\nfields = 10\nbytes = 2048\n\
+         spans = 11\nspan-fields = 12\nspan-bytes = 512\nproducers = 13\ndepth = 14\n\
+         [deployments.production.federates.host.bounded-tracing]\nrecords = 0\nspan-fields = 15\n",
+        one_federate_without_coordination(),
+    );
+    let manifest = parse_manifest(&source).unwrap();
+    let deployment = manifest.deployment("production").unwrap();
+    let limits = deployment
+        .bounded_tracing_limits(deployment.federates["host"].bounded_tracing.as_ref())
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(limits).unwrap(),
+        serde_json::json!({
+            "records": 0, "fields": 10, "bytes": 2048, "spans": 11,
+            "span_fields": 15, "span_bytes": 512, "producers": 13, "depth": 14,
+            "level": "debug", "targets": ["boomerang::coordination"],
+        })
+    );
+}
+
+#[test]
+fn bounded_trace_filters_resolve_and_validate_at_the_manifest_boundary() {
+    let source = format!(
+        "{}\n[deployments.production]\ntracing = \"bounded\"\n\
+         [deployments.production.bounded-tracing]\nlevel = \"trace\"\n\
+         targets = [\"boomerang::runtime\", \"boomerang::coordination\"]\n\
+         [deployments.production.federates.host.bounded-tracing]\nlevel = \"info\"\n",
+        one_federate_without_coordination(),
+    );
+    let resolve = |source: &str| {
+        let manifest = parse_manifest(source).unwrap();
+        let deployment = manifest.deployment("production").unwrap();
+        let limits = deployment
+            .bounded_tracing_limits(deployment.federates["host"].bounded_tracing.as_ref())
+            .unwrap();
+        // Configuration passes directly to the native subscriber without conversion.
+        let config = tracing_bounded::Config {
+            level: limits.level,
+            ..Default::default()
+        };
+        let encoded = serde_json::to_value(&limits).unwrap();
+        let decoded: cargo_boomerang::BoundedTracingLimits =
+            serde_json::from_value(encoded.clone()).unwrap();
+        assert_eq!(decoded.level, config.level);
+        assert_eq!(decoded, limits);
+        encoded
+    };
+    let resolved = resolve(&source);
+    assert_eq!(resolved["level"], "info");
+    assert_eq!(
+        resolved["targets"],
+        serde_json::json!(["boomerang::runtime", "boomerang::coordination"])
+    );
+    assert_eq!(
+        resolve(&format!("{source}targets = []\n"))["targets"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        resolve(&format!("{source}targets = [\"application\"]\n"))["targets"],
+        serde_json::json!(["application"])
+    );
+    for level in ["off", "error", "warn", "info", "debug", "trace"] {
+        assert_eq!(
+            resolve(&source.replace("level = \"info\"", &format!("level = {level:?}")))["level"],
+            level
+        );
+    }
+    for invalid in [
+        "", "0", "1", "5", "6", "DEBUG", " debug", "debug ", "verbose",
+    ] {
+        let invalid_source = source.replace("level = \"info\"", &format!("level = {invalid:?}"));
+        assert!(parse_manifest(&invalid_source)
+            .unwrap_err()
+            .to_string()
+            .contains("bounded-tracing"));
+        let mut invalid_report = resolved.clone();
+        invalid_report["level"] = serde_json::json!(invalid);
+        assert!(
+            serde_json::from_value::<cargo_boomerang::BoundedTracingLimits>(invalid_report)
+                .is_err()
+        );
+    }
+    for invalid in [
+        source.replace("level = \"info\"", "level = \"verbose\""),
+        format!("{source}targets = [\"\"]\n"),
+        format!("{source}targets = [\" boomerang::runtime\"]\n"),
+    ] {
+        assert!(parse_manifest(&invalid)
+            .unwrap_err()
+            .to_string()
+            .contains("bounded-tracing"));
+    }
+}
+
+#[test]
+fn bindings_select_named_component_modules_and_reject_expressions() {
+    for entry in ["keyboard", "input::keyboard", "input::r#type"] {
+        let source = format!(
+            "{}\n[deployments.production.bindings.keys]\npackage = \"components\"\ncomponent = {entry:?}\n",
+            one_federate_without_coordination(),
+        );
+        let manifest = cargo_boomerang::parse_manifest(&source).unwrap();
+        assert_eq!(
+            manifest.deployment("production").unwrap().bindings["keys"]
+                .component
+                .as_deref(),
+            Some(entry)
+        );
+    }
+    for entry in [
+        "",
+        "::keyboard",
+        "crate::keyboard",
+        "super::keyboard",
+        "self::keyboard",
+        "keyboard::<u8>",
+        "keyboard()",
+        "keyboard; panic!()",
+    ] {
+        let source = format!(
+            "{}\n[deployments.production.bindings.keys]\npackage = \"components\"\ncomponent = {entry:?}\n",
+            one_federate_without_coordination(),
+        );
+        assert!(
+            cargo_boomerang::parse_manifest(&source).is_err(),
+            "accepted {entry}"
+        );
+    }
+}
+
+#[test]
 fn valid_manifest_preserves_the_complete_schema() {
     let manifest = load_manifest(fixture("valid")).unwrap();
     assert_eq!(manifest.schema, 1);
@@ -121,8 +328,13 @@ fn deployment_execution_policy_is_nameable_from_the_public_crate_root() {
 
 #[test]
 fn central_rti_requires_an_rti_table() {
-    let source = std::fs::read_to_string(fixture("invalid-rti")).unwrap();
-    let error = parse_manifest(&source).unwrap_err();
+    let mut source: toml::Value =
+        toml::from_str(&std::fs::read_to_string(fixture("valid")).unwrap()).unwrap();
+    source["deployments"]["production"]
+        .as_table_mut()
+        .unwrap()
+        .remove("rti");
+    let error = parse_manifest(&toml::to_string(&source).unwrap()).unwrap_err();
     assert!(error
         .to_string()
         .contains("central-rti requires deployments.production.rti"));

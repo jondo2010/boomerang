@@ -26,14 +26,13 @@ pub(super) struct LogicalTimeBarrier {
 }
 
 impl LogicalTimeBarrier {
-    #[tracing::instrument(skip(self), fields(tag = %tag, released = %self.released_tag))]
     pub(super) fn release_tag(&mut self, tag: Tag) {
-        tracing::trace!("Release");
-
         if tag < self.released_tag {
-            tracing::warn!(
-                "Cannot release a tag ({tag}) earlier than the last released tag {}",
-                self.released_tag
+            tracing::warn!(target: "boomerang::runtime",
+                event = "runtime.barrier.release_rejected",
+                upstream = self.upstream_ctx.enclave_id().as_u32(),
+                tag_kind = tag.kind_str(), tag_offset_ns = tag.offset().whole_nanoseconds(), tag_microstep = tag.microstep(),
+                released_tag_kind = self.released_tag.kind_str(), released_tag_offset_ns = self.released_tag.offset().whole_nanoseconds(), released_tag_microstep = self.released_tag.microstep(), reason = "tag_regression",
             );
         } else {
             self.released_tag = tag;
@@ -61,7 +60,6 @@ impl LogicalTimeBarrier {
     ///
     /// If an async event is received, it is returned to the caller. A return value of `None` indicates that the tag has been released.
     #[inline]
-    #[tracing::instrument(skip(self, tag, this_enclave, event_rx), fields(tag = %tag))]
     pub(super) fn acquire_tag(
         &mut self,
         tag: Tag,
@@ -77,20 +75,23 @@ impl LogicalTimeBarrier {
             tag
         };
 
-        tracing::trace!(upstream_tag = %upstream_tag, "Try acquire");
         if self.try_acquire_tag(upstream_tag) {
             return Ok(None);
         }
 
         if upstream_tag > self.provisional_tag {
-            tracing::trace!(%upstream_tag, "Releasing provisional tag");
             if !self
                 .upstream_ctx
                 .release_provisional(this_enclave, upstream_tag)
             {
                 // The upstream has terminated try to return a queued event here. If the upstream terminated, we probably
                 // have an event queued from it. This prevents pre-mature termination of this enclave.
-                tracing::warn!("Upstream has terminated");
+                tracing::warn!(target: "boomerang::runtime",
+                    event = "runtime.barrier.wait_interrupted", enclave = this_enclave.as_u32(),
+                    upstream = self.upstream_ctx.enclave_id().as_u32(),
+                    tag_kind = upstream_tag.kind_str(), tag_offset_ns = upstream_tag.offset().whole_nanoseconds(), tag_microstep = upstream_tag.microstep(),
+                    reason = "upstream_closed",
+                );
                 return event_rx.try_recv().map_err(|_| {
                     LogicalTimeBarrierError::EventChannelClosed {
                         upstream: self.upstream_ctx.enclave_id(),
@@ -100,8 +101,11 @@ impl LogicalTimeBarrier {
             self.provisional_tag = upstream_tag;
         }
 
-        // Block until the tag is released
-        tracing::trace!("Blocking");
+        tracing::debug!(target: "boomerang::runtime",
+            event = "runtime.scheduler.waiting", enclave = this_enclave.as_u32(),
+            reason = "upstream_release", upstream = self.upstream_ctx.enclave_id().as_u32(),
+            tag_kind = upstream_tag.kind_str(), tag_offset_ns = upstream_tag.offset().whole_nanoseconds(), tag_microstep = upstream_tag.microstep(),
+        );
         event_rx
             .recv()
             .map(Some)

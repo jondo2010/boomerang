@@ -11,9 +11,6 @@ use crate::{
     load_manifest, Binding, CommandOutput, Deployment, Federate, RecoveryPolicy, Topology,
 };
 
-const DESCRIPTOR_FEATURE: &str = "__boomerang_descriptor";
-const PAYLOAD_FEATURE: &str = "__boomerang_payload";
-
 /// Exact Cargo identity and location for a selected workspace package.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CargoPackage {
@@ -34,6 +31,8 @@ pub struct CargoPackage {
 /// Resolved target and runtime configuration for one Federate.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedFederate {
+    /// Validated, fully inherited bounded capture limits, absent for other backends.
+    pub bounded_tracing: Option<crate::BoundedTracingLimits>,
     /// Stable placement groups assigned to this Federate.
     pub groups: Vec<String>,
     /// Optional Rust target triple; absence selects the host target.
@@ -127,13 +126,35 @@ impl ResolvedWorkspace {
         &self.table_store
     }
 
-    /// Returns all direct packages expected beneath the synthetic driver root.
-    pub(crate) fn driver_package_ids(&self) -> BTreeSet<String> {
-        self.packages
+    /// Resolves a selected implementation identity back to its package and component entry.
+    pub(crate) fn implementation(&self, identity: &str) -> Option<(&CargoPackage, &Binding)> {
+        let binding = self
+            .deployment
+            .bindings
             .values()
-            .chain(std::iter::once(&self.host_builder))
-            .map(|package| package.id.to_string())
-            .collect()
+            .find(|binding| binding.implementation_id() == identity)?;
+        Some((self.package(&binding.package)?, binding))
+    }
+
+    /// Direct package roots used by one isolated host stage.
+    pub(crate) fn host_stage_package_ids(&self, topology: bool) -> BTreeSet<String> {
+        let mut packages = BTreeSet::from([self.host_builder.id.to_string()]);
+        if topology {
+            packages.insert(
+                self.package(&self.topology.package)
+                    .expect("topology resolved")
+                    .id
+                    .to_string(),
+            );
+        } else {
+            packages.extend(self.deployment.bindings.values().map(|binding| {
+                self.package(&binding.package)
+                    .expect("implementation resolved")
+                    .id
+                    .to_string()
+            }));
+        }
+        packages
     }
 
     /// Returns every exact package identity available to the source application.
@@ -208,7 +229,12 @@ pub(crate) fn resolve_workspace_with_output(
     let federates = deployment
         .federates
         .iter()
-        .map(|(name, federate)| (name.clone(), resolve_federate(&workspace_root, federate)))
+        .map(|(name, federate)| {
+            let mut resolved = resolve_federate(&workspace_root, federate);
+            resolved.bounded_tracing =
+                deployment.bounded_tracing_limits(federate.bounded_tracing.as_ref());
+            (name.clone(), resolved)
+        })
         .collect();
     let lockfile = lockfile_identity(workspace_root.join("Cargo.lock"))?;
 
@@ -222,6 +248,8 @@ pub(crate) fn resolve_workspace_with_output(
             coordination: deployment.coordination.clone(),
             rti: deployment.rti.clone(),
             execution: deployment.execution.clone(),
+            tracing: deployment.tracing,
+            bounded_tracing: deployment.bounded_tracing.clone(),
             boundaries: deployment.boundaries.clone(),
         },
         packages,
@@ -332,11 +360,7 @@ fn resolve_package(
 ) -> Result<CargoPackage> {
     let package = workspace_member(metadata, name)?;
 
-    validate_facets(package)?;
     for feature in selected_features {
-        if matches!(feature.as_str(), DESCRIPTOR_FEATURE | PAYLOAD_FEATURE) {
-            bail!("package '{name}' feature '{feature}' is reserved for cargo-boomerang");
-        }
         if !package.features.contains_key(feature) {
             bail!("package '{name}' does not declare selected feature '{feature}'");
         }
@@ -414,22 +438,10 @@ fn workspace_member<'a>(metadata: &'a Metadata, name: &str) -> Result<&'a Packag
         })
 }
 
-/// Confirms that a package supports both reserved deployment facets.
-fn validate_facets(package: &Package) -> Result<()> {
-    for feature in [DESCRIPTOR_FEATURE, PAYLOAD_FEATURE] {
-        if !package.features.contains_key(feature) {
-            bail!(
-                "package '{}' must declare reserved feature '{feature}'",
-                package.name
-            );
-        }
-    }
-    Ok(())
-}
-
 /// Resolves workspace-relative Federate configuration paths.
 fn resolve_federate(workspace_root: &Path, federate: &Federate) -> ResolvedFederate {
     ResolvedFederate {
+        bounded_tracing: None,
         groups: federate.groups.clone(),
         target: federate.target.clone(),
         toolchain: federate.toolchain.clone(),
@@ -484,6 +496,7 @@ mod tests {
             String::from("component"),
             Binding {
                 package: String::from("payload"),
+                component: None,
                 features: Vec::new(),
             },
         )]);

@@ -1,0 +1,27 @@
+[package]
+name = "tracing-bounded"
+version = "0.1.0"
+edition = "2021"
+description = "Bounded, loss-aware capture for native tracing events and spans"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/jondo2010/boomerang"
+readme = "README.md"
+keywords = ["tracing", "diagnostics", "bounded", "subscriber"]
+categories = ["development-tools::debugging"]
+# Remove only after the specification's release qualification passes.
+publish = false
+include = [
+    "src/**",
+    "tests/native_path/*.rs",
+    "README.md", "SPEC.md", "QUALIFICATION.md", "LICENSE-MIT", "LICENSE-APACHE",
+]
+
+[dependencies]
+tracing-core.workspace = true
+
+[dev-dependencies]
+tracing.workspace = true
+
+[[test]]
+name = "native_path"
+harness = false

@@ -1,4 +1,3 @@
-use cargo_metadata::MetadataCommand;
 use std::path::PathBuf;
 
 use super::support;
@@ -11,6 +10,22 @@ fn fixture_workspace() -> PathBuf {
 fn generated_manifest_unions_features_for_one_selected_package() {
     let _guard = support::toolchain_lock();
     let target = support::toolchain_target();
+    let _manifest = support::fixture_variant("feature-union", "production", |deployment| {
+        deployment["bindings"]["controller"]
+            .as_table_mut()
+            .unwrap()
+            .insert(
+                "features".into(),
+                toml::Value::try_from(["controller-selected"]).unwrap(),
+            );
+        deployment["bindings"]["backup"]
+            .as_table_mut()
+            .unwrap()
+            .insert(
+                "features".into(),
+                toml::Value::try_from(["sensor-selected"]).unwrap(),
+            );
+    });
     let launcher = support::with_target_directory(&target, || {
         cargo_boomerang::generate_launcher(fixture_workspace(), "feature-union", "host")
     })
@@ -21,7 +36,7 @@ fn generated_manifest_unions_features_for_one_selected_package() {
     let features = &manifest["dependencies"]["implementation_0"]["features"];
     assert_eq!(
         features.to_string(),
-        r#"["__boomerang_payload", "controller-selected", "sensor-selected"]"#
+        r#"["controller-selected", "sensor-selected"]"#
     );
 }
 
@@ -61,109 +76,29 @@ fn generated_single_federate_launcher_executes_typed_local_route_without_builder
         .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
     launcher.run_locked_offline().unwrap();
     launcher.check_locked_offline().unwrap();
-
-    let metadata = MetadataCommand::new()
-        .manifest_path(launcher.manifest_path())
-        .other_options(vec![String::from("--locked"), String::from("--offline")])
-        .exec()
-        .unwrap();
-    let package_names = metadata
-        .packages
-        .iter()
-        .map(|package| package.name.as_str())
-        .collect::<Vec<_>>();
-    assert!(!package_names.contains(&"boomerang_builder"));
-    assert!(!package_names.contains(&"vehicle-topology"));
-    assert!(package_names.contains(&"sensor-host"));
-    assert!(package_names.contains(&"vehicle-control"));
-}
-
-/// Proves a generated distributed slice preserves canonical keys and excludes sibling payloads.
-#[test]
-fn generated_sensor_federate_slice_excludes_host_payload_and_preserves_canonical_keys() {
-    let _guard = support::toolchain_lock();
-    let target = tempfile::tempdir().unwrap();
-    let launcher = support::with_target_directory(target.path(), || {
-        cargo_boomerang::generate_launcher(fixture_workspace(), "sensor-slice", "sensor")
-    })
-    .unwrap();
-
-    let source = std::fs::read_to_string(launcher.source_path()).unwrap();
+    let payload_crates = support::launcher_payload_crates(first.executable_path());
+    for present in ["boomerang_runtime", "sensor_host", "vehicle_control"] {
+        assert!(payload_crates.contains(present), "{payload_crates:?}");
+    }
     assert!(
-        source.contains("static FEDERATE: FederateIndex = FederateIndex::new(1);"),
-        "{source}"
+        !payload_crates.contains("boomerang_builder"),
+        "{payload_crates:?}"
     );
-    assert!(!source.contains("FederateSliceImage"), "{source}");
-    assert!(!source.contains("FederateSliceView"), "{source}");
-    assert!(source.contains("IndexSpan::new(2, 1)"), "{source}");
-    assert!(source.contains(".bind_enclave("), "{source}");
-    assert!(source.contains("EnclaveIndex::new(2)"), "{source}");
-    assert!(
-        source.contains("boundary/controller%2Fcommand/sensor%2Fcommand/c0"),
-        "{source}"
-    );
-    assert!(!source.contains("IdentityRange"), "{source}");
-    assert!(!source.contains("IDENTITIES"), "{source}");
-    assert!(source.contains("FederateImage::new("), "{source}");
-    assert!(source.contains("FederateId::new(\"sensor\")"), "{source}");
-    let metadata = MetadataCommand::new()
-        .manifest_path(launcher.manifest_path())
-        .other_options(vec![String::from("--locked"), String::from("--offline")])
-        .exec()
-        .unwrap();
-    let package_names = metadata
-        .packages
-        .iter()
-        .map(|package| package.name.as_str())
-        .collect::<Vec<_>>();
-    assert!(package_names.contains(&"sensor-host"));
-    assert!(package_names.contains(&"boomerang_central_rti"));
-    assert!(!package_names.contains(&"vehicle-control"));
-    assert!(!package_names.contains(&"vehicle-topology"));
-    assert!(!package_names.contains(&"boomerang_builder"));
-
-    launcher.build_locked_offline().unwrap();
-    let error = launcher.run_locked_offline().unwrap_err().to_string();
-    assert!(
-        error.contains("BOOMERANG_RTI_ADDRESS is required"),
-        "{error}"
-    );
-}
-
-/// Rejects reserved payload activation through an unselected transitive dependency.
-#[test]
-fn generated_launcher_rejects_transitive_payload_for_unselected_implementation() {
-    let _guard = support::toolchain_lock();
-    let target = tempfile::tempdir().unwrap();
-    let result = support::with_target_directory(target.path(), || {
-        cargo_boomerang::generate_launcher(fixture_workspace(), "transitive-peer", "sensor")
-    });
-    let error = result.err().expect("peer payload must fail").to_string();
-
-    assert!(
-        error.contains("unselected implementation package")
-            && error.contains("activates reserved payload facet"),
-        "{error}"
-    );
-}
-
-#[test]
-fn generated_launcher_check_and_run_apply_federate_cargo_configuration() {
-    let _guard = support::toolchain_lock();
-    let target = support::toolchain_target();
-    let launcher = support::with_target_directory(&target, || {
-        cargo_boomerang::generate_launcher(fixture_workspace(), "profile-config", "host")
-    })
-    .unwrap();
-    let check = launcher.check_locked_offline();
-    let run = launcher.run_locked_offline();
-    assert!(check.is_ok(), "check failed: {check:#?}");
-    assert!(run.is_ok(), "run failed: {run:#?}");
 }
 
 #[test]
 fn generated_launcher_rejects_changed_configured_files_before_cargo() {
     let _guard = support::toolchain_lock();
+    let _manifest = support::fixture_variant("resolution", "production", |deployment| {
+        deployment["federates"]["host"]
+            .as_table_mut()
+            .unwrap()
+            .insert("target-json".into(), "targets/host.json".into());
+        deployment["federates"]["host"]
+            .as_table_mut()
+            .unwrap()
+            .insert("cargo-config".into(), ".cargo/host.toml".into());
+    });
     let fixture = support::copied_fixture_workspace();
     let target = tempfile::tempdir().unwrap();
     let launcher = support::with_target_directory(target.path(), || {
@@ -184,28 +119,6 @@ fn generated_launcher_rejects_changed_configured_files_before_cargo() {
     assert!(
         error.contains("configured Cargo configuration changed"),
         "{error}"
-    );
-}
-
-#[test]
-fn generated_launcher_renders_normalized_deployment_execution_policy() {
-    let _guard = support::toolchain_lock();
-    let target = support::toolchain_target();
-    let launcher = support::with_target_directory(&target, || {
-        cargo_boomerang::generate_launcher(fixture_workspace(), "execution", "host")
-    })
-    .unwrap();
-    let source = std::fs::read_to_string(launcher.source_path()).unwrap();
-    assert!(source.contains("fast_forward: true"), "{source}");
-    assert!(source.contains("keep_alive: true"), "{source}");
-    assert!(
-        source.contains("timeout: Some(boomerang_runtime::Duration::nanoseconds_i128(1000000000))"),
-        "{source}"
-    );
-    assert!(source.contains("physical_event_q_size: 1024"), "{source}");
-    assert!(
-        source.contains("boomerang_util::launcher::write_execution_summary(&execution)?"),
-        "{source}"
     );
 }
 
@@ -239,7 +152,10 @@ fn generated_launcher_rejects_unsupported_coordination_before_publication() {
             .as_table_mut()
             .unwrap();
         if selection == "backend" {
-            deployment["coordination"]["backend"] = "peer-to-peer".into();
+            deployment["coordination"]
+                .as_table_mut()
+                .unwrap()
+                .insert("backend".into(), "peer-to-peer".into());
             deployment.remove("rti");
         } else {
             deployment["boundaries"]["boundary/controller%2Fcommand/sensor%2Fcommand/c0"]

@@ -1,35 +1,38 @@
 use std::{env, fs, path::Path};
 
 use boomerang_runtime::binding::{
-    payload_fingerprint_compile_input_key, COMPONENT_DESCRIPTOR_MACRO_ABI,
+    component_payload_fingerprint_compile_inputs_key, COMPONENT_DESCRIPTOR_MACRO_ABI,
     PAYLOAD_MACRO_ABI_COMPILE_INPUT,
 };
 
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(boomerang_cargo_config_probe)");
+    println!("cargo:rustc-check-cfg=cfg(boomerang_facet, values(\"descriptor\", \"payload\"))");
+    println!("cargo:rustc-cfg=boomerang_facet=\"payload\"");
     println!(
-        "cargo:rustc-check-cfg=cfg(feature, values(\"__boomerang_descriptor\", \
-         \"broken-descriptor\", \"broken-payload\", \"profile-config-probe\", \
-         \"runtime-failure\", \"warning-diagnostic\"))"
+        "cargo:rustc-check-cfg=cfg(feature, values(\"broken-descriptor\", \"broken-payload\", \"profile-config-probe\", \
+         \"natural-quiescence\", \"runtime-failure\", \"warning-diagnostic\"))"
     );
     let manifest_dir = fs::canonicalize(env::var_os("CARGO_MANIFEST_DIR").unwrap()).unwrap();
     let manifest_dir = manifest_dir.to_str().unwrap();
     println!("cargo:rustc-env={PAYLOAD_MACRO_ABI_COMPILE_INPUT}={COMPONENT_DESCRIPTOR_MACRO_ABI}");
-    for (contract, reactor, fingerprint) in [
+    for (component, contract, reactor, fingerprint) in [
         (
+            "controller",
             "vehicle.controller",
             "Controller",
             "5d653759745efef472762f00cd6ecbf0654f58f4f98c5a71758ab413b374c42f",
         ),
         (
+            "sensor",
             "vehicle.sensor",
             "Sensor",
             "fd8927818c1f722adab20ec868c920758153f21fdb26f46781495c38dc2623a1",
         ),
     ] {
         println!(
-            "cargo:rustc-env={}={fingerprint}",
-            payload_fingerprint_compile_input_key(manifest_dir, contract, 1, reactor)
+            "cargo:rustc-env={}=owned_reference_payloads::{component}={fingerprint}",
+            component_payload_fingerprint_compile_inputs_key(manifest_dir, contract, 1, reactor)
         );
     }
     let fixtures = Path::new(manifest_dir).join("../workspace");

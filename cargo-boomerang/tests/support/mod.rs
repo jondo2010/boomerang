@@ -13,59 +13,123 @@ use boomerang_builder::compiler::{
 use boomerang_runtime::{execute_owned_federate, image::FederateIndex, Config};
 use serde_json::{json, Value};
 
+/// Materializes one stable package tree per test binary under Cargo's test target.
+/// The next run (or `cargo clean`) removes it; no process-static TempDir leaks into source.
 pub fn fixture_workspace() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/workspace")
+    static WORKSPACE: OnceLock<PathBuf> = OnceLock::new();
+    WORKSPACE
+        .get_or_init(|| {
+            let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/workspace");
+            let destination = shared_target("workspace");
+            copy_tree(&source, &destination);
+            destination
+        })
+        .clone()
+}
+
+fn copy_tree(source: &Path, destination: &Path) {
+    std::fs::create_dir_all(destination).unwrap();
+    for entry in std::fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        if entry.file_name() == "target" {
+            continue;
+        }
+        let output = destination.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree(&entry.path(), &output);
+        } else if entry.file_name() == "Cargo.toml" {
+            // Keep fixture packages together, but resolve dependencies on repository crates
+            // before moving the workspace away from its original directory depth.
+            let mut manifest: toml::Value =
+                toml::from_str(&std::fs::read_to_string(entry.path()).unwrap()).unwrap();
+            for section in ["dependencies", "dev-dependencies", "build-dependencies"] {
+                if let Some(dependencies) = manifest
+                    .get_mut(section)
+                    .and_then(toml::Value::as_table_mut)
+                {
+                    for (_, dependency) in dependencies.iter_mut() {
+                        if let Some(path) = dependency.get_mut("path") {
+                            let relative = path.as_str().unwrap();
+                            // The tiny fixture's peer dependencies start with ../; repository
+                            // dependencies climb further. Absolute paths are already relocated.
+                            if relative.starts_with("../../") {
+                                *path = std::fs::canonicalize(source.join(relative))
+                                    .unwrap()
+                                    .to_str()
+                                    .unwrap()
+                                    .into();
+                            }
+                        }
+                    }
+                }
+            }
+            std::fs::write(output, toml::to_string(&manifest).unwrap()).unwrap();
+        } else {
+            std::fs::copy(entry.path(), output).unwrap();
+        }
+    }
 }
 
 pub fn copied_fixture_workspace() -> tempfile::TempDir {
-    fn copy_tree(source: &Path, destination: &Path) {
-        for entry in std::fs::read_dir(source).unwrap() {
-            let entry = entry.unwrap();
-            if entry.file_name() == "target" {
-                continue;
-            }
-            let destination = destination.join(entry.file_name());
-            if entry.file_type().unwrap().is_dir() {
-                std::fs::create_dir(&destination).unwrap();
-                copy_tree(&entry.path(), &destination);
-            } else {
-                std::fs::copy(entry.path(), destination).unwrap();
-            }
-        }
-    }
-
-    let source = fixture_workspace();
-    let destination = tempfile::tempdir_in(source.parent().unwrap()).unwrap();
-    copy_tree(&source, destination.path());
+    let destination = tempfile::tempdir().unwrap();
+    copy_tree(&fixture_workspace(), destination.path());
     destination
 }
 
-/// Reuses one host-target copy across generated central deployment tests.
-pub fn hosted_fixture_workspace() -> PathBuf {
-    static WORKSPACE: OnceLock<tempfile::TempDir> = OnceLock::new();
-    WORKSPACE
-        .get_or_init(|| {
-            let workspace = copied_fixture_workspace();
-            let manifest = workspace.path().join("Boomerang.toml");
-            let source = std::fs::read_to_string(&manifest).unwrap().replace(
-                "aarch64-unknown-linux-gnu",
-                &target_lexicon::HOST.to_string(),
-            );
-            let source = source.replace(
-                "vehicle_topology::topology",
-                "vehicle_topology::tagged_topology",
-            );
-            std::fs::write(manifest, source).unwrap();
-            workspace
-        })
-        .path()
-        .to_path_buf()
+/// Restores a scenario's manifest even when one of its assertions panics.
+#[must_use]
+pub struct ManifestGuard {
+    path: PathBuf,
+    original: String,
+}
+
+impl Drop for ManifestGuard {
+    fn drop(&mut self) {
+        std::fs::write(&self.path, &self.original).expect("restore fixture manifest");
+    }
+}
+
+pub fn edit_manifest(workspace: &Path, edit: impl FnOnce(&mut toml::Value)) -> ManifestGuard {
+    let path = workspace.join("Boomerang.toml");
+    let original = std::fs::read_to_string(&path).unwrap();
+    let mut manifest = toml::from_str(&original).unwrap();
+    edit(&mut manifest);
+    let guard = ManifestGuard { path, original };
+    std::fs::write(&guard.path, toml::to_string(&manifest).unwrap()).unwrap();
+    guard
+}
+
+/// Adds only the configuration delta needed by a scenario. Call while holding toolchain_lock.
+pub fn fixture_variant(
+    name: &str,
+    base: &str,
+    edit: impl FnOnce(&mut toml::Value),
+) -> ManifestGuard {
+    edit_manifest(&fixture_workspace(), |manifest| {
+        let mut deployment = manifest["deployments"][base].clone();
+        edit(&mut deployment);
+        manifest["deployments"]
+            .as_table_mut()
+            .unwrap()
+            .insert(name.into(), deployment);
+    })
+}
+
+pub fn hosted_fixture() -> ManifestGuard {
+    edit_manifest(&fixture_workspace(), |manifest| {
+        manifest["topology"]["entry"] = "vehicle_topology::tagged_topology".into();
+        manifest["deployments"]["sensor-slice"]["rti"]["target"] =
+            target_lexicon::HOST.to_string().into();
+    })
 }
 
 pub fn shared_target(lane: &str) -> PathBuf {
     static ROOT: OnceLock<PathBuf> = OnceLock::new();
     let root = ROOT.get_or_init(|| {
-        let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("cargo-boomerang-fixtures");
+        // One test binary must not delete another's workspace or coverage objects.
+        let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+            .join("cargo-boomerang-fixtures")
+            .join(env!("CARGO_CRATE_NAME"));
         if root.exists() {
             std::fs::remove_dir_all(&root).unwrap();
         }
@@ -98,10 +162,12 @@ pub fn owned_reference_summary(deployment_name: &str) -> Value {
     let driver = cargo_boomerang::run_descriptor_driver(&workspace, deployment_name).unwrap();
     for binding in driver.bindings() {
         let payload = match binding.implementation().as_str() {
-            "vehicle-control" => {
-                owned_reference_payloads::controller::__boomerang::BINDING_MANIFEST
+            "vehicle-control::controller" => {
+                owned_reference_payloads::controller::__boomerang::binding_manifest()
             }
-            "sensor-host" => owned_reference_payloads::sensor::__boomerang::BINDING_MANIFEST,
+            "sensor-host::sensor" => {
+                owned_reference_payloads::sensor::__boomerang::binding_manifest()
+            }
             implementation => panic!("unexpected fixture implementation {implementation}"),
         };
         assert_eq!(
@@ -174,7 +240,7 @@ pub fn owned_reference_summary(deployment_name: &str) -> Value {
     let selected = FederateIndex::new(0);
     let execution = compiled.with_image(|image| {
         execute_owned_federate(
-            &image,
+            image,
             selected,
             owned_reference_payloads::bindings(),
             Config::default(),
@@ -248,4 +314,40 @@ pub fn with_target_directory<T>(target: &Path, operation: impl FnOnce() -> T) ->
     let _guard = TargetDirectoryGuard(std::env::var_os("CARGO_TARGET_DIR"));
     unsafe { std::env::set_var("CARGO_TARGET_DIR", target) };
     operation()
+}
+
+/// Inspect emitted target libraries from generated launcher builds, excluding host tooling builds.
+/// Unfiltered Cargo metadata also lists the facade's cfg-disabled hosted dependencies.
+pub fn launcher_payload_crates(executable: &Path) -> std::collections::BTreeSet<String> {
+    fn collect(directory: &Path, crates: &mut std::collections::BTreeSet<String>) {
+        for entry in std::fs::read_dir(directory).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if entry.file_type().unwrap().is_dir() {
+                collect(&path, crates);
+            } else if matches!(
+                path.extension().and_then(|value| value.to_str()),
+                Some("rlib" | "rmeta")
+            ) {
+                let filename = path.file_stem().unwrap().to_str().unwrap();
+                if let Some(name) = filename
+                    .strip_prefix("lib")
+                    .and_then(|value| value.split('-').next())
+                {
+                    crates.insert(name.to_owned());
+                }
+            }
+        }
+    }
+    // BuiltLauncher returns a private executable copy directly below its build target.
+    // Inspect only this launcher's explicit target tree, not host tooling or other builds.
+    let build_target = executable.parent().unwrap().parent().unwrap();
+    let payload = build_target.join(target_lexicon::HOST.to_string());
+    let mut crates = std::collections::BTreeSet::new();
+    collect(&payload, &mut crates);
+    assert!(
+        crates.contains("boomerang_runtime"),
+        "no target runtime artifact found: {crates:?}"
+    );
+    crates
 }

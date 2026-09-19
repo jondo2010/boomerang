@@ -21,7 +21,7 @@ pub(super) fn start(
     let replies = [(source, source_tx), (sink, sink_tx)]
         .into_iter()
         .collect::<std::collections::BTreeMap<_, _>>();
-    let server = std::thread::spawn(move || {
+    let server = super::spawn_traced(move || {
         while !rti.is_finished() {
             let (member, request) = rx.recv_timeout(Duration::from_secs(3)).unwrap();
             let delivery = if inject_failure && matches!(request, RtiRequest::Publish { .. }) {

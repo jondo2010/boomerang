@@ -6,8 +6,6 @@ publish = false
 
 [features]
 default = ["boomerang/hosted"]
-__boomerang_descriptor = ["boomerang/__boomerang_descriptor", "dep:boomerang_builder"]
-__boomerang_payload = ["boomerang/__boomerang_payload"]
 action-delay-overflow = []
 action-duration-unit-overflow = []
 binding-fingerprint-mismatch = []
@@ -19,6 +17,11 @@ payload-lexical-relation = []
 
 [dependencies]
 boomerang = { path = "../../../../boomerang", default-features = false }
-boomerang_builder = { path = "../../../../boomerang_builder", features = ["descriptor-fingerprint"], optional = true }
+
+[target.'cfg(boomerang_facet = "descriptor")'.dev-dependencies]
+boomerang_builder = { path = "../../../../boomerang_builder", features = ["descriptor-fingerprint"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(boomerang_facet, values("descriptor", "payload"))'] }
 
 [workspace]

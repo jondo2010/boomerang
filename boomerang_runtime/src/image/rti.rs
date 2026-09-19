@@ -93,6 +93,8 @@ impl RtiDependencyImage {
 /// Precomputed coordination ranges owned by one dense Federate entry.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RtiMemberImage {
+    /// Maximum distinct destination tags awaiting cumulative completion at the RTI.
+    pub(super) in_transit_capacity: u32,
     /// Explicit recovery policy selected for this Federate.
     pub(super) recovery: RecoveryPolicy,
     /// Direct incoming dependencies grouped by this target Federate.
@@ -228,6 +230,15 @@ impl<'a> RtiRouteImage<'a> {
 }
 
 impl RtiMemberImage {
+    /// Maximum distinct incoming tags retained until this Federate confirms completion.
+    ///
+    /// The compiler derives this budget from the sum of the Federate's Enclave event capacities.
+    /// Equal-tag payloads share one entry; exhausting the budget terminates coordination.
+    #[must_use]
+    pub const fn in_transit_capacity(&self) -> u32 {
+        self.in_transit_capacity
+    }
+
     /// Returns the original packed direct incoming relationship range.
     #[must_use]
     pub const fn direct_incoming_range(&self) -> SliceRange<RtiDependencyImage> {
@@ -253,9 +264,11 @@ impl RtiMemberImage {
         direct_incoming: SliceRange<RtiDependencyImage>,
         transitive_incoming: SliceRange<RtiDependencyImage>,
         affected_downstream: SliceRange<FederateIndex>,
+        in_transit_capacity: u32,
     ) -> Self {
         Self {
             recovery,
+            in_transit_capacity,
             direct_incoming,
             transitive_incoming,
             affected_downstream,

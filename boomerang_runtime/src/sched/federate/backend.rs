@@ -42,6 +42,8 @@ pub struct FederatePublication {
     revision: CoordinationRevision,
     /// Next finite logical event, if the Federate has one to publish.
     next_event: Option<Tag>,
+    /// Runtime-accepted execution authority retained across publications.
+    grant_horizon: Option<Tag>,
 }
 
 impl FederatePublication {
@@ -50,7 +52,19 @@ impl FederatePublication {
         Self {
             revision,
             next_event,
+            grant_horizon: None,
         }
+    }
+
+    /// Attaches authority already accepted by the runtime, never a merely received grant.
+    pub const fn with_grant_horizon(mut self, horizon: Option<Tag>) -> Self {
+        self.grant_horizon = horizon;
+        self
+    }
+
+    /// Returns the runtime-accepted execution horizon at publication time.
+    pub const fn grant_horizon(self) -> Option<Tag> {
+        self.grant_horizon
     }
 
     /// Returns the revision supplied by this publication.
@@ -95,12 +109,28 @@ impl FederateAcquisition {
 pub struct FederateCompletion {
     /// Logical tag that the Federate finished processing.
     completed: Tag,
+    /// Whether this cumulative frontier covers processed network input.
+    network_input: bool,
 }
 
 impl FederateCompletion {
     /// Creates a completion for a processed logical tag.
     pub const fn new(completed: Tag) -> Self {
-        Self { completed }
+        Self {
+            completed,
+            network_input: false,
+        }
+    }
+
+    /// Marks completion evidence produced after processing network input and its outputs.
+    pub const fn with_network_input(mut self, network_input: bool) -> Self {
+        self.network_input = network_input;
+        self
+    }
+
+    /// Whether this frontier must be confirmed to the RTI to retire in-transit work.
+    pub const fn confirms_network_input(self) -> bool {
+        self.network_input
     }
 
     /// Returns the completed logical tag.

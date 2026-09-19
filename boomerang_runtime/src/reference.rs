@@ -1,4 +1,9 @@
 //! Standard-library reference implementation for synchronously executing validated compiled enclave images as a behavioral baseline for target executors.
+//!
+//! Runtime lifecycle spans expose only validated compiler identities. Preflight rejection precedes
+//! every initializer and construction event. Construction then advances through the applicable
+//! bounded phases `storage`, `routes`, `backend`, and `workers`; failures stop that sequence, while
+//! a panic during an active phase emits cancellation with reason `unwind`.
 
 mod distributed;
 pub use distributed::execute_owned_federate_with_backend;
@@ -12,13 +17,13 @@ use std::{
     time::Instant,
 };
 
-use tinymap::{TinyMap, TinySecondaryMap};
+use tinymap::{TinyMap, TinyMapView, TinySecondaryMap};
 
 use crate::{
     image::{
         BoundaryId, CompiledDeploymentImage, CompiledDeploymentView, EnclaveImage,
-        EnclaveImageView, EnclaveIndex, FederateIndex, ImageValidationError, PortIndex,
-        RouteDirection, RouteIndex, StateSlotIndex, TimingDomain,
+        EnclaveImageView, EnclaveIndex, FederateImage, FederateIndex, ImageValidationError,
+        PortIndex, RouteDirection, RouteIndex, StateSlotIndex, TimingDomain,
     },
     run_owned_scheduler,
     sched::{
@@ -32,6 +37,67 @@ use crate::{
     AsyncEvent, Config, EnclaveBindings, FederateCoordinationBackend, OwnedSchedulerOutcome,
     OwnedStorage, OwnedStorageError, PayloadType, ReactorData, RuntimeError, Stats, Tag,
 };
+
+/// Emits one bounded construction phase and reports unwinding before completion.
+struct ConstructionPhase {
+    phase: &'static str,
+    active: bool,
+}
+
+impl ConstructionPhase {
+    fn started(phase: &'static str) -> Self {
+        tracing::debug!(target: "boomerang::runtime",
+            event = "runtime.construction.started", phase);
+        Self {
+            phase,
+            active: true,
+        }
+    }
+
+    fn completed(&mut self) {
+        tracing::debug!(target: "boomerang::runtime",
+            event = "runtime.construction.completed", phase = self.phase);
+        self.active = false;
+    }
+
+    fn failed(&mut self, reason: &'static str) {
+        tracing::warn!(target: "boomerang::runtime",
+            event = "runtime.construction.failed", phase = self.phase, reason);
+        self.active = false;
+    }
+}
+
+impl Drop for ConstructionPhase {
+    fn drop(&mut self) {
+        if self.active && std::thread::panicking() {
+            tracing::warn!(target: "boomerang::runtime",
+                event = "runtime.construction.cancelled", phase = self.phase, reason = "unwind");
+        }
+    }
+}
+
+fn preflight_reason(error: &ExecuteOwnedFederateError) -> &'static str {
+    match error {
+        ExecuteOwnedFederateError::ImageValidation { .. }
+        | ExecuteOwnedFederateError::FederateNotFound { .. } => "image",
+        ExecuteOwnedFederateError::MissingEnclaveBinding { .. }
+        | ExecuteOwnedFederateError::DuplicateEnclaveBinding { .. }
+        | ExecuteOwnedFederateError::UnexpectedEnclaveBinding { .. }
+        | ExecuteOwnedFederateError::EnclavePreflight { .. } => "binding",
+        ExecuteOwnedFederateError::FederateCoordination { .. } => "coordination",
+        _ => "route",
+    }
+}
+
+fn federate_span(
+    federate: FederateIndex,
+    image: &FederateImage<'_>,
+    ownership: &'static str,
+) -> tracing::Span {
+    tracing::debug_span!(target: "boomerang::runtime", "runtime.federate",
+        federate = federate.as_u32(), federate_id = image.id().as_str(), target = image.target().as_str(),
+        runtime = image.runtime().as_str(), ownership)
+}
 
 /// Failure while validating, initializing, or synchronously executing a compiled image.
 #[derive(Debug, thiserror::Error)]
@@ -638,20 +704,19 @@ fn federate_shutdown_unblocks_a_full_mailbox_and_blocked_sender() {
 
 /// Resolves every outbound route to its unique inbound half after root validation.
 fn local_route_endpoints<'image>(
-    deployment: &'image CompiledDeploymentImage<'image>,
+    enclaves: TinyMapView<'image, EnclaveIndex, EnclaveImage<'image>>,
     selected_federate: FederateIndex,
     selected: &crate::image::FederateImage<'_>,
 ) -> Result<Vec<ResolvedLocalRoute<'image>>, ExecuteOwnedFederateError> {
     let mut endpoints = Vec::new();
-    for (source, source_image) in deployment.enclaves.iter() {
+    for (source, source_image) in enclaves.iter() {
         for (outbound_route, outbound) in source_image
             .routes
             .iter()
             .filter(|(_, route)| route.direction() == RouteDirection::Outbound)
         {
             let boundary = outbound.boundary();
-            let (destination, inbound) = deployment
-                .enclaves
+            let (destination, inbound) = enclaves
                 .iter()
                 .flat_map(|(enclave, image)| {
                     image
@@ -696,22 +761,22 @@ fn local_route_endpoints<'image>(
 
 /// Validates complete Enclave and route bindings before any user initializer runs.
 fn preflight_owned_federate<'image>(
-    deployment: &'image CompiledDeploymentImage<'image>,
+    deployment: CompiledDeploymentImage<'image>,
     federate: FederateIndex,
     bindings: &FederateBindings<'_>,
 ) -> Result<PreparedFederate<'image>, ExecuteOwnedFederateError> {
-    CompiledDeploymentView::new(deployment).map_err(|error| {
+    let deployment = CompiledDeploymentView::new(deployment).map_err(|error| {
         ExecuteOwnedFederateError::ImageValidation {
             message: error.to_string(),
         }
     })?;
     let selected = deployment
-        .federates
+        .federates()
         .get(federate)
         .ok_or(ExecuteOwnedFederateError::FederateNotFound { federate })?;
 
     let images = deployment
-        .enclaves
+        .enclaves()
         .iter()
         .filter(|(key, _)| selected.enclaves().contains(*key))
         .collect();
@@ -722,7 +787,7 @@ fn preflight_owned_federate<'image>(
             federate,
         });
     }
-    let endpoints = local_route_endpoints(deployment, federate, selected)?;
+    let endpoints = local_route_endpoints(deployment.enclaves(), federate, selected)?;
     preflight_local_bindings(federate, &images, &endpoints, bindings)?;
     Ok(PreparedFederate { images, endpoints })
 }
@@ -842,12 +907,13 @@ fn preflight_local_bindings(
 
 /// Executes every Enclave in one validated Federate with direct typed local routes.
 ///
+/// Consumes the deployment descriptor; backing tables remain borrowed for the duration of execution.
 /// All root, binding, route, timer, and timing checks complete before any user initializer runs.
 /// The first execution failure triggers Federate-wide shutdown; every scheduler thread is joined.
 /// Automatic quiescence covers executor-owned scheduler and local-route work. Callers that admit
 /// exogenous events must set [`Config::keep_alive`] and request shutdown explicitly.
 pub fn execute_owned_federate(
-    deployment: &CompiledDeploymentImage<'_>,
+    deployment: CompiledDeploymentImage<'_>,
     federate: FederateIndex,
     bindings: FederateBindings<'_>,
     config: Config,
@@ -861,13 +927,31 @@ pub fn execute_owned_federate(
 /// each scheduler thread. Production always returns `false`; unit tests use the guard to exercise
 /// failures that cannot be induced safely through operating-system resource exhaustion.
 fn execute_owned_federate_with_spawn_guard(
-    deployment: &CompiledDeploymentImage<'_>,
+    deployment: CompiledDeploymentImage<'_>,
     federate: FederateIndex,
     bindings: FederateBindings<'_>,
     config: Config,
     fail_spawn: impl FnMut(Option<EnclaveIndex>) -> bool,
 ) -> Result<FederateExecution, ExecuteOwnedFederateError> {
-    let prepared = preflight_owned_federate(deployment, federate, &bindings)?;
+    tracing::debug!(target: "boomerang::runtime",
+        event = "runtime.preflight.started", owner = "federate", federate = federate.as_u32());
+    let identity = deployment.federates.get(federate).cloned();
+    let prepared = match preflight_owned_federate(deployment, federate, &bindings) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            tracing::warn!(target: "boomerang::runtime", event = "runtime.preflight.rejected",
+                owner = "federate", federate = federate.as_u32(), reason = preflight_reason(&error));
+            return Err(error);
+        }
+    };
+    let span = federate_span(
+        federate,
+        &identity.expect("successful preflight selected the Federate"),
+        "local",
+    );
+    let _span = span.enter();
+    tracing::debug!(target: "boomerang::runtime",
+        event = "runtime.preflight.completed", owner = "federate", federate = federate.as_u32());
     let lifecycle = if config.keep_alive {
         LifecyclePolicy::KeepAlive
     } else {
@@ -911,18 +995,27 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
             (route.key, binding)
         })
         .collect::<BTreeMap<_, _>>();
+    let mut storage_phase = ConstructionPhase::started("storage");
     let mut storages = Vec::with_capacity(enclaves.len());
     for (enclave, owned) in enclaves {
         let image = EnclaveImageView::new(images[enclave])
             .expect("Federate preflight validated every selected Enclave image");
+        let span = tracing::debug_span!(target: "boomerang::runtime", "runtime.enclave",
+            enclave = enclave.as_u32(), enclave_id = image.enclave_id().as_str());
+        let _span = span.enter();
         let enclave_key = runtime_enclave_key(enclave);
-        let storage =
-            OwnedStorage::new_for_enclave(image, owned, enclave_key).map_err(|source| {
-                ExecuteOwnedFederateError::EnclaveInitialization { enclave, source }
-            })?;
+        let storage = match OwnedStorage::new_for_enclave(image, owned, enclave_key) {
+            Ok(storage) => storage,
+            Err(source) => {
+                storage_phase.failed("initialization");
+                return Err(ExecuteOwnedFederateError::EnclaveInitialization { enclave, source });
+            }
+        };
         storages.push((enclave, storage));
     }
+    storage_phase.completed();
 
+    let mut route_phase = ConstructionPhase::started("routes");
     let event_senders = storages
         .iter()
         .map(|(_, storage)| storage.scheduler_event_tx())
@@ -941,6 +1034,7 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
             .expect("Federate preflight required source storage");
         route.install(source, endpoint, destination_tx);
     }
+    route_phase.completed();
 
     let scheduler_contexts = storages
         .iter()
@@ -986,14 +1080,16 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
             .1
             .add_upstream(source_key, source_context, delay);
     }
-    let backend = connect(&mut storages)?;
+    let mut backend_phase = ConstructionPhase::started("backend");
+    let backend = match connect(&mut storages) {
+        Ok(backend) => backend,
+        Err(error) => {
+            backend_phase.failed("connection");
+            return Err(error);
+        }
+    };
     let enclave_count = storages.len();
-    let FederateCoordinationParts {
-        abort_handle,
-        coordinator,
-        participants,
-        ..
-    } = build_federate_coordination(
+    let parts = build_federate_coordination(
         &images,
         storages.iter().map(|(enclave, storage)| {
             (
@@ -1004,8 +1100,24 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
         }),
         lifecycle,
         backend,
-    )?;
+    );
+    let FederateCoordinationParts {
+        abort_handle,
+        coordinator,
+        participants,
+        ..
+    } = match parts {
+        Ok(parts) => parts,
+        Err(error) => {
+            backend_phase.failed("setup");
+            return Err(error);
+        }
+    };
+    backend_phase.completed();
     let origin = Instant::now();
+    let dispatch = tracing::dispatcher::get_default(Clone::clone);
+    let parent_span = tracing::Span::current();
+    let mut worker_phase = ConstructionPhase::started("workers");
     let (results, failure) = std::thread::scope(|scope| {
         let (result_tx, result_rx) = std::sync::mpsc::channel();
         let coordinator_thread = if fail_spawn(None) {
@@ -1013,13 +1125,22 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
                 "injected scoped thread spawn failure",
             ))
         } else {
+            let dispatch = dispatch.clone();
+            let parent_span = parent_span.clone();
             std::thread::Builder::new()
                 .name("federate-coordination".to_owned())
-                .spawn_scoped(scope, move || coordinator.run())
+                .spawn_scoped(scope, move || {
+                    let _dispatch = tracing::dispatcher::set_default(&dispatch);
+                    #[cfg(feature = "bounded-tracing")]
+                    let _producer = tracing_bounded::prepare_current_thread();
+                    let _parent = parent_span.entered();
+                    coordinator.run()
+                })
         };
         let coordinator_thread = match coordinator_thread {
             Ok(handle) => handle,
             Err(source) => {
+                worker_phase.failed("spawn");
                 drop(participants);
                 request_federate_shutdown(&event_senders);
                 return (
@@ -1055,9 +1176,18 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
                     "injected scoped thread spawn failure",
                 ))
             } else {
+                let dispatch = dispatch.clone();
+                let parent_span = parent_span.clone();
                 std::thread::Builder::new()
                     .name(format!("enclave-{enclave}"))
                     .spawn_scoped(scope, move || {
+                        let _dispatch = tracing::dispatcher::set_default(&dispatch);
+                        #[cfg(feature = "bounded-tracing")]
+                        let _producer = tracing_bounded::prepare_current_thread();
+                        let _parent = parent_span.entered();
+                        let _enclave = tracing::debug_span!(target: "boomerang::coordination",
+                            "enclave", enclave = enclave.as_u32())
+                        .entered();
                         let execution = std::panic::catch_unwind(AssertUnwindSafe(|| {
                             run_owned_scheduler_with_coordination(
                                 &mut storage,
@@ -1102,6 +1232,7 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
             match spawned {
                 Ok(handle) => handles.push((enclave, handle)),
                 Err(source) => {
+                    worker_phase.failed("spawn");
                     abort();
                     failure = Some(ExecuteOwnedFederateError::ThreadSpawn { enclave, source });
                     break;
@@ -1110,6 +1241,9 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
         }
         drop(participant_ports);
         drop(result_tx);
+        if failure.is_none() {
+            worker_phase.completed();
+        }
 
         let mut worker_errors = TinySecondaryMap::new();
         let mut first_worker = None;
@@ -1189,14 +1323,43 @@ pub fn execute_owned<'image>(
     bindings: EnclaveBindings,
     config: Config,
 ) -> Result<EnclaveExecution, ExecuteOwnedError<'image>> {
-    let image = crate::image::EnclaveImageView::new(image)?;
+    tracing::debug!(target: "boomerang::runtime",
+        event = "runtime.preflight.started", owner = "enclave");
+    let image = match crate::image::EnclaveImageView::new(image) {
+        Ok(image) => image,
+        Err(error) => {
+            tracing::warn!(target: "boomerang::runtime",
+                event = "runtime.preflight.rejected", owner = "enclave", reason = "image");
+            return Err(error.into());
+        }
+    };
+    let span = tracing::debug_span!(target: "boomerang::runtime", "runtime.enclave",
+        enclave_id = image.enclave_id().as_str());
+    let _span = span.enter();
     let unsupported_routes = image.routes().len();
     if unsupported_routes != 0 {
+        tracing::warn!(target: "boomerang::runtime",
+            event = "runtime.preflight.rejected", owner = "enclave", reason = "route");
         return Err(ExecuteOwnedError::RoutesUnsupported {
             count: unsupported_routes,
         });
     }
-    let mut storage = OwnedStorage::new(image, bindings)?;
+    if let Err(error) = OwnedStorage::validate_image_bindings(&image, &bindings) {
+        tracing::warn!(target: "boomerang::runtime",
+            event = "runtime.preflight.rejected", owner = "enclave", reason = "binding");
+        return Err(error.into());
+    }
+    tracing::debug!(target: "boomerang::runtime",
+        event = "runtime.preflight.completed", owner = "enclave");
+    let mut storage_phase = ConstructionPhase::started("storage");
+    let mut storage = match OwnedStorage::new(image, bindings) {
+        Ok(storage) => storage,
+        Err(error) => {
+            storage_phase.failed("initialization");
+            return Err(error.into());
+        }
+    };
+    storage_phase.completed();
     let OwnedSchedulerOutcome { final_tag, stats } = run_owned_scheduler(&mut storage, &config)?;
     Ok(EnclaveExecution {
         states: storage.into_states(),
@@ -1207,7 +1370,11 @@ pub fn execute_owned<'image>(
 
 #[cfg(test)]
 mod scoped_spawn_tests {
-    use std::{io::ErrorKind, sync::mpsc, time::Duration};
+    use std::{
+        io::{ErrorKind, Write},
+        sync::{mpsc, Arc, Mutex},
+        time::Duration,
+    };
 
     use tinymap::TinyMapView;
 
@@ -1223,6 +1390,28 @@ mod scoped_spawn_tests {
         keepalive, EnclaveKey, FederateAcquisition, FederateCompletion,
         FederateCoordinationBackend, FederateCoordinationError, FederatePublication, SendContext,
     };
+
+    #[derive(Clone, Default)]
+    struct TraceCapture(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for TraceCapture {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for TraceCapture {
+        type Writer = Self;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
 
     static REACTORS: [ReactorImage; 1] = [ReactorImage::new(
         BindingSlotIndex::new(0),
@@ -1331,7 +1520,7 @@ mod scoped_spawn_tests {
         IndexSpan::new(0, 3),
     )];
     static MEMBERS: [FederateIndex; 1] = [FederateIndex::new(0)];
-    static DEPLOYMENT: CompiledDeploymentImage<'static> = CompiledDeploymentImage {
+    const DEPLOYMENT: CompiledDeploymentImage<'static> = CompiledDeploymentImage {
         federation: GlobalFederationImage::new(&MEMBERS, &[]),
         federates: TinyMapView::new(&FEDERATES),
         enclaves: TinyMapView::new(&ENCLAVES),
@@ -1428,15 +1617,44 @@ mod scoped_spawn_tests {
         }
     }
 
-    fn execute_with_spawn_failure(failed_spawn: Option<EnclaveIndex>) -> ExecuteOwnedFederateError {
-        execute_owned_federate_with_spawn_guard(
-            &DEPLOYMENT,
-            FederateIndex::new(0),
-            bindings(),
-            Config::default().with_fast_forward(true),
-            move |spawn| spawn == failed_spawn,
-        )
-        .expect_err("the selected scoped thread creation must fail")
+    fn execute_with_spawn_failure(
+        failed_spawn: Option<EnclaveIndex>,
+    ) -> (ExecuteOwnedFederateError, Vec<serde_json::Value>) {
+        let output = TraceCapture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .without_time()
+            .with_writer(output.clone())
+            .with_env_filter("boomerang=debug")
+            .finish();
+        let error = tracing::subscriber::with_default(subscriber, || {
+            execute_owned_federate_with_spawn_guard(
+                DEPLOYMENT,
+                FederateIndex::new(0),
+                bindings(),
+                Config::default().with_fast_forward(true),
+                move |spawn| spawn == failed_spawn,
+            )
+            .expect_err("the selected scoped thread creation must fail")
+        });
+        let bytes = output.0.lock().unwrap();
+        let events = std::str::from_utf8(&bytes)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        (error, events)
+    }
+
+    fn assert_spawn_failure_event(events: &[serde_json::Value]) {
+        assert!(
+            events.iter().any(|event| {
+                event["fields"]["event"] == "runtime.construction.failed"
+                    && event["fields"]["phase"] == "workers"
+                    && event["fields"]["reason"] == "spawn"
+            }),
+            "missing worker spawn failure event in {events:#?}"
+        );
     }
 
     /// Verifies compiled coordination preserves the complete selected Federate layout and policy.
@@ -1551,20 +1769,22 @@ mod scoped_spawn_tests {
             return;
         }
 
-        let coordinator = execute_with_spawn_failure(None);
+        let (coordinator, coordinator_events) = execute_with_spawn_failure(None);
         assert!(matches!(
             coordinator,
             ExecuteOwnedFederateError::CoordinatorThreadSpawn { source }
                 if source.kind() == ErrorKind::Other
         ));
+        assert_spawn_failure_event(&coordinator_events);
 
         let failed_enclave = EnclaveIndex::new(1);
-        let scheduler = execute_with_spawn_failure(Some(failed_enclave));
+        let (scheduler, scheduler_events) = execute_with_spawn_failure(Some(failed_enclave));
         assert!(matches!(
             scheduler,
             ExecuteOwnedFederateError::ThreadSpawn { enclave, source }
                 if enclave == failed_enclave && source.kind() == ErrorKind::Other
         ));
+        assert_spawn_failure_event(&scheduler_events);
     }
 
     /// Coordinator authority wins over a secondary panic that reaches the result channel first.

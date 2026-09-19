@@ -113,7 +113,6 @@ pub trait CommonContext {
     /// Schedule a new value for this action asynchronously
     ///
     /// Returns true if the event was successfully scheduled, false if the channel was disconnected.
-    #[tracing::instrument(skip(self, action, value, delay), fields(logical = action.is_logical()))]
     fn schedule_action_async<T: ReactorData>(
         &self,
         action: &impl ActionCommon<T>,
@@ -125,13 +124,10 @@ pub trait CommonContext {
 
         let event = if action.is_logical() {
             // Logical actions are scheduled at the current logical time + tag_delay
-            //tracing::info!(tag_delay = %tag_delay, key = ?action.key(), "Sched");
-            //AsyncEvent::logical(action.key(), tag_delay, value)
             todo!("Logical actions are not supported here");
         } else {
             // Physical actions are scheduled at the current physical time + tag_delay
             let time = self.get_physical_time() + tag_delay;
-            tracing::info!(time = ?time, key = ?action.key(), "Sched");
             AsyncEvent::physical(action.key(), time, value)
         };
 
@@ -278,7 +274,6 @@ impl CommonContext for Context {
         self.shutdown_rx.is_shutdwon()
     }
 
-    #[tracing::instrument]
     fn schedule_shutdown(&mut self, offset: Option<Duration>) -> bool {
         let tag = self.tag.delay(offset.unwrap_or_default());
 
@@ -290,7 +285,6 @@ impl CommonContext for Context {
     }
 
     /// Schedule an asynchronous event
-    #[tracing::instrument(skip(self), fields(enclave = %self.enclave_id(), event = %event))]
     fn schedule_external(&self, event: AsyncEvent) -> bool {
         if self.shutdown_rx.is_shutdwon() {
             return false;
@@ -303,7 +297,11 @@ impl CommonContext for Context {
             return Some(false);
         }
 
-        self.async_tx.try_send(event).map(|_| true).ok()
+        match self.async_tx.try_send(event) {
+            Ok(true) => Some(true),
+            Ok(false) => None,
+            Err(_) => Some(false),
+        }
     }
 }
 
@@ -335,7 +333,6 @@ impl CommonContext for SendContext {
     }
 
     /// Send an external event to the scheduler.
-    #[tracing::instrument(skip(self), fields(enclave = %self.enclave_id(), event = %event))]
     fn schedule_external(&self, event: AsyncEvent) -> bool {
         if self.is_shutdown() {
             return false;
@@ -348,7 +345,11 @@ impl CommonContext for SendContext {
             return Some(false);
         }
 
-        self.async_tx.try_send(event).map(|_| true).ok()
+        match self.async_tx.try_send(event) {
+            Ok(true) => Some(true),
+            Ok(false) => None,
+            Err(_) => Some(false),
+        }
     }
 }
 
@@ -415,6 +416,37 @@ mod tests {
         assert_eq!(tags.len(), 2);
         assert_eq!(tags[0].offset(), tags[1].offset());
         assert_eq!(tags[1].microstep(), tags[0].microstep() + 1);
+    }
+
+    #[test]
+    fn nonblocking_sends_distinguish_acceptance_backpressure_and_disconnection() {
+        let (async_tx, async_rx) = kanal::bounded::<AsyncEvent>(1);
+        let (_shutdown_tx, shutdown_rx) = keepalive::channel();
+        let ctx = Context::new(
+            EnclaveKey::from(0),
+            std::time::Instant::now(),
+            None,
+            async_tx,
+            shutdown_rx,
+        );
+        let sender = ctx.make_send_context();
+        let event = || AsyncEvent::shutdown(Duration::ZERO);
+
+        assert_eq!(ctx.try_schedule_async(event()), Some(true));
+        assert_eq!(ctx.try_schedule_async(event()), None);
+        assert_eq!(sender.try_schedule_async(event()), None);
+        assert!(matches!(
+            async_rx.recv().unwrap(),
+            AsyncEvent::Shutdown { .. }
+        ));
+        assert_eq!(sender.try_schedule_async(event()), Some(true));
+        assert!(matches!(
+            async_rx.recv().unwrap(),
+            AsyncEvent::Shutdown { .. }
+        ));
+        drop(async_rx);
+        assert_eq!(ctx.try_schedule_async(event()), Some(false));
+        assert_eq!(sender.try_schedule_async(event()), Some(false));
     }
 
     #[test]

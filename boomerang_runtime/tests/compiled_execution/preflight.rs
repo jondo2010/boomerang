@@ -24,25 +24,42 @@ fn wrong_sink_bindings() -> EnclaveBindings {
 
 #[test]
 fn owned_federate_preflight_rejects_before_initializers() {
+    if !run_runtime_trace_test("preflight::owned_federate_preflight_rejects_before_initializers") {
+        return;
+    }
     use boomerang_runtime::image::{
         BoundaryFailurePolicy, CodecCapabilityIndex, CodecPolicy, FederationEdgeImage, FlowIndex,
         IdentityTable, PhysicalBoundaryIndex, RecoveryPolicy, RtiImage, RtiMemberImage,
         RtiRouteImage, SecurityPolicy, TimingPolicy, TransportCapabilityIndex, TransportPolicy,
     };
     ROUTED_INITIALIZATIONS.store(0, Ordering::SeqCst);
-    let error = execute_owned_federate(
-        &ROUTED_DEPLOYMENT,
-        FederateIndex::new(0),
-        FederateBindings::new().bind_enclave(EnclaveIndex::new(0), counted_source_bindings()),
-        Config::default(),
-    )
-    .unwrap_err();
+    let (result, events) = capture_runtime(|| {
+        execute_owned_federate(
+            ROUTED_DEPLOYMENT,
+            FederateIndex::new(0),
+            FederateBindings::new().bind_enclave(EnclaveIndex::new(0), counted_source_bindings()),
+            Config::default(),
+        )
+    });
+    let error = result.unwrap_err();
     assert!(matches!(
         error,
         ExecuteOwnedFederateError::MissingEnclaveBinding { enclave }
             if enclave == EnclaveIndex::new(1)
     ));
     assert_eq!(ROUTED_INITIALIZATIONS.load(Ordering::SeqCst), 0);
+    let lifecycle = lifecycle_events(&events);
+    assert_eq!(lifecycle[0]["fields"]["event"], "runtime.preflight.started");
+    assert_eq!(
+        lifecycle[1]["fields"]["event"],
+        "runtime.preflight.rejected"
+    );
+    assert_eq!(lifecycle[1]["fields"]["reason"], "binding");
+    assert_eq!(
+        lifecycle.len(),
+        2,
+        "rejected preflight constructed runtime state"
+    );
 
     let unpaired_enclaves = [ROUTED_SOURCE_IMAGE];
     let unpaired_federates = [fixture_federate("host", "target", "runtime", s!(0, 1))];
@@ -52,7 +69,7 @@ fn owned_federate_preflight_rejects_before_initializers() {
         ..ROUTED_DEPLOYMENT
     };
     let error = execute_owned_federate(
-        &unpaired,
+        unpaired,
         FederateIndex::new(0),
         FederateBindings::new().bind_enclave(EnclaveIndex::new(0), counted_source_bindings()),
         Config::default(),
@@ -65,7 +82,7 @@ fn owned_federate_preflight_rejects_before_initializers() {
     assert_eq!(ROUTED_INITIALIZATIONS.load(Ordering::SeqCst), 0);
 
     let error = execute_owned_federate(
-        &ROUTED_DEPLOYMENT,
+        ROUTED_DEPLOYMENT,
         FederateIndex::new(0),
         FederateBindings::new()
             .bind_enclave(EnclaveIndex::new(0), counted_source_bindings())
@@ -118,7 +135,7 @@ fn owned_federate_preflight_rejects_before_initializers() {
             .bind_port(BindingSlotIndex::new(2), PayloadType::<Collision>::new())
     };
     let error = execute_owned_federate(
-        &ROUTED_DEPLOYMENT,
+        ROUTED_DEPLOYMENT,
         FederateIndex::new(0),
         bindings
             .bind_enclave(EnclaveIndex::new(0), source)
@@ -147,7 +164,8 @@ fn owned_federate_preflight_rejects_before_initializers() {
         1_000_000,
     )];
     let rti_members =
-        [const { RtiMemberImage::new(RecoveryPolicy::FailStop, r!(0, 0), r!(0, 0), r!(0, 0)) }; 2];
+        [const { RtiMemberImage::new(RecoveryPolicy::FailStop, r!(0, 0), r!(0, 0), r!(0, 0), 32) };
+            2];
     let rti_routes = [RtiRouteImage::new(
         BoundaryId::new("pipe"),
         FlowIndex::new(0),
@@ -182,7 +200,7 @@ fn owned_federate_preflight_rejects_before_initializers() {
         ..ROUTED_DEPLOYMENT
     };
     let error = execute_owned_federate(
-        &cross,
+        cross,
         FederateIndex::new(0),
         FederateBindings::new().bind_enclave(EnclaveIndex::new(0), counted_source_bindings()),
         Config::default(),
@@ -234,7 +252,7 @@ fn owned_federate_rejects_enclave_without_root_reactor() {
     };
 
     let error = execute_owned_federate(
-        &deployment,
+        deployment,
         FederateIndex::new(0),
         FederateBindings::new().bind_enclave(EnclaveIndex::new(0), EnclaveBindings::new()),
         Config::default(),

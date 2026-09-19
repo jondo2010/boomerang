@@ -1028,6 +1028,34 @@ fn central_rti_projection_uses_precomputed_dense_dependencies() {
 }
 
 #[test]
+fn central_rti_projection_derives_accounting_from_lowered_event_capacity() {
+    let mut bounds = known_bounds();
+    bounds.queue_capacity = DescriptorBound::Known(23);
+    let compiled = deployment_with_bounds(
+        false,
+        true,
+        false,
+        ConnectionSemantics::Logical { after: None },
+        [bounds, known_bounds()],
+        DependencyCase::None,
+        RecoveryPolicy::FailStop,
+        false,
+    )
+    .lower()
+    .unwrap();
+    with_central_rti(&compiled, |rti| {
+        assert_eq!(
+            rti.members()[FederateIndex::new(0)].in_transit_capacity(),
+            8
+        );
+        assert_eq!(
+            rti.members()[FederateIndex::new(1)].in_transit_capacity(),
+            23
+        );
+    });
+}
+
+#[test]
 fn central_rti_projection_preserves_route_identity_and_delay() {
     let compiled = distributed_with(
         ConnectionSemantics::Logical {
@@ -1566,4 +1594,25 @@ fn dense_cardinality_overflow_is_reported_before_conversion() {
             ..
         })
     ));
+}
+
+#[test]
+fn local_enclaves_do_not_share_an_rti_accounting_budget() {
+    let bounds = DescriptorBounds {
+        queue_capacity: DescriptorBound::Known(u32::MAX as u64),
+        ..known_bounds()
+    };
+    let compiled = deployment_with_bounds(
+        false,
+        false,
+        false,
+        ConnectionSemantics::Logical { after: None },
+        [bounds; 2],
+        DependencyCase::None,
+        RecoveryPolicy::FailStop,
+        false,
+    )
+    .lower()
+    .unwrap();
+    assert_eq!(compiled.enclaves().len(), 2);
 }

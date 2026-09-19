@@ -14,6 +14,7 @@ exclude = ['.gitignore', '.cargo/config', '.vscode', '.devcontainer', '.github']
 anyhow = "1.0"
 blake3 = "1.8"
 cargo_metadata = "0.23"
+cargo-config2 = "0.1.45"
 time = { version = "0.3", features = [] }
 document-features = "0.2"
 erased-serde = "0.4"
@@ -28,6 +29,9 @@ tempfile = "3"
 thiserror = "2.0"
 toml = "1.1"
 tracing = "0.1"
+tracing-core = "0.1"
+tracing-bounded = { path = "tracing-bounded", version = "0.1.0" }
+tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = [
     "fmt",
     "json",
@@ -56,8 +60,11 @@ members = [
     "boomerang_macros",
     "boomerang_runtime",
     "boomerang_tinymap",
+    "tracing-bounded",
     "cargo-boomerang",
     "examples/snake",
+    "examples/snake/game",
+    "examples/snake/keyboard",
 ]
 resolver = "2"
 

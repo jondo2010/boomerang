@@ -14,6 +14,12 @@ exclude.workspace = true
 [features]
 default = []
 
+## Native bounded coordination capture and shutdown export (no hosted formatter)
+bounded-tracing = ["launcher", "dep:tracing-bounded", "boomerang_runtime/bounded-tracing"]
+
+## Hosted streaming formatter and asynchronous output queue
+hosted-tracing = ["launcher", "dep:tracing-appender", "dep:tracing-subscriber"]
+
 ## Support for built-in CLI/runner methods
 runner = ["dep:clap", "dep:anyhow", "dep:boomerang"]
 
@@ -23,14 +29,13 @@ launcher = [
     "boomerang_runtime/serde",
     "dep:serde",
     "dep:serde_json",
-    "dep:tracing-subscriber",
 ]
 
 ## Support for recording and replaying
 replay = ["dep:boomerang", "boomerang/replay"]
 
 ## Test helper for fmt tracing with span lifecycle output
-test-tracing = ["launcher"]
+test-tracing = ["hosted-tracing"]
 
 [dependencies]
 anyhow = { version = "1.0", optional = true }
@@ -40,6 +45,8 @@ document-features = { workspace = true }
 serde = { workspace = true, optional = true, features = ["derive"] }
 serde_json = { workspace = true, optional = true }
 tracing.workspace = true
+tracing-bounded = { workspace = true, optional = true }
+tracing-appender = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true }
 
 boomerang = { workspace = true, optional = true }

@@ -333,6 +333,7 @@ impl ResolvedDeployment {
         federates.sort_by_cached_key(|federate| canonical_identity_text(federate.id()));
         let members = analysis.federation.members().to_vec().into_boxed_slice();
         let federation_edges = analysis.federation.edges().to_vec().into_boxed_slice();
+        let mut in_transit_capacities = BTreeMap::new();
         let mut owned_federates: tinymap::TinyMap<FederateIndex, _> = tinymap::TinyMap::new();
         let mut owned_enclaves: tinymap::TinyMap<EnclaveIndex, _> = tinymap::TinyMap::new();
         for federate in federates {
@@ -358,6 +359,23 @@ impl ResolvedDeployment {
                 .into_iter()
                 .map(|(id, _)| self.lower_enclave(id, &analysis))
                 .collect::<Result<Vec<_>, _>>()?;
+            if matches!(
+                self.coordination(),
+                super::CoordinationSelection::Distributed {
+                    backend: super::CoordinationBackend::CentralRti,
+                }
+            ) {
+                let capacity = enclaves.iter().try_fold(0u32, |total, enclave| {
+                    total
+                        .checked_add(enclave.storage_bounds().event_capacity())
+                        .ok_or_else(|| {
+                            super::coordination::CoordinationProjectionError::InTransitCapacityOverflow {
+                                member: federate.id().clone(),
+                            }
+                        })
+                })?;
+                in_transit_capacities.insert(federate.id().clone(), capacity);
+            }
             let enclave_span = owned_enclaves.try_extend_exact(enclaves).map_err(|error| {
                 CompileError::InvalidDeployment {
                     message: format!("Enclave table {error}"),
@@ -388,6 +406,7 @@ impl ResolvedDeployment {
                 } => OwnedCoordinationProjection::CentralRti(Box::new(project_central_rti(
                     &analysis.federation,
                     self,
+                    &in_transit_capacities,
                 )?)),
                 super::CoordinationSelection::Distributed { .. } => {
                     return Err(CompileError::UnsupportedCoordination);

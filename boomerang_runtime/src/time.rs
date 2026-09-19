@@ -113,6 +113,19 @@ impl Tag {
         self.microstep
     }
 
+    /// Returns the static kind name: `"never"`, `"finite"`, or `"forever"`.
+    ///
+    /// Only the exact sentinel tags are non-finite; their offsets with other microsteps are finite.
+    pub fn kind_str(&self) -> &'static str {
+        if *self == Self::NEVER {
+            "never"
+        } else if *self == Self::FOREVER {
+            "forever"
+        } else {
+            "finite"
+        }
+    }
+
     /// Create a new Tag minimally smaller than the current.
     pub fn decrement(&self) -> Self {
         if self.microstep == 0 {
@@ -132,6 +145,21 @@ impl Tag {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kind_str_distinguishes_exact_sentinels_from_finite_tags() {
+        for (tag, kind) in [
+            (Tag::NEVER, "never"),
+            (Tag::FOREVER, "forever"),
+            (Tag::ZERO, "finite"),
+            (Tag::new(Duration::nanoseconds(-1), 3), "finite"),
+            (Tag::new(Duration::nanoseconds(5), 7), "finite"),
+            (Tag::new(Duration::MIN, 1), "finite"),
+            (Tag::new(Duration::MAX, 0), "finite"),
+        ] {
+            assert_eq!(tag.kind_str(), kind);
+        }
+    }
 
     #[test]
     fn checked_delay_requires_a_positive_duration() {

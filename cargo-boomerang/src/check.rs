@@ -40,6 +40,7 @@ pub fn check_with_output(
         deployment_name,
         analyzed.driver.topology(),
         &analyzed.compiled,
+        &analyzed.resolved,
     )?;
     output.status(
         Phase::Publishing,
@@ -201,6 +202,9 @@ struct CheckReport<'a> {
 pub(crate) struct ResourceReport {
     /// Federates in compiler identity order.
     federates: Vec<FederateResourceReport>,
+    /// Separate central RTI capture capacities, when bounded tracing is selected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rti_bounded_tracing: Option<crate::BoundedTracingLimits>,
 }
 
 /// Resource projection for one compiled Federate.
@@ -215,6 +219,9 @@ pub(crate) struct FederateResourceReport {
     runtime: String,
     /// Enclaves owned by this Federate in compiler identity order.
     enclaves: Vec<EnclaveResourceReport>,
+    /// Process-wide capture capacities, separate from Enclave execution storage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bounded_tracing: Option<crate::BoundedTracingLimits>,
 }
 
 /// Fixed storage bounds for one compiled Enclave.
@@ -251,10 +258,11 @@ fn build_report<'a>(
     deployment_name: &'a str,
     topology: &boomerang_builder::compiler::ApplicationTopology,
     compiled: &OwnedCompiledDeployment,
+    resolved: &ResolvedWorkspace,
 ) -> Result<CheckReport<'a>> {
     let topology = serde_json::to_vec(topology).context("failed to serialize topology")?;
     let topology_digest = format!("blake3:{}", blake3::hash(&topology).to_hex());
-    let resources = resource_report(compiled);
+    let resources = resource_report(compiled, resolved);
     Ok(CheckReport {
         compiler_schema: COMPILER_SCHEMA,
         deployment: deployment_name,
@@ -265,11 +273,18 @@ fn build_report<'a>(
 }
 
 /// Projects validated compiler output into canonical Federate and Enclave resources.
-pub(crate) fn resource_report(compiled: &OwnedCompiledDeployment) -> ResourceReport {
+pub(crate) fn resource_report(
+    compiled: &OwnedCompiledDeployment,
+    resolved: &ResolvedWorkspace,
+) -> ResourceReport {
+    let deployment = resolved.deployment();
     let federates = compiled
         .federates()
         .values()
         .map(|federate| FederateResourceReport {
+            bounded_tracing: deployment.federates[federate.id().as_str()]
+                .bounded_tracing
+                .clone(),
             id: federate.id().to_string(),
             target: federate.target().to_string(),
             runtime: federate.runtime().to_string(),
@@ -293,7 +308,13 @@ pub(crate) fn resource_report(compiled: &OwnedCompiledDeployment) -> ResourceRep
                 .collect(),
         })
         .collect();
-    ResourceReport { federates }
+    ResourceReport {
+        federates,
+        rti_bounded_tracing: deployment
+            .rti
+            .as_ref()
+            .and_then(|rti| deployment.bounded_tracing_limits(rti.bounded_tracing.as_ref())),
+    }
 }
 
 /// Atomically publishes one successful report beside any previous valid report.

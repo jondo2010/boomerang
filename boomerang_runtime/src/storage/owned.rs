@@ -903,6 +903,19 @@ impl<'image> OwnedStorage<'image> {
         reaction: ReactionIndex,
         tag: Tag,
     ) -> Result<(), OwnedStorageError> {
+        let mut observation = ReactionObservation {
+            reaction,
+            tag,
+            finished: false,
+        };
+        tracing::debug!(
+            target: "boomerang::coordination",
+            event = "coordination.reaction.started",
+            reaction = reaction.as_u32(),
+            tag_kind = tag.kind_str(),
+            tag_offset_ns = tag.offset().whole_nanoseconds(),
+            tag_microstep = tag.microstep(),
+        );
         let reaction_image = &self.image.reactions()[reaction];
         let reactor = reaction_image.reactor();
         let state_slot = self.image.reactors()[reactor].state_slot();
@@ -941,6 +954,15 @@ impl<'image> OwnedStorage<'image> {
             return Err(OwnedStorageError::LegacyModeTransition { reaction });
         }
         self.emit_outbound_routes(tag)?;
+        observation.finished = true;
+        tracing::debug!(
+            target: "boomerang::coordination",
+            event = "coordination.reaction.finished",
+            reaction = reaction.as_u32(),
+            tag_kind = tag.kind_str(),
+            tag_offset_ns = tag.offset().whole_nanoseconds(),
+            tag_microstep = tag.microstep(),
+        );
         Ok(())
     }
 
@@ -953,6 +975,28 @@ impl<'image> OwnedStorage<'image> {
     /// Borrows this storage's validated image for scheduler composition.
     pub(crate) fn scheduler_image(&self) -> EnclaveImageView<'image> {
         self.image.reborrow()
+    }
+}
+
+/// Records interrupted invocations, including unwinding through a generated reaction.
+struct ReactionObservation {
+    reaction: ReactionIndex,
+    tag: Tag,
+    finished: bool,
+}
+
+impl Drop for ReactionObservation {
+    fn drop(&mut self) {
+        if !self.finished {
+            tracing::debug!(
+                target: "boomerang::coordination",
+                event = "coordination.reaction.cancelled",
+                reaction = self.reaction.as_u32(),
+                tag_kind = self.tag.kind_str(),
+                tag_offset_ns = self.tag.offset().whole_nanoseconds(),
+                tag_microstep = self.tag.microstep(),
+            );
+        }
     }
 }
 

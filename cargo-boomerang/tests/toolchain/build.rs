@@ -10,7 +10,7 @@ use serde_json::Value;
 use super::support;
 
 fn fixture_workspace() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/workspace")
+    support::fixture_workspace()
 }
 
 fn build_fixture(deployment: &str, target: &Path) -> Output {
@@ -18,7 +18,9 @@ fn build_fixture(deployment: &str, target: &Path) -> Output {
 }
 
 fn build_fixture_with_options(deployment: &str, target: &Path, options: &[&str]) -> Output {
+    let current = tempfile::tempdir().unwrap();
     Command::new(env!("CARGO_BIN_EXE_cargo-boomerang"))
+        .current_dir(current.path())
         .arg("boomerang")
         .arg("--workspace")
         .arg(fixture_workspace())
@@ -57,44 +59,6 @@ fn assert_no_staging_residue(path: &Path) {
 }
 
 #[test]
-fn build_reports_cargo_style_progress_without_polluting_stdout() {
-    let _guard = support::toolchain_lock();
-    let target = support::toolchain_target();
-    support::reset_deployment_output(&target, "production");
-    let output = build_fixture("production", &target);
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    let stderr = String::from_utf8(output.stderr).unwrap();
-
-    assert!(output.status.success(), "{stderr}");
-    assert_eq!(stdout.lines().count(), 1, "unexpected stdout: {stdout:?}");
-    let executable = published_executable(&stdout);
-    assert!(executable.is_absolute(), "{}", executable.display());
-    assert!(
-        support::without_ansi(&stderr).contains(&format!(
-            "Published Federate 'host' executable {}",
-            executable.display()
-        )),
-        "{stderr}"
-    );
-    assert!(stderr.contains("Building"), "{stderr}");
-    assert!(stderr.contains("Bundling"), "{stderr}");
-    support::assert_progress_phases(
-        &stderr,
-        &[
-            "Analyzing",
-            "Generating",
-            "Building",
-            "Validating",
-            "Generating",
-            "Building",
-            "Bundling",
-            "Publishing",
-            "Published",
-        ],
-    );
-}
-
-#[test]
 fn quiet_build_keeps_its_machine_readable_result_without_progress() {
     let _guard = support::toolchain_lock();
     let target = support::toolchain_target();
@@ -116,26 +80,24 @@ fn quiet_build_keeps_its_machine_readable_result_without_progress() {
 }
 
 #[test]
-fn color_always_styles_progress_without_styling_stdout() {
+fn verbose_colored_build_preserves_compiler_diagnostics() {
     let _guard = support::toolchain_lock();
     let target = support::toolchain_target();
-    support::reset_deployment_output(&target, "production");
-    let output = build_fixture_with_options("production", &target, &["--color", "always"]);
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    let stderr = String::from_utf8(output.stderr).unwrap();
-
-    assert!(output.status.success(), "{stderr}");
-    assert_eq!(stdout.lines().count(), 1, "unexpected stdout: {stdout:?}");
-    assert!(!stdout.contains('\u{1b}'), "unexpected color: {stdout:?}");
-    assert!(stderr.contains("\u{1b}[1;32m"), "missing color: {stderr:?}");
-}
-
-#[test]
-fn verbose_build_forwards_nested_cargo_output_between_progress_phases() {
-    let _guard = support::toolchain_lock();
-    let target = support::toolchain_target();
-    support::reset_deployment_output(&target, "production");
-    let output = build_fixture_with_options("production", &target, &["--verbose"]);
+    support::reset_deployment_output(&target, "warning-diagnostic");
+    let _manifest = support::fixture_variant("warning-diagnostic", "production", |deployment| {
+        deployment["bindings"]["controller"]
+            .as_table_mut()
+            .unwrap()
+            .insert(
+                "features".into(),
+                toml::Value::try_from(["warning-diagnostic"]).unwrap(),
+            );
+    });
+    let output = build_fixture_with_options(
+        "warning-diagnostic",
+        &target,
+        &["--verbose", "--color", "always"],
+    );
     let stdout = String::from_utf8(output.stdout).unwrap();
     let stderr = String::from_utf8(output.stderr).unwrap();
 
@@ -145,6 +107,8 @@ fn verbose_build_forwards_nested_cargo_output_between_progress_phases() {
         &stderr,
         &[
             "Analyzing",
+            "Generating",
+            "Building",
             "Generating",
             "Building",
             "Validating",
@@ -171,20 +135,8 @@ fn verbose_build_forwards_nested_cargo_output_between_progress_phases() {
         building < nested,
         "nested Cargo output was out of order:\n{stderr}"
     );
-}
-
-#[test]
-fn successful_build_preserves_compiler_warnings_in_phase_order() {
-    let _guard = support::toolchain_lock();
-    let target = support::toolchain_target();
-    support::reset_deployment_output(&target, "warning-diagnostic");
-    let output = build_fixture("warning-diagnostic", &target);
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    let stderr = String::from_utf8(output.stderr).unwrap();
-
-    assert!(output.status.success(), "{stderr}");
-    assert_eq!(stdout.lines().count(), 1, "unexpected stdout: {stdout:?}");
-    let plain_stderr = support::without_ansi(&stderr);
+    assert!(!stdout.contains('\u{1b}'), "unexpected color: {stdout:?}");
+    assert!(stderr.contains("\u{1b}[1;32m"), "missing color: {stderr:?}");
     let building = plain_stderr.find("Building launcher").unwrap();
     let warning = plain_stderr
         .find("INTENTIONAL_TARGET_PAYLOAD_WARNING")
@@ -198,6 +150,15 @@ fn broken_payload_preserves_diagnostics_without_publishing_a_bundle() {
     let _guard = support::toolchain_lock();
     let target = support::toolchain_target();
     support::reset_deployment_output(&target, "broken-payload");
+    let _manifest = support::fixture_variant("broken-payload", "production", |deployment| {
+        deployment["bindings"]["controller"]
+            .as_table_mut()
+            .unwrap()
+            .insert(
+                "features".into(),
+                toml::Value::try_from(["broken-payload"]).unwrap(),
+            );
+    });
     let result = build_fixture("broken-payload", &target);
     let stderr = String::from_utf8_lossy(&result.stderr);
     let plain_stderr = support::without_ansi(&stderr);
@@ -238,8 +199,17 @@ fn broken_payload_preserves_diagnostics_without_publishing_a_bundle() {
 }
 
 #[test]
-fn build_publishes_a_valid_fingerprinted_bundle() {
+fn build_publishes_reuses_and_protects_a_fingerprinted_bundle() {
     let _guard = support::toolchain_lock();
+    let _manifest = support::fixture_variant("production", "production", |deployment| {
+        deployment["bindings"]["controller"]
+            .as_table_mut()
+            .unwrap()
+            .insert(
+                "features".into(),
+                toml::Value::try_from(["warning-diagnostic"]).unwrap(),
+            );
+    });
     let target = support::toolchain_target();
     support::reset_deployment_output(&target, "production");
     let result = build_fixture("production", &target);
@@ -247,6 +217,40 @@ fn build_publishes_a_valid_fingerprinted_bundle() {
     assert!(result.status.success(), "{stderr}");
 
     let stdout = String::from_utf8(result.stdout).unwrap();
+    let executable = published_executable(&stdout);
+    assert!(executable.is_absolute(), "{}", executable.display());
+    assert!(
+        support::without_ansi(&stderr).contains(&format!(
+            "Published Federate 'host' executable {}",
+            executable.display()
+        )),
+        "{stderr}"
+    );
+    assert!(stderr.contains("Building"), "{stderr}");
+    assert!(stderr.contains("Bundling"), "{stderr}");
+    support::assert_progress_phases(
+        &stderr,
+        &[
+            "Analyzing",
+            "Generating",
+            "Building",
+            "Generating",
+            "Building",
+            "Validating",
+            "Generating",
+            "Building",
+            "Bundling",
+            "Publishing",
+            "Published",
+        ],
+    );
+    let plain_stderr = support::without_ansi(&stderr);
+    let building = plain_stderr.find("Building launcher").unwrap();
+    let warning = plain_stderr
+        .find("INTENTIONAL_TARGET_PAYLOAD_WARNING")
+        .expect("default output must retain successful compiler warnings");
+    let bundling = plain_stderr.find("Bundling deployment").unwrap();
+    assert!(building < warning && warning < bundling, "{stderr}");
     let manifest_path = fs::canonicalize(PathBuf::from(stdout.trim())).unwrap();
     assert_eq!(stdout.lines().count(), 1, "unexpected stdout: {stdout:?}");
     let target_directory = fs::canonicalize(&target).unwrap();
@@ -336,7 +340,20 @@ fn build_publishes_a_valid_fingerprinted_bundle() {
         .iter()
         .map(|package| package.name.as_str())
         .collect::<Vec<_>>();
-    assert!(!package_names.contains(&"boomerang_builder"));
+    // Reuse the generated build to inspect the exact target artifacts, since unfiltered
+    // metadata also includes the facade's cfg-disabled hosted dependencies.
+    let launcher = support::with_target_directory(&target, || {
+        cargo_boomerang::generate_launcher(fixture_workspace(), "production", "host")
+    })
+    .unwrap();
+    let built = launcher.build_locked_offline().unwrap();
+    let payload_crates = support::launcher_payload_crates(built.executable_path());
+    assert!(payload_crates.contains("sensor_host"));
+    assert!(payload_crates.contains("vehicle_control"));
+    assert!(
+        !payload_crates.contains("boomerang_builder"),
+        "{payload_crates:?}"
+    );
     assert!(!package_names.contains(&"vehicle-topology"));
     assert!(package_names.contains(&"sensor-host"));
     assert!(package_names.contains(&"vehicle-control"));
@@ -350,18 +367,62 @@ fn build_publishes_a_valid_fingerprinted_bundle() {
             .all(|enclave| enclave.get("event_capacity").is_some()),
         "each Enclave resource record must retain its authoritative event capacity: {resources:?}"
     );
+    let artifact = manifest_path
+        .parent()
+        .unwrap()
+        .join(document["artifacts"][0]["path"].as_str().unwrap());
+    let manifest_before = fs::read(&manifest_path).unwrap();
+    let artifact_before = fs::read(&artifact).unwrap();
+    let artifact_hash_before = blake3::hash(&artifact_before);
+
+    let second = build_fixture("production", &target);
+    assert!(
+        second.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let second_manifest = fs::canonicalize(PathBuf::from(
+        String::from_utf8(second.stdout).unwrap().trim(),
+    ))
+    .unwrap();
+
+    assert_eq!(second_manifest, manifest_path);
+    assert_eq!(fs::read(&manifest_path).unwrap(), manifest_before);
+    let artifact_after = fs::read(&artifact).unwrap();
+    assert_eq!(artifact_after, artifact_before);
+    assert_eq!(blake3::hash(&artifact_after), artifact_hash_before);
+    assert_no_staging_residue(&target.join("boomerang/generated"));
+    assert_no_staging_residue(manifest_path.parent().unwrap().parent().unwrap());
+    let mut corrupted = fs::read(&artifact).unwrap();
+    corrupted[0] ^= 1;
+    fs::write(&artifact, &corrupted).unwrap();
+    let manifest_before = fs::read(&manifest_path).unwrap();
+
+    let second = build_fixture("production", &target);
+    let stderr = String::from_utf8_lossy(&second.stderr);
+    assert!(!second.status.success(), "{stderr}");
+    assert!(stderr.contains("conflict"), "{stderr}");
+    assert_eq!(fs::read(&artifact).unwrap(), corrupted);
+    assert_eq!(fs::read(&manifest_path).unwrap(), manifest_before);
 }
 
 /// Publishes one canonical generated workspace and artifact per compiled Federate.
 #[test]
-fn build_publishes_canonical_federate_artifact_collection() {
+fn generated_central_deployment_publishes_isolated_artifacts_and_exchanges_tagged_payload() {
     let _guard = support::toolchain_lock();
     let target = support::toolchain_target();
     support::reset_deployment_output(&target, "sensor-slice");
+    let _hosted = support::hosted_fixture();
+    let directory = tempfile::tempdir().unwrap();
+    let summary = directory.path().join("summary.json");
     let result = Command::new(env!("CARGO_BIN_EXE_cargo-boomerang"))
         .args(["boomerang", "--workspace"])
-        .arg(support::hosted_fixture_workspace())
-        .args(["build", "--deployment", "sensor-slice"])
+        .arg(fixture_workspace())
+        .args(["run", "--deployment", "sensor-slice", "--summary"])
+        .arg(&summary)
+        // A legacy runtime switch must not override the compiled hosted choice.
+        .env("BOOMERANG_TRACE_MODE", "bounded")
+        .env("RUST_LOG", "boomerang::coordination=debug")
         .env("CARGO_TARGET_DIR", &target)
         .output()
         .unwrap();
@@ -370,13 +431,318 @@ fn build_publishes_canonical_federate_artifact_collection() {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
+    let trace = String::from_utf8_lossy(&result.stderr);
+    for event in [
+        "coordination.reaction.started",
+        "coordination.publication.sent",
+        "coordination.codec.encoded",
+        "coordination.transport.encoded",
+        "coordination.transport.decoded",
+        "coordination.rti.payload.forwarded",
+        "coordination.rti.grant.issued",
+        "coordination.rti.accounting.completed",
+        "coordination.boundary.admitted",
+        "coordination.reaction.finished",
+    ] {
+        assert!(trace.contains(event), "missing {event}: {trace}");
+    }
+    for (event, member) in [
+        ("coordination.transport.encoded", 0),
+        ("coordination.transport.decoded", 1),
+        ("coordination.boundary.admitted", 1),
+    ] {
+        let line = trace.lines().find(|line| line.contains(event)).unwrap();
+        assert!(line.contains(&format!("federate={member}")), "{line}");
+        assert!(line.contains("coordination=["), "{line}");
+        assert!(line.contains("route=0"), "{line}");
+    }
+    let fingerprint = |line: &str| {
+        line.split("coordination=")
+            .nth(1)
+            .and_then(|rest| rest.split_once(']').map(|(value, _)| value.to_owned()))
+            .unwrap()
+    };
+    let encoded = trace
+        .lines()
+        .find(|line| line.contains("coordination.transport.encoded"))
+        .unwrap();
+    for event in [
+        "coordination.transport.decoded",
+        "coordination.boundary.admitted",
+        "coordination.rti.payload.forwarded",
+    ] {
+        let line = trace.lines().find(|line| line.contains(event)).unwrap();
+        assert_eq!(fingerprint(line), fingerprint(encoded));
+    }
+    let queued = trace
+        .lines()
+        .find(|line| line.contains("coordination.transport.queued") && line.contains("federate=1"))
+        .expect("server queue trace has peer context");
+    assert_eq!(fingerprint(queued), fingerprint(encoded));
 
-    let manifest = PathBuf::from(String::from_utf8(result.stdout).unwrap().trim());
+    // Build separate artifacts for each subscriber choice. Bounded
+    // capture is lossy under contention, but must report every kind of loss
+    // separately and must not change the application result.
+    let mut bounded_document: Option<Value> = None;
+    for variant in ["off", "bounded", "bounded-small", "bounded-filter"] {
+        let mode = if variant == "off" { "off" } else { "bounded" };
+        let deployment = format!("sensor-slice-{variant}");
+        support::reset_deployment_output(&target, &deployment);
+        let _variant = support::fixture_variant(&deployment, "sensor-slice", |config| {
+            config
+                .as_table_mut()
+                .unwrap()
+                .insert("tracing".into(), mode.into());
+            if variant == "bounded-small" {
+                config.as_table_mut().unwrap().insert(
+                    "bounded-tracing".into(),
+                    toml::toml! {
+                        records = 1
+                        bytes = 2048
+                        span-bytes = 512
+                    }
+                    .into(),
+                );
+                config["federates"]["sensor"]
+                    .as_table_mut()
+                    .unwrap()
+                    .insert("bounded-tracing".into(), toml::toml! { records = 2 }.into());
+                config["rti"]
+                    .as_table_mut()
+                    .unwrap()
+                    .insert("bounded-tracing".into(), toml::toml! { records = 3 }.into());
+            }
+            if variant == "bounded-filter" {
+                config.as_table_mut().unwrap().insert(
+                    "bounded-tracing".into(),
+                    toml::toml! { level = "trace"
+                    targets = ["boomerang::runtime"] }
+                    .into(),
+                );
+                config["federates"]["sensor"]
+                    .as_table_mut()
+                    .unwrap()
+                    .insert(
+                        "bounded-tracing".into(),
+                        toml::toml! { level = "debug"
+                        targets = ["boomerang::coordination"] }
+                        .into(),
+                    );
+                config["rti"].as_table_mut().unwrap().insert(
+                    "bounded-tracing".into(),
+                    toml::toml! { level = "off" }.into(),
+                );
+            }
+        });
+        let output = Command::new(env!("CARGO_BIN_EXE_cargo-boomerang"))
+            .args(["boomerang", "--workspace"])
+            .arg(fixture_workspace())
+            .args(["run", "--deployment", &deployment])
+            .env(
+                "BOOMERANG_TRACE_MODE",
+                if mode == "off" { "bounded" } else { "off" },
+            )
+            .env("RUST_LOG", "boomerang::coordination=debug")
+            .env("CARGO_TARGET_DIR", &target)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{mode}: {stderr}");
+        assert!(String::from_utf8_lossy(&output.stdout).contains("sensor received command 42"));
+        let bundles: Vec<_> = fs::read_dir(target.join("boomerang").join(&deployment))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.join("deployment.json").is_file())
+            .collect();
+        assert_eq!(bundles.len(), 1);
+        let trace_document: Value =
+            serde_json::from_slice(&fs::read(bundles[0].join("deployment.json")).unwrap()).unwrap();
+        if variant == "bounded" {
+            bounded_document = Some(trace_document.clone());
+        } else if variant == "bounded-small" {
+            let previous = bounded_document.as_ref().unwrap();
+            assert_ne!(trace_document["fingerprint"], previous["fingerprint"]);
+            assert_eq!(trace_document["coordination"], previous["coordination"]);
+            assert_eq!(trace_document["federates"], previous["federates"]);
+            for (limits, records) in [
+                (
+                    &trace_document["resources"]["federates"][0]["bounded_tracing"],
+                    1,
+                ),
+                (
+                    &trace_document["resources"]["federates"][1]["bounded_tracing"],
+                    2,
+                ),
+                (&trace_document["resources"]["rti_bounded_tracing"], 3),
+            ] {
+                assert_eq!(limits["records"], records);
+                assert_eq!(limits["bytes"], 2048);
+                assert_eq!(limits["span_bytes"], 512);
+                assert_eq!(limits["fields"], 32);
+                assert_eq!(limits["spans"], 64);
+                assert_eq!(limits["span_fields"], 16);
+                assert_eq!(limits["producers"], 64);
+                assert_eq!(limits["depth"], 16);
+            }
+        }
+        for role in ["rti", "federates/host", "federates/sensor"] {
+            assert_trace_dependencies(
+                &bundles[0].join(format!("generated/{role}/Cargo.toml")),
+                mode,
+            );
+        }
+        if mode == "off" {
+            assert!(!stderr.contains("coordination."), "{stderr}");
+            continue;
+        }
+        let documents: Vec<Value> = stderr
+            .lines()
+            .filter(|line| line.starts_with('{'))
+            .map(|line| serde_json::from_str(line).expect("complete bounded JSON line"))
+            .collect();
+        let losses: Vec<_> = documents
+            .iter()
+            .filter(|line| line["kind"] == "loss")
+            .collect();
+        if variant == "bounded-filter" {
+            let resources = &trace_document["resources"];
+            assert_eq!(
+                resources["federates"][0]["bounded_tracing"]["level"],
+                "trace"
+            );
+            assert_eq!(
+                resources["federates"][1]["bounded_tracing"]["level"],
+                "debug"
+            );
+            assert_eq!(resources["rti_bounded_tracing"]["level"], "off");
+            assert_eq!(
+                resources["rti_bounded_tracing"]["targets"],
+                serde_json::json!(["boomerang::runtime"])
+            );
+            let previous = bounded_document.as_ref().unwrap();
+            assert_ne!(trace_document["fingerprint"], previous["fingerprint"]);
+            assert_eq!(trace_document["coordination"], previous["coordination"]);
+            assert_eq!(trace_document["federates"], previous["federates"]);
+            // Host runs TRACE runtime events; sensor overrides with DEBUG coordination;
+            // RTI inherits the target but disables its subscriber output with OFF.
+            assert!(
+                documents.iter().any(|record| record["fields"]["event"]
+                    == "runtime.scheduler.tag_processed"
+                    && record["level"] == "TRACE"),
+                "{stderr}"
+            );
+            assert!(
+                documents
+                    .iter()
+                    .any(|record| record["fields"]["event"] == "coordination.reaction.started"),
+                "{stderr}"
+            );
+            assert!(
+                documents
+                    .iter()
+                    .filter(|record| record["kind"] == "record")
+                    .all(|record| record["target"] != "boomerang::coordination"
+                        || record["level"] != "TRACE"),
+                "{stderr}"
+            );
+        }
+        assert_eq!(
+            losses.len(),
+            3,
+            "RTI and both Federates must export loss: {stderr}"
+        );
+        let mut retained = Vec::new();
+        for loss in losses {
+            retained.push(
+                documents
+                    .iter()
+                    .filter(|record| record["kind"] == "record" && record["pid"] == loss["pid"])
+                    .count(),
+            );
+            if variant == "bounded-small" {
+                assert!(
+                    loss["loss"]["overwritten_records"]["value"]
+                        .as_u64()
+                        .unwrap()
+                        > 0,
+                    "{loss}"
+                );
+            }
+            assert_eq!(loss["loss"]["unsupported_value"]["value"], 0, "{loss}");
+            assert_eq!(loss["loss"]["field_limit"]["value"], 0, "{loss}");
+            assert_eq!(loss["loss"]["byte_limit"]["value"], 0, "{loss}");
+            assert_eq!(
+                loss["lifecycle_loss"]["producer_admission"]["value"], 0,
+                "{loss}"
+            );
+            if variant != "bounded-filter" {
+                assert!(
+                    documents
+                        .iter()
+                        .any(|record| record["kind"] == "record" && record["pid"] == loss["pid"]),
+                    "{stderr}"
+                );
+            }
+        }
+        if variant == "bounded-small" {
+            retained.sort_unstable();
+            assert_eq!(retained, [1, 2, 3], "{stderr}");
+        }
+        if variant == "bounded-filter" {
+            assert_eq!(
+                retained.iter().filter(|&&count| count == 0).count(),
+                1,
+                "only RTI is disabled: {stderr}"
+            );
+        }
+        for record in documents.iter().filter(|line| line["kind"] == "record") {
+            assert_eq!(record["trace_schema"], 1);
+            if variant != "bounded-filter" {
+                assert_eq!(record["target"], "boomerang::coordination");
+            }
+            assert!(record["fields"].get("payload").is_none());
+        }
+    }
+
+    assert!(String::from_utf8_lossy(&result.stdout).contains("sensor received command 42"));
+    let summary: Value = serde_json::from_slice(&fs::read(summary).unwrap()).unwrap();
+    assert_eq!(summary["final_tag"]["offset_nanos"], "1000000");
+    assert_eq!(summary["final_tag"]["microstep"], "0");
+    let manifests = fs::read_dir(target.join("boomerang/sensor-slice"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path().join("deployment.json"))
+        .filter(|path| path.is_file())
+        .collect::<Vec<_>>();
+    assert_eq!(manifests.len(), 1);
+    let manifest = &manifests[0];
     let bundle = manifest.parent().unwrap();
-    let document: Value = serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
+    for role in ["rti", "federates/host", "federates/sensor"] {
+        assert_trace_dependencies(
+            &bundle.join(format!("generated/{role}/Cargo.toml")),
+            "hosted",
+        );
+    }
+    let document: Value = serde_json::from_slice(&fs::read(manifest).unwrap()).unwrap();
     let host_target = target_lexicon::HOST.to_string();
+    let mut federate_metadata = document["federates"].clone();
+    let claims = federate_metadata
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .map(|federate| {
+            let claim = federate
+                .as_object_mut()
+                .unwrap()
+                .remove("image_fingerprint")
+                .unwrap();
+            assert_eq!(claim.as_str().unwrap().len(), 64);
+            claim
+        })
+        .collect::<Vec<_>>();
+    assert_ne!(claims[0], claims[1]);
+    verify_generated_wire_contract(bundle, &document, &target);
     assert_eq!(
-        document["federates"],
+        federate_metadata,
         serde_json::json!([
             {
                 "id": "host",
@@ -487,6 +853,10 @@ fn build_publishes_canonical_federate_artifact_collection() {
     let rti = &document["rti"];
     assert_eq!(rti["target"], host_target);
     assert_eq!(rti["profile"], Value::Null);
+    assert!(rti["artifact"]["path"]
+        .as_str()
+        .unwrap()
+        .starts_with("artifacts/rti/"));
     let rti_executable = bundle.join(rti["artifact"]["path"].as_str().unwrap());
     assert_eq!(
         rti["artifact"]["blake3"],
@@ -510,61 +880,158 @@ fn build_publishes_canonical_federate_artifact_collection() {
         "vehicle-topology",
         "vehicle-control",
         "sensor-host",
-        "transitive-host",
     ] {
         assert!(
             !packages.contains(&forbidden),
             "RTI links {forbidden}: {packages:?}"
         );
     }
-    for node in &metadata.resolve.unwrap().nodes {
-        assert!(
-            node.features
-                .iter()
-                .all(|feature| feature.as_str() != "__boomerang_payload"),
-            "RTI activates a payload facet in {}",
-            node.id
+    for (federate, present, absent) in [
+        ("host", "vehicle-control", "sensor-host"),
+        ("sensor", "sensor-host", "vehicle-control"),
+    ] {
+        let metadata = MetadataCommand::new()
+            .manifest_path(bundle.join(format!("generated/federates/{federate}/Cargo.toml")))
+            .other_options(vec!["--locked".into(), "--offline".into()])
+            .exec()
+            .unwrap();
+        let packages = metadata
+            .packages
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect::<Vec<_>>();
+        assert!(packages.contains(&present), "{packages:?}");
+        for forbidden in [absent, "vehicle-topology"] {
+            assert!(!packages.contains(&forbidden), "{packages:?}");
+        }
+        assert!(packages.contains(&"boomerang_central_rti"));
+        let launcher = support::with_target_directory(&target, || {
+            cargo_boomerang::generate_launcher(fixture_workspace(), "sensor-slice", federate)
+        })
+        .unwrap();
+        let built = launcher.build_locked_offline().unwrap();
+        let payload_crates = support::launcher_payload_crates(built.executable_path());
+        for required in ["boomerang_runtime", &present.replace('-', "_")] {
+            assert!(payload_crates.contains(required), "{payload_crates:?}");
+        }
+        for forbidden in [
+            "boomerang_builder",
+            "vehicle_topology",
+            &absent.replace('-', "_"),
+        ] {
+            assert!(!payload_crates.contains(forbidden), "{payload_crates:?}");
+        }
+    }
+    assert!(sensor_source.contains(".bind_enclave("), "{sensor_source}");
+    assert!(
+        sensor_source.contains("EnclaveIndex::new(2)"),
+        "{sensor_source}"
+    );
+    assert!(
+        sensor_source.contains("boundary/controller%2Fcommand/sensor%2Fcommand/c0"),
+        "{sensor_source}"
+    );
+    assert!(!sensor_source.contains("IdentityRange"), "{sensor_source}");
+    assert!(!sensor_source.contains("IDENTITIES"), "{sensor_source}");
+    assert!(
+        sensor_source.contains("FederateImage::new("),
+        "{sensor_source}"
+    );
+    assert!(
+        sensor_source.contains("FederateId::new(\"sensor\")"),
+        "{sensor_source}"
+    );
+    let sensor = bundle.join(artifacts[1]["path"].as_str().unwrap());
+    let output = Command::new(sensor)
+        .env_remove("BOOMERANG_RTI_ADDRESS")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("BOOMERANG_RTI_ADDRESS is required"),
+        "{stderr}"
+    );
+}
+
+fn assert_trace_dependencies(manifest: &std::path::Path, mode: &str) {
+    let output = Command::new("cargo")
+        .args(["tree", "--manifest-path"])
+        .arg(manifest)
+        .args([
+            "--locked",
+            "--offline",
+            "--edges",
+            "normal",
+            "--prefix",
+            "none",
+            "--format",
+            "{p}",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let tree = String::from_utf8(output.stdout).unwrap();
+    for (package, present) in [
+        ("tracing-bounded", mode == "bounded"),
+        ("tracing-subscriber", mode == "hosted"),
+        ("tracing-appender", mode == "hosted"),
+    ] {
+        assert_eq!(
+            tree.lines()
+                .any(|line| line.starts_with(&format!("{package} v"))),
+            present,
+            "{mode}: {tree}"
         );
     }
 }
 
-#[test]
-fn repeated_build_preserves_the_same_published_bundle() {
-    let _guard = support::toolchain_lock();
-    let target = support::toolchain_target();
-    support::reset_deployment_output(&target, "production");
-    let first = build_fixture("production", &target);
+/// Executes the portable codec/admission contract compiled with the actual generated RTI tables.
+fn verify_generated_wire_contract(bundle: &Path, document: &Value, target: &Path) {
+    let scratch = tempfile::tempdir().unwrap();
+    fs::create_dir(scratch.path().join("src")).unwrap();
+    for file in ["Cargo.toml", "Cargo.lock", "src/main.rs"] {
+        fs::copy(
+            bundle.join("generated/rti").join(file),
+            scratch.path().join(file),
+        )
+        .unwrap();
+    }
+    let source_path = scratch.path().join("src/main.rs");
+    let source = fs::read_to_string(&source_path).unwrap();
+    fs::write(
+        &source_path,
+        format!("{source}\n{}", include_str!("wire_contract.rs")),
+    )
+    .unwrap();
+    let result = Command::new("cargo")
+        .args(["test", "--locked", "--offline", "--manifest-path"])
+        .arg(scratch.path().join("Cargo.toml"))
+        .arg("--target-dir")
+        .arg(target.join("wire-contract"))
+        .current_dir(fixture_workspace())
+        .env(
+            "EXPECTED_COORDINATION",
+            document["coordination"]["identity"].as_str().unwrap(),
+        )
+        .env(
+            "EXPECTED_MAPPING",
+            document["coordination"]["wire"]["mapping"]
+                .as_str()
+                .unwrap(),
+        )
+        .output()
+        .unwrap();
     assert!(
-        first.status.success(),
-        "{}",
-        String::from_utf8_lossy(&first.stderr)
+        result.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
     );
-    let first_manifest = PathBuf::from(String::from_utf8(first.stdout).unwrap().trim());
-    let first_document: Value =
-        serde_json::from_slice(&fs::read(&first_manifest).unwrap()).unwrap();
-    let artifact = first_manifest
-        .parent()
-        .unwrap()
-        .join(first_document["artifacts"][0]["path"].as_str().unwrap());
-    let manifest_before = fs::read(&first_manifest).unwrap();
-    let artifact_before = fs::read(&artifact).unwrap();
-    let artifact_hash_before = blake3::hash(&artifact_before);
-
-    let second = build_fixture("production", &target);
-    assert!(
-        second.status.success(),
-        "{}",
-        String::from_utf8_lossy(&second.stderr)
-    );
-    let second_manifest = PathBuf::from(String::from_utf8(second.stdout).unwrap().trim());
-
-    assert_eq!(second_manifest, first_manifest);
-    assert_eq!(fs::read(&first_manifest).unwrap(), manifest_before);
-    let artifact_after = fs::read(&artifact).unwrap();
-    assert_eq!(artifact_after, artifact_before);
-    assert_eq!(blake3::hash(&artifact_after), artifact_hash_before);
-    assert_no_staging_residue(&target.join("boomerang/generated"));
-    assert_no_staging_residue(first_manifest.parent().unwrap().parent().unwrap());
 }
 
 #[test]
@@ -573,6 +1040,23 @@ fn build_normalizes_deployment_execution_policy_into_every_published_artifact() 
     let target = support::toolchain_target();
     support::reset_deployment_output(&target, "execution");
     support::reset_deployment_output(&target, "execution-equivalent");
+    let _manifest = support::fixture_variant("execution", "production", |deployment| {
+        deployment.as_table_mut().unwrap().insert(
+            "execution".into(),
+            toml::toml! {
+                fast-forward = true
+                keep-alive = true
+                logical-horizon = "1000ms"
+            }
+            .into(),
+        );
+    });
+    let _equivalent = support::fixture_variant("execution-equivalent", "execution", |deployment| {
+        deployment["execution"]
+            .as_table_mut()
+            .unwrap()
+            .insert("logical-horizon".into(), "1s".into());
+    });
     let result = build_fixture("execution", &target);
     assert!(
         result.status.success(),
@@ -635,65 +1119,30 @@ fn build_normalizes_deployment_execution_policy_into_every_published_artifact() 
     )
     .unwrap();
     assert_eq!(equivalent_source, source);
-}
-
-#[test]
-fn corrupted_published_artifact_causes_a_conflict_without_overwrite() {
-    let _guard = support::toolchain_lock();
-    let target = support::toolchain_target();
-    support::reset_deployment_output(&target, "production");
-    let first = build_fixture("production", &target);
+    assert!(source.contains("physical_event_q_size: 1024"), "{source}");
     assert!(
-        first.status.success(),
-        "{}",
-        String::from_utf8_lossy(&first.stderr)
+        source.contains("boomerang_util::launcher::write_execution_summary(&execution)?"),
+        "{source}"
     );
-    let manifest = PathBuf::from(String::from_utf8(first.stdout).unwrap().trim());
-    let document: Value = serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
-    let artifact = manifest
-        .parent()
-        .unwrap()
-        .join(document["artifacts"][0]["path"].as_str().unwrap());
-    let mut corrupted = fs::read(&artifact).unwrap();
-    corrupted[0] ^= 1;
-    fs::write(&artifact, &corrupted).unwrap();
-    let manifest_before = fs::read(&manifest).unwrap();
-
-    let second = build_fixture("production", &target);
-    let stderr = String::from_utf8_lossy(&second.stderr);
-    assert!(!second.status.success(), "{stderr}");
-    assert!(stderr.contains("conflict"), "{stderr}");
-    assert_eq!(fs::read(&artifact).unwrap(), corrupted);
-    assert_eq!(fs::read(&manifest).unwrap(), manifest_before);
-}
-
-#[test]
-fn build_accepts_an_explicit_workspace_outside_the_current_directory() {
-    let _guard = support::toolchain_lock();
-    let current = tempfile::tempdir().unwrap();
-    let target = support::toolchain_target();
-    support::reset_deployment_output(&target, "production");
-    let result = Command::new(env!("CARGO_BIN_EXE_cargo-boomerang"))
-        .arg("boomerang")
-        .arg("--workspace")
-        .arg(fixture_workspace())
-        .args(["build", "--deployment", "production"])
-        .current_dir(current.path())
-        .env("CARGO_TARGET_DIR", &target)
-        .output()
-        .unwrap();
-
-    assert!(
-        result.status.success(),
-        "{}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-    let manifest = fs::canonicalize(PathBuf::from(
-        String::from_utf8(result.stdout).unwrap().trim(),
-    ))
+    let generated_manifest: toml::Value = toml::from_str(
+        &fs::read_to_string(manifest.parent().unwrap().join("generated/host/Cargo.toml")).unwrap(),
+    )
     .unwrap();
-    assert!(manifest.exists(), "missing {}", manifest.display());
-    assert!(manifest.starts_with(fs::canonicalize(target).unwrap()));
+    let dependencies = generated_manifest["dependencies"].as_table().unwrap();
+    assert_eq!(
+        dependencies["boomerang_util"]["features"]
+            .as_array()
+            .unwrap(),
+        &[toml::Value::String("hosted-tracing".into())]
+    );
+    assert!(!dependencies.contains_key("tracing-subscriber"));
+    let executable = published_executable(manifest.to_str().unwrap());
+    let output = Command::new(executable).output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
@@ -701,6 +1150,23 @@ fn build_applies_configured_release_profile_and_cargo_configuration() {
     let _guard = support::toolchain_lock();
     let target = support::toolchain_target();
     support::reset_deployment_output(&target, "profile-config");
+    let _manifest = support::fixture_variant("profile-config", "production", |deployment| {
+        deployment["bindings"]["controller"]
+            .as_table_mut()
+            .unwrap()
+            .insert(
+                "features".into(),
+                toml::Value::try_from(["profile-config-probe"]).unwrap(),
+            );
+        deployment["federates"]["host"]
+            .as_table_mut()
+            .unwrap()
+            .insert("profile".into(), "release".into());
+        deployment["federates"]["host"]
+            .as_table_mut()
+            .unwrap()
+            .insert("cargo-config".into(), ".cargo/profile-config.toml".into());
+    });
     let result = build_fixture("profile-config", &target);
 
     assert!(
@@ -710,4 +1176,10 @@ fn build_applies_configured_release_profile_and_cargo_configuration() {
     );
     let manifest = PathBuf::from(String::from_utf8(result.stdout).unwrap().trim());
     assert!(manifest.exists(), "missing {}", manifest.display());
+    let launcher = support::with_target_directory(&target, || {
+        cargo_boomerang::generate_launcher(fixture_workspace(), "profile-config", "host")
+    })
+    .unwrap();
+    launcher.check_locked_offline().unwrap();
+    launcher.run_locked_offline().unwrap();
 }

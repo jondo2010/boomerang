@@ -25,8 +25,9 @@ current backend messages and timing rules, see
   adapters, scheduler execution, and the protocol-neutral
   `FederateCoordinationBackend` contract. It does not depend on RTI wire types or
   distributed transport.
-- `boomerang_federated` contains only the pure `WireTag` and `WireDelay`
-  primitives. It has no RTI state, client, transport, or scheduler lifecycle.
+- `boomerang_federated` owns `WireTag`, `WireDelay`, and the canonical bounded wire
+  codec and preflight admission contract. These operate on caller-provided storage;
+  they own no sockets, Tokio tasks, RTI grant state, or scheduler lifecycle.
 - `boomerang_central_rti::compiled` owns `CompiledRti`, `CentralRtiClient`,
   `RtiClientBindings`, requests and replies, and hosted/reference transports.
   `tag_conversion` checks conversion between runtime and wire tags.

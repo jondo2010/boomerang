@@ -3,8 +3,10 @@ use std::{fs, path::Path, path::PathBuf};
 use cargo_boomerang::resolve_workspace;
 use cargo_metadata::MetadataCommand;
 
+mod support;
+
 fn fixture_workspace() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/workspace")
+    support::fixture_workspace()
 }
 
 fn copy_without_lockfile(source: &Path, destination: &Path) {
@@ -25,6 +27,26 @@ fn copy_without_lockfile(source: &Path, destination: &Path) {
 
 #[test]
 fn resolution_returns_exact_package_ids_and_rejects_nonmembers() {
+    let _manifest = support::fixture_variant("resolution", "production", |deployment| {
+        deployment["federates"]["host"]
+            .as_table_mut()
+            .unwrap()
+            .insert("target".into(), "x86_64-unknown-linux-gnu".into());
+        deployment["federates"]["host"]
+            .as_table_mut()
+            .unwrap()
+            .insert("target-json".into(), "targets/host.json".into());
+        deployment["federates"]["host"]
+            .as_table_mut()
+            .unwrap()
+            .insert("cargo-config".into(), ".cargo/host.toml".into());
+    });
+    let _outside = support::fixture_variant("outside-member", "production", |deployment| {
+        deployment.as_table_mut().unwrap().insert(
+            "bindings".into(),
+            toml::toml! { "vehicle/sensor" = { package = "outside-member" } }.into(),
+        );
+    });
     let workspace = fixture_workspace();
     let mut metadata = MetadataCommand::new();
     metadata
@@ -85,9 +107,9 @@ fn resolution_returns_exact_package_ids_and_rejects_nonmembers() {
     assert_eq!(
         resolved.lockfile().digest,
         [
-            0x96, 0xd8, 0x6b, 0xe7, 0x76, 0x90, 0x57, 0x16, 0x04, 0x45, 0x4c, 0x32, 0xbf, 0x78,
-            0x65, 0x48, 0x12, 0xff, 0xb0, 0x1c, 0xb1, 0x5d, 0x57, 0x12, 0x00, 0x65, 0xf5, 0x87,
-            0x1e, 0xea, 0x8a, 0xd0,
+            0xe2, 0xc5, 0xb0, 0x98, 0x40, 0xd1, 0xcb, 0x8f, 0xa1, 0x5a, 0xe7, 0xc2, 0x75, 0x3e,
+            0x9d, 0x65, 0xab, 0x29, 0x02, 0xea, 0x5f, 0x8b, 0x83, 0x6d, 0xe2, 0xa9, 0x4e, 0x22,
+            0xbf, 0x6c, 0x11, 0xb7,
         ]
     );
 

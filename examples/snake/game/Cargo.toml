@@ -1,0 +1,11 @@
+[package]
+name = "snake-game"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+boomerang = { path = "../../../boomerang" }
+crossterm = "0.29"
+rand = "0.9"

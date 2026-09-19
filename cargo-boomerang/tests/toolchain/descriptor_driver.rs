@@ -17,23 +17,8 @@ fn repeated_descriptor_analysis_uses_workspace_configuration_and_cargo_freshness
         serde_json::to_vec(first.topology()).unwrap(),
         serde_json::to_vec(second.topology()).unwrap(),
     );
-}
-
-#[test]
-fn driver_selects_only_bound_descriptors_and_emits_topology() {
-    let _guard = support::toolchain_lock();
-    let target = support::toolchain_target();
-    support::reset_deployment_output(&target, "production");
-    support::reset_deployment_output(&target, "payload-alias");
-    let (output, result) = support::with_target_directory(&target, || {
-        (
-            run_descriptor_driver(support::fixture_workspace(), "production").unwrap(),
-            run_descriptor_driver(support::fixture_workspace(), "payload-alias"),
-        )
-    });
-
     assert_eq!(
-        output
+        first
             .topology()
             .components()
             .map(|(id, _)| id.to_string())
@@ -41,7 +26,7 @@ fn driver_selects_only_bound_descriptors_and_emits_topology() {
         ["backup", "controller", "sensor"]
     );
     assert_eq!(
-        output
+        first
             .topology()
             .components()
             .map(|(_, component)| (component.contract().as_str(), component.contract_version()))
@@ -53,11 +38,8 @@ fn driver_selects_only_bound_descriptors_and_emits_topology() {
         ]
     );
     assert_eq!(
-        output.selected_packages().collect::<Vec<_>>(),
+        first.selected_packages().collect::<Vec<_>>(),
         ["sensor-host", "vehicle-control"]
     );
-    assert!(!output.build_log().contains("payload-only"));
-
-    let error = result.err().unwrap();
-    assert!(error.to_string().contains("reserved payload facet"));
+    assert!(!first.build_log().contains("payload-only"));
 }

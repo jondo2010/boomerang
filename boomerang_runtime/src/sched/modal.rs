@@ -140,6 +140,8 @@ pub(super) struct ReadyEvent<K: tinymap::Key, A: Copy> {
     pub(super) terminal: bool,
     /// Whether this event includes work other than terminal shutdown processing.
     pub(super) has_nonterminal_work: bool,
+    /// Whether this ready tag contains a network boundary input.
+    pub(super) network_input: bool,
     /// Action identities whose values caused this ready event.
     pub(super) action_values: Vec<A>,
 }
@@ -224,6 +226,15 @@ impl<S: Schedule> EventManager<S> {
     {
         self.root.push_event(tag, reactions, terminal);
         self.record_nonterminal_push(terminal);
+    }
+
+    /// Queues a network boundary at its global tag, including inputs without active reactions.
+    pub(super) fn push_network_event<I>(&mut self, tag: Tag, reactions: I)
+    where
+        I: IntoIterator<Item = (Level, S::Reaction)>,
+    {
+        self.root.push_network_event(tag, reactions);
+        self.record_nonterminal_push(false);
     }
 
     /// Pushes a root-level provisional event that advances only local barrier control state.
@@ -345,6 +356,7 @@ impl<S: Schedule> EventManager<S> {
                 reactions: event.reactions,
                 terminal: event.terminal,
                 has_nonterminal_work: event.nonterminal_work_count != 0,
+                network_input: event.network_input,
                 action_values,
             });
         }
@@ -355,6 +367,7 @@ impl<S: Schedule> EventManager<S> {
             reactions: self.next_reaction_set(),
             terminal: false,
             has_nonterminal_work: false,
+            network_input: false,
             action_values,
         };
 
@@ -363,6 +376,7 @@ impl<S: Schedule> EventManager<S> {
             ready.reactions.merge(&event.reactions);
             ready.terminal = ready.terminal || event.terminal;
             ready.has_nonterminal_work |= event.nonterminal_work_count != 0;
+            ready.network_input |= event.network_input;
             self.remove_nonterminal_work(event.nonterminal_work_count);
             self.root.recycle_reaction_set(event.reactions);
         }
@@ -376,6 +390,7 @@ impl<S: Schedule> EventManager<S> {
             ready.reactions.merge(&event.reactions);
             ready.terminal = ready.terminal || event.terminal;
             ready.has_nonterminal_work |= event.nonterminal_work_count != 0;
+            ready.network_input |= event.network_input;
             self.remove_nonterminal_work(event.nonterminal_work_count);
             self.scope_queues[frontier.scope].recycle_reaction_set(event.reactions);
             self.refresh_frontier(frontier.scope);

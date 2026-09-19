@@ -46,8 +46,67 @@ impl FederateCoordinationBackend for GrantBackend {
         Ok(true)
     }
     fn stop(&mut self) -> Result<(), FederateCoordinationError> {
+        #[cfg(feature = "bounded-tracing")]
+        tracing::debug!(target: "boomerang::worker_preparation_test", parent: None,
+            worker = "coordinator");
         Ok(())
     }
+}
+
+/// Filtering to the two ordered probes removes incidental capture contention.
+#[cfg(feature = "bounded-tracing")]
+#[test]
+fn bounded_capture_prepares_coordinator_and_scheduler_workers() {
+    if !run_runtime_trace_test(
+        "distributed::bounded_capture_prepares_coordinator_and_scheduler_workers",
+    ) {
+        return;
+    }
+    let (subscriber, capture) = tracing_bounded::BoundedSubscriber::new(tracing_bounded::Config {
+        level: tracing::level_filters::LevelFilter::DEBUG,
+        targets: &["boomerang::worker_preparation_test"],
+        ..Default::default()
+    })
+    .unwrap();
+    tracing::subscriber::with_default(subscriber, || {
+        let _producer = capture.prepare_current_thread().unwrap();
+        let bindings = EnclaveBindings::new()
+            .bind_state(BindingSlotIndex::new(0), initialize_counter)
+            .bind_reaction(BindingSlotIndex::new(1), |context, state, refs, mode| {
+                tracing::debug!(target: "boomerang::worker_preparation_test", parent: None,
+                    worker = "scheduler");
+                increment_counter(context, state, refs, mode)
+            });
+        let execution = execute_owned_federate_with_backend(
+            FederateIndex::new(0),
+            &fixture_federate("host", "host", "std", IndexSpan::new(0, 1)),
+            std::slice::from_ref(&IMAGE),
+            FederateBindings::new().bind_enclave(EnclaveIndex::new(0), bindings),
+            Config::default().with_fast_forward(true),
+            |_| Ok(GrantBackend::default()),
+        )
+        .unwrap();
+        assert_eq!(
+            execution
+                .enclave(EnclaveIndex::new(0))
+                .unwrap()
+                .state::<CounterState>(StateSlotIndex::new(0))
+                .unwrap()
+                .count,
+            1
+        );
+    });
+    let records = capture.snapshot();
+    assert_eq!(records.len(), 2, "{:?}", capture.loss());
+    assert_eq!(
+        records[0].fields[0].value,
+        tracing_bounded::Value::Str("scheduler".into())
+    );
+    assert_eq!(
+        records[1].fields[0].value,
+        tracing_bounded::Value::Str("coordinator".into())
+    );
+    assert_eq!(capture.loss().invalid_context.value, 0);
 }
 
 /// Captures encoded transport submissions, before any destination scheduler exists.
@@ -66,6 +125,40 @@ impl OutboundBoundarySink for CaptureSink {
 /// Decodes the fixture's explicit four-byte little-endian contract.
 fn decode_u32(bytes: &[u8]) -> Result<u32, std::array::TryFromSliceError> {
     Ok(u32::from_le_bytes(bytes.try_into()?))
+}
+
+#[test]
+fn distributed_federate_trace_retains_validated_compiler_identity() {
+    if !run_runtime_trace_test(
+        "distributed::distributed_federate_trace_retains_validated_compiler_identity",
+    ) {
+        return;
+    }
+    let (_, events) = capture_runtime(|| {
+        execute_owned_federate_with_backend(
+            FederateIndex::new(3),
+            &fixture_federate("source", "host", "std", IndexSpan::new(5, 1)),
+            &[ROUTED_SOURCE_IMAGE],
+            FederateBindings::new()
+                .bind_enclave(EnclaveIndex::new(5), source_bindings())
+                .bind_outbound_route(
+                    route_boundary(),
+                    PayloadType::<u32>::new(),
+                    |value: &u32| Ok::<_, std::convert::Infallible>(value.to_le_bytes().to_vec()),
+                    Arc::new(CaptureSink::default()),
+                ),
+            Config::default().with_fast_forward(true),
+            |_| Ok(GrantBackend::default()),
+        )
+        .unwrap()
+    });
+    let completed = lifecycle_events(&events)
+        .into_iter()
+        .find(|event| event["fields"]["event"] == "runtime.preflight.completed")
+        .unwrap();
+    assert_eq!(completed["span"]["federate"], 3);
+    assert_eq!(completed["span"]["federate_id"], "source");
+    assert_eq!(completed["span"]["ownership"], "distributed");
 }
 
 /// Proves independent owned slices exchange the encoded value with one delay application.

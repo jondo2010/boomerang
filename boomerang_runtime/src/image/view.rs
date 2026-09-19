@@ -1,4 +1,4 @@
-//! Checked borrowed views over immutable compiled runtime images.
+//! Checked views over immutable compiled runtime images.
 use super::*;
 use tinymap::{IndexSpan, Key, SliceRange, TinyMapView};
 
@@ -6,10 +6,11 @@ use tinymap::{IndexSpan, Key, SliceRange, TinyMapView};
 ///
 /// Deployment compilation separately checks coherence with the authoritative federation.
 /// This view checks the standalone artifact's identities, ranges, and typed references.
+/// It owns the image descriptor while borrowing its backing tables and member names.
 #[derive(Debug)]
 pub struct RtiImageView<'a> {
     /// Immutable coordination projection whose internal references were checked.
-    image: &'a RtiImage<'a>,
+    image: RtiImage<'a>,
     /// Canonical stable identities sharing the projection's Federate key domain.
     members: IdentityTable<'a, FederateIndex>,
 }
@@ -17,18 +18,24 @@ pub struct RtiImageView<'a> {
 impl<'a> RtiImageView<'a> {
     /// Validates a standalone coordination projection and its member identities.
     pub fn new(
-        image: &'a RtiImage<'a>,
+        image: RtiImage<'a>,
         members: IdentityTable<'a, FederateIndex>,
     ) -> Result<Self, ImageValidationError<'a>> {
         validate_rti_identity_table("coordination.rti.member_identities", "federate", members)?;
-        validate_rti_member_count(image, members.len())?;
-        validate_rti(image)?;
+        validate_rti_member_count(&image, members.len())?;
+        validate_rti(&image)?;
         Ok(Self { image, members })
     }
 
     /// Returns the checked immutable coordination projection.
     #[must_use]
-    pub const fn image(&self) -> &'a RtiImage<'a> {
+    pub const fn image(&self) -> &RtiImage<'a> {
+        &self.image
+    }
+
+    /// Consumes the validated view and returns its immutable image descriptor.
+    #[must_use]
+    pub fn into_image(self) -> RtiImage<'a> {
         self.image
     }
 
@@ -231,50 +238,60 @@ pub enum ImageValidationError<'a> {
 }
 
 /// A validated allocation-free view of one complete compiled deployment.
+///
+/// The view owns the aggregate descriptor and borrows the hierarchy's backing tables.
 #[derive(Debug)]
 pub struct CompiledDeploymentView<'a> {
-    /// Complete validated deployment image borrowed for this view's lifetime.
-    image: &'a CompiledDeploymentImage<'a>,
+    /// Complete validated deployment descriptor with borrowed backing tables.
+    image: CompiledDeploymentImage<'a>,
 }
 
 impl<'a> CompiledDeploymentView<'a> {
-    /// Validates `image` and borrows its complete immutable hierarchy.
-    pub fn new(image: &'a CompiledDeploymentImage<'a>) -> Result<Self, ImageValidationError<'a>> {
-        validate_compiled_deployment(image)?;
+    /// Consumes `image` and validates its complete immutable hierarchy.
+    pub fn new(image: CompiledDeploymentImage<'a>) -> Result<Self, ImageValidationError<'a>> {
+        validate_compiled_deployment(&image)?;
         Ok(Self { image })
     }
 
     /// Returns the dense Federate table.
-    pub const fn federates(&self) -> &'a TinyMapView<'a, FederateIndex, FederateImage<'a>> {
-        &self.image.federates
+    pub const fn federates(&self) -> TinyMapView<'a, FederateIndex, FederateImage<'a>> {
+        self.image.federates
     }
 
-    /// Returns one validated Federate view.
+    /// Returns the complete Enclave table with its original deployment-wide keys.
+    pub const fn enclaves(&self) -> TinyMapView<'a, EnclaveIndex, EnclaveImage<'a>> {
+        self.image.enclaves
+    }
+
+    /// Returns a validated Federate descriptor independent of this aggregate view.
     pub fn federate(&self, key: FederateIndex) -> FederateImageView<'a> {
         FederateImageView {
-            image: self.image,
-            federate: &self.image.federates[key],
+            enclaves: self.image.enclaves,
+            federate: self.image.federates[key].clone(),
         }
     }
 
     /// Returns the backend-neutral federation structure.
-    pub const fn federation(&self) -> &'a GlobalFederationImage<'a> {
+    pub const fn federation(&self) -> &GlobalFederationImage<'a> {
         &self.image.federation
     }
 
     /// Returns the selected coordination projection.
-    pub const fn coordination(&self) -> &'a CoordinationProjection<'a> {
+    pub const fn coordination(&self) -> &CoordinationProjection<'a> {
         &self.image.coordination
     }
 }
 
-/// A validated borrowed view of one Federate and its Enclaves.
+/// A validated Federate descriptor with borrowed Enclave images.
+///
+/// The view owns its Federate descriptor and retains the original Enclave table's key domain.
+/// It can outlive the deployment view that selected it; backing tables and identities stay borrowed.
 #[derive(Debug)]
 pub struct FederateImageView<'a> {
-    /// Complete deployment image containing the Federate and its Enclaves.
-    image: &'a CompiledDeploymentImage<'a>,
-    /// Validated Federate record selected from the deployment table.
-    federate: &'a FederateImage<'a>,
+    /// Complete Enclave table preserving deployment-wide keys and validated ranges.
+    enclaves: TinyMapView<'a, EnclaveIndex, EnclaveImage<'a>>,
+    /// Validated Federate descriptor selected from the deployment table.
+    federate: FederateImage<'a>,
 }
 
 impl<'a> FederateImageView<'a> {
@@ -301,7 +318,6 @@ impl<'a> FederateImageView<'a> {
     /// Iterates validated Enclave views in canonical identity order.
     pub fn enclave_views(&self) -> impl ExactSizeIterator<Item = EnclaveImageView<'a>> + 'a {
         let images = self
-            .image
             .enclaves
             .get_span(self.federate.enclaves())
             .expect("compiled deployment ranges are validated");
@@ -2225,11 +2241,16 @@ mod tests {
     }
 
     #[test]
-    fn compiled_view_resolves_static_federate_and_enclave_ranges() {
-        let view = CompiledDeploymentView::new(&COMPILED).unwrap();
-
-        assert_eq!(view.federates().len(), 1);
-        let federate = view.federate(FederateIndex::new(0));
+    fn compiled_views_outlive_local_deployment_descriptor() {
+        let (federate, members) = {
+            let view = {
+                let image = COMPILED;
+                CompiledDeploymentView::new(image).unwrap()
+            };
+            (view.federate(FederateIndex::new(0)), view.federates())
+        };
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[FederateIndex::new(0)].id(), federate.id());
         assert_eq!(federate.id().as_str(), "host");
         assert_eq!(federate.enclaves(), IndexSpan::new(0, 2));
         assert_eq!(federate.enclave_views().count(), 2);
@@ -2242,6 +2263,7 @@ mod tests {
             SliceRange::new(0, 0),
             SliceRange::new(0, 0),
             SliceRange::new(0, 0),
+            32,
         );
         let one = [member];
         let image = CompiledDeploymentImage {
@@ -2249,7 +2271,7 @@ mod tests {
             ..COMPILED
         };
         assert!(matches!(
-            CompiledDeploymentView::new(&image),
+            CompiledDeploymentView::new(image),
             Err(ImageValidationError::OwnershipMismatch {
                 table: "coordination",
                 index: 0,
@@ -2277,7 +2299,7 @@ mod tests {
             ..COMPILED
         };
         assert!(matches!(
-            CompiledDeploymentView::new(&image),
+            CompiledDeploymentView::new(image),
             Err(ImageValidationError::OwnershipMismatch {
                 table: "coordination",
                 index: 0,
@@ -2293,6 +2315,7 @@ mod tests {
             SliceRange::new(0, 0),
             SliceRange::new(0, 0),
             SliceRange::new(0, 0),
+            32,
         )];
         let edges = [FederationEdgeImage::new(
             BoundaryId::new("host"),
@@ -2327,7 +2350,7 @@ mod tests {
             ..COMPILED
         };
         assert!(matches!(
-            CompiledDeploymentView::new(&image),
+            CompiledDeploymentView::new(image),
             Err(ImageValidationError::OwnershipMismatch {
                 table: "coordination.rti.routes",
                 index: 0,
@@ -2343,11 +2366,12 @@ mod tests {
             SliceRange::new(0, 1),
             SliceRange::new(1, 0),
             SliceRange::new(0, 0),
+            32,
         )];
         let dependencies = [RtiDependencyImage::new(FederateIndex::new(0), 42)];
         let image = rti_fixture(&members, &dependencies, &[], &[]);
         let identities = IdentityTable::new(&["standalone"]);
-        let view = RtiImageView::new(&image, identities).unwrap();
+        let view = RtiImageView::new(image.clone(), identities).unwrap();
         assert_eq!(
             view.member_identity(FederateIndex::new(0))
                 .unwrap()
@@ -2360,11 +2384,11 @@ mod tests {
             42
         );
         assert_eq!(view.members().len(), 1);
-        assert!(RtiImageView::new(&image, IdentityTable::new(&[])).is_err());
-        assert!(RtiImageView::new(&image, IdentityTable::new(&[""])).is_err());
+        assert!(RtiImageView::new(image.clone(), IdentityTable::new(&[])).is_err());
+        assert!(RtiImageView::new(image, IdentityTable::new(&[""])).is_err());
 
         let missing_dependencies = rti_fixture(&members, &[], &[], &[]);
-        assert!(RtiImageView::new(&missing_dependencies, identities).is_err());
+        assert!(RtiImageView::new(missing_dependencies, identities).is_err());
         let invalid_routes = [RtiRouteImage::new(
             BoundaryId::new("route"),
             FlowIndex::new(0),
@@ -2383,7 +2407,7 @@ mod tests {
         )];
         let invalid_route_image = rti_fixture(&members, &dependencies, &invalid_routes, &["flow"]);
         assert!(matches!(
-            RtiImageView::new(&invalid_route_image, identities),
+            RtiImageView::new(invalid_route_image, identities),
             Err(ImageValidationError::ReferenceOutOfBounds {
                 table: "coordination.rti.routes",
                 field: "target",
@@ -2395,7 +2419,7 @@ mod tests {
         let invalid_dependencies = [RtiDependencyImage::new(FederateIndex::new(1), 42)];
         let invalid = rti_fixture(&members, &invalid_dependencies, &[], &[]);
         assert!(matches!(
-            RtiImageView::new(&invalid, identities),
+            RtiImageView::new(invalid, identities),
             Err(ImageValidationError::ReferenceOutOfBounds {
                 table: "coordination.rti.dependencies",
                 referenced: 1,
@@ -2412,6 +2436,7 @@ mod tests {
             SliceRange::new(0, 0),
             SliceRange::new(0, 0),
             SliceRange::new(0, 0),
+            32,
         );
         let members = [member];
         let routes = [RtiRouteImage::new(
@@ -2440,7 +2465,7 @@ mod tests {
             ..COMPILED
         };
         assert!(matches!(
-            CompiledDeploymentView::new(&image),
+            CompiledDeploymentView::new(image),
             Err(ImageValidationError::ReferenceOutOfBounds {
                 table: "coordination.rti.routes",
                 index: 0,
@@ -2455,6 +2480,7 @@ mod tests {
             SliceRange::new(0, 1),
             SliceRange::new(0, 0),
             SliceRange::new(0, 0),
+            32,
         )];
         let image = CompiledDeploymentImage {
             coordination: CoordinationProjection::CentralRti(rti_fixture(
@@ -2466,7 +2492,7 @@ mod tests {
             ..COMPILED
         };
         assert!(matches!(
-            CompiledDeploymentView::new(&image),
+            CompiledDeploymentView::new(image),
             Err(ImageValidationError::RangeOutOfBounds {
                 table: "coordination.rti.members",
                 index: 0,
@@ -2488,7 +2514,7 @@ mod tests {
             ..COMPILED
         };
         assert!(matches!(
-            CompiledDeploymentView::new(&image),
+            CompiledDeploymentView::new(image),
             Err(ImageValidationError::OwnershipMismatch {
                 table: "coordination.rti",
                 index: 0,
@@ -2511,7 +2537,7 @@ mod tests {
             ..COMPILED
         };
         assert!(matches!(
-            CompiledDeploymentView::new(&missing_image).unwrap_err(),
+            CompiledDeploymentView::new(missing_image).unwrap_err(),
             ImageValidationError::UnpairedRoute {
                 boundary: "network/in",
                 direction: RouteDirection::Inbound,
@@ -2537,7 +2563,7 @@ mod tests {
             ..COMPILED
         };
         assert!(matches!(
-            CompiledDeploymentView::new(&mismatched_image).unwrap_err(),
+            CompiledDeploymentView::new(mismatched_image).unwrap_err(),
             ImageValidationError::RoutePairMismatch {
                 boundary: "network/in",
                 field: "timing_domain",
@@ -2563,7 +2589,7 @@ mod tests {
             ..COMPILED
         };
         assert!(matches!(
-            CompiledDeploymentView::new(&delayed_image).unwrap_err(),
+            CompiledDeploymentView::new(delayed_image).unwrap_err(),
             ImageValidationError::RoutePairMismatch {
                 boundary: "network/in",
                 field: "delay_nanos",
@@ -2590,7 +2616,7 @@ mod tests {
             ..COMPILED
         };
         assert!(matches!(
-            CompiledDeploymentView::new(&duplicate_image).unwrap_err(),
+            CompiledDeploymentView::new(duplicate_image).unwrap_err(),
             ImageValidationError::DuplicateRouteHalf {
                 boundary: "network/in",
                 direction: RouteDirection::Inbound,
@@ -2632,6 +2658,7 @@ mod tests {
             SliceRange::new(0, 0),
             SliceRange::new(0, 0),
             SliceRange::new(0, 0),
+            32,
         );
         let rti_members = [rti_member_image.clone(), rti_member_image];
         let image = CompiledDeploymentImage {
@@ -2646,10 +2673,15 @@ mod tests {
             )),
         };
 
-        let view = CompiledDeploymentView::new(&image).unwrap();
-        let second_ids = view
-            .federate(FederateIndex::new(1))
-            .enclave_views()
+        let second_enclaves = {
+            let second = {
+                let view = CompiledDeploymentView::new(image).unwrap();
+                view.federate(FederateIndex::new(1))
+            };
+            assert_eq!(second.enclaves(), IndexSpan::new(2, 2));
+            second.enclave_views()
+        };
+        let second_ids = second_enclaves
             .map(|enclave| enclave.enclave_id().as_str())
             .collect::<Vec<_>>();
         assert_eq!(second_ids, ["aaaaa/control", "aaaab/control"]);
@@ -2669,7 +2701,7 @@ mod tests {
         };
 
         assert!(matches!(
-            CompiledDeploymentView::new(&image),
+            CompiledDeploymentView::new(image),
             Err(ImageValidationError::RangeOutOfBounds {
                 table: "federates",
                 index: 0,

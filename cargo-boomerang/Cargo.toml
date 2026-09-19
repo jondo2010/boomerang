@@ -12,9 +12,11 @@ anstream = "1.0"
 anyhow.workspace = true
 blake3.workspace = true
 boomerang_builder = { workspace = true, features = ["descriptor-fingerprint", "host-interchange"] }
+boomerang_federated.workspace = true
 boomerang_runtime = { workspace = true, features = ["serde"] }
 boomerang_util = { workspace = true, features = ["launcher"] }
 cargo_metadata.workspace = true
+cargo-config2.workspace = true
 fs2.workspace = true
 humantime.workspace = true
 clap = { version = "4.2", features = ["derive"] }
@@ -28,6 +30,8 @@ tempfile.workspace = true
 target-lexicon = "0.13"
 tinymap.workspace = true
 toml.workspace = true
+tracing-bounded.workspace = true
+tracing-core.workspace = true
 syn = { version = "3", features = ["full"] }
 
 [dev-dependencies]

@@ -11,10 +11,25 @@ categories.workspace = true
 readme = "README.md"
 exclude.workspace = true
 
+[features]
+## Prepare runtime and hosted I/O workers for an installed native bounded subscriber
+bounded-tracing = ["dep:tracing-bounded", "boomerang_runtime/bounded-tracing"]
+
 [dependencies]
 boomerang_federated.workspace = true
 boomerang_runtime.workspace = true
 tinymap.workspace = true
+tracing.workspace = true
+tracing-bounded = { workspace = true, optional = true }
 thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+bytes = "1"
+futures-util = { version = "0.3", features = ["sink"] }
+tokio = { version = "1", features = ["rt", "net", "sync", "time", "macros", "io-util"] }
+tokio-util = { version = "0.7", features = ["codec", "rt"] }
+
+[dev-dependencies]
+boomerang_federated = { workspace = true, features = ["conformance"] }
+tokio = { version = "1", features = ["test-util"] }
+tracing-subscriber.workspace = true

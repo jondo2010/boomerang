@@ -27,6 +27,12 @@ use tinymap::{SliceRange, TinyMap};
 /// Failure to represent an analyzed federation in bounded image coordinates.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum CoordinationProjectionError {
+    /// The sum of a Federate's Enclave event capacities cannot fit its RTI accounting budget.
+    #[error("Federate '{member}' in-transit tag capacity exceeds u32")]
+    InTransitCapacityOverflow {
+        /// Stable identity of the member whose resource sum overflowed.
+        member: FederateId,
+    },
     /// A generated table has more entries than its `u32` image range can address.
     #[error("coordination table '{table}' exceeds u32 image capacity")]
     TableTooLarge {
@@ -192,6 +198,7 @@ impl OwnedCoordinationProjection {
 pub(crate) fn project_central_rti(
     analysis: &AnalyzedFederationGraph,
     deployment: &ResolvedDeployment,
+    in_transit_capacities: &BTreeMap<FederateId, u32>,
 ) -> Result<OwnedRtiImage, CoordinationProjectionError> {
     let mut members = TinyMap::with_capacity(analysis.members().len());
     let mut indices = BTreeMap::new();
@@ -205,6 +212,7 @@ pub(crate) fn project_central_rti(
                 SliceRange::new(0, 0),
                 SliceRange::new(0, 0),
                 SliceRange::new(0, 0),
+                in_transit_capacities[member],
             ))
             .map_err(|_| CoordinationProjectionError::TableTooLarge { table: "members" })?;
         indices.insert(member, index);
@@ -309,6 +317,7 @@ pub(crate) fn project_central_rti(
             direct,
             transitive,
             downstream,
+            in_transit_capacities[member],
         );
     }
 

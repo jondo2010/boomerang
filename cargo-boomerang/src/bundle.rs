@@ -28,7 +28,7 @@ pub(crate) struct DeploymentDocument {
     pub(crate) compiler_schema: u32,
     /// Selected deployment name.
     pub(crate) deployment: String,
-    /// Lowercase BLAKE3 deployment fingerprint naming the bundle directory.
+    /// Bundle reproducibility fingerprint naming its directory, not a peer compatibility claim.
     pub(crate) fingerprint: String,
     /// Lowercase BLAKE3 hash of compact canonical topology JSON.
     pub(crate) topology_hash: String,
@@ -161,6 +161,9 @@ pub(crate) struct DescriptorDocument {
     pub(crate) component: String,
     /// Selected implementation package name.
     pub(crate) package: String,
+    /// Selected named component module, absent for legacy crate-root exports.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) module: Option<String>,
     /// Stable external contract identity.
     pub(crate) contract: String,
     /// Stable external contract version.
@@ -175,6 +178,9 @@ pub(crate) struct DescriptorDocument {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct FederateDocument {
+    /// Identity of this Federate scheduler image, direct bindings, and local bounds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) image_fingerprint: Option<String>,
     /// Stable Federate identity.
     pub(crate) id: String,
     /// Canonically sorted placement groups assigned to this Federate.
@@ -213,9 +219,26 @@ pub(crate) struct CoordinationDocument {
     pub(crate) backend: String,
     /// Versioned protocol identity, absent for local coordination.
     pub(crate) protocol: Option<String>,
-    /// Shared deployment identity embedded in RTI and Federate launchers.
+    /// Shared coordination compatibility fingerprint embedded in participating launchers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) identity: Option<String>,
+    /// Portable canonical protocol profile reserved for the framed transport adapter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) wire: Option<WireProfileDocument>,
+}
+
+/// Explicit baseline wire profile and dense-mapping claim shared by every route.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct WireProfileDocument {
+    /// Portable frame protocol version.
+    pub(crate) protocol: u16,
+    /// Canonical wire codec profile version.
+    pub(crate) codec: u16,
+    /// Inclusive maximum encoded payload bytes, independent of scheduler storage bounds.
+    pub(crate) max_payload_bytes: usize,
+    /// Digest of the exact canonical dense mapping.
+    pub(crate) mapping: String,
 }
 
 /// Compilation identity and files owned by the central RTI, never by a Federate.
@@ -862,6 +885,7 @@ fn validate_coordination(document: &DeploymentDocument) -> Result<()> {
             if document.rti.is_some()
                 || document.coordination.identity.is_some()
                 || document.coordination.protocol.is_some()
+                || document.coordination.wire.is_some()
             {
                 bail!("local coordination has unexpected RTI or protocol identity");
             }
@@ -886,6 +910,18 @@ fn validate_coordination(document: &DeploymentDocument) -> Result<()> {
                 .is_some_and(|protocol| !protocol.is_empty())
             {
                 bail!("central coordination requires an RTI protocol identity");
+            }
+            if let Some(wire) = &document.coordination.wire {
+                use boomerang_federated::wire::{
+                    CODEC_VERSION, MAX_PAYLOAD_BYTES, PROTOCOL_VERSION,
+                };
+                if wire.protocol != PROTOCOL_VERSION
+                    || wire.codec != CODEC_VERSION
+                    || wire.max_payload_bytes != MAX_PAYLOAD_BYTES
+                    || !is_lower_hex(&wire.mapping, 64)
+                {
+                    bail!("unsupported portable wire profile");
+                }
             }
             if rti.target.is_empty() {
                 bail!("RTI compilation target must not be empty");
@@ -913,6 +949,9 @@ fn validate_bundle(bundle: &Path, document: &DeploymentDocument) -> Result<()> {
     let mut federates = BTreeSet::new();
     for federate in &document.federates {
         validate_segment(&federate.id, "Federate")?;
+        if let Some(identity) = &federate.image_fingerprint {
+            validate_fingerprint(identity)?;
+        }
         if !federates.insert(federate.id.as_str()) {
             bail!("duplicate Federate record {}", federate.id);
         }
@@ -1212,6 +1251,31 @@ fn hash_open_file(file: &mut File) -> Result<String> {
 mod tests {
     use super::*;
 
+    /// Layered claims must be accepted and retained independently in bundle metadata.
+    #[test]
+    fn bundle_retains_federate_image_claim() {
+        let mut legacy = sample_document();
+        legacy.federates[0].image_fingerprint = None;
+        let mut value = serde_json::to_value(&legacy).unwrap();
+        assert!(value["federates"][0].get("image_fingerprint").is_none());
+        let decoded: DeploymentDocument = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(
+            deployment_fingerprint(&legacy).unwrap(),
+            deployment_fingerprint(&decoded).unwrap()
+        );
+        value["federates"][0]["image_fingerprint"] = serde_json::json!("ab".repeat(32));
+        let decoded: DeploymentDocument = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            decoded.federates[0].image_fingerprint.as_deref(),
+            Some("ab".repeat(32).as_str())
+        );
+        assert_ne!(
+            deployment_fingerprint(&legacy).unwrap(),
+            deployment_fingerprint(&decoded).unwrap()
+        );
+        assert_eq!(legacy.coordination, decoded.coordination);
+    }
+
     fn sample_document() -> DeploymentDocument {
         let mut document: DeploymentDocument = serde_json::from_value(serde_json::json!({
             "schema": 1,
@@ -1225,6 +1289,7 @@ mod tests {
             "bindings": [],
             "federates": [{
                 "id": "host",
+                "image_fingerprint": "66".repeat(32),
                 "groups": [],
                 "target": target_lexicon::HOST.to_string(),
                 "toolchain": null,
@@ -1255,6 +1320,7 @@ mod tests {
             backend: "central-rti".into(),
             protocol: Some("boomerang.coordination.v1".into()),
             identity: Some("55".repeat(32)),
+            wire: None,
         };
         document.rti = Some(RtiDocument {
             target: target_lexicon::HOST.to_string(),

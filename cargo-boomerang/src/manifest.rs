@@ -1,5 +1,6 @@
 use std::{collections::BTreeMap, path::PathBuf};
 
+use crate::{BoundedTracingLimits, BoundedTracingSettings};
 use anyhow::{anyhow, bail, Context, Result};
 pub use boomerang_builder::compiler::CoordinationBackend;
 pub use boomerang_runtime::image::{
@@ -80,13 +81,67 @@ pub struct Deployment<F = Federate> {
     pub rti: Option<Rti>,
     /// Deployment-wide execution behavior.
     pub execution: Option<ExecutionPolicy>,
+    /// Subscriber compiled into generated executables; not a runtime mode switch.
+    #[serde(default)]
+    pub tracing: TracingBackend,
+    /// Deployment defaults for bounded capture; only valid with `tracing = "bounded"`.
+    #[serde(rename = "bounded-tracing")]
+    pub bounded_tracing: Option<BoundedTracingSettings>,
     /// Cross-Federate boundary capabilities and explicit policies by stable boundary identity.
     #[serde(default)]
     pub boundaries: BTreeMap<String, Boundary>,
 }
 
+/// Deployment-wide build choice for generated launcher diagnostics.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub enum TracingBackend {
+    /// Install no subscriber and request no subscriber dependencies.
+    Off,
+    /// Native bounded coordination capture with shutdown export.
+    Bounded,
+    /// Hosted streaming formatter, filtered by `RUST_LOG` (off by default).
+    #[default]
+    Hosted,
+}
+
 impl Deployment<Federate> {
     fn validate(&self, name: &str) -> Result<()> {
+        let defaults =
+            BoundedTracingLimits::default().with_overrides(self.bounded_tracing.as_ref());
+        let validate = |path: &str, settings: Option<&BoundedTracingSettings>| {
+            if self.tracing != TracingBackend::Bounded {
+                if settings.is_some() {
+                    return Err(invalid_deployment(
+                        name,
+                        format!("{path}: requires tracing = \"bounded\""),
+                    ));
+                }
+                return Ok(());
+            }
+            defaults
+                .clone()
+                .with_overrides(settings)
+                .validate()
+                .map_err(|error| invalid_deployment(name, format!("{path}: {error}")))
+        };
+        validate("bounded-tracing", self.bounded_tracing.as_ref())?;
+        for (id, federate) in &self.federates {
+            validate(
+                &format!("federates.{id}.bounded-tracing"),
+                federate.bounded_tracing.as_ref(),
+            )?;
+        }
+        if let Some(rti) = &self.rti {
+            validate("rti.bounded-tracing", rti.bounded_tracing.as_ref())?;
+        }
+        for (instance, binding) in &self.bindings {
+            if let Some(component) = &binding.component {
+                validate_component_path(component).map_err(|error| {
+                    invalid_deployment(name, format!("bindings.{instance}.component: {error}"))
+                })?;
+            }
+        }
         match self.federates.len() {
             0 => {
                 return Err(invalid_deployment(
@@ -132,6 +187,20 @@ impl Deployment<Federate> {
     }
 }
 
+impl<F> Deployment<F> {
+    /// Resolves per-field process overrides over deployment and Boomerang defaults.
+    pub fn bounded_tracing_limits(
+        &self,
+        overrides: Option<&BoundedTracingSettings>,
+    ) -> Option<BoundedTracingLimits> {
+        (self.tracing == TracingBackend::Bounded).then(|| {
+            BoundedTracingLimits::default()
+                .with_overrides(self.bounded_tracing.as_ref())
+                .with_overrides(overrides)
+        })
+    }
+}
+
 /// Deployment-wide runtime behavior normalized at the manifest boundary.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
@@ -168,15 +237,69 @@ where
 pub struct Binding {
     /// Cargo package providing the selected implementation descriptor.
     pub package: String,
+    /// Public component module relative to the package's library root.
+    #[serde(default)]
+    pub component: Option<String>,
     /// Cargo features enabled while compiling that implementation descriptor.
     #[serde(default)]
     pub features: Vec<String>,
+}
+
+impl Binding {
+    /// Stable implementation selection, distinct from the logical instance identity.
+    pub(crate) fn implementation_id(&self) -> String {
+        self.component.as_ref().map_or_else(
+            || self.package.clone(),
+            |_| self.exported_path(&self.package).replace("r#", ""),
+        )
+    }
+
+    /// Resolves this component's public exports through a generated crate alias.
+    pub(crate) fn exported_path(&self, alias: &str) -> String {
+        self.component.as_ref().map_or_else(
+            || alias.to_owned(),
+            |component| {
+                let path: syn::Path =
+                    syn::parse_str(component).expect("component path is validated");
+                let module = path
+                    .segments
+                    .iter()
+                    .map(|segment| segment.ident.to_string())
+                    .collect::<Vec<_>>()
+                    .join("::");
+                format!("{alias}::{module}")
+            },
+        )
+    }
+}
+
+/// Accepts only relative Rust module paths, never expressions or generic arguments.
+fn validate_component_path(value: &str) -> Result<()> {
+    let path: syn::Path = syn::parse_str(value)
+        .map_err(|_| anyhow::anyhow!("expected a relative Rust module path"))?;
+    if path.leading_colon.is_some()
+        || path.segments.is_empty()
+        || path.segments.iter().any(|segment| {
+            !matches!(segment.arguments, syn::PathArguments::None)
+                || matches!(
+                    segment.ident.to_string().as_str(),
+                    "self" | "super" | "crate" | "Self"
+                )
+        })
+    {
+        return Err(anyhow::anyhow!(
+            "expected a relative Rust module path without generic arguments"
+        ));
+    }
+    Ok(())
 }
 
 /// Placement and Cargo build configuration for one Federate.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct Federate {
+    /// Per-field overrides of deployment bounded capture defaults.
+    pub bounded_tracing: Option<BoundedTracingSettings>,
     /// Stable placement groups assigned to the Federate.
     pub groups: Vec<String>,
     /// Optional Rust target triple; absence selects the host target.
@@ -235,6 +358,9 @@ pub struct Coordination {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Rti {
+    /// Per-field overrides of deployment bounded capture defaults.
+    #[serde(rename = "bounded-tracing")]
+    pub bounded_tracing: Option<BoundedTracingSettings>,
     /// Rust target triple for the coordinator artifact.
     pub target: String,
     /// Optional Cargo profile; absence selects Cargo's development profile.

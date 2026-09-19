@@ -1,8 +1,9 @@
 use std::fmt;
 
 /// A protocol tag independent of process-local clocks and architecture-sized integers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub enum WireTag {
     Never,
     Finite { offset_ns: i128, microstep: u64 },
@@ -28,6 +29,15 @@ impl WireTag {
         matches!(self, Self::Finite { .. })
     }
 
+    /// Returns the static kind name: `"never"`, `"finite"`, or `"forever"`.
+    pub const fn kind_str(self) -> &'static str {
+        match self {
+            Self::Never => "never",
+            Self::Finite { .. } => "finite",
+            Self::Forever => "forever",
+        }
+    }
+
     pub fn offset_ns(self) -> Option<i128> {
         match self {
             Self::Finite { offset_ns, .. } => Some(offset_ns),
@@ -39,6 +49,23 @@ impl WireTag {
         match self {
             Self::Finite { microstep, .. } => Some(microstep),
             Self::Never | Self::Forever => None,
+        }
+    }
+
+    /// Returns the greatest finite wire tag strictly before a finite bound.
+    ///
+    /// A zero microstep borrows one nanosecond and uses the largest wire microstep.
+    /// Sentinels are preserved; the smallest finite offset cannot wrap on subtraction.
+    pub fn checked_predecessor(self) -> Option<Self> {
+        match self {
+            Self::Never | Self::Forever => Some(self),
+            Self::Finite {
+                offset_ns,
+                microstep,
+            } if microstep != 0 => Some(Self::finite(offset_ns, microstep - 1)),
+            Self::Finite { offset_ns, .. } => offset_ns
+                .checked_sub(1)
+                .map(|offset| Self::finite(offset, u64::MAX)),
         }
     }
 
@@ -108,6 +135,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn kind_str_distinguishes_sentinels_from_finite_tags() {
+        for (tag, kind) in [
+            (WireTag::NEVER, "never"),
+            (WireTag::FOREVER, "forever"),
+            (WireTag::ZERO, "finite"),
+            (WireTag::finite(i128::MIN, 0), "finite"),
+            (WireTag::finite(i128::MAX, u64::MAX), "finite"),
+        ] {
+            assert_eq!(tag.kind_str(), kind);
+        }
+    }
+
+    #[test]
     fn wire_tags_order_sentinels_and_finite_tags() {
         assert!(WireTag::Never < WireTag::ZERO);
         assert!(WireTag::ZERO < WireTag::finite(0, 1));
@@ -141,6 +181,18 @@ mod tests {
             let encoded = serde_json::to_vec(&tag).unwrap();
             let decoded: WireTag = serde_json::from_slice(&encoded).unwrap();
             assert_eq!(decoded, tag);
+        }
+    }
+    #[test]
+    fn predecessor_bounds_superdense_tags_without_wrapping() {
+        for (tag, expected) in [
+            (WireTag::NEVER, Some(WireTag::NEVER)),
+            (WireTag::FOREVER, Some(WireTag::FOREVER)),
+            (WireTag::finite(50, 2), Some(WireTag::finite(50, 1))),
+            (WireTag::finite(50, 0), Some(WireTag::finite(49, u64::MAX))),
+            (WireTag::finite(i128::MIN, 0), None),
+        ] {
+            assert_eq!(tag.checked_predecessor(), expected);
         }
     }
 }

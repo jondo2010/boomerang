@@ -42,7 +42,8 @@ impl<'a, K: Key, V> TinyMapView<'a, K, V> {
     }
 
     /// Returns the value associated with `key`, if it is in range.
-    pub fn get(&self, key: K) -> Option<&V> {
+    /// The reference retains the backing slice's lifetime.
+    pub fn get(&self, key: K) -> Option<&'a V> {
         self.data.get(key.index())
     }
 
@@ -52,7 +53,8 @@ impl<'a, K: Key, V> TinyMapView<'a, K, V> {
     }
 
     /// Iterates over the values in dense key order.
-    pub fn values(&self) -> impl Iterator<Item = &V> {
+    /// The iterator borrows the backing slice independently of this view.
+    pub fn values(&self) -> impl Iterator<Item = &'a V> {
         self.data.iter()
     }
 
@@ -62,7 +64,8 @@ impl<'a, K: Key, V> TinyMapView<'a, K, V> {
     }
 
     /// Iterates over `(key, value)` pairs in dense key order.
-    pub fn iter(&self) -> impl Iterator<Item = (K, &V)> {
+    /// The iterator borrows the backing slice independently of this view.
+    pub fn iter(&self) -> impl Iterator<Item = (K, &'a V)> {
         self.data
             .iter()
             .enumerate()
@@ -133,6 +136,29 @@ mod tests {
             assert!(core::ptr::eq(&copy[TestKey::new(0)], &values[0]));
         }
         assert!(core::ptr::eq(&view[TestKey::new(0)], &values[0]));
+    }
+
+    #[test]
+    fn borrowed_references_and_iterators_outlive_view() {
+        let values = [10, 20, 30];
+        let (value, iter, values_iter) = {
+            let view = TinyMapView::<TestKey, _>::new(&values);
+            (
+                view.get(TestKey::new(1)).unwrap(),
+                view.iter(),
+                view.values(),
+            )
+        };
+        assert!(core::ptr::eq(value, &values[1]));
+        assert_eq!(
+            iter.collect::<Vec<_>>(),
+            [
+                (TestKey::new(0), &10),
+                (TestKey::new(1), &20),
+                (TestKey::new(2), &30)
+            ]
+        );
+        assert_eq!(values_iter.collect::<Vec<_>>(), [&10, &20, &30]);
     }
 
     #[test]

@@ -695,10 +695,12 @@ pub fn execute_enclaves(
     let schedulers = enclaves.filter_map(move |(enclave_key, enclave)| {
         if enclave.env.reactions.is_empty() {
             // If there are no reactions, there is nothing to do
-            tracing::info!("No reactions to execute for enclave {enclave_key:?}");
+            tracing::debug!(target: "boomerang::runtime",
+                event = "runtime.scheduler.skipped", enclave = enclave_key.as_u32(),
+                reason = "no_reactions",
+            );
             None
         } else {
-            tracing::info!("Starting scheduler for enclave {enclave_key:?}");
             Some(Scheduler::new(enclave_key, enclave, config.clone()))
         }
     });
@@ -761,6 +763,20 @@ mod tests {
 
     use super::*;
     use crate::{image::PortIndex, reaction_closure, ActionKey, Level, PortKey, Reaction, Reactor};
+
+    #[derive(Clone, Default)]
+    struct Captured(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Captured {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
 
     fn scheduler_recording_start_origin(
         seen_origin: Arc<Mutex<Option<std::time::Instant>>>,
@@ -834,6 +850,77 @@ mod tests {
             scheduler.try_next(),
             Err(RuntimeError::AsyncBoundaryPortUnsupported(key)) if key == boundary
         ));
+    }
+
+    #[test]
+    fn runtime_trace_uses_stable_scheduler_vocabulary_without_object_dumps() {
+        let captured = Captured::default();
+        let make_writer = {
+            let captured = captured.clone();
+            move || captured.clone()
+        };
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_level(false)
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(make_writer)
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            let (mut scheduler, _) = scheduler_recording_start_origin(Arc::new(Mutex::new(None)));
+            scheduler.try_event_loop().unwrap();
+
+            let enclave = Enclave::default();
+            let event_tx = enclave.event_tx.clone();
+            let mut scheduler = Scheduler::new(
+                EnclaveKey::from(1),
+                enclave,
+                Config::default().with_fast_forward(true),
+            );
+            event_tx
+                .send(AsyncEvent::shutdown(Duration::nanoseconds(1)))
+                .unwrap();
+            scheduler.try_event_loop().unwrap();
+        });
+
+        let output = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            output.contains(
+                "boomerang::runtime: event=\"runtime.scheduler.started\" enclave=0 tag_kind=\"finite\" tag_offset_ns=0 tag_microstep=0"
+            ),
+            "{output}"
+        );
+        assert!(
+            output.contains(
+                "boomerang::runtime: event=\"runtime.scheduler.waiting\" enclave=0 reason=\"empty_queue\""
+            ),
+            "{output}"
+        );
+        assert!(
+            output.contains(
+                "boomerang::runtime: event=\"runtime.event.admitted\" enclave=1 kind=\"shutdown\" tag_kind=\"finite\" tag_offset_ns=0 tag_microstep=0"
+            ),
+            "{output}"
+        );
+        assert!(
+            output.contains("event=\"runtime.scheduler.tag_processed\" enclave=0 tag_kind=\"finite\" tag_offset_ns=0 tag_microstep=0 terminal=true network_input=false"),
+            "{output}"
+        );
+        assert!(
+            output.contains("event=\"runtime.scheduler.stopped\" enclave=0 tag_kind=\"finite\" tag_offset_ns=0 tag_microstep=0 processed_tags=1 processed_reactions=0 processed_events=0"),
+            "{output}"
+        );
+        for legacy in [
+            concat!("boomerang_runtime", "::sched"),
+            "try_event_loop",
+            "event=Shutdown",
+            "Stats {",
+            "reactor=",
+            "reaction=",
+        ] {
+            assert!(!output.contains(legacy), "found {legacy:?} in {output}");
+        }
     }
 }
 

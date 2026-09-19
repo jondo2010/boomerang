@@ -3,12 +3,63 @@
 This note describes the current compiled `central-rti` coordination backend.
 Its requests and replies are defined in
 [compiled/mod.rs](../boomerang_central_rti/src/compiled/mod.rs), state transitions
-in [compiled/state.rs](../boomerang_central_rti/src/compiled/state.rs), and runtime
+in [compiled/state/mod.rs](../boomerang_central_rti/src/compiled/state/mod.rs), and runtime
 integration in [compiled/client.rs](../boomerang_central_rti/src/compiled/client.rs).
 See [runtime internals](./federated-runtime.md) for crate ownership.
 
 The hosted framing is experimental and versioned. It is not a stable public
 protocol or a guarantee of compatibility between Boomerang versions.
+
+## Canonical bounded protocol
+
+[`boomerang_federated::wire`](../boomerang_federated/src/wire.rs) defines the transport-independent
+protocol consumed by the hosted Tokio TCP adapter. The canonical codec owns no I/O,
+queues, reliability, grant decisions, or executor. It borrows caller-owned buffers and immutable
+member/route tables, preserving their actual typed key domains.
+
+A complete frame starts with a big-endian `u32` body length, followed by a Serde-derived
+Postcard record: zero flags, then record discriminant 0 (handshake) or 1 (traffic).
+The handshake fields are protocol `u16`, codec `u16`, coordination `[u8;32]`, epoch `u64`,
+incarnation `u64`, mapping `[u8;32]`, and borrowed member text, in that order. Traffic contains
+zero epoch/incarnation values followed by the derived message enum. Nonzero reserved fields fail closed.
+Postcard uses minimal unsigned varints, ZigZag signed integers, and varint string/byte lengths.
+Tags encode Never=0, finite=1 plus `i128` nanoseconds and `u64` microstep, or Forever=2; no padding.
+
+The message envelope encodes direction (`Request=0`, `Reply=1`), followed by its record discriminant:
+
+| Direction / record | Fields after the discriminant |
+| --- | --- |
+| Request 0 publish / NET | Revision `u64`, optional tag. |
+| Request 1 complete / LTC | Tag. |
+| Request 2 payload; Reply 2 payload | Route `u32`, tag, borrowed payload bytes. |
+| Request 3 confirm idle; Reply 3 idle | Revision `u64`. |
+| Request 4 stop; Reply 0 started; Reply 4 stopped | Empty. |
+| Request 5 abort; Reply 5 failed | Borrowed diagnostic text. |
+| Reply 1 grant / TAG | Revision `u64` and tag. |
+| Reply 6 suppress publication / DNET | Tag. |
+
+PTAG and port ABS have no admitted record in this profile; unknown discriminants are rejected.
+
+Participants always upgrade atomically as a closed world. Protocol, codec, and fingerprint
+matching are exact; there is no backward-compatible decoder or version negotiation. Canonical
+re-serialization is compared directly against input bytes using a Postcard sink; it allocates no buffer.
+
+The baseline profile permits at most 65,535 encoded payload bytes, 1,024 diagnostic bytes,
+255 member-name bytes, and 65,582 total frame bytes. These are encoded-message limits, not
+scheduler aggregate storage bounds. Both endpoints match the same compiled channel member, coordination,
+protocol, codec, and mapping before interpreting route references. The RTI echoes the channel's
+Federate identity; it does not acquire an invented Federate key. The hosted adapter enforces
+upstream/downstream message direction before dispatch. Unknown routes, wrong route
+ownership, malformed or trailing bytes, and protocol errors terminate the session. Stable names
+appear only during preflight; normal route resolution uses the borrowed typed table.
+
+[`PostcardCodec`](../boomerang_federated/src/wire/payload.rs) derives value encoding through Serde
+and Postcard 1.x: minimal integer varints, ZigZag signed integers, little-endian IEEE floats,
+and UTF-8 strings. Supported values are sealed allocation-free scalars, borrowed strings/bytes,
+fixed arrays, and pairs. Architecture-sized integers and allocating collections are excluded.
+Each codec declares a compile-time maximum. Decoding checks the byte limit before deserialization,
+requires exact consumption, and re-encodes into caller scratch to reject alternate encodings.
+The original Postcard error remains available until the hosted adapter normalizes it.
 
 ## Participants, images, and transport
 
@@ -27,16 +78,15 @@ any execution. Subsequent `RtiRouteIndex` values belong to that admitted image;
 they are not process-local Enclave route keys. Socket arrival order does not
 establish membership.
 
-[compiled/hosted.rs](../boomerang_central_rti/src/compiled/hosted.rs) implements
-bounded binary frames with a big-endian `u32` length prefix, explicit fixed-width
-fields, a one-MiB frame limit, and bounded queues. JSON is an application payload
-codec, not the control-frame encoding. The transport uses nonblocking socket I/O
-and deadlines without a Tokio runtime. In-memory transport exercises the same
+[compiled/hosted/mod.rs](../boomerang_central_rti/src/compiled/hosted/mod.rs) implements
+the canonical bounded frames described above and bounded queues. JSON is an application payload
+codec, not the control-frame encoding. The transport uses Tokio asynchronous socket I/O,
+deadlines, cancellation, and task supervision. In-memory transport exercises the same
 ordered interfaces for testing and reference execution only.
 
 ## Tags and delays
 
-The pure `boomerang_federated` crate contains `WireTag` and `WireDelay` only.
+The portable `boomerang_federated` crate also owns `WireTag` and `WireDelay`.
 `WireTag` orders `Never` before finite `{ offset_ns, microstep }` tags and
 `Forever` after them. Executable events use finite nonnegative tags. Checked
 conversions preserve sentinels and reject runtime or wire values outside the
@@ -65,7 +115,8 @@ apply the route delay once; payload requests carry the final destination tag.
 | Reply | Meaning |
 | --- | --- |
 | `Started` | All expected artifacts passed identity admission. |
-| `Grant { revision, tag }` | Authorize the named publication at its requested tag. |
+| `Grant { revision, tag }` | Authorize execution through a safe horizon for the named publication. |
+| `SuppressPublication { tag }` | Advise that NET reports through this tag are unnecessary, subject to already accepted grant authority. |
 | `Payload { route, tag, payload }` | Deliver a value through the preflighted local inbound adapter. |
 | `Idle { revision }` | Authorize global quiescence for this local-idle revision. |
 | `Stopped` | Acknowledge this member's terminal stop. |
@@ -73,29 +124,82 @@ apply the route delay once; payload requests carry the final destination tag.
 
 ## Definitive grants
 
+The RTI implements safe-horizon grants from the
+[efficient centralized coordination algorithm](deployment-architecture.md#efficient-centralized-coordination).
+NET and cumulative LTC reports are selective; local progress and completion remain eager.
+
 Each member has a publication, completed and granted frontiers, lifecycle state,
-and a set of distinct incoming tags not yet covered by completion. Multiple
-payloads at one tag occupy one set entry. The earliest possible upstream work is
-the minimum of its publication and earliest in-transit tag. Before publication
-it is `Never`; a locally idle publication contributes `Forever`, but incoming
-payloads still constrain it.
+and a sorted, preallocated collection of distinct incoming tags not yet covered by completion.
+The compiler derives its capacity by summing the member's lowered Enclave event capacities
+with checked arithmetic. The capacity is part of the coordination fingerprint. Multiple
+payloads at one tag occupy one entry; cumulative completion retires all entries through
+its tag. A new distinct tag at capacity fails the session before forwarding the payload.
 
-For a finite requested tag, `CompiledRti` uses precomputed bounds:
+The earliest possible upstream work is the minimum of its publication and earliest
+in-transit tag. Before publication it is `Never`; a locally idle publication contributes
+`Forever`, but incoming payloads still constrain it.
 
-1. Check every direct upstream completion shifted by its edge delay. A zero-delay
-   bound covers an equal requested tag. A positive-delay bound must be strictly
-   later: later source microsteps at the same offset collapse onto the same
-   destination tag after positive delay.
-2. If those completion bounds do not establish safety, require every transitive
-   upstream earliest-work bound, shifted by its minimum cumulative delay, to be
-   strictly later than the request.
-3. Grant the requested tag and publication revision only when one of those
-   proofs succeeds. A member with no upstream dependencies can proceed directly.
+For a finite requested tag, `CompiledRti` computes two independent safe horizons:
 
-Accepted requests reconsider the sender and its compiler-projected affected
-members. Completion clears in-transit bounds and may therefore release a
-previously blocked downstream request. Topology analysis and zero-delay-cycle
-rejection remain compiler responsibilities.
+1. The completion horizon is the minimum direct upstream completion shifted by its
+   edge delay. A zero-delay bound includes that tag. A positive-delay bound uses its
+   predecessor because later source microsteps collapse onto the same destination tag.
+2. The earliest-input horizon is the predecessor of the minimum transitive upstream
+   earliest-work bound shifted by its minimum cumulative delay.
+
+The grant horizon is the maximum of these proofs and the member's retained grant.
+An empty minimum is `Forever`. Completion can tighten a conservative earliest-input
+bound when a NET report is stale. Authority never decreases. The RTI replies when the
+horizon covers the request, including every new publication revision; for the same
+revision it sends only a strictly extended horizon.
+
+The runtime retains accepted authority and releases later covered candidates after
+their revised publication crosses the local mailbox and backend publication fence.
+It does not wait for another RTI grant for these candidates. A reply for an obsolete
+revision cannot release work; a current-revision extension can release waiting sibling
+Enclaves. Grant conversion floors unsupported finite bounds conservatively, while event
+conversion remains exact and finite authority never becomes `Forever`.
+
+Accepted requests reconsider the sender and its compiler-projected affected members.
+Completion clears in-transit bounds and may therefore extend a downstream horizon.
+Topology analysis and zero-delay-cycle rejection remain compiler responsibilities.
+
+## Selective progress reports
+
+The Rust API uses descriptive message names while retaining the source algorithm's terminology:
+
+| Rust message | Source algorithm term |
+| --- | --- |
+| `Publish` | Next Event Tag (NET) |
+| `Complete` | Latest Tag Complete (LTC) |
+| `SuppressPublication` | Downstream Next Event Tag (DNET) |
+
+For each member, DNET is the minimum over its other transitive downstream members of
+`subtract_delay(earliest_work, minimum_path_delay)`. Zero delay preserves the tag. A positive
+delay maps a finite `(t, microstep)` to `(t - delay, u64::MAX)`; a negative result is `Never`.
+`Never` and `Forever` remain explicit sentinels. Self paths are excluded, and zero-delay
+cycles are rejected during compilation. The RTI sends a changed bound when it can suppress
+reports or when tightening revokes previous advice. Tightenings also reach idle members: a member may wake using earlier advice,
+including a DNET still in flight when it published no future event. Increases are sent
+only when useful for a finite NET.
+
+The client initially uses `Never`. It suppresses a finite NET only when both DNET and the
+runtime's accepted grant horizon cover the candidate. It retains the latest skipped tag and
+revision, and submits that NET when DNET tightens below it. Payload submission tightens the
+local DNET to the destination tag under the same lock used for the suppression decision.
+No-future publications and lifecycle reports are always sent. Grants retain their original
+wire revision: stale replies are still rejected, and the first candidate outside accepted
+authority requires a fresh NET even when DNET would otherwise allow suppression.
+
+A network boundary marks its existing scheduled event. Processing that event, including its
+resulting output, creates a cumulative completion obligation; decoding and queueing it does
+not. Same-tag merges preserve the marker, including inputs with no active reaction. Local
+routes do not set it. The Federate's existing completion fence waits for every Enclave before
+confirming a frontier. A constant-space range retains processed-input obligations when an
+Enclave runs ahead; intermediate frontiers can conservatively produce an extra LTC until the
+range is covered. No second incoming-event queue is maintained. A sent LTC discards any
+skipped NET at or before its completed tag, preventing delayed DNET advice from restoring a
+completed publication.
 
 ## Ordered payload admission
 
@@ -114,7 +218,7 @@ sequenceDiagram
     R->>C: Payload(route, final tag, bytes)
     C->>T: decode and admit at final tag
     S->>R: Complete(source tag)
-    R->>C: Grant(revision, requested tag)
+    R->>C: Grant(revision, safe horizon)
     C->>T: grant acquisition
     T->>R: Complete(target tag), through client
 ```

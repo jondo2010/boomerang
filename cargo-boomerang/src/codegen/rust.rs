@@ -18,10 +18,55 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use tinymap::{IndexSpan, SliceRange};
 
-use crate::{codegen::LauncherCapabilities, manifest::ExecutionPolicy, DriverOutput};
+use crate::{
+    codegen::LauncherCapabilities,
+    manifest::{ExecutionPolicy, TracingBackend},
+    DriverOutput,
+};
+
+/// Emits only the initialization for the selected build-time backend.
+pub(super) fn render_tracing_init(
+    backend: TracingBackend,
+    limits: Option<&crate::BoundedTracingLimits>,
+) -> TokenStream {
+    match backend {
+        TracingBackend::Off => quote! {},
+        TracingBackend::Hosted => quote! {
+            let _tracing_guard = boomerang_util::launcher::init_tracing();
+        },
+        TracingBackend::Bounded => {
+            let limits = limits.expect("analyzed bounded launchers have resolved limits");
+            let level = format_ident!("{}", limits.level.to_string().to_ascii_uppercase());
+            let targets = &limits.targets;
+            let [records, fields, bytes, spans, span_fields, span_bytes, producers, depth] = [
+                limits.records,
+                limits.fields,
+                limits.bytes,
+                limits.spans,
+                limits.span_fields,
+                limits.span_bytes,
+                limits.producers,
+                limits.depth,
+            ]
+            .map(proc_macro2::Literal::u32_unsuffixed);
+            quote! {
+                let _tracing_guard = boomerang_util::launcher::init_bounded_tracing(
+                    boomerang_util::launcher::BoundedTracingConfig {
+                        level: boomerang_util::launcher::LevelFilter::#level,
+                        targets: &[#(#targets),*],
+                        records: #records, fields: #fields, bytes: #bytes,
+                        spans: #spans, span_fields: #span_fields, span_bytes: #span_bytes,
+                        producers: #producers, depth: #depth,
+                        ..Default::default()
+                    }
+                )?;
+            }
+        }
+    }
+}
 
 /// Validates and deterministically formats one complete generated Rust file.
-pub(super) fn format_rust(tokens: TokenStream) -> Result<String> {
+pub(crate) fn format_rust(tokens: TokenStream) -> Result<String> {
     let file = syn::parse2(tokens).context("generated Rust syntax is invalid")?;
     Ok(prettyplease::unparse(&file))
 }
@@ -32,9 +77,12 @@ pub(super) fn render_launcher(
     slice: &FederateSlice<'_>,
     aliases: &BTreeMap<String, String>,
     execution: &ExecutionPolicy,
+    tracing: TokenStream,
     coordination: Option<TokenStream>,
     capabilities: LauncherCapabilities,
 ) -> Result<String> {
+    let fingerprint = super::fingerprints::federate_image(slice, driver.bindings())?;
+    let fingerprint_bytes = fingerprint.as_bytes().iter();
     let distributed = coordination.is_some();
     let enclaves = slice.enclaves();
     let mut route_bindings = BTreeMap::new();
@@ -62,9 +110,7 @@ pub(super) fn render_launcher(
             )))
         },
     );
-    let init_tracing = capabilities
-        .hosted
-        .then(|| quote!(boomerang_util::launcher::init_tracing();));
+    let init_tracing = capabilities.hosted.then_some(tracing);
     let write_execution_summary = capabilities
         .hosted
         .then(|| quote!(boomerang_util::launcher::write_execution_summary(&execution)?;));
@@ -83,9 +129,10 @@ pub(super) fn render_launcher(
             let address = std::env::var("BOOMERANG_RTI_ADDRESS")
                 .map_err(|_| "BOOMERANG_RTI_ADDRESS is required for central-rti execution")?
                 .parse()?;
-            let view = RtiImageView::new(&COORDINATION_IMAGE, COORDINATION_MEMBERS)?;
-            let rti_bindings = RtiClientBindings::from_image(&view, FEDERATE, COORDINATION_IDENTITY)?;
-            let connection = hosted::connect(address, FEDERATE_IMAGE.id().as_str(), timeout)?;
+            let view = RtiImageView::new(COORDINATION_IMAGE, COORDINATION_MEMBERS)?;
+            let rti_bindings = RtiClientBindings::from_image(view, FEDERATE, COORDINATION_IDENTITY)?;
+            let _execution_span = rti_bindings.execution_span().entered();
+            let connection = hosted::connect(address, FEDERATE, wire_contract(), timeout)?;
             let sink = connection.sink();
             let bindings = generated_bindings(&rti_bindings, sink.clone())?;
             let execution = boomerang_runtime::execute_owned_federate_with_backend(
@@ -96,7 +143,7 @@ pub(super) fn render_launcher(
     } else {
         quote! {
             let execution = boomerang_runtime::execute_owned_federate(
-                &DEPLOYMENT, FEDERATE, generated_bindings(), #config,
+                DEPLOYMENT, FEDERATE, generated_bindings(), #config,
             )?;
         }
     };
@@ -124,6 +171,9 @@ pub(super) fn render_launcher(
                 .expect("generated state initializer and reaction must agree")
         }
 
+        /// Identity of this executable's scheduler image and local binding requirements.
+        pub const FEDERATE_IMAGE_FINGERPRINT: boomerang_federated::wire::FederateImageFingerprint =
+            boomerang_federated::wire::FederateImageFingerprint::new([#(#fingerprint_bytes),*]);
         #compatibility_checks
         #(#enclave_images)*
         #deployment
@@ -135,6 +185,15 @@ pub(super) fn render_launcher(
     Ok(format!(
         "// @generated by cargo-boomerang; do not edit.\n{formatted}"
     ))
+}
+
+/// Serializes the actual local scheduler tables through the canonical image renderer.
+pub(super) fn image_fingerprint_input(slice: &FederateSlice<'_>) -> Result<String> {
+    let mut tables = render_deployment(slice, false);
+    for (index, enclave) in slice.enclaves().iter().enumerate() {
+        tables.extend(enclave.with_image(|image| render_enclave_image(index, &image)));
+    }
+    format_rust(tables)
 }
 
 /// Emits independent const checks for every selected descriptor/payload pair.
@@ -154,15 +213,21 @@ fn render_compatibility_checks(
             .fingerprint()
             .to_bytes();
         let bytes = bytes.iter();
-        let alias = rust_ident(alias, "crate alias")?;
+        let alias: syn::Path =
+            syn::parse_str(alias).context("invalid generated component export path")?;
         let abi = descriptor.macro_abi();
+        let manifest = if alias.segments.len() > 1 {
+            quote!(#alias::__boomerang::binding_manifest())
+        } else {
+            quote!(#alias::__boomerang::BINDING_MANIFEST)
+        };
         checks.extend(quote! {
             const _: () = boomerang_runtime::binding::assert_descriptor_fingerprint(
                 boomerang_runtime::binding::DescriptorFingerprint::new([#(#bytes),*]),
-                #alias::__boomerang::BINDING_MANIFEST.descriptor_fingerprint(),
+                #manifest.descriptor_fingerprint(),
             );
             const _: () = assert!(
-                #abi == #alias::__boomerang::BINDING_MANIFEST.macro_abi(),
+                #abi == #manifest.macro_abi(),
                 "macro ABI mismatch",
             );
         });
@@ -341,7 +406,7 @@ fn render_deployment(slice: &FederateSlice<'_>, include_local_deployment: bool) 
         quote!(
             static FEDERATES: [FederateImage; 1] = [FEDERATE_IMAGE];
             static FEDERATION_MEMBERS: [FederateIndex; 1] = [FEDERATE];
-            static DEPLOYMENT: CompiledDeploymentImage<'static> = CompiledDeploymentImage {
+            const DEPLOYMENT: CompiledDeploymentImage<'static> = CompiledDeploymentImage {
                 federation: GlobalFederationImage::new(&FEDERATION_MEMBERS, &[]),
                 federates: TinyMapView::new(&FEDERATES),
                 enclaves: TinyMapView::new(&ENCLAVES),
@@ -416,7 +481,8 @@ fn rust_ident(value: &str, role: &str) -> Result<syn::Ident> {
 
 /// Renders a generated payload binding path from validated identifier segments.
 fn binding_path(alias: &str, symbol: &str) -> Result<TokenStream> {
-    let alias = rust_ident(alias, "crate alias")?;
+    let alias: syn::Path =
+        syn::parse_str(alias).context("invalid generated component export path")?;
     let symbol = rust_ident(symbol, "binding symbol")?;
     Ok(quote!(#alias::__boomerang::#symbol))
 }

@@ -21,6 +21,7 @@
 //! that state is private to image materialization. It must not leak back into semantic models.
 #![deny(missing_docs)]
 
+mod authoring;
 mod compiled;
 mod coordination;
 mod debug;
@@ -36,6 +37,10 @@ mod packed;
 /// Canonical implementation and placement resolution.
 mod resolved;
 
+pub use authoring::{
+    ComponentDefinition, ComponentTopology, TopologyAuthoringError, TopologyBuilder,
+    TopologyEnclave, TopologyInput, TopologyOutput,
+};
 pub use compiled::{
     direct_binding_symbol, CompiledDeploymentValidationError, FederateSlice, GlobalFederationImage,
     OwnedCompiledDeployment, OwnedEnclaveImage, OwnedFederateImage, RequiredBinding,

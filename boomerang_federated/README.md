@@ -1,9 +1,16 @@
 # boomerang_federated
 
-Portable `WireTag` and `WireDelay` primitives for compiled Boomerang coordination.
-Tags use explicit infinity sentinels, nanosecond offsets, and architecture-independent
-microsteps. Checked delay arithmetic preserves zero-delay microsteps and resets them
-for positive delays. The optional `serde` feature enables serialization.
+Portable `WireTag`, `WireDelay`, bounded canonical frames, and payload codecs for
+compiled Boomerang coordination. Tags use explicit infinity sentinels, nanosecond
+offsets, and architecture-independent microsteps. Tag serialization and canonical wire codecs are
+unconditional; the `serde` feature additionally enables `WireDelay` serialization.
 
-This pure crate owns no topology, session state, payload codec, transport, or scheduler.
-Compiled central coordination and its hosted transports live in `boomerang_central_rti`.
+`wire` borrows caller-owned buffers and compiled typed member/route tables. Its
+session admits an exact closed-world channel profile before dense references and
+fails closed on errors. `PostcardCodec` supports sealed allocation-free values,
+with compile-time encoded limits and caller scratch for canonical validation.
+
+The crate owns no topology, sockets, queues, RTI grant state, or scheduler.
+Hosted I/O and task orchestration belong to `boomerang_central_rti`. The wire
+algorithms allocate no storage; making all dependencies `no_std` remains Phase 7.
+See [the protocol](../docs/federated-protocol.md) for the wire format and bounds.

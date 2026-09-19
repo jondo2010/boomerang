@@ -295,8 +295,13 @@ site.
 
 ## Dual-facet component packages
 
-A deployment-capable component implementation is a Cargo package in the application workspace. The
-Boomerang macros generate two mutually exclusive facets from one source declaration.
+A deployment-capable component implementation is a Cargo package in the application workspace.
+Each implementation owns its reactor source and helpers; topology packages consume its public API
+through an ordinary Cargo dependency rather than including source files. A package declares a
+named implementation with `component! { pub mod name { ... } }`. The module contains exactly one
+`#[reactor]` declaration plus any implementation-owned helpers, and the package may expose several
+such named modules. The Boomerang macros generate two mutually exclusive facets from each named
+source declaration.
 
 The Cargo package is the minimum strict-slicing unit. Code that must be independently placed or
 compiled for incompatible targets must live in separate packages. One package may expose multiple
@@ -341,9 +346,12 @@ wrappers do not define a separate graph or lowering path.
 
 ### Build mode
 
-`cargo-boomerang` selects a reserved, tool-owned descriptor or payload build mode through separate
-Cargo invocations. The mode is not a Federate feature and does not encode placement. Enabling both
-facets is an error.
+`cargo-boomerang` selects a tool-owned descriptor or payload build mode through separate Cargo
+invocations using `cfg(boomerang_facet = "descriptor")` or
+`cfg(boomerang_facet = "payload")`. The mode is not a user Cargo feature, is not declared in the
+component manifest, and does not encode placement. Selecting both facets is an error. With neither
+facet selected, the same named module is the hosted authoring API used by topology crates and local
+composition tests.
 
 Target dependencies must be absent from descriptor mode through generated `cfg` boundaries and
 Cargo dependency configuration. Deployment-capable reaction and topology declarations must use
@@ -411,10 +419,12 @@ entry = "vehicle::topology"
 
 [deployments.production.bindings."vehicle/sensor"]
 package = "sensor-stm32"
+component = "sensor"
 features = ["board-a"]
 
 [deployments.production.bindings."vehicle/controller"]
 package = "vehicle-control"
+component = "controller"
 
 [deployments.production.federates.sensor-edge]
 groups = ["sensor"]
@@ -533,8 +543,21 @@ features, Cargo lock resolution, placement-group mapping, target/runtime configu
 coordination backend and protocol version, compiler schema versions, descriptor fingerprints, and
 generated global/per-Federate images.
 
-All Federates and any separate coordinator artifact in one running deployment embed and present the
-same deployment fingerprint. Participants reject mismatches before coordinated execution begins.
+This whole-bundle fingerprint identifies reproducible build inputs and publication. It is not the
+peer-admission identity. Phase 6 refines the earlier shared deployment identity into three layers:
+
+- The **coordination fingerprint** covers shared boundary contracts, protocol and codec versions,
+  canonical dense wire mappings, coordination projection, and shared policies. Every participant
+  must present the same value before dense references or payloads are admitted.
+- Each **Federate-image fingerprint** covers its own compiled scheduler image, local bindings,
+  and storage bounds. Different Federates normally have different fingerprints.
+- Each **artifact digest** hashes the exact produced executable bytes. It is checked by hosted
+  bundle validation, not used as a common peer-compatibility value.
+
+Changes to local implementation internals do not by themselves change shared compatibility.
+Canonical wire table positions are part of the coordination fingerprint; scheduler-local keys
+remain local to their image. This specializes the compatibility model in the
+[federated deployment roadmap](./federated-deployment-roadmap.md#heterogeneous-wire-and-compatibility-model).
 
 The fingerprint is a consistency and compatibility mechanism, not authentication or
 authorization. A secure deployment must authenticate peers and protect configuration through a
@@ -712,6 +735,54 @@ RTI graph and one persistent ordered client connection per Federate. A future `p
 deployment uses only its generated direct-peer routes and backend-specific coordination tables.
 Same-Federate Enclaves never communicate through a federation coordination backend.
 
+### Efficient centralized coordination
+
+The `central-rti` baseline follows the algorithm in [Improving the Efficiency of Coordinating
+Timed Events in Distributed Systems](https://doi.org/10.1145/3726301.3728399). Each Federate sends
+payloads through the RTI over its reliable ordered channel. The RTI records incoming tag
+obligations before forwarding payloads, and orders each destination's payloads before grants
+that depend on them. The destination admits those payloads before making the grants effective.
+
+The RTI computes the earliest incoming message tag (`EIMT`) from compiled minimum-delay paths,
+participant progress, and outstanding incoming tags. New progress publications cannot hide an
+earlier in-transit message. Safe-horizon grants extend to the latest representable tag strictly
+before `EIMT`, subject to stop and lifecycle constraints. A Federate can execute multiple local
+events within that horizon without a control round trip for each event. Tag predecessor and
+delay calculations preserve checked arithmetic and explicit `Never`/`Forever` semantics.
+
+Downstream next-event bounds (`DNET`) suppress a Federate's next-event reports (`NET`) when the
+algorithm establishes that downstream participants do not need them and the Federate already has
+grant authority to proceed. A Federate retains its latest skipped report, sends the necessary
+update when `DNET` tightens, and updates its local bound when sending payloads. Suppression changes
+wire traffic; local publication revisions and scheduler progress still advance consistently.
+
+Latest Tag Complete (`LTC`) reports cumulative completion through a tag and retires incoming
+obligations through that tag. Send it after completion of a tag that executed a network-input
+reaction, including resulting outputs and completion across the Federate's Enclaves. Receiving a
+payload into a future-event queue does not establish completion. Local completion tracking
+continues even when an external report is unnecessary. Lifecycle reporting remains independent.
+There is no per-payload application receipt or permission exchange and no duplicate receiver-side
+in-transit queue solely for deciding whether to send `LTC`.
+
+In-transit state and transport storage have explicit deployment resource bounds. Saturation must
+either preserve progress for completion and control traffic or produce a bounded declared failure;
+it must never lose an outstanding obligation or block the sole reader waiting for the completion
+report that would release capacity. Transport reliability remains the transport's responsibility.
+Protocol transitions must remain safe under delayed reports and cross-participant interleavings;
+they cannot assume that related `LTC` and `NET` reports arrive nearly simultaneously. Stale `NET`
+values must not regress grants or deadlock shutdown. Unexpected link loss does not authorize a
+terminal horizon as though an upstream Federate had permanently and normally resigned.
+
+These efficiency rules apply to the supported graph class outside zero-delay cycles, including
+positive-delay cycles. Constructive zero-delay coordination requires its own `PTAG`/`ABS` analysis
+and conformance evidence before any efficiency rule is enabled within those components.
+
+Direct payload routing under central RTI authority is deferred to a measured optimization with
+its own safety proof. It must preserve conservative message accounting and prevent effective
+grants from overtaking payload admission on a separate channel. Neither direct routing nor an
+extra per-send control exchange is required by the efficient centralized baseline. The separate
+future `peer-to-peer` coordination backend remains subject to the shared logical-time guarantees.
+
 ## Recording and replay
 
 ### Recording point
@@ -818,11 +889,11 @@ for `central-rti`, it launches the generated RTI followed by independent Federat
 future peer-to-peer runner launches the Federates without an RTI. It supervises startup, logs,
 coordinated shutdown, and exit status. It rejects non-host-runnable artifacts.
 
-The initial hosted projection uses `boomerang.compiled-hosted.v1` framing over TCP and the
-`serde-json` payload capability. This is the Phase 5 process transport; the canonical compact
-protocol and broader capability set remain Phase 6 work. A domain-separated coordination digest
-covers the rendered immutable coordination tables, compiler schema, protocol and compatibility
-descriptors. All artifacts embed the same digest. Stable member names are resolved once during
+The hosted projection uses `boomerang.canonical.v1` framing over TCP and the declared
+`serde-json` payload capability. Frames use the portable Serde/Postcard envelope and an exact
+echoed handshake before typed routes are admitted. The shared coordination digest covers
+canonical mappings, analyzed dependencies, declared boundary contracts, versions, and policies.
+Local image fingerprints are separate. Stable member names are resolved once during
 admission; payload exchanges carry typed `RtiRouteIndex` values, never boundary strings.
 `RtiImageView` validates the coordinator's borrowed tables without requiring scheduler images.
 The RTI crate owns transport I/O, while `cargo-boomerang` owns filesystem publication and child
@@ -831,7 +902,19 @@ processes. The in-memory transport remains solely a testing/reference implementa
 For hosted `run`, readiness uses a private loopback connection with a ten-second deadline.
 Federates start only after the RTI reports its bound data address. Admission, partial frames,
 stalled writes and terminal flushing have ten-second bounds; healthy inactive sessions may wait
-indefinitely. Frames are limited to one MiB and queues to sixteen frames per stage. The supervisor
+indefinitely. Complete frames are limited to 65,583 bytes and opaque payloads to 65,535 bytes.
+Each stage uses a bounded Tokio channel with sixteen entries; payload semaphore permits
+limit queued payloads to twelve, reserving four entries for coordination. Each transfer and
+writer retains at most one additional frame; writers flush before taking another. Standard
+framed buffers retain allocation capacity; wire limits bound records rather than exact allocator
+overhead. Accepted traffic remains FIFO, so completion and grants cannot overtake preceding
+payloads. Synchronous submission fails closed on queue exhaustion; async transfers await capacity
+within their original deadline. The link preserves the original failure.
+The hosted adapter uses Tokio tasks and `FramedRead`/`FramedWrite` over TCP. Only synchronous
+scheduler owners wait on the reply bridge or join worker threads. Cancellation closes admission
+and bounds terminal output, receive draining, and task joins by one shared deadline. TCP owns
+retransmission, ordering, duplicate suppression and segmentation; the adapter adds canonical
+framing validation and operation deadlines without a second retry protocol. The supervisor
 allows ten seconds for peers to exit after the first successful child exit, or one second after a
 failure, then kills outstanding children and reaps all of them. It forwards application streams,
 returns a failing child status, and exports a summary only when every child succeeds (saturated
@@ -992,7 +1075,7 @@ runnable proof, and compatibility decision.
   algorithm.
 - Recording captures scheduler-admitted logical boundary events, not RTI control traffic or runtime
   keys.
-- Deployment fingerprints establish peer compatibility; boundary-contract fingerprints establish
+- Coordination fingerprints establish peer compatibility; boundary-contract fingerprints establish
   recording compatibility.
 - Unsupported topology, resource, or target semantics are rejected during the earliest phase that
   has enough information to prove the error.

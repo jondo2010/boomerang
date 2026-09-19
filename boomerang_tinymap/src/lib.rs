@@ -7,7 +7,7 @@
 #[cfg(feature = "alloc")]
 #[macro_use]
 pub extern crate alloc;
-#[cfg(test)]
+#[cfg(any(feature = "std", test))]
 extern crate std;
 
 mod error;

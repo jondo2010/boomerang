@@ -128,7 +128,7 @@ impl<T, B> TinyVecBuilder<T, B> {
         }
 
         let mut actual = expected;
-        for extra in values {
+        for extra in values.by_ref() {
             actual = actual.saturating_add(1);
             drop(extra);
         }
@@ -532,6 +532,42 @@ mod tests {
         }
     }
 
+    struct PanicOnDropExact {
+        values: core::array::IntoIter<u16, 2>,
+    }
+
+    impl PanicOnDropExact {
+        fn new() -> Self {
+            Self {
+                values: [10, 20].into_iter(),
+            }
+        }
+    }
+
+    impl Iterator for PanicOnDropExact {
+        type Item = u16;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            self.values.next()
+        }
+
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            self.values.size_hint()
+        }
+    }
+
+    impl ExactSizeIterator for PanicOnDropExact {
+        fn len(&self) -> usize {
+            self.values.len()
+        }
+    }
+
+    impl Drop for PanicOnDropExact {
+        fn drop(&mut self) {
+            panic!("iterator destructor panic");
+        }
+    }
+
     #[test]
     fn inline_and_borrowed_backing_rollback_a_short_exact_iterator() {
         let _lock = TEST_LOCK.lock().unwrap();
@@ -835,6 +871,20 @@ mod tests {
         assert_eq!(drops(), [0, 1, 0, 0]);
         drop(borrowed);
         assert_eq!(drops(), [1, 1, 0, 0]);
+    }
+
+    #[test]
+    fn exact_extension_commits_before_iterator_drop_panic() {
+        let mut builder = TinyVecBuilder::<u16, InlineStorage<u16, 2>>::inline();
+
+        assert!(catch_unwind(AssertUnwindSafe(|| {
+            builder.try_extend_exact(PanicOnDropExact::new())
+        }))
+        .is_err());
+        assert_eq!(builder.len(), 2);
+
+        let sealed = builder.seal();
+        assert_eq!(sealed.as_ref().iter().copied().collect::<Vec<_>>(), [10, 20]);
     }
 
     #[test]

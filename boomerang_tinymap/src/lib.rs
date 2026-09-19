@@ -18,6 +18,7 @@ pub mod map;
 mod range;
 #[cfg(feature = "alloc")]
 pub mod secondary_map;
+pub mod tiny_vec;
 
 pub use error::TinyMapError;
 #[cfg(feature = "alloc")]
@@ -27,6 +28,7 @@ pub use map::{CapacityError, TinyMap, TinyMapView};
 pub use range::{IndexSpan, SliceRange};
 #[cfg(feature = "alloc")]
 pub use secondary_map::TinySecondaryMap;
+pub use tiny_vec::{BorrowedStorage, InlineStorage, TinyVecBuilder};
 
 /// A key that identifies a value by its dense table index.
 pub trait Key: From<usize> + Copy + Ord {
@@ -128,7 +130,7 @@ macro_rules! __key_type_from_str {
 
 key_type!(pub DefaultKey);
 
-#[cfg(test)]
+#[cfg(all(test, feature = "alloc"))]
 mod tests {
     use super::*;
     use std::{str::FromStr, string::ToString};

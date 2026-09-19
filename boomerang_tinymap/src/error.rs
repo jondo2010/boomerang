@@ -82,6 +82,7 @@ impl std::error::Error for TinyMapError {}
 #[cfg(test)]
 mod tests {
     use super::TinyMapError;
+    use std::format;
 
     #[test]
     fn capacity_error_reports_limit_and_request_without_std() {

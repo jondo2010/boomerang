@@ -1,9 +1,11 @@
 mod storage;
 
-use core::marker::PhantomData;
+use core::{marker::PhantomData, mem::ManuallyDrop};
 
 use crate::TinyMapError;
 
+#[cfg(feature = "alloc")]
+pub use storage::HeapStorage;
 use storage::Storage;
 pub use storage::{BorrowedStorage, InlineStorage};
 
@@ -18,13 +20,61 @@ pub struct TinyVecBuilder<T, B> {
     capacity: fn(&B) -> usize,
     write_slot: fn(&mut B, usize, T),
     drop_slot: fn(&mut B, usize),
+    values: for<'a> fn(&'a B, usize) -> &'a [T],
+    values_mut: for<'a> fn(&'a mut B, usize) -> &'a mut [T],
     marker: PhantomData<T>,
+}
+
+/// A fixed-shape sequence whose initialized values are ready for later phases.
+///
+/// A sealed sequence can move freely. It deliberately offers only borrowed
+/// value views, not structural mutation.
+pub struct SealedTinyVec<T, B> {
+    backing: B,
+    initialized: usize,
+    drop_slot: fn(&mut B, usize),
+    values: for<'a> fn(&'a B, usize) -> &'a [T],
+    values_mut: for<'a> fn(&'a mut B, usize) -> &'a mut [T],
+    marker: PhantomData<T>,
+}
+
+/// A borrowed read-only view of the initialized values in a sealed TinyVec.
+#[derive(Clone, Copy)]
+pub struct TinyVecRef<'a, T> {
+    values: &'a [T],
+}
+
+/// A borrowed value-mutation view of a sealed TinyVec.
+///
+/// It cannot append, remove, or otherwise change the sequence length.
+pub struct TinyVecMut<'a, T> {
+    values: &'a mut [T],
 }
 
 impl<T, B> TinyVecBuilder<T, B> {
     /// Returns the number of values currently initialized in the builder.
     pub const fn len(&self) -> usize {
         self.initialized
+    }
+
+    /// Transfers initialized values into a move-safe, fixed-shape sequence.
+    pub fn seal(self) -> SealedTinyVec<T, B> {
+        let builder = ManuallyDrop::new(self);
+        // SAFETY: ManuallyDrop prevents TinyVecBuilder::drop from observing or
+        // dropping this backing after ownership is transferred. ptr::read moves
+        // the backing exactly once into SealedTinyVec; all other copied fields
+        // are function pointers, a count, or PhantomData. The initialized
+        // prefix is unchanged, so its value-ownership metadata transfers intact.
+        unsafe {
+            SealedTinyVec {
+                backing: core::ptr::read(&builder.backing),
+                initialized: builder.initialized,
+                drop_slot: builder.drop_slot,
+                values: builder.values,
+                values_mut: builder.values_mut,
+                marker: PhantomData,
+            }
+        }
     }
 
     /// Appends one value without allocating.
@@ -105,9 +155,73 @@ impl<'a, T> TinyVecBuilder<T, BorrowedStorage<'a, T>> {
     }
 }
 
+#[cfg(feature = "alloc")]
+impl<T> TinyVecBuilder<T, HeapStorage<T>> {
+    /// Creates an empty heap-backed builder.
+    pub fn heap() -> Self {
+        new_builder(HeapStorage::new())
+    }
+}
+
 impl<T, B> Drop for TinyVecBuilder<T, B> {
     fn drop(&mut self) {
         drop_initialized(&mut self.backing, &mut self.initialized, 0, self.drop_slot);
+    }
+}
+
+impl<T, B> SealedTinyVec<T, B> {
+    /// Returns the number of fixed-shape values in this sealed sequence.
+    pub const fn len(&self) -> usize {
+        self.initialized
+    }
+
+    /// Returns a read-only borrowed view of the initialized values.
+    pub fn as_ref(&self) -> TinyVecRef<'_, T> {
+        TinyVecRef {
+            values: (self.values)(&self.backing, self.initialized),
+        }
+    }
+
+    /// Returns a borrowed view that may update values but not sequence shape.
+    pub fn as_mut(&mut self) -> TinyVecMut<'_, T> {
+        TinyVecMut {
+            values: (self.values_mut)(&mut self.backing, self.initialized),
+        }
+    }
+}
+
+impl<T, B> Drop for SealedTinyVec<T, B> {
+    fn drop(&mut self) {
+        drop_initialized(&mut self.backing, &mut self.initialized, 0, self.drop_slot);
+    }
+}
+
+impl<'a, T> TinyVecRef<'a, T> {
+    /// Returns the number of values in this view.
+    pub const fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    /// Iterates over the borrowed values.
+    pub fn iter(&self) -> core::slice::Iter<'a, T> {
+        self.values.iter()
+    }
+}
+
+impl<'a, T> TinyVecMut<'a, T> {
+    /// Returns the number of values in this view.
+    pub const fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    /// Iterates over the borrowed values.
+    pub fn iter(&self) -> core::slice::Iter<'_, T> {
+        self.values.iter()
+    }
+
+    /// Iterates mutably over the borrowed values without changing their count.
+    pub fn iter_mut(&mut self) -> core::slice::IterMut<'_, T> {
+        self.values.iter_mut()
     }
 }
 
@@ -118,6 +232,8 @@ fn new_builder<T, B: Storage<T>>(backing: B) -> TinyVecBuilder<T, B> {
         capacity: storage_capacity::<T, B>,
         write_slot: write_slot::<T, B>,
         drop_slot: drop_slot::<T, B>,
+        values: storage_values::<T, B>,
+        values_mut: storage_values_mut::<T, B>,
         marker: PhantomData,
     }
 }
@@ -127,16 +243,19 @@ fn storage_capacity<T, B: Storage<T>>(backing: &B) -> usize {
 }
 
 fn write_slot<T, B: Storage<T>>(backing: &mut B, index: usize, value: T) {
-    backing.slots()[index].write(value);
+    backing.write_slot(index, value);
 }
 
 fn drop_slot<T, B: Storage<T>>(backing: &mut B, index: usize) {
-    // SAFETY: the caller establishes that `index` is a valid slot in the
-    // initialized prefix, then removes it from that prefix before this call.
-    // Therefore this valid value is selected for an exactly-once drop.
-    unsafe {
-        backing.slots()[index].assume_init_drop();
-    }
+    backing.drop_slot(index);
+}
+
+fn storage_values<T, B: Storage<T>>(backing: &B, initialized: usize) -> &[T] {
+    backing.values(initialized)
+}
+
+fn storage_values_mut<T, B: Storage<T>>(backing: &mut B, initialized: usize) -> &mut [T] {
+    backing.values_mut(initialized)
 }
 
 fn drop_initialized<B>(
@@ -233,6 +352,7 @@ mod tests {
             atomic::{AtomicUsize, Ordering},
             Mutex,
         },
+        vec::Vec,
     };
 
     use super::{BorrowedStorage, InlineStorage, TinyVecBuilder};
@@ -691,5 +811,46 @@ mod tests {
         assert_eq!(drops(), [0, 1, 0, 0]);
         drop(borrowed);
         assert_eq!(drops(), [1, 1, 0, 0]);
+    }
+
+    #[test]
+    fn sealed_inline_storage_can_move_then_yield_a_borrowed_view() {
+        let mut builder = TinyVecBuilder::<u16, InlineStorage<u16, 3>>::inline();
+        builder.try_extend_exact([10, 20].into_iter()).unwrap();
+
+        let sealed = builder.seal();
+        let moved = [sealed].into_iter().next().unwrap();
+
+        assert_eq!(moved.len(), 2);
+        assert_eq!(moved.as_ref().iter().copied().collect::<Vec<_>>(), [10, 20]);
+    }
+
+    #[test]
+    fn sealed_mutable_view_changes_values_without_changing_length() {
+        let mut builder = TinyVecBuilder::<u16, InlineStorage<u16, 3>>::inline();
+        builder.try_extend_exact([10, 20].into_iter()).unwrap();
+        let mut sealed = builder.seal();
+
+        let mut values = sealed.as_mut();
+        values.iter_mut().for_each(|value| *value += 1);
+        assert_eq!(values.len(), 2);
+        assert_eq!(values.iter().copied().collect::<Vec<_>>(), [11, 21]);
+        drop(values);
+
+        let values = sealed.as_ref();
+        assert_eq!(values.len(), 2);
+        assert_eq!(values.iter().copied().collect::<Vec<_>>(), [11, 21]);
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn sealed_heap_storage_can_move_then_yield_a_borrowed_view() {
+        let mut builder = TinyVecBuilder::<u16, super::HeapStorage<u16>>::heap();
+        builder.try_extend_exact([10, 20].into_iter()).unwrap();
+
+        let sealed = builder.seal();
+        let moved = [sealed].into_iter().next().unwrap();
+
+        assert_eq!(moved.as_ref().iter().copied().collect::<Vec<_>>(), [10, 20]);
     }
 }

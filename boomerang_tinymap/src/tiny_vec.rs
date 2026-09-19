@@ -6,7 +6,8 @@ use crate::TinyMapError;
 
 #[cfg(feature = "alloc")]
 pub use storage::HeapStorage;
-use storage::Storage;
+#[doc(hidden)]
+pub use storage::Storage;
 pub use storage::{BorrowedStorage, InlineStorage};
 
 /// A not-yet-sealed sequence builder.
@@ -15,14 +16,9 @@ pub use storage::{BorrowedStorage, InlineStorage};
 /// storage interface remains private so callers cannot observe or alter the
 /// initialized-slot metadata. Inline and borrowed storage have fixed capacity;
 /// heap storage may grow and allocate while values are appended.
-pub struct TinyVecBuilder<T, B> {
+pub struct TinyVecBuilder<T, B: Storage<T>> {
     backing: B,
     initialized: usize,
-    capacity: fn(&B) -> usize,
-    write_slot: fn(&mut B, usize, T),
-    drop_slot: fn(&mut B, usize),
-    values: for<'a> fn(&'a B, usize) -> &'a [T],
-    values_mut: for<'a> fn(&'a mut B, usize) -> &'a mut [T],
     marker: PhantomData<T>,
 }
 
@@ -30,12 +26,9 @@ pub struct TinyVecBuilder<T, B> {
 ///
 /// A sealed sequence can move freely. It deliberately offers only borrowed
 /// value views, not structural mutation.
-pub struct SealedTinyVec<T, B> {
+pub struct SealedTinyVec<T, B: Storage<T>> {
     backing: B,
     initialized: usize,
-    drop_slot: fn(&mut B, usize),
-    values: for<'a> fn(&'a B, usize) -> &'a [T],
-    values_mut: for<'a> fn(&'a mut B, usize) -> &'a mut [T],
     marker: PhantomData<T>,
 }
 
@@ -52,7 +45,7 @@ pub struct TinyVecMut<'a, T> {
     values: &'a mut [T],
 }
 
-impl<T, B> TinyVecBuilder<T, B> {
+impl<T, B: Storage<T>> TinyVecBuilder<T, B> {
     /// Returns the number of values currently initialized in the builder.
     pub const fn len(&self) -> usize {
         self.initialized
@@ -68,16 +61,12 @@ impl<T, B> TinyVecBuilder<T, B> {
         let builder = ManuallyDrop::new(self);
         // SAFETY: ManuallyDrop prevents TinyVecBuilder::drop from observing or
         // dropping this backing after ownership is transferred. ptr::read moves
-        // the backing exactly once into SealedTinyVec; all other copied fields
-        // are function pointers, a count, or PhantomData. The initialized
-        // prefix is unchanged, so its value-ownership metadata transfers intact.
+        // the backing exactly once into SealedTinyVec; the initialized prefix
+        // is unchanged, so its value-ownership metadata transfers intact.
         unsafe {
             SealedTinyVec {
                 backing: core::ptr::read(&builder.backing),
                 initialized: builder.initialized,
-                drop_slot: builder.drop_slot,
-                values: builder.values,
-                values_mut: builder.values_mut,
                 marker: PhantomData,
             }
         }
@@ -88,7 +77,7 @@ impl<T, B> TinyVecBuilder<T, B> {
     /// Inline and borrowed storage append without allocating. Heap storage may
     /// grow its backing vector and allocate.
     pub fn try_push(&mut self, value: T) -> Result<(), TinyMapError> {
-        let limit = (self.capacity)(&self.backing);
+        let limit = self.backing.capacity();
         if self.initialized == limit {
             return Err(TinyMapError::Capacity {
                 limit,
@@ -96,7 +85,7 @@ impl<T, B> TinyVecBuilder<T, B> {
             });
         }
 
-        (self.write_slot)(&mut self.backing, self.initialized, value);
+        self.backing.write_slot(self.initialized, value);
         self.initialized += 1;
         Ok(())
     }
@@ -111,7 +100,7 @@ impl<T, B> TinyVecBuilder<T, B> {
         I: ExactSizeIterator<Item = T>,
     {
         let expected = values.len();
-        let limit = (self.capacity)(&self.backing);
+        let limit = self.backing.capacity();
         if expected > limit.saturating_sub(self.initialized) {
             return Err(TinyMapError::Capacity {
                 limit,
@@ -142,12 +131,7 @@ impl<T, B> TinyVecBuilder<T, B> {
     }
 
     fn drop_suffix_from(&mut self, original: usize) {
-        drop_initialized(
-            &mut self.backing,
-            &mut self.initialized,
-            original,
-            self.drop_slot,
-        );
+        drop_initialized::<T, _>(&mut self.backing, &mut self.initialized, original);
     }
 }
 
@@ -173,13 +157,13 @@ impl<T> TinyVecBuilder<T, HeapStorage<T>> {
     }
 }
 
-impl<T, B> Drop for TinyVecBuilder<T, B> {
+impl<T, B: Storage<T>> Drop for TinyVecBuilder<T, B> {
     fn drop(&mut self) {
-        drop_initialized(&mut self.backing, &mut self.initialized, 0, self.drop_slot);
+        drop_initialized::<T, _>(&mut self.backing, &mut self.initialized, 0);
     }
 }
 
-impl<T, B> SealedTinyVec<T, B> {
+impl<T, B: Storage<T>> SealedTinyVec<T, B> {
     /// Returns the number of fixed-shape values in this sealed sequence.
     pub const fn len(&self) -> usize {
         self.initialized
@@ -193,21 +177,21 @@ impl<T, B> SealedTinyVec<T, B> {
     /// Returns a read-only borrowed view of the initialized values.
     pub fn as_ref(&self) -> TinyVecRef<'_, T> {
         TinyVecRef {
-            values: (self.values)(&self.backing, self.initialized),
+            values: self.backing.values(self.initialized),
         }
     }
 
     /// Returns a borrowed view that may update values but not sequence shape.
     pub fn as_mut(&mut self) -> TinyVecMut<'_, T> {
         TinyVecMut {
-            values: (self.values_mut)(&mut self.backing, self.initialized),
+            values: self.backing.values_mut(self.initialized),
         }
     }
 }
 
-impl<T, B> Drop for SealedTinyVec<T, B> {
+impl<T, B: Storage<T>> Drop for SealedTinyVec<T, B> {
     fn drop(&mut self) {
-        drop_initialized(&mut self.backing, &mut self.initialized, 0, self.drop_slot);
+        drop_initialized::<T, _>(&mut self.backing, &mut self.initialized, 0);
     }
 }
 
@@ -254,46 +238,16 @@ fn new_builder<T, B: Storage<T>>(backing: B) -> TinyVecBuilder<T, B> {
     TinyVecBuilder {
         backing,
         initialized: 0,
-        capacity: storage_capacity::<T, B>,
-        write_slot: write_slot::<T, B>,
-        drop_slot: drop_slot::<T, B>,
-        values: storage_values::<T, B>,
-        values_mut: storage_values_mut::<T, B>,
         marker: PhantomData,
     }
 }
 
-fn storage_capacity<T, B: Storage<T>>(backing: &B) -> usize {
-    backing.capacity()
-}
-
-fn write_slot<T, B: Storage<T>>(backing: &mut B, index: usize, value: T) {
-    backing.write_slot(index, value);
-}
-
-fn drop_slot<T, B: Storage<T>>(backing: &mut B, index: usize) {
-    backing.drop_slot(index);
-}
-
-fn storage_values<T, B: Storage<T>>(backing: &B, initialized: usize) -> &[T] {
-    backing.values(initialized)
-}
-
-fn storage_values_mut<T, B: Storage<T>>(backing: &mut B, initialized: usize) -> &mut [T] {
-    backing.values_mut(initialized)
-}
-
-fn drop_initialized<B>(
-    backing: &mut B,
-    initialized: &mut usize,
-    original: usize,
-    drop_slot: fn(&mut B, usize),
-) {
+fn drop_initialized<T, B: Storage<T>>(backing: &mut B, initialized: &mut usize, original: usize) {
     let mut cleanup = DropRemaining {
         backing,
         initialized,
         original,
-        drop_slot,
+        marker: PhantomData,
         active: true,
     };
     cleanup.run();
@@ -306,15 +260,15 @@ fn drop_initialized<B>(
 /// that guard cleans the remaining valid slots during the active unwind. A
 /// second destructor panic is intentionally left to Rust's normal double-panic
 /// abort behavior.
-struct DropRemaining<'a, B> {
+struct DropRemaining<'a, T, B: Storage<T>> {
     backing: &'a mut B,
     initialized: &'a mut usize,
     original: usize,
-    drop_slot: fn(&mut B, usize),
+    marker: PhantomData<T>,
     active: bool,
 }
 
-impl<B> DropRemaining<'_, B> {
+impl<T, B: Storage<T>> DropRemaining<'_, T, B> {
     fn run(&mut self) {
         while *self.initialized > self.original {
             *self.initialized -= 1;
@@ -323,16 +277,16 @@ impl<B> DropRemaining<'_, B> {
                 backing: &mut *self.backing,
                 initialized: &mut *self.initialized,
                 original: self.original,
-                drop_slot: self.drop_slot,
+                marker: PhantomData,
                 active: true,
             };
-            (remaining.drop_slot)(&mut *remaining.backing, index);
+            remaining.backing.drop_slot(index);
             remaining.active = false;
         }
     }
 }
 
-impl<B> Drop for DropRemaining<'_, B> {
+impl<T, B: Storage<T>> Drop for DropRemaining<'_, T, B> {
     fn drop(&mut self) {
         if self.active {
             self.run();
@@ -340,13 +294,13 @@ impl<B> Drop for DropRemaining<'_, B> {
     }
 }
 
-struct Rollback<'a, T, B> {
+struct Rollback<'a, T, B: Storage<T>> {
     builder: &'a mut TinyVecBuilder<T, B>,
     original: usize,
     committed: bool,
 }
 
-impl<'a, T, B> Rollback<'a, T, B> {
+impl<'a, T, B: Storage<T>> Rollback<'a, T, B> {
     fn new(builder: &'a mut TinyVecBuilder<T, B>) -> Self {
         Self {
             original: builder.initialized,
@@ -360,7 +314,7 @@ impl<'a, T, B> Rollback<'a, T, B> {
     }
 }
 
-impl<T, B> Drop for Rollback<'_, T, B> {
+impl<T, B: Storage<T>> Drop for Rollback<'_, T, B> {
     fn drop(&mut self) {
         if !self.committed {
             self.builder.drop_suffix_from(self.original);
@@ -994,6 +948,24 @@ mod tests {
         let values = sealed.as_ref();
         assert_eq!(values.len(), 2);
         assert_eq!(values.iter().copied().collect::<Vec<_>>(), [11, 21]);
+    }
+
+    #[test]
+    fn inline_storage_seals_and_mutates_without_erased_dispatch_state() {
+        let mut builder = TinyVecBuilder::<u16, InlineStorage<u16, 3>>::inline();
+        builder.try_extend_exact([10, 20].into_iter()).unwrap();
+        let mut sealed = builder.seal();
+
+        sealed.as_mut().iter_mut().for_each(|value| *value += 1);
+
+        assert_eq!(
+            sealed.as_ref().iter().copied().collect::<Vec<_>>(),
+            [11, 21]
+        );
+        assert_eq!(
+            core::mem::size_of::<TinyVecBuilder<u16, InlineStorage<u16, 3>>>(),
+            core::mem::size_of::<(InlineStorage<u16, 3>, usize)>(),
+        );
     }
 
     #[cfg(feature = "alloc")]

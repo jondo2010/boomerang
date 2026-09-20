@@ -2062,10 +2062,11 @@ const fn validate_enclave_const<'a>(image: &EnclaveImage<'a>) -> Result<(), Vali
         let range = reaction.enabled_modes();
         let mut position = 0;
         while position < range.len() as usize {
-            let mode = image.reaction_modes[range.start() as usize + position];
+            let backing_index = range.start() as usize + position;
+            let mode = image.reaction_modes[backing_index];
             let mode = const_try!(check_mode_ref(
                 "reaction_modes",
-                range.start() + position as u32,
+                backing_index as u32,
                 "mode",
                 mode,
                 image.modes,

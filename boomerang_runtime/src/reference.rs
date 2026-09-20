@@ -6,7 +6,7 @@
 //! a panic during an active phase emits cancellation with reason `unwind`.
 
 mod distributed;
-pub use distributed::execute_owned_federate_with_backend;
+pub use distributed::{execute_owned_federate_slice, execute_owned_federate_with_backend};
 
 use std::{
     any::{Any, TypeId},
@@ -1560,17 +1560,44 @@ mod scoped_spawn_tests {
     #[test]
     fn checked_image_preflight_preserves_dynamic_binding_validation() {
         let enclave = EnclaveIndex::new(0);
-        let checked = EnclaveImageView::new(&ENCLAVES[0]).unwrap();
-        let images = [(enclave, checked)].into_iter().collect();
-        let bindings = FederateBindings::new().bind_enclave(enclave, EnclaveBindings::new());
-
-        assert!(matches!(
-            preflight_enclave_bindings(FederateIndex::new(0), &images, &bindings),
-            Err(ExecuteOwnedFederateError::EnclavePreflight {
-                enclave: rejected,
-                source: OwnedStorageError::MissingBinding { .. },
-            }) if rejected == enclave
-        ));
+        const CHECKED: EnclaveImageView<'static> = match EnclaveImageView::new(&ENCLAVES[0]) {
+            Ok(view) => view,
+            Err(_) => panic!("invalid checked preflight fixture"),
+        };
+        let federate = FederateImage::new(
+            FederateId::new("host"),
+            TargetId::new("host"),
+            RuntimeBackendId::new("std"),
+            IndexSpan::new(0, 1),
+        );
+        let bindings = || FederateBindings::new().bind_enclave(enclave, EnclaveBindings::new());
+        for result in [
+            execute_owned_federate_slice(
+                FederateIndex::new(0),
+                &federate,
+                &[&CHECKED],
+                bindings(),
+                Config::default(),
+            ),
+            execute_owned_federate_with_backend(
+                FederateIndex::new(0),
+                &federate,
+                &[&CHECKED],
+                bindings(),
+                Config::default(),
+                |_| -> Result<LocalFederateCoordinationBackend, _> {
+                    panic!("invalid binding reached connect")
+                },
+            ),
+        ] {
+            assert!(matches!(
+                result,
+                Err(ExecuteOwnedFederateError::EnclavePreflight {
+                    enclave: rejected,
+                    source: OwnedStorageError::MissingBinding { .. },
+                }) if rejected == enclave
+            ));
+        }
 
         let invalid = state_only_image(" invalid");
         assert!(matches!(

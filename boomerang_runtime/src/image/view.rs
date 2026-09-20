@@ -1365,56 +1365,9 @@ const fn validate_enclave_id<'a>(
     Ok(())
 }
 
-const fn same_level(left: LevelReactionImage, right: LevelReactionImage) -> bool {
-    left.level() == right.level() && left.reaction().as_u32() == right.reaction().as_u32()
-}
-
-const fn same_reactor(left: ReactorIndex, right: ReactorIndex) -> bool {
-    left.as_u32() == right.as_u32()
-}
-
-const fn same_scope(left: ScopeIndex, right: ScopeIndex) -> bool {
-    left.as_u32() == right.as_u32()
-}
-
-const fn same_mode(left: ModeIndex, right: ModeIndex) -> bool {
-    left.as_u32() == right.as_u32()
-}
-
 const fn mode_span_contains(span: IndexSpan<ModeIndex>, mode: ModeIndex) -> bool {
     let dense_index = mode.as_u32() as usize;
     dense_index >= span.start() && dense_index < span.start().saturating_add(span.len())
-}
-
-const fn same_action(left: ActionIndex, right: ActionIndex) -> bool {
-    left.as_u32() == right.as_u32()
-}
-
-const fn action_before(left: ActionIndex, right: ActionIndex) -> bool {
-    left.as_u32() < right.as_u32()
-}
-
-const fn level_before(left: LevelReactionImage, right: LevelReactionImage) -> bool {
-    left.level() < right.level()
-        || (left.level() == right.level() && left.reaction().as_u32() < right.reaction().as_u32())
-}
-
-const fn binding_kind_is(actual: BindingKind, expected: BindingKind) -> bool {
-    matches!(
-        (actual, expected),
-        (BindingKind::StateInitializer, BindingKind::StateInitializer)
-            | (BindingKind::Reaction, BindingKind::Reaction)
-            | (BindingKind::Port, BindingKind::Port)
-            | (BindingKind::Action, BindingKind::Action)
-    )
-}
-
-const fn same_direction(left: RouteDirection, right: RouteDirection) -> bool {
-    matches!(
-        (left, right),
-        (RouteDirection::Inbound, RouteDirection::Inbound)
-            | (RouteDirection::Outbound, RouteDirection::Outbound)
-    )
 }
 
 const fn validate_level_ref<'a>(
@@ -1455,13 +1408,13 @@ const fn validate_levels<'a>(
         let index = backing_index as u32;
         const_try!(validate_level_ref(table, index, entry, image));
         if let Some(before) = previous {
-            if same_level(entry, before) {
+            if entry.const_eq(before) {
                 return Err(enclave_fault(ImageValidationError::DuplicateEntry {
                     table,
                     index,
                 }));
             }
-            if level_before(entry, before) {
+            if matches!(entry.const_cmp(before), core::cmp::Ordering::Less) {
                 return Err(enclave_fault(ImageValidationError::EntriesNotSorted {
                     table,
                     index,
@@ -1496,13 +1449,16 @@ const fn validate_lifecycle<'a>(
         ));
         const_try!(validate_level_ref(table, index, entry.reaction(), image));
         if let Some(before) = previous {
-            if same_level(entry.reaction(), before) {
+            if entry.reaction().const_eq(before) {
                 return Err(enclave_fault(ImageValidationError::DuplicateEntry {
                     table,
                     index,
                 }));
             }
-            if level_before(entry.reaction(), before) {
+            if matches!(
+                entry.reaction().const_cmp(before),
+                core::cmp::Ordering::Less
+            ) {
                 return Err(enclave_fault(ImageValidationError::EntriesNotSorted {
                     table,
                     index,
@@ -1562,7 +1518,7 @@ const fn validate_enclave_const<'a>(image: &EnclaveImage<'a>) -> Result<(), Vali
             reactor.state_binding(),
             image.required_bindings,
         ));
-        if !binding_kind_is(state_binding.kind(), BindingKind::StateInitializer) {
+        if !matches!(state_binding.kind(), BindingKind::StateInitializer) {
             const_fail!(ImageValidationError::BindingKindMismatch {
                 table: "reactors",
                 index,
@@ -1585,9 +1541,7 @@ const fn validate_enclave_const<'a>(image: &EnclaveImage<'a>) -> Result<(), Vali
             reactor.root_scope(),
             image.scopes,
         ));
-        if !same_reactor(root_scope.reactor(), ReactorIndex::new(index))
-            || root_scope.mode().is_some()
-        {
+        if !root_scope.reactor().const_eq(ReactorIndex::new(index)) || root_scope.mode().is_some() {
             const_fail!(ImageValidationError::OwnershipMismatch {
                 table: "reactors",
                 index,
@@ -1661,7 +1615,7 @@ const fn validate_enclave_const<'a>(image: &EnclaveImage<'a>) -> Result<(), Vali
                     binding,
                     image.required_bindings,
                 ));
-                if !binding_kind_is(binding.kind(), BindingKind::Action) {
+                if !matches!(binding.kind(), BindingKind::Action) {
                     const_fail!(ImageValidationError::BindingKindMismatch {
                         table: "actions",
                         index,
@@ -1703,7 +1657,7 @@ const fn validate_enclave_const<'a>(image: &EnclaveImage<'a>) -> Result<(), Vali
             port.binding(),
             image.required_bindings,
         ));
-        if !binding_kind_is(binding.kind(), BindingKind::Port) {
+        if !matches!(binding.kind(), BindingKind::Port) {
             const_fail!(ImageValidationError::BindingKindMismatch {
                 table: "ports",
                 index,
@@ -1758,14 +1712,14 @@ const fn validate_enclave_const<'a>(image: &EnclaveImage<'a>) -> Result<(), Vali
             reaction.binding(),
             image.required_bindings,
         ));
-        if !binding_kind_is(binding.kind(), BindingKind::Reaction) {
+        if !matches!(binding.kind(), BindingKind::Reaction) {
             const_fail!(ImageValidationError::BindingKindMismatch {
                 table: "reactions",
                 index,
                 field: "binding",
             });
         }
-        if !same_reactor(scope.reactor(), reaction.reactor()) {
+        if !scope.reactor().const_eq(reaction.reactor()) {
             const_fail!(ImageValidationError::OwnershipMismatch {
                 table: "reactions",
                 index,
@@ -1780,7 +1734,7 @@ const fn validate_enclave_const<'a>(image: &EnclaveImage<'a>) -> Result<(), Vali
                 effect.target,
                 image.modes,
             ));
-            if !same_reactor(target.reactor(), reaction.reactor()) {
+            if !target.reactor().const_eq(reaction.reactor()) {
                 const_fail!(ImageValidationError::OwnershipMismatch {
                     table: "reactions",
                     index,
@@ -1845,7 +1799,7 @@ const fn validate_enclave_const<'a>(image: &EnclaveImage<'a>) -> Result<(), Vali
             mode.scope(),
             image.scopes,
         ));
-        if !same_reactor(scope.reactor(), mode.reactor()) {
+        if !scope.reactor().const_eq(mode.reactor()) {
             const_fail!(ImageValidationError::OwnershipMismatch {
                 table: "modes",
                 index,
@@ -1853,7 +1807,7 @@ const fn validate_enclave_const<'a>(image: &EnclaveImage<'a>) -> Result<(), Vali
             });
         }
         match scope.mode() {
-            Some(owner) if same_mode(owner, ModeIndex::new(index)) => {}
+            Some(owner) if owner.const_eq(ModeIndex::new(index)) => {}
             _ => {
                 const_fail!(ImageValidationError::OwnershipMismatch {
                     table: "modes",
@@ -1895,8 +1849,8 @@ const fn validate_enclave_const<'a>(image: &EnclaveImage<'a>) -> Result<(), Vali
         }
         if let Some(mode) = scope.mode() {
             let owner = const_try!(check_mode_ref("scopes", index, "mode", mode, image.modes,));
-            if !same_scope(owner.scope(), ScopeIndex::new(index))
-                || !same_reactor(owner.reactor(), scope.reactor())
+            if !owner.scope().const_eq(ScopeIndex::new(index))
+                || !owner.reactor().const_eq(scope.reactor())
             {
                 const_fail!(ImageValidationError::OwnershipMismatch {
                     table: "scopes",
@@ -2071,7 +2025,7 @@ const fn validate_enclave_const<'a>(image: &EnclaveImage<'a>) -> Result<(), Vali
                 mode,
                 image.modes,
             ));
-            if !same_reactor(mode.reactor(), reaction.reactor()) {
+            if !mode.reactor().const_eq(reaction.reactor()) {
                 const_fail!(ImageValidationError::OwnershipMismatch {
                     table: "reactions",
                     index: i as u32,
@@ -2247,13 +2201,13 @@ const fn validate_enclave_const<'a>(image: &EnclaveImage<'a>) -> Result<(), Vali
             image.actions,
         ));
         if let Some(previous) = previous_action {
-            if same_action(action, previous) {
+            if action.const_eq(previous) {
                 const_fail!(ImageValidationError::DuplicateEntry {
                     table: "shutdown_actions",
                     index: i as u32,
                 });
             }
-            if action_before(action, previous) {
+            if matches!(action.const_cmp(previous), core::cmp::Ordering::Less) {
                 const_fail!(ImageValidationError::EntriesNotSorted {
                     table: "shutdown_actions",
                     index: i as u32,
@@ -2285,7 +2239,13 @@ const fn validate_enclave_const<'a>(image: &EnclaveImage<'a>) -> Result<(), Vali
                     id,
                 });
             }
-            if ordering == 0 && same_direction(route.direction(), previous_direction) {
+            if ordering == 0
+                && matches!(
+                    (route.direction(), previous_direction),
+                    (RouteDirection::Inbound, RouteDirection::Inbound)
+                        | (RouteDirection::Outbound, RouteDirection::Outbound)
+                )
+            {
                 const_fail!(ImageValidationError::DuplicateRouteHalf {
                     boundary: id,
                     direction: route.direction(),

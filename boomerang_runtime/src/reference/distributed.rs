@@ -236,8 +236,7 @@ pub fn execute_owned_federate_with_backend<'image, B: FederateCoordinationBacken
 fn prepare_images<'image>(
     image: &FederateImage<'image>,
     images: &'image [EnclaveImage<'image>],
-) -> Result<TinySecondaryMap<EnclaveIndex, &'image EnclaveImage<'image>>, ExecuteOwnedFederateError>
-{
+) -> Result<TinySecondaryMap<EnclaveIndex, EnclaveImageView<'image>>, ExecuteOwnedFederateError> {
     let fail = |message: &str| ExecuteOwnedFederateError::ImageValidation {
         message: message.into(),
     };
@@ -267,10 +266,14 @@ fn prepare_images<'image>(
             "Federate Enclave identities must be unique and sorted",
         ));
     }
-    Ok((span.start()..end)
+    (span.start()..end)
         .zip(images)
-        .map(|(key, image)| (EnclaveIndex::from(key), image))
-        .collect())
+        .map(|(key, image)| {
+            EnclaveImageView::new(image)
+                .map(|image| (EnclaveIndex::from(key), image))
+                .map_err(|error| fail(&error.to_string()))
+        })
+        .collect()
 }
 
 /// Local route pairs plus external coordinates in caller binding order.
@@ -282,13 +285,13 @@ type ResolvedRoutes<'image> = (
 /// Matches compiled halves by stable boundary identity without inferring peer key domains.
 fn resolve_routes<'image>(
     federate: FederateIndex,
-    images: &TinySecondaryMap<EnclaveIndex, &'image EnclaveImage<'image>>,
+    images: &TinySecondaryMap<EnclaveIndex, EnclaveImageView<'image>>,
     bindings: &FederateBindings<'_>,
 ) -> Result<ResolvedRoutes<'image>, ExecuteOwnedFederateError> {
     let mut halves = BTreeMap::<_, (Option<_>, Option<_>)>::new();
     let invalid = |message: String| ExecuteOwnedFederateError::ImageValidation { message };
-    for (enclave, &image) in images.iter() {
-        for (index, route) in image.routes.iter() {
+    for (enclave, image) in images.iter() {
+        for (index, route) in image.routes().iter() {
             let pair = halves.entry(route.boundary()).or_default();
             let half = match route.direction() {
                 RouteDirection::Outbound => &mut pair.0,
@@ -363,7 +366,7 @@ fn resolve_routes<'image>(
                 delay_nanos: route.delay_nanos(),
             });
         }
-        let slot = images[enclave].ports[route.local_port()].binding();
+        let slot = images[enclave].ports()[route.local_port()].binding();
         let (found_id, found) = bindings.enclaves[enclave]
             .port_payload_type(slot)
             .expect("port bindings passed preflight");

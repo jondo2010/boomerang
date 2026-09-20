@@ -335,6 +335,8 @@ fn render_enclave_image(index: usize, image: &EnclaveImage<'_>) -> TokenStream {
     tokens.extend(render_routes(&prefix, image));
     tokens.extend(render_required_bindings(&prefix, image));
     let image_name = format_ident!("{prefix}_IMAGE");
+    let view_name = format_ident!("{prefix}_VIEW");
+    let invalid_image = format!("invalid generated Enclave image {prefix}");
     let enclave_id = image.enclave_id.as_str();
     let bounds = storage_bounds(image.storage_bounds);
     let reactors = format_ident!("{prefix}_REACTORS");
@@ -387,6 +389,10 @@ fn render_enclave_image(index: usize, image: &EnclaveImage<'_>) -> TokenStream {
             routes: TinyMapView::new(&#routes),
             required_bindings: TinyMapView::new(&#required_bindings),
             storage_bounds: &#bounds,
+        };
+        static #view_name: EnclaveImageView<'static> = match EnclaveImageView::new(&#image_name) {
+            Ok(view) => view,
+            Err(_) => panic!(#invalid_image),
         };
     });
     tokens

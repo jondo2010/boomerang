@@ -51,6 +51,15 @@ fn generated_single_federate_launcher_executes_typed_local_route_without_builder
             cargo_boomerang::generate_launcher(&workspace, "production", "host").unwrap(),
         )
     });
+    let source = std::fs::read_to_string(launcher.source_path()).unwrap();
+    assert!(
+        source.contains("EnclaveImageView::new(&E0_IMAGE)"),
+        "{source}"
+    );
+    assert!(
+        source.contains("invalid generated Enclave image E0"),
+        "{source}"
+    );
     let first = launcher.build_locked_offline().unwrap();
     assert!(first.compiled_artifacts() > 0);
     let first_executable = std::fs::read(first.executable_path()).unwrap();

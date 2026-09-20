@@ -424,6 +424,9 @@ where
     /// Execute startup of the Scheduler.
     pub(super) fn startup(&mut self) {
         self.observe(SchedulerPhase::Framework);
+        if let Some(observation) = self.observation {
+            observation.mark_running();
+        }
         self.storage.prepare_startup_origin(self.start_time);
         let tag = Tag::ZERO;
 
@@ -460,6 +463,9 @@ where
     /// Final shutdown of the Scheduler. The last tag has already been processed.
     fn shutdown(&mut self) {
         self.events.shutdown();
+        if let Some(observation) = self.observation {
+            observation.mark_stopped();
+        }
         let tag = self
             .shutdown_tag
             .expect("shutdown tag established before shutdown");
@@ -818,6 +824,7 @@ where
         self.stats.increment_processed_tags();
         if let Some(observation) = self.observation {
             observation.increment_processed_tags();
+            observation.record_logical_progress(std::time::Instant::now());
         }
         tracing::trace!(target: "boomerang::runtime",
             event = "runtime.scheduler.tag_processed", enclave = self.key.as_u32(),
@@ -947,6 +954,9 @@ where
                     };
                     self.shutdown_tx.shutdown();
                     self.events.shutdown();
+                    if let Some(observation) = self.observation {
+                        observation.mark_failed();
+                    }
                     return Err(error);
                 }
             }

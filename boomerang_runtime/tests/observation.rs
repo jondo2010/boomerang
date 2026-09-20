@@ -2,7 +2,9 @@ use std::time::{Duration, Instant};
 
 use std::sync::Arc;
 
-use boomerang_runtime::{Config, ObservationHandle, ObservationState, SchedulerPhase};
+use boomerang_runtime::{
+    Config, ObservationHandle, ObservationState, SchedulerLifecycle, SchedulerPhase,
+};
 
 #[test]
 fn config_retains_an_opt_in_observation_handle() {
@@ -81,4 +83,31 @@ fn event_queue_observation_distinguishes_capacity_limit_and_peak() {
     assert_eq!(snapshot.event_queue_reserved_capacity, 16);
     assert_eq!(snapshot.event_queue_enforced_limit, None);
     assert_eq!(snapshot.event_queue_peak_occupancy, 3);
+}
+
+#[test]
+fn lifecycle_and_logical_progress_are_independent_of_measurement_time() {
+    let origin = Instant::now();
+    let observation = ObservationState::new(origin);
+
+    assert_eq!(
+        observation.snapshot(origin).lifecycle,
+        SchedulerLifecycle::NotStarted
+    );
+
+    observation.mark_running();
+    observation.record_logical_progress(origin + Duration::from_millis(7));
+
+    let running = observation.snapshot(origin + Duration::from_millis(20));
+    assert_eq!(running.lifecycle, SchedulerLifecycle::Running);
+    assert_eq!(running.completed_logical_tags, 1);
+    assert_eq!(running.last_logical_progress_ns, Some(7_000_000));
+
+    observation.mark_stopped();
+    assert_eq!(
+        observation
+            .snapshot(origin + Duration::from_millis(25))
+            .lifecycle,
+        SchedulerLifecycle::Stopped
+    );
 }

@@ -39,7 +39,9 @@ pub use env::{
     ScopeKey, TransitionKind,
 };
 pub use event::{AsyncEvent, AsyncEventTarget};
-pub use observation::{ObservationHandle, ObservationSnapshot, ObservationState, SchedulerPhase};
+pub use observation::{
+    ObservationHandle, ObservationSnapshot, ObservationState, SchedulerLifecycle, SchedulerPhase,
+};
 mod boundary;
 pub use boundary::{
     BoundaryAdmissionError, BoundarySubmissionError, InboundBoundaryAdapter, OutboundBoundarySink,

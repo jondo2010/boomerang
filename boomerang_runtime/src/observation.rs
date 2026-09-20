@@ -43,9 +43,36 @@ impl SchedulerPhase {
     }
 }
 
+/// The scheduler lifecycle as observed independently of telemetry transport.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum SchedulerLifecycle {
+    /// The scheduler has not yet begun startup.
+    NotStarted = 0,
+    /// The scheduler has started and may still be progressing logically.
+    Running = 1,
+    /// The scheduler completed its normal shutdown path.
+    Stopped = 2,
+    /// The scheduler left its event loop through an error path.
+    Failed = 3,
+}
+
+impl SchedulerLifecycle {
+    const fn from_u8(value: u8) -> Self {
+        match value {
+            1 => Self::Running,
+            2 => Self::Stopped,
+            3 => Self::Failed,
+            _ => Self::NotStarted,
+        }
+    }
+}
+
 /// A coherent point-in-time view of scheduler phase accounting.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ObservationSnapshot {
+    /// Lifecycle state reported by the scheduler, not packet delivery state.
+    pub lifecycle: SchedulerLifecycle,
     /// Current scheduler phase, including a phase still in progress.
     pub current_phase: SchedulerPhase,
     /// Monotonic nanoseconds after the observation origin at which the current phase began.
@@ -78,6 +105,10 @@ pub struct ObservationSnapshot {
     pub event_queue_enforced_limit: Option<u64>,
     /// Largest aggregate event-queue occupancy seen by the scheduler.
     pub event_queue_peak_occupancy: u64,
+    /// Number of scheduler tags completed since startup.
+    pub completed_logical_tags: u64,
+    /// Scheduler-monotonic time of the most recently completed logical tag.
+    pub last_logical_progress_ns: Option<u64>,
 }
 
 /// Atomic scheduler-observation storage independent of any sharing strategy.
@@ -86,6 +117,7 @@ pub struct ObservationState {
     origin: Instant,
     /// An odd value means the single scheduler writer is changing phase fields.
     generation: AtomicU64,
+    lifecycle: AtomicU8,
     phase: AtomicU8,
     phase_started_ns: AtomicU64,
     reaction_elapsed_ns: AtomicU64,
@@ -101,6 +133,8 @@ pub struct ObservationState {
     event_queue_occupancy: AtomicU64,
     event_queue_reserved_capacity: AtomicU64,
     event_queue_peak_occupancy: AtomicU64,
+    completed_logical_tags: AtomicU64,
+    last_logical_progress_ns: AtomicU64,
 }
 
 /// Hosted convenience ownership for independently running scheduler and exporter code.
@@ -112,6 +146,7 @@ impl ObservationState {
         Self {
             origin,
             generation: AtomicU64::new(0),
+            lifecycle: AtomicU8::new(SchedulerLifecycle::NotStarted as u8),
             phase: AtomicU8::new(SchedulerPhase::Idle as u8),
             phase_started_ns: AtomicU64::new(0),
             reaction_elapsed_ns: AtomicU64::new(0),
@@ -127,6 +162,8 @@ impl ObservationState {
             event_queue_occupancy: AtomicU64::new(0),
             event_queue_reserved_capacity: AtomicU64::new(0),
             event_queue_peak_occupancy: AtomicU64::new(0),
+            completed_logical_tags: AtomicU64::new(0),
+            last_logical_progress_ns: AtomicU64::new(u64::MAX),
         }
     }
 
@@ -141,6 +178,31 @@ impl ObservationState {
         state.phase.store(phase as u8, Ordering::Relaxed);
         state.phase_started_ns.store(now_ns, Ordering::Relaxed);
         state.generation.fetch_add(1, Ordering::Release);
+    }
+
+    /// Marks successful scheduler startup.
+    pub fn mark_running(&self) {
+        self.lifecycle
+            .store(SchedulerLifecycle::Running as u8, Ordering::Release);
+    }
+
+    /// Marks normal scheduler shutdown.
+    pub fn mark_stopped(&self) {
+        self.lifecycle
+            .store(SchedulerLifecycle::Stopped as u8, Ordering::Release);
+    }
+
+    /// Marks scheduler termination through an error path.
+    pub fn mark_failed(&self) {
+        self.lifecycle
+            .store(SchedulerLifecycle::Failed as u8, Ordering::Release);
+    }
+
+    /// Records completion of one logical scheduler tag.
+    pub fn record_logical_progress(&self, now: Instant) {
+        saturating_add(&self.completed_logical_tags, 1);
+        self.last_logical_progress_ns
+            .store(elapsed_ns(self.origin, now), Ordering::Release);
     }
 
     /// Records one completed scheduler tag.
@@ -190,6 +252,7 @@ impl ObservationState {
             let phase = SchedulerPhase::from_u8(state.phase.load(Ordering::Relaxed));
             let started_ns = state.phase_started_ns.load(Ordering::Relaxed);
             let mut snapshot = ObservationSnapshot {
+                lifecycle: SchedulerLifecycle::from_u8(state.lifecycle.load(Ordering::Acquire)),
                 current_phase: phase,
                 current_phase_started_ns: started_ns,
                 reaction_elapsed_ns: state.reaction_elapsed_ns.load(Ordering::Relaxed),
@@ -212,6 +275,14 @@ impl ObservationState {
                 event_queue_peak_occupancy: state
                     .event_queue_peak_occupancy
                     .load(Ordering::Relaxed),
+                completed_logical_tags: state.completed_logical_tags.load(Ordering::Relaxed),
+                last_logical_progress_ns: match state
+                    .last_logical_progress_ns
+                    .load(Ordering::Acquire)
+                {
+                    u64::MAX => None,
+                    progress => Some(progress),
+                },
             };
             add_snapshot_elapsed(
                 &mut snapshot,

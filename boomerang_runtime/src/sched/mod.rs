@@ -859,7 +859,7 @@ mod tests {
         );
         assert!(scheduler.try_next().unwrap());
 
-        let snapshot = observation.snapshot(std::time::Instant::now());
+        let snapshot = observation.snapshot(std::time::Instant::now()).unwrap();
         assert!(snapshot.reaction_elapsed_ns > 0);
         assert_eq!(snapshot.processed_reactions, 1);
         assert_eq!(snapshot.processed_tags, 1);

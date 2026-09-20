@@ -12,6 +12,8 @@ use std::{
     time::Instant,
 };
 
+const SNAPSHOT_ATTEMPTS: usize = 32;
+
 /// The scheduler activity currently being observed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -262,9 +264,12 @@ impl ObservationState {
     }
 
     /// Captures closed phase totals plus the elapsed portion of the current phase.
-    pub fn snapshot(&self, now: Instant) -> ObservationSnapshot {
+    ///
+    /// Returns `None` when concurrent writers prevent a coherent sample within
+    /// the fixed retry budget.
+    pub fn snapshot(&self, now: Instant) -> Option<ObservationSnapshot> {
         let state = self;
-        loop {
+        for _ in 0..SNAPSHOT_ATTEMPTS {
             let before = state.generation.load(Ordering::Acquire);
             if !before.is_multiple_of(2) {
                 std::hint::spin_loop();
@@ -311,9 +316,10 @@ impl ObservationState {
                 elapsed_ns(state.origin, now).saturating_sub(started_ns),
             );
             if state.generation.load(Ordering::Acquire) == before {
-                return snapshot;
+                return Some(snapshot);
             }
         }
+        None
     }
 
     fn begin_update(&self) {

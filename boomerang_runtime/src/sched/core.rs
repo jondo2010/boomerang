@@ -823,8 +823,7 @@ where
 
         self.stats.increment_processed_tags();
         if let Some(observation) = self.observation {
-            observation.increment_processed_tags();
-            observation.record_logical_progress(std::time::Instant::now());
+            observation.record_completed_tag(std::time::Instant::now());
         }
         tracing::trace!(target: "boomerang::runtime",
             event = "runtime.scheduler.tag_processed", enclave = self.key.as_u32(),

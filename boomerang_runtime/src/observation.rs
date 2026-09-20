@@ -204,9 +204,10 @@ impl ObservationState {
         self.end_update();
     }
 
-    /// Records completion of one logical scheduler tag.
-    pub fn record_logical_progress(&self, now: Instant) {
+    /// Records one completed scheduler tag and its corresponding logical progress.
+    pub fn record_completed_tag(&self, now: Instant) {
         self.begin_update();
+        saturating_add(&self.processed_tags, 1);
         saturating_add(&self.completed_logical_tags, 1);
         self.last_logical_progress_ns
             .store(elapsed_ns(self.origin, now), Ordering::Release);

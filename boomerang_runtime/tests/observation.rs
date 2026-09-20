@@ -96,11 +96,12 @@ fn lifecycle_and_logical_progress_are_independent_of_measurement_time() {
     );
 
     observation.mark_running();
-    observation.record_logical_progress(origin + Duration::from_millis(7));
+    observation.record_completed_tag(origin + Duration::from_millis(7));
 
     let running = observation.snapshot(origin + Duration::from_millis(20));
     assert_eq!(running.lifecycle, SchedulerLifecycle::Running);
     assert_eq!(running.completed_logical_tags, 1);
+    assert_eq!(running.processed_tags, 1);
     assert_eq!(running.last_logical_progress_ns, Some(7_000_000));
 
     observation.mark_stopped();

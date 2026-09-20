@@ -252,14 +252,14 @@ impl ObservationState {
     }
 
     /// Records the aggregate state of the scheduler's growable event queues.
-    pub fn record_event_queue(&self, occupancy: u64, reserved_capacity: u64) {
+    pub fn record_event_queue(&self, occupancy: u64, reserved_capacity: u64, peak_occupancy: u64) {
         self.begin_update();
         self.event_queue_occupancy
             .store(occupancy, Ordering::Relaxed);
         self.event_queue_reserved_capacity
             .store(reserved_capacity, Ordering::Relaxed);
         self.event_queue_peak_occupancy
-            .fetch_max(occupancy, Ordering::Relaxed);
+            .fetch_max(peak_occupancy.max(occupancy), Ordering::Relaxed);
         self.end_update();
     }
 

@@ -177,6 +177,7 @@ pub(super) struct EventManager<S: Schedule> {
     has_local_scopes: bool,
     /// Number of queued nonterminal contributions across every event queue.
     nonterminal_work_count: usize,
+    event_queue_peak_occupancy: u64,
 }
 
 impl<S: Schedule> EventManager<S> {
@@ -217,6 +218,7 @@ impl<S: Schedule> EventManager<S> {
             reaction_set_limits,
             has_local_scopes: schedule.has_modal_scopes(),
             nonterminal_work_count: 0,
+            event_queue_peak_occupancy: 0,
         }
     }
 
@@ -226,6 +228,7 @@ impl<S: Schedule> EventManager<S> {
     {
         self.root.push_event(tag, reactions, terminal);
         self.record_nonterminal_push(terminal);
+        self.refresh_event_queue_peak();
     }
 
     /// Queues a network boundary at its global tag, including inputs without active reactions.
@@ -235,11 +238,13 @@ impl<S: Schedule> EventManager<S> {
     {
         self.root.push_network_event(tag, reactions);
         self.record_nonterminal_push(false);
+        self.refresh_event_queue_peak();
     }
 
     /// Pushes a root-level provisional event that advances only local barrier control state.
     pub(super) fn push_control_event(&mut self, tag: Tag) {
         self.root.push_control_event(tag);
+        self.refresh_event_queue_peak();
     }
 
     pub(super) fn push_action_event<I>(
@@ -260,6 +265,7 @@ impl<S: Schedule> EventManager<S> {
             self.root
                 .push_action_event(tag, Some(action_value), reactions, terminal);
             self.record_nonterminal_push(terminal);
+            self.refresh_event_queue_peak();
             return;
         }
 
@@ -269,6 +275,7 @@ impl<S: Schedule> EventManager<S> {
             self.root
                 .push_action_event(tag, Some(action_value), reactions, terminal);
             self.record_nonterminal_push(terminal);
+            self.refresh_event_queue_peak();
             return;
         }
 
@@ -281,6 +288,7 @@ impl<S: Schedule> EventManager<S> {
         );
         self.record_nonterminal_push(terminal);
         self.refresh_frontier(scope);
+        self.refresh_event_queue_peak();
     }
 
     fn push_local_action_event<I>(
@@ -302,6 +310,7 @@ impl<S: Schedule> EventManager<S> {
                 terminal,
             );
             self.record_nonterminal_push(terminal);
+            self.refresh_event_queue_peak();
             return;
         }
 
@@ -313,6 +322,7 @@ impl<S: Schedule> EventManager<S> {
         );
         self.record_nonterminal_push(terminal);
         self.refresh_frontier(scope);
+        self.refresh_event_queue_peak();
     }
 
     pub(super) fn peek_tag(&mut self) -> Option<Tag> {
@@ -349,8 +359,8 @@ impl<S: Schedule> EventManager<S> {
     ///
     /// The frontier heap and recycled reaction sets are scheduler implementation
     /// details, not queued events, so they are deliberately excluded.
-    pub(super) fn event_queue_observation(&self) -> (u64, u64) {
-        self.scope_queues.values().fold(
+    pub(super) fn event_queue_observation(&self) -> (u64, u64, u64) {
+        let (occupancy, reserved_capacity) = self.scope_queues.values().fold(
             self.root.observation_metrics(),
             |(occupancy, reserved_capacity), queue| {
                 let (queue_occupancy, queue_reserved_capacity) = queue.observation_metrics();
@@ -359,7 +369,8 @@ impl<S: Schedule> EventManager<S> {
                     reserved_capacity.saturating_add(queue_reserved_capacity),
                 )
             },
-        )
+        );
+        (occupancy, reserved_capacity, self.event_queue_peak_occupancy)
     }
 
     pub(super) fn pop_next_event(&mut self) -> Option<ReadyEvent<S::Reaction, S::Action>> {
@@ -414,6 +425,11 @@ impl<S: Schedule> EventManager<S> {
         }
 
         Some(ready)
+    }
+
+    fn refresh_event_queue_peak(&mut self) {
+        let (occupancy, _, _) = self.event_queue_observation();
+        self.event_queue_peak_occupancy = self.event_queue_peak_occupancy.max(occupancy);
     }
 
     /// Recycles action-identity scratch after the scheduler processes a ready event.

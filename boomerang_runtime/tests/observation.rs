@@ -76,8 +76,8 @@ fn event_queue_observation_distinguishes_capacity_limit_and_peak() {
     let origin = Instant::now();
     let observation = ObservationState::new(origin);
 
-    observation.record_event_queue(3, 8);
-    observation.record_event_queue(2, 16);
+    observation.record_event_queue(3, 8, 3);
+    observation.record_event_queue(2, 16, 3);
 
     let snapshot = observation.snapshot(origin).unwrap();
     assert_eq!(snapshot.event_queue_occupancy, 2);

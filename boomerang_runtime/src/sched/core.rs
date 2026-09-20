@@ -291,8 +291,8 @@ where
 
     fn observe_event_queue(&self) {
         if let Some(observation) = self.observation {
-            let (occupancy, reserved_capacity) = self.events.event_queue_observation();
-            observation.record_event_queue(occupancy, reserved_capacity);
+            let (occupancy, reserved_capacity, peak_occupancy) = self.events.event_queue_observation();
+            observation.record_event_queue(occupancy, reserved_capacity, peak_occupancy);
         }
     }
 

@@ -332,15 +332,36 @@ pub struct EnclaveImageView<'a> {
     image: &'a EnclaveImage<'a>,
 }
 
+struct ValidationFault<'a> {
+    error: ImageValidationError<'a>,
+}
+
+macro_rules! const_try {
+    ($result:expr) => {
+        match $result {
+            Ok(value) => value,
+            Err(error) => return Err(error),
+        }
+    };
+}
+
+macro_rules! const_fail {
+    ($error:expr) => {
+        return Err(enclave_fault($error));
+    };
+}
+
 impl<'a> EnclaveImageView<'a> {
     /// Validates `image` and borrows all of its tables without copying.
     ///
     /// Validation errors borrow identity data, independently of the shorter image borrow.
-    pub fn new<'data: 'a>(
+    pub const fn new<'data: 'a>(
         image: &'a EnclaveImage<'data>,
     ) -> Result<Self, ImageValidationError<'data>> {
-        validate(image)?;
-        Ok(Self { image })
+        match validate_enclave_const(image) {
+            Ok(()) => Ok(Self { image }),
+            Err(fault) => Err(fault.error),
+        }
     }
 
     fn validated(image: &'a EnclaveImage<'a>) -> Self {
@@ -599,8 +620,71 @@ fn check_span<'a, K: Key>(
     Ok(())
 }
 
-fn valid_id(value: &str) -> bool {
-    !value.is_empty() && value.trim() == value && !value.chars().any(char::is_control)
+const fn utf8_scalar(bytes: &[u8], offset: usize) -> (u32, usize) {
+    let first = bytes[offset];
+    if first < 0x80 {
+        (first as u32, 1)
+    } else if first < 0xe0 {
+        (
+            ((first & 0x1f) as u32) << 6 | (bytes[offset + 1] & 0x3f) as u32,
+            2,
+        )
+    } else if first < 0xf0 {
+        (
+            ((first & 0x0f) as u32) << 12
+                | ((bytes[offset + 1] & 0x3f) as u32) << 6
+                | (bytes[offset + 2] & 0x3f) as u32,
+            3,
+        )
+    } else {
+        (
+            ((first & 0x07) as u32) << 18
+                | ((bytes[offset + 1] & 0x3f) as u32) << 12
+                | ((bytes[offset + 2] & 0x3f) as u32) << 6
+                | (bytes[offset + 3] & 0x3f) as u32,
+            4,
+        )
+    }
+}
+
+const fn unicode_control(value: u32) -> bool {
+    value <= 0x1f || (value >= 0x7f && value <= 0x9f)
+}
+
+const fn unicode_whitespace(value: u32) -> bool {
+    matches!(
+        value,
+        0x0009..=0x000d
+            | 0x0020
+            | 0x0085
+            | 0x00a0
+            | 0x1680
+            | 0x2000..=0x200a
+            | 0x2028
+            | 0x2029
+            | 0x202f
+            | 0x205f
+            | 0x3000
+    )
+}
+
+const fn valid_id(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.is_empty() {
+        return false;
+    }
+
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let (scalar, width) = utf8_scalar(bytes, offset);
+        if unicode_control(scalar)
+            || ((offset == 0 || offset + width == bytes.len()) && unicode_whitespace(scalar))
+        {
+            return false;
+        }
+        offset += width;
+    }
+    true
 }
 
 fn validate_id<'a>(
@@ -1092,124 +1176,358 @@ fn validate_route_pairs<'a>(
     Ok(())
 }
 
-fn validate_level_ref<'a>(
+const fn enclave_fault<'a>(error: ImageValidationError<'a>) -> ValidationFault<'a> {
+    ValidationFault { error }
+}
+
+const fn check_enclave_ref<'a>(
+    table: &'static str,
+    index: u32,
+    field: &'static str,
+    target: &'static str,
+    referenced: u32,
+    target_len: usize,
+) -> Result<(), ValidationFault<'a>> {
+    if referenced as usize >= target_len {
+        Err(enclave_fault(ImageValidationError::ReferenceOutOfBounds {
+            table,
+            index,
+            field,
+            target,
+            referenced,
+        }))
+    } else {
+        Ok(())
+    }
+}
+
+const fn check_enclave_len<'a>(table: &'static str, len: usize) -> Result<(), ValidationFault<'a>> {
+    let max_len = if usize::BITS > u32::BITS {
+        u32::MAX as usize + 1
+    } else {
+        usize::MAX
+    };
+    if len > max_len {
+        Err(enclave_fault(ImageValidationError::TableTooLarge { table }))
+    } else {
+        Ok(())
+    }
+}
+
+const fn check_enclave_range<'a, T>(
+    table: &'static str,
+    index: u32,
+    field: &'static str,
+    target: &'static str,
+    range: SliceRange<T>,
+    len: usize,
+    previous_end: &mut usize,
+) -> Result<(), ValidationFault<'a>> {
+    let end = match range.checked_end() {
+        Some(end) if end <= len => end,
+        _ => {
+            return Err(enclave_fault(ImageValidationError::RangeOutOfBounds {
+                table,
+                index,
+                field,
+                target,
+                start: range.start() as usize,
+                len: range.len() as usize,
+            }));
+        }
+    };
+    if (range.start() as usize) < *previous_end {
+        return Err(enclave_fault(ImageValidationError::RangesNotMonotonic {
+            table,
+            index,
+            field,
+            start: range.start() as usize,
+            previous_end: *previous_end,
+        }));
+    }
+    *previous_end = end;
+    Ok(())
+}
+
+const fn check_enclave_span<'a, K: Key>(
+    table: &'static str,
+    index: u32,
+    field: &'static str,
+    target: &'static str,
+    span: IndexSpan<K>,
+    len: usize,
+    previous_end: &mut usize,
+) -> Result<(), ValidationFault<'a>> {
+    let end = match span.checked_end() {
+        Some(end) if end <= len => end,
+        _ => {
+            return Err(enclave_fault(ImageValidationError::RangeOutOfBounds {
+                table,
+                index,
+                field,
+                target,
+                start: span.start(),
+                len: span.len(),
+            }));
+        }
+    };
+    if span.start() < *previous_end {
+        return Err(enclave_fault(ImageValidationError::RangesNotMonotonic {
+            table,
+            index,
+            field,
+            start: span.start(),
+            previous_end: *previous_end,
+        }));
+    }
+    *previous_end = end;
+    Ok(())
+}
+
+const fn compare_utf8(left: &str, right: &str) -> i8 {
+    let left = left.as_bytes();
+    let right = right.as_bytes();
+    let mut index = 0;
+    while index < left.len() && index < right.len() {
+        if left[index] < right[index] {
+            return -1;
+        }
+        if left[index] > right[index] {
+            return 1;
+        }
+        index += 1;
+    }
+    if left.len() < right.len() {
+        -1
+    } else if left.len() > right.len() {
+        1
+    } else {
+        0
+    }
+}
+
+const fn validate_enclave_id<'a>(
+    kind: &'static str,
+    index: u32,
+    id: &'a str,
+    previous: Option<&'a str>,
+) -> Result<(), ValidationFault<'a>> {
+    if !valid_id(id) {
+        return Err(enclave_fault(ImageValidationError::InvalidStableId {
+            kind,
+            index,
+            id,
+        }));
+    }
+    if let Some(before) = previous {
+        let ordering = compare_utf8(id, before);
+        if ordering == 0 {
+            return Err(enclave_fault(ImageValidationError::DuplicateStableId {
+                kind,
+                index,
+                id,
+            }));
+        }
+        if ordering < 0 {
+            return Err(enclave_fault(ImageValidationError::StableIdsNotSorted {
+                kind,
+                index,
+                id,
+            }));
+        }
+    }
+    Ok(())
+}
+
+const fn same_level(left: LevelReactionImage, right: LevelReactionImage) -> bool {
+    left.level() == right.level() && left.reaction().as_u32() == right.reaction().as_u32()
+}
+
+const fn level_before(left: LevelReactionImage, right: LevelReactionImage) -> bool {
+    left.level() < right.level()
+        || (left.level() == right.level() && left.reaction().as_u32() < right.reaction().as_u32())
+}
+
+const fn binding_kind_is(actual: BindingKind, expected: BindingKind) -> bool {
+    matches!(
+        (actual, expected),
+        (BindingKind::StateInitializer, BindingKind::StateInitializer)
+            | (BindingKind::Reaction, BindingKind::Reaction)
+            | (BindingKind::Port, BindingKind::Port)
+            | (BindingKind::Action, BindingKind::Action)
+    )
+}
+
+const fn same_direction(left: RouteDirection, right: RouteDirection) -> bool {
+    matches!(
+        (left, right),
+        (RouteDirection::Inbound, RouteDirection::Inbound)
+            | (RouteDirection::Outbound, RouteDirection::Outbound)
+    )
+}
+
+const fn validate_level_ref<'a>(
     table: &'static str,
     index: u32,
     entry: LevelReactionImage,
     image: &EnclaveImage<'a>,
-) -> Result<(), ImageValidationError<'a>> {
-    check_ref(
+) -> Result<(), ValidationFault<'a>> {
+    const_try!(check_enclave_ref(
         table,
         index,
         "reaction",
         "reactions",
-        entry.reaction(),
-        image.reactions,
-    )?;
-    if image.reactions[entry.reaction()].dependency_level() != entry.level() {
-        return Err(ImageValidationError::OwnershipMismatch {
+        entry.reaction().as_u32(),
+        image.reactions.len(),
+    ));
+    if image.reactions.as_slice()[entry.reaction().as_u32() as usize].dependency_level()
+        != entry.level()
+    {
+        return Err(enclave_fault(ImageValidationError::OwnershipMismatch {
             table,
             index,
             field: "dependency_level",
-        });
+        }));
     }
     Ok(())
 }
 
-fn validate_levels<'a>(
+const fn validate_levels<'a>(
     table: &'static str,
-    offset: u32,
+    start: u32,
+    len: u32,
     values: &[LevelReactionImage],
     image: &EnclaveImage<'a>,
-) -> Result<(), ImageValidationError<'a>> {
-    let mut previous = None;
-    for (position, entry) in values.iter().copied().enumerate() {
-        let index = offset + position as u32;
-        validate_level_ref(table, index, entry, image)?;
+) -> Result<(), ValidationFault<'a>> {
+    let mut previous: Option<LevelReactionImage> = None;
+    let mut position = 0;
+    while position < len as usize {
+        let index = start + position as u32;
+        let entry = values[index as usize];
+        const_try!(validate_level_ref(table, index, entry, image));
         if let Some(before) = previous {
-            if entry == before {
-                return Err(ImageValidationError::DuplicateEntry { table, index });
+            if same_level(entry, before) {
+                return Err(enclave_fault(ImageValidationError::DuplicateEntry {
+                    table,
+                    index,
+                }));
             }
-            if entry < before {
-                return Err(ImageValidationError::EntriesNotSorted { table, index });
+            if level_before(entry, before) {
+                return Err(enclave_fault(ImageValidationError::EntriesNotSorted {
+                    table,
+                    index,
+                }));
             }
         }
         previous = Some(entry);
+        position += 1;
     }
     Ok(())
 }
 
-fn validate_lifecycle<'a>(
+const fn validate_lifecycle<'a>(
     table: &'static str,
-    offset: u32,
+    start: u32,
+    len: u32,
     values: &[LifecycleReactionImage],
     image: &EnclaveImage<'a>,
-) -> Result<(), ImageValidationError<'a>> {
-    let mut previous = None;
-    for (position, entry) in values.iter().copied().enumerate() {
-        let index = offset + position as u32;
-        check_ref(
+) -> Result<(), ValidationFault<'a>> {
+    let mut previous: Option<LevelReactionImage> = None;
+    let mut position = 0;
+    while position < len as usize {
+        let index = start + position as u32;
+        let entry = values[index as usize];
+        const_try!(check_enclave_ref(
             table,
             index,
             "action",
             "actions",
-            entry.action(),
-            image.actions,
-        )?;
-        validate_level_ref(table, index, entry.reaction(), image)?;
+            entry.action().as_u32(),
+            image.actions.len(),
+        ));
+        const_try!(validate_level_ref(table, index, entry.reaction(), image));
         if let Some(before) = previous {
-            if entry.reaction() == before {
-                return Err(ImageValidationError::DuplicateEntry { table, index });
+            if same_level(entry.reaction(), before) {
+                return Err(enclave_fault(ImageValidationError::DuplicateEntry {
+                    table,
+                    index,
+                }));
             }
-            if entry.reaction() < before {
-                return Err(ImageValidationError::EntriesNotSorted { table, index });
+            if level_before(entry.reaction(), before) {
+                return Err(enclave_fault(ImageValidationError::EntriesNotSorted {
+                    table,
+                    index,
+                }));
             }
         }
         previous = Some(entry.reaction());
+        position += 1;
     }
     Ok(())
 }
 
-fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>> {
-    check_len::<ReactorIndex>("reactors", image.reactors.len())?;
-    check_len::<ActionIndex>("actions", image.actions.len())?;
-    check_len::<PortIndex>("ports", image.ports.len())?;
-    check_len::<ReactionIndex>("reactions", image.reactions.len())?;
-    check_len::<ModeIndex>("modes", image.modes.len())?;
-    check_len::<ScopeIndex>("scopes", image.scopes.len())?;
-    check_len::<RouteIndex>("routes", image.routes.len())?;
-    check_len::<BindingSlotIndex>("required_bindings", image.required_bindings.len())?;
-    check_ref(
+const fn validate_enclave_const<'a>(image: &EnclaveImage<'a>) -> Result<(), ValidationFault<'a>> {
+    const_try!(check_enclave_len("reactors", image.reactors.len()));
+    const_try!(check_enclave_len("actions", image.actions.len()));
+    const_try!(check_enclave_len("ports", image.ports.len()));
+    const_try!(check_enclave_len("reactions", image.reactions.len()));
+    const_try!(check_enclave_len("modes", image.modes.len()));
+    const_try!(check_enclave_len("scopes", image.scopes.len()));
+    const_try!(check_enclave_len("routes", image.routes.len()));
+    const_try!(check_enclave_len(
+        "required_bindings",
+        image.required_bindings.len(),
+    ));
+    const_try!(check_enclave_ref(
         "image",
         0,
         "root_reactor",
         "reactors",
-        ReactorIndex::new(0),
-        image.reactors,
-    )?;
-    validate_id("enclave", 0, image.enclave_id.as_str(), &mut None)?;
+        0,
+        image.reactors.len(),
+    ));
+    const_try!(validate_enclave_id(
+        "enclave",
+        0,
+        image.enclave_id.as_str(),
+        None,
+    ));
+
+    let reactors = image.reactors.as_slice();
+    let actions = image.actions.as_slice();
+    let ports = image.ports.as_slice();
+    let reactions = image.reactions.as_slice();
+    let modes = image.modes.as_slice();
+    let scopes = image.scopes.as_slice();
+    let routes = image.routes.as_slice();
+    let bindings = image.required_bindings.as_slice();
 
     let mut mode_end = 0;
-    for (i, reactor) in image.reactors.values().enumerate() {
+    let mut i = 0;
+    while i < reactors.len() {
+        let reactor = &reactors[i];
         let index = i as u32;
-        check_ref(
+        let state_binding = reactor.state_binding().as_u32();
+        const_try!(check_enclave_ref(
             "reactors",
             index,
             "state_binding",
             "required_bindings",
-            reactor.state_binding(),
-            image.required_bindings,
-        )?;
-        if image.required_bindings[reactor.state_binding()].kind() != BindingKind::StateInitializer
-        {
-            return Err(ImageValidationError::BindingKindMismatch {
+            state_binding,
+            bindings.len(),
+        ));
+        if !binding_kind_is(
+            bindings[state_binding as usize].kind(),
+            BindingKind::StateInitializer,
+        ) {
+            const_fail!(ImageValidationError::BindingKindMismatch {
                 table: "reactors",
                 index,
                 field: "state_binding",
             });
         }
         if reactor.state_slot().as_u32() >= image.storage_bounds.state_slots() {
-            return Err(ImageValidationError::StorageBoundExceeded {
+            const_fail!(ImageValidationError::StorageBoundExceeded {
                 table: "reactors",
                 index,
                 kind: "state slots",
@@ -1217,42 +1535,47 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
                 bound: image.storage_bounds.state_slots(),
             });
         }
-        check_ref(
+        let root_scope = reactor.root_scope().as_u32();
+        const_try!(check_enclave_ref(
             "reactors",
             index,
             "root_scope",
             "scopes",
-            reactor.root_scope(),
-            image.scopes,
-        )?;
-        let root_scope = &image.scopes[reactor.root_scope()];
-        if root_scope.reactor() != ReactorIndex::new(index) || root_scope.mode().is_some() {
-            return Err(ImageValidationError::OwnershipMismatch {
+            root_scope,
+            scopes.len(),
+        ));
+        let root_scope = &scopes[root_scope as usize];
+        if root_scope.reactor().as_u32() != index || root_scope.mode().is_some() {
+            const_fail!(ImageValidationError::OwnershipMismatch {
                 table: "reactors",
                 index,
                 field: "root_scope",
             });
         }
-        check_span(
+        const_try!(check_enclave_span(
             "reactors",
             index,
             "modes",
             "modes",
             reactor.modes(),
-            image.modes.len(),
+            modes.len(),
             &mut mode_end,
-        )?;
+        ));
         if let Some(mode) = reactor.initial_mode() {
-            check_ref(
+            let mode = mode.as_u32();
+            const_try!(check_enclave_ref(
                 "reactors",
                 index,
                 "initial_mode",
                 "modes",
                 mode,
-                image.modes,
-            )?;
-            if !reactor.modes().contains(mode) {
-                return Err(ImageValidationError::OwnershipMismatch {
+                modes.len(),
+            ));
+            let owned = reactor.modes();
+            if (mode as usize) < owned.start()
+                || (mode as usize) >= owned.start().saturating_add(owned.len())
+            {
+                const_fail!(ImageValidationError::OwnershipMismatch {
                     table: "reactors",
                     index,
                     field: "initial_mode",
@@ -1261,28 +1584,31 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
         }
         if let Some(bank) = reactor.bank() {
             if bank.total() == 0 || bank.index() >= bank.total() {
-                return Err(ImageValidationError::InvalidBankInfo {
+                const_fail!(ImageValidationError::InvalidBankInfo {
                     reactor: index,
                     index: bank.index(),
                     total: bank.total(),
                 });
             }
         }
+        i += 1;
     }
 
     let mut trigger_end = 0;
-    for (i, action) in image.actions.values().enumerate() {
+    i = 0;
+    while i < actions.len() {
+        let action = &actions[i];
         let index = i as u32;
-        check_ref(
+        const_try!(check_enclave_ref(
             "actions",
             index,
             "scope",
             "scopes",
-            action.scope(),
-            image.scopes,
-        )?;
+            action.scope().as_u32(),
+            scopes.len(),
+        ));
         if action.storage_slot().as_u32() >= image.storage_bounds.action_slots() {
-            return Err(ImageValidationError::StorageBoundExceeded {
+            const_fail!(ImageValidationError::StorageBoundExceeded {
                 table: "actions",
                 index,
                 kind: "action slots",
@@ -1292,16 +1618,17 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
         }
         match (action.timing(), action.binding()) {
             (ActionTiming::Standard { .. }, Some(binding)) => {
-                check_ref(
+                let binding = binding.as_u32();
+                const_try!(check_enclave_ref(
                     "actions",
                     index,
                     "binding",
                     "required_bindings",
                     binding,
-                    image.required_bindings,
-                )?;
-                if image.required_bindings[binding].kind() != BindingKind::Action {
-                    return Err(ImageValidationError::BindingKindMismatch {
+                    bindings.len(),
+                ));
+                if !binding_kind_is(bindings[binding as usize].kind(), BindingKind::Action) {
+                    const_fail!(ImageValidationError::BindingKindMismatch {
                         table: "actions",
                         index,
                         field: "binding",
@@ -1310,7 +1637,7 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
             }
             (ActionTiming::Standard { .. }, None)
             | (ActionTiming::Timer { .. } | ActionTiming::Shutdown, Some(_)) => {
-                return Err(ImageValidationError::BindingPresenceMismatch {
+                const_fail!(ImageValidationError::BindingPresenceMismatch {
                     table: "actions",
                     index,
                     field: "binding",
@@ -1318,7 +1645,7 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
             }
             (ActionTiming::Timer { .. } | ActionTiming::Shutdown, None) => {}
         }
-        check_range(
+        const_try!(check_enclave_range(
             "actions",
             index,
             "triggers",
@@ -1326,35 +1653,40 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
             action.triggers(),
             image.reaction_triggers.len(),
             &mut trigger_end,
-        )?;
+        ));
+        i += 1;
     }
+
     trigger_end = 0;
-    for (i, port) in image.ports.values().enumerate() {
+    i = 0;
+    while i < ports.len() {
+        let port = &ports[i];
         let index = i as u32;
-        check_ref(
+        let binding = port.binding().as_u32();
+        const_try!(check_enclave_ref(
             "ports",
             index,
             "binding",
             "required_bindings",
-            port.binding(),
-            image.required_bindings,
-        )?;
-        if image.required_bindings[port.binding()].kind() != BindingKind::Port {
-            return Err(ImageValidationError::BindingKindMismatch {
+            binding,
+            bindings.len(),
+        ));
+        if !binding_kind_is(bindings[binding as usize].kind(), BindingKind::Port) {
+            const_fail!(ImageValidationError::BindingKindMismatch {
                 table: "ports",
                 index,
                 field: "binding",
             });
         }
-        check_ref(
+        const_try!(check_enclave_ref(
             "ports",
             index,
             "scope",
             "scopes",
-            port.scope(),
-            image.scopes,
-        )?;
-        check_range(
+            port.scope().as_u32(),
+            scopes.len(),
+        ));
+        const_try!(check_enclave_range(
             "ports",
             index,
             "triggers",
@@ -1362,68 +1694,80 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
             port.triggers(),
             image.reaction_triggers.len(),
             &mut trigger_end,
-        )?;
+        ));
+        i += 1;
     }
 
-    let (mut use_end, mut effect_end, mut action_end, mut reaction_mode_end) = (0, 0, 0, 0);
-    for (i, reaction) in image.reactions.values().enumerate() {
+    let mut use_end = 0;
+    let mut effect_end = 0;
+    let mut action_end = 0;
+    let mut reaction_mode_end = 0;
+    i = 0;
+    while i < reactions.len() {
+        let reaction = &reactions[i];
         let index = i as u32;
-        check_ref(
+        const_try!(check_enclave_ref(
             "reactions",
             index,
             "reactor",
             "reactors",
-            reaction.reactor(),
-            image.reactors,
-        )?;
-        check_ref(
+            reaction.reactor().as_u32(),
+            reactors.len(),
+        ));
+        const_try!(check_enclave_ref(
             "reactions",
             index,
             "scope",
             "scopes",
-            reaction.scope(),
-            image.scopes,
-        )?;
-        check_ref(
+            reaction.scope().as_u32(),
+            scopes.len(),
+        ));
+        let binding = reaction.binding().as_u32();
+        const_try!(check_enclave_ref(
             "reactions",
             index,
             "binding",
             "required_bindings",
-            reaction.binding(),
-            image.required_bindings,
-        )?;
-        if image.required_bindings[reaction.binding()].kind() != BindingKind::Reaction {
-            return Err(ImageValidationError::BindingKindMismatch {
+            binding,
+            bindings.len(),
+        ));
+        if !binding_kind_is(bindings[binding as usize].kind(), BindingKind::Reaction) {
+            const_fail!(ImageValidationError::BindingKindMismatch {
                 table: "reactions",
                 index,
                 field: "binding",
             });
         }
-        if image.scopes[reaction.scope()].reactor() != reaction.reactor() {
-            return Err(ImageValidationError::OwnershipMismatch {
+        if scopes[reaction.scope().as_u32() as usize]
+            .reactor()
+            .as_u32()
+            != reaction.reactor().as_u32()
+        {
+            const_fail!(ImageValidationError::OwnershipMismatch {
                 table: "reactions",
                 index,
                 field: "scope.reactor",
             });
         }
         if let Some(effect) = reaction.mode_effect() {
-            check_ref(
+            let target = effect.target.as_u32();
+            const_try!(check_enclave_ref(
                 "reactions",
                 index,
                 "mode_effect.target",
                 "modes",
-                effect.target,
-                image.modes,
-            )?;
-            if image.modes[effect.target].reactor() != reaction.reactor() {
-                return Err(ImageValidationError::OwnershipMismatch {
+                target,
+                modes.len(),
+            ));
+            if modes[target as usize].reactor().as_u32() != reaction.reactor().as_u32() {
+                const_fail!(ImageValidationError::OwnershipMismatch {
                     table: "reactions",
                     index,
                     field: "mode_effect.target.reactor",
                 });
             }
         }
-        check_range(
+        const_try!(check_enclave_range(
             "reactions",
             index,
             "use_ports",
@@ -1431,8 +1775,8 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
             reaction.use_ports(),
             image.reaction_use_ports.len(),
             &mut use_end,
-        )?;
-        check_range(
+        ));
+        const_try!(check_enclave_range(
             "reactions",
             index,
             "effect_ports",
@@ -1440,8 +1784,8 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
             reaction.effect_ports(),
             image.reaction_effect_ports.len(),
             &mut effect_end,
-        )?;
-        check_range(
+        ));
+        const_try!(check_enclave_range(
             "reactions",
             index,
             "actions",
@@ -1449,8 +1793,8 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
             reaction.actions(),
             image.reaction_actions.len(),
             &mut action_end,
-        )?;
-        check_range(
+        ));
+        const_try!(check_enclave_range(
             "reactions",
             index,
             "enabled_modes",
@@ -1458,78 +1802,104 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
             reaction.enabled_modes(),
             image.reaction_modes.len(),
             &mut reaction_mode_end,
-        )?;
+        ));
+        i += 1;
     }
 
-    for (i, mode) in image.modes.values().copied().enumerate() {
+    i = 0;
+    while i < modes.len() {
+        let mode = modes[i];
         let index = i as u32;
-        check_ref(
+        const_try!(check_enclave_ref(
             "modes",
             index,
             "reactor",
             "reactors",
-            mode.reactor(),
-            image.reactors,
-        )?;
-        check_ref(
+            mode.reactor().as_u32(),
+            reactors.len(),
+        ));
+        const_try!(check_enclave_ref(
             "modes",
             index,
             "scope",
             "scopes",
-            mode.scope(),
-            image.scopes,
-        )?;
-        let scope = &image.scopes[mode.scope()];
-        if scope.reactor() != mode.reactor() {
-            return Err(ImageValidationError::OwnershipMismatch {
+            mode.scope().as_u32(),
+            scopes.len(),
+        ));
+        let scope = &scopes[mode.scope().as_u32() as usize];
+        if scope.reactor().as_u32() != mode.reactor().as_u32() {
+            const_fail!(ImageValidationError::OwnershipMismatch {
                 table: "modes",
                 index,
                 field: "scope.reactor",
             });
         }
-        if scope.mode() != Some(ModeIndex::new(index)) {
-            return Err(ImageValidationError::OwnershipMismatch {
-                table: "modes",
-                index,
-                field: "scope.mode",
-            });
+        match scope.mode() {
+            Some(owner) if owner.as_u32() == index => {}
+            _ => {
+                const_fail!(ImageValidationError::OwnershipMismatch {
+                    table: "modes",
+                    index,
+                    field: "scope.mode",
+                });
+            }
         }
-        let modes = image.reactors[mode.reactor()].modes();
-        if !modes.contains(ModeIndex::new(index)) {
-            return Err(ImageValidationError::OwnershipMismatch {
+        let owned = reactors[mode.reactor().as_u32() as usize].modes();
+        if i < owned.start() || i >= owned.start().saturating_add(owned.len()) {
+            const_fail!(ImageValidationError::OwnershipMismatch {
                 table: "modes",
                 index,
                 field: "reactor.modes",
             });
         }
+        i += 1;
     }
 
     let mut ends = [0_usize; 6];
-    for (i, scope) in image.scopes.values().enumerate() {
+    i = 0;
+    while i < scopes.len() {
+        let scope = &scopes[i];
         let index = i as u32;
-        check_ref(
+        const_try!(check_enclave_ref(
             "scopes",
             index,
             "reactor",
             "reactors",
-            scope.reactor(),
-            image.reactors,
-        )?;
+            scope.reactor().as_u32(),
+            reactors.len(),
+        ));
         if let Some(parent) = scope.parent() {
-            check_ref("scopes", index, "parent", "scopes", parent, image.scopes)?;
+            const_try!(check_enclave_ref(
+                "scopes",
+                index,
+                "parent",
+                "scopes",
+                parent.as_u32(),
+                scopes.len(),
+            ));
         }
         if let Some(mode) = scope.mode() {
-            check_ref("scopes", index, "mode", "modes", mode, image.modes)?;
-            let owner = image.modes[mode];
-            if owner.scope() != ScopeIndex::new(index) || owner.reactor() != scope.reactor() {
-                return Err(ImageValidationError::OwnershipMismatch {
+            let mode = mode.as_u32();
+            const_try!(check_enclave_ref(
+                "scopes",
+                index,
+                "mode",
+                "modes",
+                mode,
+                modes.len(),
+            ));
+            let owner = modes[mode as usize];
+            if owner.scope().as_u32() != index
+                || owner.reactor().as_u32() != scope.reactor().as_u32()
+            {
+                const_fail!(ImageValidationError::OwnershipMismatch {
                     table: "scopes",
                     index,
                     field: "mode",
                 });
             }
         }
-        check_range(
+        const_try!(check_enclave_range(
             "scopes",
             index,
             "descendants",
@@ -1537,8 +1907,8 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
             scope.descendants(),
             image.scope_descendants.len(),
             &mut ends[0],
-        )?;
-        check_range(
+        ));
+        const_try!(check_enclave_range(
             "scopes",
             index,
             "logical_actions",
@@ -1546,8 +1916,8 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
             scope.logical_actions(),
             image.scope_logical_actions.len(),
             &mut ends[1],
-        )?;
-        check_range(
+        ));
+        const_try!(check_enclave_range(
             "scopes",
             index,
             "timer_startups",
@@ -1555,8 +1925,8 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
             scope.timer_startups(),
             image.scope_timer_startups.len(),
             &mut ends[2],
-        )?;
-        check_range(
+        ));
+        const_try!(check_enclave_range(
             "scopes",
             index,
             "reset_reactions",
@@ -1564,8 +1934,8 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
             scope.reset_reactions(),
             image.scope_reset_reactions.len(),
             &mut ends[3],
-        )?;
-        check_range(
+        ));
+        const_try!(check_enclave_range(
             "scopes",
             index,
             "startup_reactions",
@@ -1573,8 +1943,8 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
             scope.startup_reactions(),
             image.scope_startup_reactions.len(),
             &mut ends[4],
-        )?;
-        check_range(
+        ));
+        const_try!(check_enclave_range(
             "scopes",
             index,
             "shutdown_reactions",
@@ -1582,275 +1952,376 @@ fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>
             scope.shutdown_reactions(),
             image.scope_shutdown_reactions.len(),
             &mut ends[5],
-        )?;
-    }
-    for scope in image.scopes.keys() {
-        let mut ancestor = Some(scope);
-        for _ in 0..image.scopes.len() {
-            ancestor = ancestor.and_then(|key| image.scopes[key].parent());
-        }
-        if ancestor.is_some() {
-            return Err(ImageValidationError::ScopeParentCycle {
-                scope: scope.as_u32(),
-            });
-        }
+        ));
+        i += 1;
     }
 
-    for action in image.actions.values() {
-        validate_levels(
-            "reaction_triggers",
-            action.triggers().start(),
-            action
-                .triggers()
-                .get(image.reaction_triggers)
-                .expect("image table ranges are validated"),
-            image,
-        )?;
+    i = 0;
+    while i < scopes.len() {
+        let mut ancestor = Some(ScopeIndex::new(i as u32));
+        let mut depth = 0;
+        while depth < scopes.len() {
+            ancestor = match ancestor {
+                Some(key) => scopes[key.as_u32() as usize].parent(),
+                None => None,
+            };
+            depth += 1;
+        }
+        if ancestor.is_some() {
+            const_fail!(ImageValidationError::ScopeParentCycle { scope: i as u32 });
+        }
+        i += 1;
     }
-    for port in image.ports.values() {
-        validate_levels(
+
+    i = 0;
+    while i < actions.len() {
+        let range = actions[i].triggers();
+        const_try!(validate_levels(
             "reaction_triggers",
-            port.triggers().start(),
-            port.triggers()
-                .get(image.reaction_triggers)
-                .expect("image table ranges are validated"),
+            range.start(),
+            range.len(),
+            image.reaction_triggers,
             image,
-        )?;
+        ));
+        i += 1;
     }
-    for (i, value) in image.reaction_use_ports.iter().enumerate() {
-        check_ref(
+    i = 0;
+    while i < ports.len() {
+        let range = ports[i].triggers();
+        const_try!(validate_levels(
+            "reaction_triggers",
+            range.start(),
+            range.len(),
+            image.reaction_triggers,
+            image,
+        ));
+        i += 1;
+    }
+
+    i = 0;
+    while i < image.reaction_use_ports.len() {
+        const_try!(check_enclave_ref(
             "reaction_use_ports",
             i as u32,
             "port",
             "ports",
-            *value,
-            image.ports,
-        )?;
+            image.reaction_use_ports[i].as_u32(),
+            ports.len(),
+        ));
+        i += 1;
     }
-    for (i, value) in image.reaction_effect_ports.iter().enumerate() {
-        check_ref(
+    i = 0;
+    while i < image.reaction_effect_ports.len() {
+        const_try!(check_enclave_ref(
             "reaction_effect_ports",
             i as u32,
             "port",
             "ports",
-            *value,
-            image.ports,
-        )?;
+            image.reaction_effect_ports[i].as_u32(),
+            ports.len(),
+        ));
+        i += 1;
     }
-    for (i, value) in image.reaction_actions.iter().enumerate() {
-        check_ref(
+    i = 0;
+    while i < image.reaction_actions.len() {
+        const_try!(check_enclave_ref(
             "reaction_actions",
             i as u32,
             "action",
             "actions",
-            *value,
-            image.actions,
-        )?;
+            image.reaction_actions[i].as_u32(),
+            actions.len(),
+        ));
+        i += 1;
     }
-    for (i, value) in image.reaction_modes.iter().enumerate() {
-        check_ref(
+    i = 0;
+    while i < image.reaction_modes.len() {
+        const_try!(check_enclave_ref(
             "reaction_modes",
             i as u32,
             "mode",
             "modes",
-            *value,
-            image.modes,
-        )?;
+            image.reaction_modes[i].as_u32(),
+            modes.len(),
+        ));
+        i += 1;
     }
-    for (i, reaction) in image.reactions.values().enumerate() {
-        for mode in reaction
-            .enabled_modes()
-            .get(image.reaction_modes)
-            .expect("image table ranges are validated")
-        {
-            if image.modes[*mode].reactor() != reaction.reactor() {
-                return Err(ImageValidationError::OwnershipMismatch {
+
+    i = 0;
+    while i < reactions.len() {
+        let reaction = &reactions[i];
+        let range = reaction.enabled_modes();
+        let mut position = 0;
+        while position < range.len() as usize {
+            let mode = image.reaction_modes[range.start() as usize + position];
+            if modes[mode.as_u32() as usize].reactor().as_u32() != reaction.reactor().as_u32() {
+                const_fail!(ImageValidationError::OwnershipMismatch {
                     table: "reactions",
                     index: i as u32,
                     field: "enabled_modes.reactor",
                 });
             }
+            position += 1;
         }
+        i += 1;
     }
-    for (i, value) in image.scope_descendants.iter().enumerate() {
-        check_ref(
+
+    i = 0;
+    while i < image.scope_descendants.len() {
+        const_try!(check_enclave_ref(
             "scope_descendants",
             i as u32,
             "scope",
             "scopes",
-            *value,
-            image.scopes,
-        )?;
+            image.scope_descendants[i].as_u32(),
+            scopes.len(),
+        ));
+        i += 1;
     }
-    for (i, value) in image.scope_logical_actions.iter().enumerate() {
-        check_ref(
+    i = 0;
+    while i < image.scope_logical_actions.len() {
+        const_try!(check_enclave_ref(
             "scope_logical_actions",
             i as u32,
             "action",
             "actions",
-            *value,
-            image.actions,
-        )?;
+            image.scope_logical_actions[i].as_u32(),
+            actions.len(),
+        ));
+        i += 1;
     }
-    for (i, value) in image.scope_timer_startups.iter().enumerate() {
-        check_ref(
+    i = 0;
+    while i < image.scope_timer_startups.len() {
+        const_try!(check_enclave_ref(
             "scope_timer_startups",
             i as u32,
             "action",
             "actions",
-            value.action(),
-            image.actions,
-        )?;
+            image.scope_timer_startups[i].action().as_u32(),
+            actions.len(),
+        ));
+        i += 1;
     }
-    for scope in image.scopes.values() {
-        validate_levels(
+
+    i = 0;
+    while i < scopes.len() {
+        let scope = &scopes[i];
+        let reset = scope.reset_reactions();
+        const_try!(validate_levels(
             "scope_reset_reactions",
-            scope.reset_reactions().start(),
-            scope
-                .reset_reactions()
-                .get(image.scope_reset_reactions)
-                .expect("image table ranges are validated"),
+            reset.start(),
+            reset.len(),
+            image.scope_reset_reactions,
             image,
-        )?;
-        validate_lifecycle(
+        ));
+        let startup = scope.startup_reactions();
+        const_try!(validate_lifecycle(
             "scope_startup_reactions",
-            scope.startup_reactions().start(),
-            scope
-                .startup_reactions()
-                .get(image.scope_startup_reactions)
-                .expect("image table ranges are validated"),
+            startup.start(),
+            startup.len(),
+            image.scope_startup_reactions,
             image,
-        )?;
-        validate_lifecycle(
+        ));
+        let shutdown = scope.shutdown_reactions();
+        const_try!(validate_lifecycle(
             "scope_shutdown_reactions",
-            scope.shutdown_reactions().start(),
-            scope
-                .shutdown_reactions()
-                .get(image.scope_shutdown_reactions)
-                .expect("image table ranges are validated"),
+            shutdown.start(),
+            shutdown.len(),
+            image.scope_shutdown_reactions,
             image,
-        )?;
+        ));
+        i += 1;
     }
-    for (i, entry) in image.reaction_triggers.iter().copied().enumerate() {
-        validate_level_ref("reaction_triggers", i as u32, entry, image)?;
+
+    i = 0;
+    while i < image.reaction_triggers.len() {
+        const_try!(validate_level_ref(
+            "reaction_triggers",
+            i as u32,
+            image.reaction_triggers[i],
+            image,
+        ));
+        i += 1;
     }
-    for (i, entry) in image.scope_reset_reactions.iter().copied().enumerate() {
-        validate_level_ref("scope_reset_reactions", i as u32, entry, image)?;
+    i = 0;
+    while i < image.scope_reset_reactions.len() {
+        const_try!(validate_level_ref(
+            "scope_reset_reactions",
+            i as u32,
+            image.scope_reset_reactions[i],
+            image,
+        ));
+        i += 1;
     }
-    for (table, entries) in [
-        ("scope_startup_reactions", image.scope_startup_reactions),
-        ("scope_shutdown_reactions", image.scope_shutdown_reactions),
-    ] {
-        for (i, entry) in entries.iter().copied().enumerate() {
-            check_ref(
-                table,
-                i as u32,
-                "action",
-                "actions",
-                entry.action(),
-                image.actions,
-            )?;
-            validate_level_ref(table, i as u32, entry.reaction(), image)?;
-        }
+
+    i = 0;
+    while i < image.scope_startup_reactions.len() {
+        let entry = image.scope_startup_reactions[i];
+        const_try!(check_enclave_ref(
+            "scope_startup_reactions",
+            i as u32,
+            "action",
+            "actions",
+            entry.action().as_u32(),
+            actions.len(),
+        ));
+        const_try!(validate_level_ref(
+            "scope_startup_reactions",
+            i as u32,
+            entry.reaction(),
+            image,
+        ));
+        i += 1;
     }
-    for (i, value) in image.startup_actions.iter().enumerate() {
-        check_ref(
+    i = 0;
+    while i < image.scope_shutdown_reactions.len() {
+        let entry = image.scope_shutdown_reactions[i];
+        const_try!(check_enclave_ref(
+            "scope_shutdown_reactions",
+            i as u32,
+            "action",
+            "actions",
+            entry.action().as_u32(),
+            actions.len(),
+        ));
+        const_try!(validate_level_ref(
+            "scope_shutdown_reactions",
+            i as u32,
+            entry.reaction(),
+            image,
+        ));
+        i += 1;
+    }
+
+    i = 0;
+    while i < image.startup_actions.len() {
+        const_try!(check_enclave_ref(
             "startup_actions",
             i as u32,
             "action",
             "actions",
-            value.action(),
-            image.actions,
-        )?;
+            image.startup_actions[i].action().as_u32(),
+            actions.len(),
+        ));
+        i += 1;
     }
-    for (i, value) in image.timer_startup_actions.iter().enumerate() {
-        check_ref(
+    i = 0;
+    while i < image.timer_startup_actions.len() {
+        const_try!(check_enclave_ref(
             "timer_startup_actions",
             i as u32,
             "action",
             "actions",
-            value.action(),
-            image.actions,
-        )?;
+            image.timer_startup_actions[i].action().as_u32(),
+            actions.len(),
+        ));
+        i += 1;
     }
-    validate_lifecycle("shutdown_reactions", 0, image.shutdown_reactions, image)?;
-    let mut previous_action = None;
-    for (i, action) in image.shutdown_actions.iter().copied().enumerate() {
-        check_ref(
+    const_try!(validate_lifecycle(
+        "shutdown_reactions",
+        0,
+        image.shutdown_reactions.len() as u32,
+        image.shutdown_reactions,
+        image,
+    ));
+
+    let mut previous_action: Option<u32> = None;
+    i = 0;
+    while i < image.shutdown_actions.len() {
+        let action = image.shutdown_actions[i].as_u32();
+        const_try!(check_enclave_ref(
             "shutdown_actions",
             i as u32,
             "action",
             "actions",
             action,
-            image.actions,
-        )?;
+            actions.len(),
+        ));
         if let Some(previous) = previous_action {
             if action == previous {
-                return Err(ImageValidationError::DuplicateEntry {
+                const_fail!(ImageValidationError::DuplicateEntry {
                     table: "shutdown_actions",
                     index: i as u32,
                 });
             }
             if action < previous {
-                return Err(ImageValidationError::EntriesNotSorted {
+                const_fail!(ImageValidationError::EntriesNotSorted {
                     table: "shutdown_actions",
                     index: i as u32,
                 });
             }
         }
         previous_action = Some(action);
+        i += 1;
     }
 
-    let mut previous_route = None;
-    for (i, route) in image.routes.values().enumerate() {
-        let id = route.boundary();
-        if !valid_id(id.as_str()) {
-            return Err(ImageValidationError::InvalidStableId {
+    let mut previous_route: Option<(&str, RouteDirection)> = None;
+    i = 0;
+    while i < routes.len() {
+        let route = &routes[i];
+        let id = route.boundary().as_str();
+        if !valid_id(id) {
+            const_fail!(ImageValidationError::InvalidStableId {
                 kind: "boundary",
                 index: i as u32,
-                id: id.as_str(),
+                id,
             });
         }
         if let Some((previous_id, previous_direction)) = previous_route {
-            match id.cmp(&previous_id) {
-                std::cmp::Ordering::Less => {
-                    return Err(ImageValidationError::StableIdsNotSorted {
-                        kind: "boundary",
-                        index: i as u32,
-                        id: id.as_str(),
-                    })
-                }
-                std::cmp::Ordering::Equal if route.direction() == previous_direction => {
-                    return Err(ImageValidationError::DuplicateRouteHalf {
-                        boundary: id.as_str(),
-                        direction: route.direction(),
-                    })
-                }
-                std::cmp::Ordering::Equal if previous_direction == RouteDirection::Outbound => {
-                    return Err(ImageValidationError::EntriesNotSorted {
-                        table: "routes",
-                        index: i as u32,
-                    })
-                }
-                _ => {}
+            let ordering = compare_utf8(id, previous_id);
+            if ordering < 0 {
+                const_fail!(ImageValidationError::StableIdsNotSorted {
+                    kind: "boundary",
+                    index: i as u32,
+                    id,
+                });
+            }
+            if ordering == 0 && same_direction(route.direction(), previous_direction) {
+                const_fail!(ImageValidationError::DuplicateRouteHalf {
+                    boundary: id,
+                    direction: route.direction(),
+                });
+            }
+            if ordering == 0 && matches!(previous_direction, RouteDirection::Outbound) {
+                const_fail!(ImageValidationError::EntriesNotSorted {
+                    table: "routes",
+                    index: i as u32,
+                });
             }
         }
         previous_route = Some((id, route.direction()));
-        check_ref(
+        const_try!(check_enclave_ref(
             "routes",
             i as u32,
             "local_port",
             "ports",
-            route.local_port(),
-            image.ports,
-        )?;
+            route.local_port().as_u32(),
+            ports.len(),
+        ));
+        i += 1;
     }
-    let mut previous = None;
-    for (i, binding) in image.required_bindings.values().copied().enumerate() {
-        let id = binding.id();
-        validate_id("binding", i as u32, id.as_str(), &mut previous)?;
+
+    let mut previous_binding = None;
+    i = 0;
+    while i < bindings.len() {
+        let id = bindings[i].id().as_str();
+        const_try!(validate_enclave_id(
+            "binding",
+            i as u32,
+            id,
+            previous_binding,
+        ));
+        previous_binding = Some(id);
+        i += 1;
     }
     Ok(())
+}
+
+fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>> {
+    match validate_enclave_const(image) {
+        Ok(()) => Ok(()),
+        Err(fault) => Err(fault.error),
+    }
 }
 
 #[cfg(test)]
@@ -1926,6 +2397,45 @@ mod tests {
         assert_eq!(route.boundary(), boundary);
         assert_eq!(edge.boundary(), boundary);
         assert_eq!(binding.id().as_str(), "reaction/main");
+    }
+
+    #[test]
+    fn const_and_dynamic_identity_validation_preserve_unicode_semantics() {
+        assert_eq!(
+            VALIDATED_NON_ASCII_IMAGE.enclave_id().as_str(),
+            "plänt/控制"
+        );
+        assert!(EnclaveImageView::new(&NON_ASCII_IMAGE).is_ok());
+
+        for (constant, image, rejected) in [
+            (
+                &UNICODE_WHITESPACE_ERROR,
+                &UNICODE_WHITESPACE_IMAGE,
+                "\u{2003}plant/control",
+            ),
+            (
+                &UNICODE_CONTROL_ERROR,
+                &UNICODE_CONTROL_IMAGE,
+                "plant/control\u{80}",
+            ),
+        ] {
+            assert!(matches!(
+                constant,
+                ImageValidationError::InvalidStableId {
+                    kind: "enclave",
+                    index: 0,
+                    id,
+                } if *id == rejected
+            ));
+            assert!(matches!(
+                EnclaveImageView::new(image),
+                Err(ImageValidationError::InvalidStableId {
+                    kind: "enclave",
+                    index: 0,
+                    id,
+                }) if id == rejected
+            ));
+        }
     }
 
     const RANGE_0_0: SliceRange<PortIndex> = SliceRange::new(0, 0);
@@ -2120,6 +2630,39 @@ mod tests {
         storage_bounds: &StorageBounds::new(2, 1, 8, 0, 0, 4),
     };
 
+    const VALIDATED_IMAGE: EnclaveImageView<'static> = match EnclaveImageView::new(&IMAGE) {
+        Ok(view) => view,
+        Err(_) => panic!("valid Enclave image fixture rejected"),
+    };
+
+    const NON_ASCII_IMAGE: EnclaveImage<'static> = EnclaveImage {
+        enclave_id: EnclaveId::new("plänt/控制"),
+        ..IMAGE
+    };
+    const VALIDATED_NON_ASCII_IMAGE: EnclaveImageView<'static> =
+        match EnclaveImageView::new(&NON_ASCII_IMAGE) {
+            Ok(view) => view,
+            Err(_) => panic!("valid non-ASCII Enclave identity rejected"),
+        };
+    const UNICODE_WHITESPACE_IMAGE: EnclaveImage<'static> = EnclaveImage {
+        enclave_id: EnclaveId::new("\u{2003}plant/control"),
+        ..IMAGE
+    };
+    const UNICODE_WHITESPACE_ERROR: ImageValidationError<'static> =
+        match EnclaveImageView::new(&UNICODE_WHITESPACE_IMAGE) {
+            Ok(_) => panic!("Unicode whitespace identity accepted"),
+            Err(error) => error,
+        };
+    const UNICODE_CONTROL_IMAGE: EnclaveImage<'static> = EnclaveImage {
+        enclave_id: EnclaveId::new("plant/control\u{80}"),
+        ..IMAGE
+    };
+    const UNICODE_CONTROL_ERROR: ImageValidationError<'static> =
+        match EnclaveImageView::new(&UNICODE_CONTROL_IMAGE) {
+            Ok(_) => panic!("Unicode control identity accepted"),
+            Err(error) => error,
+        };
+
     const SECOND_IMAGE: EnclaveImage<'static> = EnclaveImage {
         enclave_id: EnclaveId::new("plant/otherx"),
         routes: TinyMapView::new(&OUTBOUND_ROUTES),
@@ -2172,7 +2715,7 @@ mod tests {
             IndexSpan::new(0, 2)
         );
 
-        let view = EnclaveImageView::new(&IMAGE).unwrap();
+        let view = VALIDATED_IMAGE;
 
         assert_eq!(view.enclave_id().as_str(), "plant/control");
         assert_eq!(view.reactors().len(), 2);

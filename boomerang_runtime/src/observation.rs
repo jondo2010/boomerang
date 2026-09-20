@@ -170,14 +170,14 @@ impl ObservationState {
     /// Transitions the scheduler to `phase` at `now`, closing the previous phase once.
     pub fn enter(&self, phase: SchedulerPhase, now: Instant) {
         let state = self;
-        state.generation.fetch_add(1, Ordering::AcqRel);
+        state.begin_update();
         let now_ns = elapsed_ns(state.origin, now);
         let previous = SchedulerPhase::from_u8(state.phase.load(Ordering::Relaxed));
         let started_ns = state.phase_started_ns.load(Ordering::Relaxed);
         add_elapsed(state, previous, now_ns.saturating_sub(started_ns));
         state.phase.store(phase as u8, Ordering::Relaxed);
         state.phase_started_ns.store(now_ns, Ordering::Relaxed);
-        state.generation.fetch_add(1, Ordering::Release);
+        state.end_update();
     }
 
     /// Marks successful scheduler startup.
@@ -317,7 +317,25 @@ impl ObservationState {
     }
 
     fn begin_update(&self) {
-        self.generation.fetch_add(1, Ordering::AcqRel);
+        loop {
+            let generation = self.generation.load(Ordering::Acquire);
+            if !generation.is_multiple_of(2) {
+                std::hint::spin_loop();
+                continue;
+            }
+            if self
+                .generation
+                .compare_exchange_weak(
+                    generation,
+                    generation.wrapping_add(1),
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+            {
+                return;
+            }
+        }
     }
 
     fn end_update(&self) {

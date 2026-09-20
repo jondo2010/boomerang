@@ -264,6 +264,20 @@ fn receive_until_wall_clock_deadline(
     }
 }
 
+fn observe_coordination_wait<T>(
+    observation: Option<&crate::ObservationHandle>,
+    wait: impl FnOnce() -> T,
+) -> T {
+    if let Some(observation) = observation {
+        observation.enter(SchedulerPhase::CoordinationWait, std::time::Instant::now());
+    }
+    let result = wait();
+    if let Some(observation) = observation {
+        observation.enter(SchedulerPhase::Framework, std::time::Instant::now());
+    }
+    result
+}
+
 impl<S, E> SchedulerCore<'_, '_, S, E>
 where
     S: Schedule,
@@ -464,6 +478,7 @@ where
     fn shutdown(&mut self) {
         self.events.shutdown();
         if let Some(observation) = self.observation {
+            observation.enter(SchedulerPhase::Idle, std::time::Instant::now());
             observation.mark_stopped();
         }
         let tag = self
@@ -607,10 +622,10 @@ where
         control_only: bool,
         logical_horizon: Option<Tag>,
     ) -> Result<Option<bool>, SchedulerError<E::Error>> {
+        let observation = self.observation;
         if let Some(coordination) = self.federate_coordination.as_deref_mut() {
             if logical_horizon == Some(next_tag) && !self.events.has_nonterminal_work() {
-                match coordination
-                    .wait()
+                match observe_coordination_wait(observation, || coordination.wait())
                     .map_err(SchedulerError::FederateCoordination)
                 {
                     Ok(FederateIdleWait::Interrupted(async_event)) => {
@@ -641,8 +656,9 @@ where
         }
         if let Some(coordination) = self.federate_coordination.as_deref_mut() {
             if control_only {
-                match coordination
-                    .authorize_control(next_tag)
+                match observe_coordination_wait(observation, || {
+                    coordination.authorize_control(next_tag)
+                })
                     .map_err(SchedulerError::FederateCoordination)
                 {
                     Ok(FederateControlAuthorization::Authorized) => {}
@@ -666,8 +682,7 @@ where
                     Err(error) => return Err(self.report_federate_failure(error)),
                 }
             } else {
-                match coordination
-                    .acquire_tag(next_tag)
+                match observe_coordination_wait(observation, || coordination.acquire_tag(next_tag))
                     .map_err(SchedulerError::FederateCoordination)
                 {
                     Ok(FederateTagAcquisition::Granted) => {}
@@ -700,9 +715,12 @@ where
         &mut self,
         next_tag: Tag,
     ) -> Result<Option<bool>, SchedulerError<E::Error>> {
+        let observation = self.observation;
         if self.federate_shutdown_tag != Some(next_tag) {
             for (_upstream_enclave_key, barrier) in self.upstream_enclaves.iter_mut() {
-                let async_event = match barrier.acquire_tag(next_tag, self.key, self.event_rx) {
+                let async_event = match observe_coordination_wait(observation, || {
+                    barrier.acquire_tag(next_tag, self.key, self.event_rx)
+                }) {
                     Ok(async_event) => async_event,
                     Err(error) => {
                         if let Some(keep_running) = self.handle_closed_event_channel()? {
@@ -954,6 +972,7 @@ where
                     self.shutdown_tx.shutdown();
                     self.events.shutdown();
                     if let Some(observation) = self.observation {
+                        observation.enter(SchedulerPhase::Idle, std::time::Instant::now());
                         observation.mark_failed();
                     }
                     return Err(error);

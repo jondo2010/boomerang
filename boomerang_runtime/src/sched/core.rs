@@ -275,6 +275,13 @@ where
         }
     }
 
+    fn observe_event_queue(&self) {
+        if let Some(observation) = self.observation {
+            let (occupancy, reserved_capacity) = self.events.event_queue_observation();
+            observation.record_event_queue(occupancy, reserved_capacity);
+        }
+    }
+
     /// Handle an asynchronous event from the event queue
     fn handle_async_event(&mut self, event: AsyncEvent) -> Result<(), E::Error> {
         self.stats.increment_processed_events();
@@ -887,6 +894,7 @@ where
     /// Process one scheduler step, returning coordination failures to the caller.
     pub(super) fn try_next(&mut self) -> Result<bool, SchedulerError<E::Error>> {
         self.pump_pending_async_events()?;
+        self.observe_event_queue();
 
         if self.event_rx.is_closed() {
             if let Some(keep_running) = self.handle_closed_event_channel()? {
@@ -914,9 +922,13 @@ where
                 return Ok(keep_running);
             }
 
-            self.process_next_event(logical_horizon)
+            let result = self.process_next_event(logical_horizon);
+            self.observe_event_queue();
+            result
         } else {
-            self.wait_for_next_event()
+            let result = self.wait_for_next_event();
+            self.observe_event_queue();
+            result
         }
     }
 

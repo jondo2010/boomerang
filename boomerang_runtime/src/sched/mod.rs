@@ -847,9 +847,8 @@ mod tests {
     fn live_scheduler_observation_attributes_callback_elapsed_time_to_reactions() {
         let seen_origin = Arc::new(Mutex::new(None));
         let (mut scheduler, reaction) = scheduler_recording_start_origin(seen_origin);
-        let observation = std::sync::Arc::new(crate::ObservationState::new(
-            std::time::Instant::now(),
-        ));
+        let observation =
+            std::sync::Arc::new(crate::ObservationState::new(std::time::Instant::now()));
         scheduler.config.observation = Some(observation.clone());
 
         scheduler.startup();
@@ -864,6 +863,8 @@ mod tests {
         assert!(snapshot.reaction_elapsed_ns > 0);
         assert_eq!(snapshot.processed_reactions, 1);
         assert_eq!(snapshot.processed_tags, 1);
+        assert_eq!(snapshot.event_queue_occupancy, 0);
+        assert_eq!(snapshot.event_queue_peak_occupancy, 1);
     }
 
     #[test]

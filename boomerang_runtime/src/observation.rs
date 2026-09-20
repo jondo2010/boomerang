@@ -70,6 +70,14 @@ pub struct ObservationSnapshot {
     pub set_ports: u64,
     /// Cumulative actions requested by reaction outcomes.
     pub scheduled_actions: u64,
+    /// Events currently retained across the scheduler's root and modal queues.
+    pub event_queue_occupancy: u64,
+    /// Slots currently reserved by those growable event queues.
+    pub event_queue_reserved_capacity: u64,
+    /// Event queues have no runtime-enforced size limit.
+    pub event_queue_enforced_limit: Option<u64>,
+    /// Largest aggregate event-queue occupancy seen by the scheduler.
+    pub event_queue_peak_occupancy: u64,
 }
 
 /// Atomic scheduler-observation storage independent of any sharing strategy.
@@ -90,6 +98,9 @@ pub struct ObservationState {
     processed_events: AtomicU64,
     set_ports: AtomicU64,
     scheduled_actions: AtomicU64,
+    event_queue_occupancy: AtomicU64,
+    event_queue_reserved_capacity: AtomicU64,
+    event_queue_peak_occupancy: AtomicU64,
 }
 
 /// Hosted convenience ownership for independently running scheduler and exporter code.
@@ -113,6 +124,9 @@ impl ObservationState {
             processed_events: AtomicU64::new(0),
             set_ports: AtomicU64::new(0),
             scheduled_actions: AtomicU64::new(0),
+            event_queue_occupancy: AtomicU64::new(0),
+            event_queue_reserved_capacity: AtomicU64::new(0),
+            event_queue_peak_occupancy: AtomicU64::new(0),
         }
     }
 
@@ -154,12 +168,22 @@ impl ObservationState {
         saturating_add(&self.scheduled_actions, count);
     }
 
+    /// Records the aggregate state of the scheduler's growable event queues.
+    pub fn record_event_queue(&self, occupancy: u64, reserved_capacity: u64) {
+        self.event_queue_occupancy
+            .store(occupancy, Ordering::Relaxed);
+        self.event_queue_reserved_capacity
+            .store(reserved_capacity, Ordering::Relaxed);
+        self.event_queue_peak_occupancy
+            .fetch_max(occupancy, Ordering::Relaxed);
+    }
+
     /// Captures closed phase totals plus the elapsed portion of the current phase.
     pub fn snapshot(&self, now: Instant) -> ObservationSnapshot {
         let state = self;
         loop {
             let before = state.generation.load(Ordering::Acquire);
-            if before % 2 != 0 {
+            if !before.is_multiple_of(2) {
                 std::hint::spin_loop();
                 continue;
             }
@@ -180,6 +204,14 @@ impl ObservationState {
                 processed_events: state.processed_events.load(Ordering::Relaxed),
                 set_ports: state.set_ports.load(Ordering::Relaxed),
                 scheduled_actions: state.scheduled_actions.load(Ordering::Relaxed),
+                event_queue_occupancy: state.event_queue_occupancy.load(Ordering::Relaxed),
+                event_queue_reserved_capacity: state
+                    .event_queue_reserved_capacity
+                    .load(Ordering::Relaxed),
+                event_queue_enforced_limit: None,
+                event_queue_peak_occupancy: state
+                    .event_queue_peak_occupancy
+                    .load(Ordering::Relaxed),
             };
             add_snapshot_elapsed(
                 &mut snapshot,

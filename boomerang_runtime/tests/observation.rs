@@ -67,3 +67,18 @@ fn work_counters_are_cumulative_and_saturate_without_wrapping() {
     assert_eq!(snapshot.processed_reactions, u64::MAX);
     assert_eq!(snapshot.processed_tags, 1);
 }
+
+#[test]
+fn event_queue_observation_distinguishes_capacity_limit_and_peak() {
+    let origin = Instant::now();
+    let observation = ObservationState::new(origin);
+
+    observation.record_event_queue(3, 8);
+    observation.record_event_queue(2, 16);
+
+    let snapshot = observation.snapshot(origin);
+    assert_eq!(snapshot.event_queue_occupancy, 2);
+    assert_eq!(snapshot.event_queue_reserved_capacity, 16);
+    assert_eq!(snapshot.event_queue_enforced_limit, None);
+    assert_eq!(snapshot.event_queue_peak_occupancy, 3);
+}

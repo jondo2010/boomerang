@@ -345,6 +345,23 @@ impl<S: Schedule> EventManager<S> {
         self.nonterminal_work_count != 0
     }
 
+    /// Returns aggregate event-queue occupancy and reserved capacity.
+    ///
+    /// The frontier heap and recycled reaction sets are scheduler implementation
+    /// details, not queued events, so they are deliberately excluded.
+    pub(super) fn event_queue_observation(&self) -> (u64, u64) {
+        self.scope_queues.values().fold(
+            self.root.observation_metrics(),
+            |(occupancy, reserved_capacity), queue| {
+                let (queue_occupancy, queue_reserved_capacity) = queue.observation_metrics();
+                (
+                    occupancy.saturating_add(queue_occupancy),
+                    reserved_capacity.saturating_add(queue_reserved_capacity),
+                )
+            },
+        )
+    }
+
     pub(super) fn pop_next_event(&mut self) -> Option<ReadyEvent<S::Reaction, S::Action>> {
         let mut action_values = std::mem::take(&mut self.ready_action_values);
         action_values.clear();

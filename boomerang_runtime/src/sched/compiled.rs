@@ -237,6 +237,7 @@ pub(crate) fn run_owned_scheduler_with_coordination(
     SchedulerCore {
         key,
         config,
+        observation: config.observation(),
         schedule: &schedule,
         storage,
         event_rx: &event_rx,

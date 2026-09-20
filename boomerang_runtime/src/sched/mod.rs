@@ -73,6 +73,8 @@ pub struct Config {
     pub physical_event_q_size: usize,
     /// Stop the scheduler after a certain amount of time has passed.
     pub timeout: Option<Duration>,
+    /// Optional bounded observation state sampled by hosted adapters.
+    pub observation: Option<crate::ObservationHandle>,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -81,6 +83,7 @@ impl Default for Config {
             keep_alive: false,
             physical_event_q_size: 1024,
             timeout: None,
+            observation: None,
         }
     }
 }
@@ -109,6 +112,17 @@ impl Config {
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
         self
+    }
+
+    /// Enables scheduler observation without adding transport or subscriber work.
+    pub fn with_observation(mut self, observation: crate::ObservationHandle) -> Self {
+        self.observation = Some(observation);
+        self
+    }
+
+    /// Returns the hosted-samplable observation handle when monitoring is enabled.
+    pub const fn observation(&self) -> Option<&crate::ObservationHandle> {
+        self.observation.as_ref()
     }
 }
 
@@ -595,6 +609,7 @@ impl Scheduler {
         SchedulerCore {
             key: *key,
             config,
+            observation: config.observation(),
             schedule: reaction_graph,
             storage: store,
             event_rx,
@@ -826,6 +841,29 @@ mod tests {
 
         assert!(scheduler.start_time >= startup_floor);
         assert_eq!(*seen_origin.lock().unwrap(), Some(scheduler.start_time));
+    }
+
+    #[test]
+    fn live_scheduler_observation_attributes_callback_elapsed_time_to_reactions() {
+        let seen_origin = Arc::new(Mutex::new(None));
+        let (mut scheduler, reaction) = scheduler_recording_start_origin(seen_origin);
+        let observation = std::sync::Arc::new(crate::ObservationState::new(
+            std::time::Instant::now(),
+        ));
+        scheduler.config.observation = Some(observation.clone());
+
+        scheduler.startup();
+        scheduler.events.push_event(
+            Tag::ZERO,
+            std::iter::once((Level::from(0), reaction)),
+            false,
+        );
+        assert!(scheduler.try_next().unwrap());
+
+        let snapshot = observation.snapshot(std::time::Instant::now());
+        assert!(snapshot.reaction_elapsed_ns > 0);
+        assert_eq!(snapshot.processed_reactions, 1);
+        assert_eq!(snapshot.processed_tags, 1);
     }
 
     #[test]

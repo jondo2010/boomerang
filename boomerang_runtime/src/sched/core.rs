@@ -16,7 +16,7 @@ use crate::{
     keepalive,
     key_set::KeySetView,
     ActionKey, CommonContext, Duration, EnclaveKey, Level, ReactionSetLimits, ReactorData,
-    RuntimeError, SendContext, Tag, TransitionKind,
+    RuntimeError, SchedulerPhase, SendContext, Tag, TransitionKind,
 };
 
 /// Immutable normalized schedule addressed by one exact family of dense key types.
@@ -172,6 +172,8 @@ where
     pub(super) key: EnclaveKey,
     /// Existing live scheduler configuration.
     pub(super) config: &'a Config,
+    /// Optional snapshot-only scheduler observation state.
+    pub(super) observation: Option<&'a crate::ObservationHandle>,
     /// Immutable dependency and modal schedule tables.
     pub(super) schedule: &'a S,
     /// Mutable reaction, action, and port execution storage.
@@ -267,9 +269,18 @@ where
     S: Schedule,
     E: ExecutionStorage<S>,
 {
+    fn observe(&self, phase: SchedulerPhase) {
+        if let Some(observation) = self.observation {
+            observation.enter(phase, std::time::Instant::now());
+        }
+    }
+
     /// Handle an asynchronous event from the event queue
     fn handle_async_event(&mut self, event: AsyncEvent) -> Result<(), E::Error> {
         self.stats.increment_processed_events();
+        if let Some(observation) = self.observation {
+            observation.increment_processed_events();
+        }
         let origin = event.kind_str();
         match event {
             AsyncEvent::TagRelease { enclave, tag } => {
@@ -405,6 +416,7 @@ where
 
     /// Execute startup of the Scheduler.
     pub(super) fn startup(&mut self) {
+        self.observe(SchedulerPhase::Framework);
         self.storage.prepare_startup_origin(self.start_time);
         let tag = Tag::ZERO;
 
@@ -465,7 +477,10 @@ where
                     event = "runtime.scheduler.waiting", enclave = self.key.as_u32(),
                     reason = "shutdown_deadline", tag_kind = shutdown.kind_str(), tag_offset_ns = shutdown.offset().whole_nanoseconds(), tag_microstep = shutdown.microstep(),
                 );
-                self.event_rx.recv_timeout(timeout).ok()
+                self.observe(SchedulerPhase::ExternalWait);
+                let event = self.event_rx.recv_timeout(timeout).ok();
+                self.observe(SchedulerPhase::Framework);
+                event
             } else {
                 None
             }
@@ -474,7 +489,10 @@ where
                 event = "runtime.scheduler.waiting", enclave = self.key.as_u32(),
                 reason = "keep_alive",
             );
-            self.event_rx.recv().ok()
+            self.observe(SchedulerPhase::ExternalWait);
+            let event = self.event_rx.recv().ok();
+            self.observe(SchedulerPhase::Framework);
+            event
         } else {
             None
         }
@@ -791,6 +809,9 @@ where
         }
 
         self.stats.increment_processed_tags();
+        if let Some(observation) = self.observation {
+            observation.increment_processed_tags();
+        }
         tracing::trace!(target: "boomerang::runtime",
             event = "runtime.scheduler.tag_processed", enclave = self.key.as_u32(),
             tag_kind = self.current_tag.kind_str(), tag_offset_ns = self.current_tag.offset().whole_nanoseconds(), tag_microstep = self.current_tag.microstep(), terminal = event.terminal,
@@ -812,15 +833,22 @@ where
 
     /// Waits for asynchronous work when the scheduler queue is empty.
     fn wait_for_next_event(&mut self) -> Result<bool, SchedulerError<E::Error>> {
+        let observation = self.observation;
         if let Some(coordination) = self.federate_coordination.as_deref_mut() {
             tracing::debug!(target: "boomerang::runtime",
                 event = "runtime.scheduler.waiting", enclave = self.key.as_u32(),
                 reason = "federate_coordination",
             );
-            match coordination
+            if let Some(observation) = observation {
+                observation.enter(SchedulerPhase::CoordinationWait, std::time::Instant::now());
+            }
+            let waited = coordination
                 .wait()
-                .map_err(SchedulerError::FederateCoordination)
-            {
+                .map_err(SchedulerError::FederateCoordination);
+            if let Some(observation) = observation {
+                observation.enter(SchedulerPhase::Framework, std::time::Instant::now());
+            }
+            match waited {
                 Ok(FederateIdleWait::Interrupted(async_event)) => {
                     self.handle_async_event(async_event)
                         .map_err(SchedulerError::Execution)?;
@@ -988,13 +1016,19 @@ where
 
             self.stats
                 .increment_processed_reactions(self.reaction_buffer.len());
+            if let Some(observation) = self.observation {
+                observation.add_processed_reactions(self.reaction_buffer.len() as u64);
+            }
 
             let outcome_count = self.reaction_buffer.len();
-            if let Err(error) = self.storage.execute_reactions(
+            self.observe(SchedulerPhase::Reaction);
+            let reaction_result = self.storage.execute_reactions(
                 self.reaction_buffer,
                 tag,
                 &mut self.outcomes[..outcome_count],
-            ) {
+            );
+            self.observe(SchedulerPhase::Framework);
+            if let Err(error) = reaction_result {
                 execution_error = Some(error);
                 return;
             }
@@ -1030,6 +1064,9 @@ where
                 // Submit events to the event queue for all scheduled actions
                 self.stats
                     .increment_scheduled_actions(outcome.scheduled_actions.len());
+                if let Some(observation) = self.observation {
+                    observation.add_scheduled_actions(outcome.scheduled_actions.len() as u64);
+                }
                 for &(action_key, tag) in &outcome.scheduled_actions {
                     self.events.push_action_event(
                         action_key,
@@ -1052,6 +1089,9 @@ where
 
                 for port_key in self.storage.set_ports() {
                     self.stats.increment_set_ports();
+                    if let Some(observation) = self.observation {
+                        observation.increment_set_ports();
+                    }
                     let downstream = self.schedule.port_triggers(port_key);
                     if has_modal_scopes {
                         next_levels.extend_above(downstream.filter(|&(_, reaction_key)| {

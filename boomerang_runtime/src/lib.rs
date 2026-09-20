@@ -10,6 +10,7 @@ pub mod binding;
 mod context;
 mod env;
 mod event;
+mod observation;
 pub mod image;
 pub mod keepalive;
 mod key_set;
@@ -38,6 +39,7 @@ pub use env::{
     ScopeKey, TransitionKind,
 };
 pub use event::{AsyncEvent, AsyncEventTarget};
+pub use observation::{ObservationHandle, ObservationSnapshot, ObservationState, SchedulerPhase};
 mod boundary;
 pub use boundary::{
     BoundaryAdmissionError, BoundarySubmissionError, InboundBoundaryAdapter, OutboundBoundarySink,

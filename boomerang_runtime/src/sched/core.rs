@@ -981,18 +981,26 @@ where
                     reason = "wall_clock", duration_ns = advance.as_nanos(),
                 );
 
-                return receive_until_wall_clock_deadline(
+                let observation = self.observation;
+                let received = receive_until_wall_clock_deadline(
                     target,
                     self.event_rx,
-                    || {},
+                    || {
+                        if let Some(observation) = observation {
+                            observation.enter(SchedulerPhase::PhysicalWait, std::time::Instant::now());
+                        }
+                    },
                     || {
                         self.federate_coordination.as_deref_mut().map_or(
                             Ok(None),
                             FederateSchedulerCoordination::terminal_after_event_channel_closed,
                         )
                     },
-                )
-                .map_err(SchedulerError::FederateCoordination);
+                );
+                if let Some(observation) = observation {
+                    observation.enter(SchedulerPhase::Framework, std::time::Instant::now());
+                }
+                return received.map_err(SchedulerError::FederateCoordination);
             }
 
             std::cmp::Ordering::Greater => {

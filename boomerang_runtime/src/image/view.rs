@@ -1180,26 +1180,52 @@ const fn enclave_fault<'a>(error: ImageValidationError<'a>) -> ValidationFault<'
     ValidationFault { error }
 }
 
-const fn check_enclave_ref<'a>(
-    table: &'static str,
-    index: u32,
-    field: &'static str,
-    target: &'static str,
-    referenced: u32,
-    target_len: usize,
-) -> Result<(), ValidationFault<'a>> {
-    if referenced as usize >= target_len {
-        Err(enclave_fault(ImageValidationError::ReferenceOutOfBounds {
-            table,
-            index,
-            field,
-            target,
-            referenced,
-        }))
-    } else {
-        Ok(())
-    }
+// Defines concrete same-domain adapters from a typed dense key to its matching table. The
+// key-to-`usize` representation conversion is deliberately centralized here; every generated
+// function's signature prevents a key from indexing an unrelated table domain.
+macro_rules! const_dense_ref_adapter {
+    ($name:ident, $key:ty, $value:ty, $target:literal) => {
+        const fn $name<'a>(
+            table: &'static str,
+            index: u32,
+            field: &'static str,
+            key: $key,
+            values: TinyMapView<'a, $key, $value>,
+        ) -> Result<&'a $value, ValidationFault<'a>> {
+            let referenced = key.as_u32();
+            let dense_index = referenced as usize;
+            if dense_index >= values.len() {
+                Err(enclave_fault(ImageValidationError::ReferenceOutOfBounds {
+                    table,
+                    index,
+                    field,
+                    target: $target,
+                    referenced,
+                }))
+            } else {
+                Ok(&values.as_slice()[dense_index])
+            }
+        }
+    };
 }
+
+const_dense_ref_adapter!(check_reactor_ref, ReactorIndex, ReactorImage, "reactors");
+const_dense_ref_adapter!(check_action_ref, ActionIndex, ActionImage, "actions");
+const_dense_ref_adapter!(check_port_ref, PortIndex, PortImage, "ports");
+const_dense_ref_adapter!(
+    check_reaction_ref,
+    ReactionIndex,
+    ReactionImage,
+    "reactions"
+);
+const_dense_ref_adapter!(check_mode_ref, ModeIndex, ModeImage, "modes");
+const_dense_ref_adapter!(check_scope_ref, ScopeIndex, ScopeImage, "scopes");
+const_dense_ref_adapter!(
+    check_binding_ref,
+    BindingSlotIndex,
+    RequiredBindingImage<'a>,
+    "required_bindings"
+);
 
 const fn check_enclave_len<'a>(table: &'static str, len: usize) -> Result<(), ValidationFault<'a>> {
     let max_len = if usize::BITS > u32::BITS {
@@ -1343,6 +1369,31 @@ const fn same_level(left: LevelReactionImage, right: LevelReactionImage) -> bool
     left.level() == right.level() && left.reaction().as_u32() == right.reaction().as_u32()
 }
 
+const fn same_reactor(left: ReactorIndex, right: ReactorIndex) -> bool {
+    left.as_u32() == right.as_u32()
+}
+
+const fn same_scope(left: ScopeIndex, right: ScopeIndex) -> bool {
+    left.as_u32() == right.as_u32()
+}
+
+const fn same_mode(left: ModeIndex, right: ModeIndex) -> bool {
+    left.as_u32() == right.as_u32()
+}
+
+const fn mode_span_contains(span: IndexSpan<ModeIndex>, mode: ModeIndex) -> bool {
+    let dense_index = mode.as_u32() as usize;
+    dense_index >= span.start() && dense_index < span.start().saturating_add(span.len())
+}
+
+const fn same_action(left: ActionIndex, right: ActionIndex) -> bool {
+    left.as_u32() == right.as_u32()
+}
+
+const fn action_before(left: ActionIndex, right: ActionIndex) -> bool {
+    left.as_u32() < right.as_u32()
+}
+
 const fn level_before(left: LevelReactionImage, right: LevelReactionImage) -> bool {
     left.level() < right.level()
         || (left.level() == right.level() && left.reaction().as_u32() < right.reaction().as_u32())
@@ -1372,17 +1423,14 @@ const fn validate_level_ref<'a>(
     entry: LevelReactionImage,
     image: &EnclaveImage<'a>,
 ) -> Result<(), ValidationFault<'a>> {
-    const_try!(check_enclave_ref(
+    let reaction = const_try!(check_reaction_ref(
         table,
         index,
         "reaction",
-        "reactions",
-        entry.reaction().as_u32(),
-        image.reactions.len(),
+        entry.reaction(),
+        image.reactions,
     ));
-    if image.reactions.as_slice()[entry.reaction().as_u32() as usize].dependency_level()
-        != entry.level()
-    {
+    if reaction.dependency_level() != entry.level() {
         return Err(enclave_fault(ImageValidationError::OwnershipMismatch {
             table,
             index,
@@ -1395,13 +1443,13 @@ const fn validate_level_ref<'a>(
 const fn validate_levels<'a>(
     table: &'static str,
     start: u32,
-    len: u32,
+    len: usize,
     values: &[LevelReactionImage],
     image: &EnclaveImage<'a>,
 ) -> Result<(), ValidationFault<'a>> {
     let mut previous: Option<LevelReactionImage> = None;
     let mut position = 0;
-    while position < len as usize {
+    while position < len {
         let index = start + position as u32;
         let entry = values[index as usize];
         const_try!(validate_level_ref(table, index, entry, image));
@@ -1428,22 +1476,21 @@ const fn validate_levels<'a>(
 const fn validate_lifecycle<'a>(
     table: &'static str,
     start: u32,
-    len: u32,
+    len: usize,
     values: &[LifecycleReactionImage],
     image: &EnclaveImage<'a>,
 ) -> Result<(), ValidationFault<'a>> {
     let mut previous: Option<LevelReactionImage> = None;
     let mut position = 0;
-    while position < len as usize {
+    while position < len {
         let index = start + position as u32;
         let entry = values[index as usize];
-        const_try!(check_enclave_ref(
+        const_try!(check_action_ref(
             table,
             index,
             "action",
-            "actions",
-            entry.action().as_u32(),
-            image.actions.len(),
+            entry.action(),
+            image.actions,
         ));
         const_try!(validate_level_ref(table, index, entry.reaction(), image));
         if let Some(before) = previous {
@@ -1478,13 +1525,12 @@ const fn validate_enclave_const<'a>(image: &EnclaveImage<'a>) -> Result<(), Vali
         "required_bindings",
         image.required_bindings.len(),
     ));
-    const_try!(check_enclave_ref(
+    const_try!(check_reactor_ref(
         "image",
         0,
         "root_reactor",
-        "reactors",
-        0,
-        image.reactors.len(),
+        ReactorIndex::new(0),
+        image.reactors,
     ));
     const_try!(validate_enclave_id(
         "enclave",
@@ -1507,19 +1553,14 @@ const fn validate_enclave_const<'a>(image: &EnclaveImage<'a>) -> Result<(), Vali
     while i < reactors.len() {
         let reactor = &reactors[i];
         let index = i as u32;
-        let state_binding = reactor.state_binding().as_u32();
-        const_try!(check_enclave_ref(
+        let state_binding = const_try!(check_binding_ref(
             "reactors",
             index,
             "state_binding",
-            "required_bindings",
-            state_binding,
-            bindings.len(),
+            reactor.state_binding(),
+            image.required_bindings,
         ));
-        if !binding_kind_is(
-            bindings[state_binding as usize].kind(),
-            BindingKind::StateInitializer,
-        ) {
+        if !binding_kind_is(state_binding.kind(), BindingKind::StateInitializer) {
             const_fail!(ImageValidationError::BindingKindMismatch {
                 table: "reactors",
                 index,
@@ -1535,17 +1576,16 @@ const fn validate_enclave_const<'a>(image: &EnclaveImage<'a>) -> Result<(), Vali
                 bound: image.storage_bounds.state_slots(),
             });
         }
-        let root_scope = reactor.root_scope().as_u32();
-        const_try!(check_enclave_ref(
+        let root_scope = const_try!(check_scope_ref(
             "reactors",
             index,
             "root_scope",
-            "scopes",
-            root_scope,
-            scopes.len(),
+            reactor.root_scope(),
+            image.scopes,
         ));
-        let root_scope = &scopes[root_scope as usize];
-        if root_scope.reactor().as_u32() != index || root_scope.mode().is_some() {
+        if !same_reactor(root_scope.reactor(), ReactorIndex::new(index))
+            || root_scope.mode().is_some()
+        {
             const_fail!(ImageValidationError::OwnershipMismatch {
                 table: "reactors",
                 index,
@@ -1562,19 +1602,14 @@ const fn validate_enclave_const<'a>(image: &EnclaveImage<'a>) -> Result<(), Vali
             &mut mode_end,
         ));
         if let Some(mode) = reactor.initial_mode() {
-            let mode = mode.as_u32();
-            const_try!(check_enclave_ref(
+            const_try!(check_mode_ref(
                 "reactors",
                 index,
                 "initial_mode",
-                "modes",
                 mode,
-                modes.len(),
+                image.modes,
             ));
-            let owned = reactor.modes();
-            if (mode as usize) < owned.start()
-                || (mode as usize) >= owned.start().saturating_add(owned.len())
-            {
+            if !mode_span_contains(reactor.modes(), mode) {
                 const_fail!(ImageValidationError::OwnershipMismatch {
                     table: "reactors",
                     index,
@@ -1599,13 +1634,12 @@ const fn validate_enclave_const<'a>(image: &EnclaveImage<'a>) -> Result<(), Vali
     while i < actions.len() {
         let action = &actions[i];
         let index = i as u32;
-        const_try!(check_enclave_ref(
+        const_try!(check_scope_ref(
             "actions",
             index,
             "scope",
-            "scopes",
-            action.scope().as_u32(),
-            scopes.len(),
+            action.scope(),
+            image.scopes,
         ));
         if action.storage_slot().as_u32() >= image.storage_bounds.action_slots() {
             const_fail!(ImageValidationError::StorageBoundExceeded {
@@ -1618,16 +1652,14 @@ const fn validate_enclave_const<'a>(image: &EnclaveImage<'a>) -> Result<(), Vali
         }
         match (action.timing(), action.binding()) {
             (ActionTiming::Standard { .. }, Some(binding)) => {
-                let binding = binding.as_u32();
-                const_try!(check_enclave_ref(
+                let binding = const_try!(check_binding_ref(
                     "actions",
                     index,
                     "binding",
-                    "required_bindings",
                     binding,
-                    bindings.len(),
+                    image.required_bindings,
                 ));
-                if !binding_kind_is(bindings[binding as usize].kind(), BindingKind::Action) {
+                if !binding_kind_is(binding.kind(), BindingKind::Action) {
                     const_fail!(ImageValidationError::BindingKindMismatch {
                         table: "actions",
                         index,
@@ -1662,29 +1694,26 @@ const fn validate_enclave_const<'a>(image: &EnclaveImage<'a>) -> Result<(), Vali
     while i < ports.len() {
         let port = &ports[i];
         let index = i as u32;
-        let binding = port.binding().as_u32();
-        const_try!(check_enclave_ref(
+        let binding = const_try!(check_binding_ref(
             "ports",
             index,
             "binding",
-            "required_bindings",
-            binding,
-            bindings.len(),
+            port.binding(),
+            image.required_bindings,
         ));
-        if !binding_kind_is(bindings[binding as usize].kind(), BindingKind::Port) {
+        if !binding_kind_is(binding.kind(), BindingKind::Port) {
             const_fail!(ImageValidationError::BindingKindMismatch {
                 table: "ports",
                 index,
                 field: "binding",
             });
         }
-        const_try!(check_enclave_ref(
+        const_try!(check_scope_ref(
             "ports",
             index,
             "scope",
-            "scopes",
-            port.scope().as_u32(),
-            scopes.len(),
+            port.scope(),
+            image.scopes,
         ));
         const_try!(check_enclave_range(
             "ports",
@@ -1706,43 +1735,35 @@ const fn validate_enclave_const<'a>(image: &EnclaveImage<'a>) -> Result<(), Vali
     while i < reactions.len() {
         let reaction = &reactions[i];
         let index = i as u32;
-        const_try!(check_enclave_ref(
+        const_try!(check_reactor_ref(
             "reactions",
             index,
             "reactor",
-            "reactors",
-            reaction.reactor().as_u32(),
-            reactors.len(),
+            reaction.reactor(),
+            image.reactors,
         ));
-        const_try!(check_enclave_ref(
+        let scope = const_try!(check_scope_ref(
             "reactions",
             index,
             "scope",
-            "scopes",
-            reaction.scope().as_u32(),
-            scopes.len(),
+            reaction.scope(),
+            image.scopes,
         ));
-        let binding = reaction.binding().as_u32();
-        const_try!(check_enclave_ref(
+        let binding = const_try!(check_binding_ref(
             "reactions",
             index,
             "binding",
-            "required_bindings",
-            binding,
-            bindings.len(),
+            reaction.binding(),
+            image.required_bindings,
         ));
-        if !binding_kind_is(bindings[binding as usize].kind(), BindingKind::Reaction) {
+        if !binding_kind_is(binding.kind(), BindingKind::Reaction) {
             const_fail!(ImageValidationError::BindingKindMismatch {
                 table: "reactions",
                 index,
                 field: "binding",
             });
         }
-        if scopes[reaction.scope().as_u32() as usize]
-            .reactor()
-            .as_u32()
-            != reaction.reactor().as_u32()
-        {
+        if !same_reactor(scope.reactor(), reaction.reactor()) {
             const_fail!(ImageValidationError::OwnershipMismatch {
                 table: "reactions",
                 index,
@@ -1750,16 +1771,14 @@ const fn validate_enclave_const<'a>(image: &EnclaveImage<'a>) -> Result<(), Vali
             });
         }
         if let Some(effect) = reaction.mode_effect() {
-            let target = effect.target.as_u32();
-            const_try!(check_enclave_ref(
+            let target = const_try!(check_mode_ref(
                 "reactions",
                 index,
                 "mode_effect.target",
-                "modes",
-                target,
-                modes.len(),
+                effect.target,
+                image.modes,
             ));
-            if modes[target as usize].reactor().as_u32() != reaction.reactor().as_u32() {
+            if !same_reactor(target.reactor(), reaction.reactor()) {
                 const_fail!(ImageValidationError::OwnershipMismatch {
                     table: "reactions",
                     index,
@@ -1810,24 +1829,21 @@ const fn validate_enclave_const<'a>(image: &EnclaveImage<'a>) -> Result<(), Vali
     while i < modes.len() {
         let mode = modes[i];
         let index = i as u32;
-        const_try!(check_enclave_ref(
+        let reactor = const_try!(check_reactor_ref(
             "modes",
             index,
             "reactor",
-            "reactors",
-            mode.reactor().as_u32(),
-            reactors.len(),
+            mode.reactor(),
+            image.reactors,
         ));
-        const_try!(check_enclave_ref(
+        let scope = const_try!(check_scope_ref(
             "modes",
             index,
             "scope",
-            "scopes",
-            mode.scope().as_u32(),
-            scopes.len(),
+            mode.scope(),
+            image.scopes,
         ));
-        let scope = &scopes[mode.scope().as_u32() as usize];
-        if scope.reactor().as_u32() != mode.reactor().as_u32() {
+        if !same_reactor(scope.reactor(), mode.reactor()) {
             const_fail!(ImageValidationError::OwnershipMismatch {
                 table: "modes",
                 index,
@@ -1835,7 +1851,7 @@ const fn validate_enclave_const<'a>(image: &EnclaveImage<'a>) -> Result<(), Vali
             });
         }
         match scope.mode() {
-            Some(owner) if owner.as_u32() == index => {}
+            Some(owner) if same_mode(owner, ModeIndex::new(index)) => {}
             _ => {
                 const_fail!(ImageValidationError::OwnershipMismatch {
                     table: "modes",
@@ -1844,8 +1860,7 @@ const fn validate_enclave_const<'a>(image: &EnclaveImage<'a>) -> Result<(), Vali
                 });
             }
         }
-        let owned = reactors[mode.reactor().as_u32() as usize].modes();
-        if i < owned.start() || i >= owned.start().saturating_add(owned.len()) {
+        if !mode_span_contains(reactor.modes(), ModeIndex::new(index)) {
             const_fail!(ImageValidationError::OwnershipMismatch {
                 table: "modes",
                 index,
@@ -1860,37 +1875,26 @@ const fn validate_enclave_const<'a>(image: &EnclaveImage<'a>) -> Result<(), Vali
     while i < scopes.len() {
         let scope = &scopes[i];
         let index = i as u32;
-        const_try!(check_enclave_ref(
+        const_try!(check_reactor_ref(
             "scopes",
             index,
             "reactor",
-            "reactors",
-            scope.reactor().as_u32(),
-            reactors.len(),
+            scope.reactor(),
+            image.reactors,
         ));
         if let Some(parent) = scope.parent() {
-            const_try!(check_enclave_ref(
+            const_try!(check_scope_ref(
                 "scopes",
                 index,
                 "parent",
-                "scopes",
-                parent.as_u32(),
-                scopes.len(),
+                parent,
+                image.scopes,
             ));
         }
         if let Some(mode) = scope.mode() {
-            let mode = mode.as_u32();
-            const_try!(check_enclave_ref(
-                "scopes",
-                index,
-                "mode",
-                "modes",
-                mode,
-                modes.len(),
-            ));
-            let owner = modes[mode as usize];
-            if owner.scope().as_u32() != index
-                || owner.reactor().as_u32() != scope.reactor().as_u32()
+            let owner = const_try!(check_mode_ref("scopes", index, "mode", mode, image.modes,));
+            if !same_scope(owner.scope(), ScopeIndex::new(index))
+                || !same_reactor(owner.reactor(), scope.reactor())
             {
                 const_fail!(ImageValidationError::OwnershipMismatch {
                     table: "scopes",
@@ -1962,7 +1966,14 @@ const fn validate_enclave_const<'a>(image: &EnclaveImage<'a>) -> Result<(), Vali
         let mut depth = 0;
         while depth < scopes.len() {
             ancestor = match ancestor {
-                Some(key) => scopes[key.as_u32() as usize].parent(),
+                Some(key) => const_try!(check_scope_ref(
+                    "scopes",
+                    i as u32,
+                    "parent",
+                    key,
+                    image.scopes,
+                ))
+                .parent(),
                 None => None,
             };
             depth += 1;
@@ -1979,7 +1990,7 @@ const fn validate_enclave_const<'a>(image: &EnclaveImage<'a>) -> Result<(), Vali
         const_try!(validate_levels(
             "reaction_triggers",
             range.start(),
-            range.len(),
+            range.len() as usize,
             image.reaction_triggers,
             image,
         ));
@@ -1991,7 +2002,7 @@ const fn validate_enclave_const<'a>(image: &EnclaveImage<'a>) -> Result<(), Vali
         const_try!(validate_levels(
             "reaction_triggers",
             range.start(),
-            range.len(),
+            range.len() as usize,
             image.reaction_triggers,
             image,
         ));
@@ -2000,49 +2011,45 @@ const fn validate_enclave_const<'a>(image: &EnclaveImage<'a>) -> Result<(), Vali
 
     i = 0;
     while i < image.reaction_use_ports.len() {
-        const_try!(check_enclave_ref(
+        const_try!(check_port_ref(
             "reaction_use_ports",
             i as u32,
             "port",
-            "ports",
-            image.reaction_use_ports[i].as_u32(),
-            ports.len(),
+            image.reaction_use_ports[i],
+            image.ports,
         ));
         i += 1;
     }
     i = 0;
     while i < image.reaction_effect_ports.len() {
-        const_try!(check_enclave_ref(
+        const_try!(check_port_ref(
             "reaction_effect_ports",
             i as u32,
             "port",
-            "ports",
-            image.reaction_effect_ports[i].as_u32(),
-            ports.len(),
+            image.reaction_effect_ports[i],
+            image.ports,
         ));
         i += 1;
     }
     i = 0;
     while i < image.reaction_actions.len() {
-        const_try!(check_enclave_ref(
+        const_try!(check_action_ref(
             "reaction_actions",
             i as u32,
             "action",
-            "actions",
-            image.reaction_actions[i].as_u32(),
-            actions.len(),
+            image.reaction_actions[i],
+            image.actions,
         ));
         i += 1;
     }
     i = 0;
     while i < image.reaction_modes.len() {
-        const_try!(check_enclave_ref(
+        const_try!(check_mode_ref(
             "reaction_modes",
             i as u32,
             "mode",
-            "modes",
-            image.reaction_modes[i].as_u32(),
-            modes.len(),
+            image.reaction_modes[i],
+            image.modes,
         ));
         i += 1;
     }
@@ -2054,7 +2061,14 @@ const fn validate_enclave_const<'a>(image: &EnclaveImage<'a>) -> Result<(), Vali
         let mut position = 0;
         while position < range.len() as usize {
             let mode = image.reaction_modes[range.start() as usize + position];
-            if modes[mode.as_u32() as usize].reactor().as_u32() != reaction.reactor().as_u32() {
+            let mode = const_try!(check_mode_ref(
+                "reaction_modes",
+                range.start() + position as u32,
+                "mode",
+                mode,
+                image.modes,
+            ));
+            if !same_reactor(mode.reactor(), reaction.reactor()) {
                 const_fail!(ImageValidationError::OwnershipMismatch {
                     table: "reactions",
                     index: i as u32,
@@ -2068,37 +2082,34 @@ const fn validate_enclave_const<'a>(image: &EnclaveImage<'a>) -> Result<(), Vali
 
     i = 0;
     while i < image.scope_descendants.len() {
-        const_try!(check_enclave_ref(
+        const_try!(check_scope_ref(
             "scope_descendants",
             i as u32,
             "scope",
-            "scopes",
-            image.scope_descendants[i].as_u32(),
-            scopes.len(),
+            image.scope_descendants[i],
+            image.scopes,
         ));
         i += 1;
     }
     i = 0;
     while i < image.scope_logical_actions.len() {
-        const_try!(check_enclave_ref(
+        const_try!(check_action_ref(
             "scope_logical_actions",
             i as u32,
             "action",
-            "actions",
-            image.scope_logical_actions[i].as_u32(),
-            actions.len(),
+            image.scope_logical_actions[i],
+            image.actions,
         ));
         i += 1;
     }
     i = 0;
     while i < image.scope_timer_startups.len() {
-        const_try!(check_enclave_ref(
+        const_try!(check_action_ref(
             "scope_timer_startups",
             i as u32,
             "action",
-            "actions",
-            image.scope_timer_startups[i].action().as_u32(),
-            actions.len(),
+            image.scope_timer_startups[i].action(),
+            image.actions,
         ));
         i += 1;
     }
@@ -2110,7 +2121,7 @@ const fn validate_enclave_const<'a>(image: &EnclaveImage<'a>) -> Result<(), Vali
         const_try!(validate_levels(
             "scope_reset_reactions",
             reset.start(),
-            reset.len(),
+            reset.len() as usize,
             image.scope_reset_reactions,
             image,
         ));
@@ -2118,7 +2129,7 @@ const fn validate_enclave_const<'a>(image: &EnclaveImage<'a>) -> Result<(), Vali
         const_try!(validate_lifecycle(
             "scope_startup_reactions",
             startup.start(),
-            startup.len(),
+            startup.len() as usize,
             image.scope_startup_reactions,
             image,
         ));
@@ -2126,7 +2137,7 @@ const fn validate_enclave_const<'a>(image: &EnclaveImage<'a>) -> Result<(), Vali
         const_try!(validate_lifecycle(
             "scope_shutdown_reactions",
             shutdown.start(),
-            shutdown.len(),
+            shutdown.len() as usize,
             image.scope_shutdown_reactions,
             image,
         ));
@@ -2157,13 +2168,12 @@ const fn validate_enclave_const<'a>(image: &EnclaveImage<'a>) -> Result<(), Vali
     i = 0;
     while i < image.scope_startup_reactions.len() {
         let entry = image.scope_startup_reactions[i];
-        const_try!(check_enclave_ref(
+        const_try!(check_action_ref(
             "scope_startup_reactions",
             i as u32,
             "action",
-            "actions",
-            entry.action().as_u32(),
-            actions.len(),
+            entry.action(),
+            image.actions,
         ));
         const_try!(validate_level_ref(
             "scope_startup_reactions",
@@ -2176,13 +2186,12 @@ const fn validate_enclave_const<'a>(image: &EnclaveImage<'a>) -> Result<(), Vali
     i = 0;
     while i < image.scope_shutdown_reactions.len() {
         let entry = image.scope_shutdown_reactions[i];
-        const_try!(check_enclave_ref(
+        const_try!(check_action_ref(
             "scope_shutdown_reactions",
             i as u32,
             "action",
-            "actions",
-            entry.action().as_u32(),
-            actions.len(),
+            entry.action(),
+            image.actions,
         ));
         const_try!(validate_level_ref(
             "scope_shutdown_reactions",
@@ -2195,56 +2204,53 @@ const fn validate_enclave_const<'a>(image: &EnclaveImage<'a>) -> Result<(), Vali
 
     i = 0;
     while i < image.startup_actions.len() {
-        const_try!(check_enclave_ref(
+        const_try!(check_action_ref(
             "startup_actions",
             i as u32,
             "action",
-            "actions",
-            image.startup_actions[i].action().as_u32(),
-            actions.len(),
+            image.startup_actions[i].action(),
+            image.actions,
         ));
         i += 1;
     }
     i = 0;
     while i < image.timer_startup_actions.len() {
-        const_try!(check_enclave_ref(
+        const_try!(check_action_ref(
             "timer_startup_actions",
             i as u32,
             "action",
-            "actions",
-            image.timer_startup_actions[i].action().as_u32(),
-            actions.len(),
+            image.timer_startup_actions[i].action(),
+            image.actions,
         ));
         i += 1;
     }
     const_try!(validate_lifecycle(
         "shutdown_reactions",
         0,
-        image.shutdown_reactions.len() as u32,
+        image.shutdown_reactions.len(),
         image.shutdown_reactions,
         image,
     ));
 
-    let mut previous_action: Option<u32> = None;
+    let mut previous_action: Option<ActionIndex> = None;
     i = 0;
     while i < image.shutdown_actions.len() {
-        let action = image.shutdown_actions[i].as_u32();
-        const_try!(check_enclave_ref(
+        let action = image.shutdown_actions[i];
+        const_try!(check_action_ref(
             "shutdown_actions",
             i as u32,
             "action",
-            "actions",
             action,
-            actions.len(),
+            image.actions,
         ));
         if let Some(previous) = previous_action {
-            if action == previous {
+            if same_action(action, previous) {
                 const_fail!(ImageValidationError::DuplicateEntry {
                     table: "shutdown_actions",
                     index: i as u32,
                 });
             }
-            if action < previous {
+            if action_before(action, previous) {
                 const_fail!(ImageValidationError::EntriesNotSorted {
                     table: "shutdown_actions",
                     index: i as u32,
@@ -2290,13 +2296,12 @@ const fn validate_enclave_const<'a>(image: &EnclaveImage<'a>) -> Result<(), Vali
             }
         }
         previous_route = Some((id, route.direction()));
-        const_try!(check_enclave_ref(
+        const_try!(check_port_ref(
             "routes",
             i as u32,
             "local_port",
-            "ports",
-            route.local_port().as_u32(),
-            ports.len(),
+            route.local_port(),
+            image.ports,
         ));
         i += 1;
     }

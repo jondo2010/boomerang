@@ -115,7 +115,7 @@ pub struct ObservationSnapshot {
 #[derive(Debug)]
 pub struct ObservationState {
     origin: Instant,
-    /// An odd value means the single scheduler writer is changing phase fields.
+    /// An odd value means the single scheduler writer is changing snapshot fields.
     generation: AtomicU64,
     lifecycle: AtomicU8,
     phase: AtomicU8,
@@ -182,62 +182,82 @@ impl ObservationState {
 
     /// Marks successful scheduler startup.
     pub fn mark_running(&self) {
+        self.begin_update();
         self.lifecycle
             .store(SchedulerLifecycle::Running as u8, Ordering::Release);
+        self.end_update();
     }
 
     /// Marks normal scheduler shutdown.
     pub fn mark_stopped(&self) {
+        self.begin_update();
         self.lifecycle
             .store(SchedulerLifecycle::Stopped as u8, Ordering::Release);
+        self.end_update();
     }
 
     /// Marks scheduler termination through an error path.
     pub fn mark_failed(&self) {
+        self.begin_update();
         self.lifecycle
             .store(SchedulerLifecycle::Failed as u8, Ordering::Release);
+        self.end_update();
     }
 
     /// Records completion of one logical scheduler tag.
     pub fn record_logical_progress(&self, now: Instant) {
+        self.begin_update();
         saturating_add(&self.completed_logical_tags, 1);
         self.last_logical_progress_ns
             .store(elapsed_ns(self.origin, now), Ordering::Release);
+        self.end_update();
     }
 
     /// Records one completed scheduler tag.
     pub fn increment_processed_tags(&self) {
+        self.begin_update();
         saturating_add(&self.processed_tags, 1);
+        self.end_update();
     }
 
     /// Adds enabled reaction callbacks to the cumulative work counter.
     pub fn add_processed_reactions(&self, count: u64) {
+        self.begin_update();
         saturating_add(&self.processed_reactions, count);
+        self.end_update();
     }
 
     /// Records one handled asynchronous scheduler event.
     pub fn increment_processed_events(&self) {
+        self.begin_update();
         saturating_add(&self.processed_events, 1);
+        self.end_update();
     }
 
     /// Records one present-port observation.
     pub fn increment_set_ports(&self) {
+        self.begin_update();
         saturating_add(&self.set_ports, 1);
+        self.end_update();
     }
 
     /// Adds requested actions to the cumulative work counter.
     pub fn add_scheduled_actions(&self, count: u64) {
+        self.begin_update();
         saturating_add(&self.scheduled_actions, count);
+        self.end_update();
     }
 
     /// Records the aggregate state of the scheduler's growable event queues.
     pub fn record_event_queue(&self, occupancy: u64, reserved_capacity: u64) {
+        self.begin_update();
         self.event_queue_occupancy
             .store(occupancy, Ordering::Relaxed);
         self.event_queue_reserved_capacity
             .store(reserved_capacity, Ordering::Relaxed);
         self.event_queue_peak_occupancy
             .fetch_max(occupancy, Ordering::Relaxed);
+        self.end_update();
     }
 
     /// Captures closed phase totals plus the elapsed portion of the current phase.
@@ -293,6 +313,14 @@ impl ObservationState {
                 return snapshot;
             }
         }
+    }
+
+    fn begin_update(&self) {
+        self.generation.fetch_add(1, Ordering::AcqRel);
+    }
+
+    fn end_update(&self) {
+        self.generation.fetch_add(1, Ordering::Release);
     }
 }
 

@@ -177,11 +177,16 @@ pub(super) struct EventManager<S: Schedule> {
     has_local_scopes: bool,
     /// Number of queued nonterminal contributions across every event queue.
     nonterminal_work_count: usize,
-    event_queue_peak_occupancy: u64,
+    /// Largest aggregate occupancy seen, or `None` when observation is disabled.
+    event_queue_peak_occupancy: Option<u64>,
 }
 
 impl<S: Schedule> EventManager<S> {
-    pub(super) fn new(reaction_set_limits: ReactionSetLimits, schedule: &S) -> Self {
+    pub(super) fn new(
+        reaction_set_limits: ReactionSetLimits,
+        schedule: &S,
+        observe_event_queue: bool,
+    ) -> Self {
         let root = EventQueue::new(reaction_set_limits.clone());
         let mut scope_active = tinymap::TinySecondaryMap::new();
         let mut scope_ever_active = tinymap::TinySecondaryMap::new();
@@ -218,7 +223,7 @@ impl<S: Schedule> EventManager<S> {
             reaction_set_limits,
             has_local_scopes: schedule.has_modal_scopes(),
             nonterminal_work_count: 0,
-            event_queue_peak_occupancy: 0,
+            event_queue_peak_occupancy: observe_event_queue.then_some(0),
         }
     }
 
@@ -355,11 +360,13 @@ impl<S: Schedule> EventManager<S> {
         self.nonterminal_work_count != 0
     }
 
-    /// Returns aggregate event-queue occupancy and reserved capacity.
+    /// Returns aggregate event-queue occupancy, reserved capacity, and peak occupancy.
     ///
     /// The frontier heap and recycled reaction sets are scheduler implementation
-    /// details, not queued events, so they are deliberately excluded.
-    pub(super) fn event_queue_observation(&self) -> (u64, u64, u64) {
+    /// details, not queued events, so they are deliberately excluded. Returns
+    /// `None` when event-queue observation is disabled.
+    pub(super) fn event_queue_observation(&self) -> Option<(u64, u64, u64)> {
+        let peak_occupancy = self.event_queue_peak_occupancy?;
         let (occupancy, reserved_capacity) = self.scope_queues.values().fold(
             self.root.observation_metrics(),
             |(occupancy, reserved_capacity), queue| {
@@ -370,7 +377,16 @@ impl<S: Schedule> EventManager<S> {
                 )
             },
         );
-        (occupancy, reserved_capacity, self.event_queue_peak_occupancy)
+        Some((occupancy, reserved_capacity, peak_occupancy))
+    }
+
+    /// Enables or disables peak tracking without folding queues on the disabled path.
+    pub(super) fn set_event_queue_observation_enabled(&mut self, enabled: bool) {
+        match (enabled, self.event_queue_peak_occupancy) {
+            (true, None) => self.event_queue_peak_occupancy = Some(0),
+            (false, Some(_)) => self.event_queue_peak_occupancy = None,
+            _ => {}
+        }
     }
 
     pub(super) fn pop_next_event(&mut self) -> Option<ReadyEvent<S::Reaction, S::Action>> {
@@ -428,8 +444,10 @@ impl<S: Schedule> EventManager<S> {
     }
 
     fn refresh_event_queue_peak(&mut self) {
-        let (occupancy, _, _) = self.event_queue_observation();
-        self.event_queue_peak_occupancy = self.event_queue_peak_occupancy.max(occupancy);
+        let Some((occupancy, _, peak_occupancy)) = self.event_queue_observation() else {
+            return;
+        };
+        self.event_queue_peak_occupancy = Some(peak_occupancy.max(occupancy));
     }
 
     /// Recycles action-identity scratch after the scheduler processes a ready event.

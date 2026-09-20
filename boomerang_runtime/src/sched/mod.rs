@@ -45,6 +45,15 @@ use crate::{
 /// Failure while starting or running a set of local enclave schedulers.
 #[derive(Debug, thiserror::Error)]
 pub enum ExecuteEnclavesError {
+    /// One observation state cannot represent multiple scheduler-local sources.
+    #[error(
+        "one observation handle cannot be shared by {schedulers} schedulers; configure one scheduler-local source per handle"
+    )]
+    ObservationRequiresSingleScheduler {
+        /// Number of non-empty schedulers that would share the configured handle.
+        schedulers: usize,
+    },
+
     #[error("failed to spawn scheduler thread for enclave {enclave}: {source}")]
     ThreadSpawn {
         enclave: EnclaveKey,
@@ -73,7 +82,10 @@ pub struct Config {
     pub physical_event_q_size: usize,
     /// Stop the scheduler after a certain amount of time has passed.
     pub timeout: Option<Duration>,
-    /// Optional bounded observation state sampled by hosted adapters.
+    /// Optional bounded observation state for this scheduler-local source.
+    ///
+    /// A handle may have concurrent samplers but must be attached to only one
+    /// scheduler writer for its lifetime.
     pub observation: Option<crate::ObservationHandle>,
 }
 impl Default for Config {
@@ -114,13 +126,17 @@ impl Config {
         self
     }
 
-    /// Enables scheduler observation without adding transport or subscriber work.
+    /// Attaches this configuration to one scheduler-local observation source.
+    ///
+    /// This adds bounded atomic instrumentation but no transport, serialization,
+    /// subscriber, or publication-queue work. Do not reuse the handle for another
+    /// scheduler writer.
     pub fn with_observation(mut self, observation: crate::ObservationHandle) -> Self {
         self.observation = Some(observation);
         self
     }
 
-    /// Returns the hosted-samplable observation handle when monitoring is enabled.
+    /// Returns the observation handle when scheduler-local sampling is enabled.
     pub const fn observation(&self) -> Option<&crate::ObservationHandle> {
         self.observation.as_ref()
     }
@@ -474,6 +490,16 @@ impl Schedule for ReactionGraph {
 /// This preserves the existing `Enclave` authoring path while its internal core
 /// is prepared for compiled execution. It is not a backend and does not lower
 /// live graphs into a compiled representation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LiveSchedulerState {
+    /// Startup has not run.
+    NotStarted,
+    /// Startup completed and steps may still be processed.
+    Running,
+    /// Normal or failed finalization completed.
+    Terminated,
+}
+
 #[derive(Debug)]
 pub struct Scheduler {
     /// The enclave key
@@ -510,17 +536,17 @@ pub struct Scheduler {
     outcomes: Vec<ReactionOutcome<ActionKey, ModeKey>>,
     /// Whether this graph contains modal scopes that need hot-path activity checks.
     has_modal_scopes: bool,
+    /// Lifecycle of the public live scheduler API.
+    state: LiveSchedulerState,
 }
 
 impl Scheduler {
-    /// Create a new Scheduler instance.
+    /// Creates a live scheduler for `enclave` using `config`.
     ///
-    /// The Scheduler will be initialized with the provided environment and reaction graph.
-    ///
-    /// # Arguments
-    ///
-    /// * `env` - The environment containing all the runtime data structures.
-    /// * `reaction_graph` - The reaction graph containing all static dependency and relationship information.
+    /// The scheduler is initially not started. Call [`Self::startup`] before
+    /// driving it with [`Self::try_next`], or use [`Self::try_event_loop`] to
+    /// perform both operations. If observation is configured, its handle must
+    /// not be attached to another scheduler writer.
     pub fn new(key: EnclaveKey, enclave: Enclave, config: Config) -> Self {
         let Enclave {
             env,
@@ -541,7 +567,7 @@ impl Scheduler {
 
         let store = Store::new(env, contexts, &graph);
         let has_modal_scopes = graph.has_modal_scopes();
-        let events = EventManager::new(reaction_set_limits, &graph);
+        let events = EventManager::new(reaction_set_limits, &graph, config.observation().is_some());
 
         let upstream_enclaves = upstream_enclaves
             .into_iter()
@@ -581,11 +607,14 @@ impl Scheduler {
             transition_buffer: Vec::with_capacity(reaction_capacity),
             outcomes: (0..reaction_capacity).map(|_| Default::default()).collect(),
             has_modal_scopes,
+            state: LiveSchedulerState::NotStarted,
         }
     }
 
     /// Borrow the live scheduler fields as the two capability concerns and concrete coordination.
     fn core(&mut self) -> SchedulerCore<'_, '_, ReactionGraph, Pin<Box<Store>>> {
+        self.events
+            .set_event_queue_observation_enabled(self.config.observation().is_some());
         let Self {
             key,
             config,
@@ -604,6 +633,7 @@ impl Scheduler {
             transition_buffer,
             outcomes,
             has_modal_scopes,
+            state: _,
         } = self;
 
         SchedulerCore {
@@ -631,19 +661,60 @@ impl Scheduler {
         }
     }
 
-    /// Execute startup of the Scheduler.
+    /// Executes scheduler startup once.
+    ///
+    /// Calls after startup or termination are no-ops; a terminated scheduler
+    /// cannot be restarted.
     pub fn startup(&mut self) {
+        if self.state != LiveSchedulerState::NotStarted {
+            return;
+        }
         self.core().startup();
+        self.state = LiveSchedulerState::Running;
     }
 
-    /// Process one scheduler step, returning coordination failures to the caller.
+    /// Processes one scheduler step after [`Self::startup`].
+    ///
+    /// Returns `Ok(true)` while another step may be processed. `Ok(false)` means
+    /// normal shutdown has been finalized. An error finalizes failed shutdown
+    /// before returning it. After either terminal result, later calls return
+    /// `Ok(false)` without restarting or finalizing the scheduler again.
     pub fn try_next(&mut self) -> Result<bool, RuntimeError> {
-        live_scheduler_result(self.core().try_next())
+        if self.state == LiveSchedulerState::Terminated {
+            return Ok(false);
+        }
+
+        let result = {
+            let mut core = self.core();
+            match core.try_next() {
+                Ok(true) => Ok(true),
+                Ok(false) => {
+                    core.shutdown();
+                    Ok(false)
+                }
+                Err(error) => {
+                    core.shutdown_failed();
+                    Err(error)
+                }
+            }
+        };
+        if !matches!(result, Ok(true)) {
+            self.state = LiveSchedulerState::Terminated;
+        }
+        live_scheduler_result(result)
     }
 
-    /// Run until shutdown or return the first runtime coordination failure.
+    /// Starts the scheduler once and processes steps until shutdown.
+    ///
+    /// Normal and failed finalization use the same [`Self::try_next`] path as
+    /// manual stepping. Calling this method after termination returns `Ok(())`.
     pub fn try_event_loop(&mut self) -> Result<(), RuntimeError> {
-        live_scheduler_result(self.core().try_event_loop())
+        self.startup();
+        while self.try_next()? {
+            // The live wrapper uses the same step and finalization path as
+            // callers that drive the scheduler manually.
+        }
+        Ok(())
     }
 
     /// Process the reactions at this tag in increasing order of level.
@@ -701,12 +772,17 @@ fn live_scheduler_result<T>(
 ///
 /// # Errors
 ///
-/// Returns a typed thread-spawn, scheduler-runtime, or thread-panic error. Runtime and panic
-/// failures are reported after every successfully spawned scheduler thread has terminated.
+/// Returns [`ExecuteEnclavesError::ObservationRequiresSingleScheduler`] when
+/// observation is enabled for more than one non-empty scheduler, because one
+/// handle cannot represent multiple scheduler-local sources. Otherwise returns
+/// a typed thread-spawn, scheduler-runtime, or thread-panic error. Runtime and
+/// panic failures are reported after every successfully spawned scheduler thread
+/// has terminated.
 pub fn execute_enclaves(
     enclaves: impl Iterator<Item = (EnclaveKey, Enclave)> + Send,
     config: Config,
 ) -> Result<tinymap::TinySecondaryMap<EnclaveKey, Env>, ExecuteEnclavesError> {
+    let observation_enabled = config.observation().is_some();
     let schedulers = enclaves.filter_map(move |(enclave_key, enclave)| {
         if enclave.env.reactions.is_empty() {
             // If there are no reactions, there is nothing to do
@@ -720,6 +796,26 @@ pub fn execute_enclaves(
         }
     });
 
+    if observation_enabled {
+        let schedulers = schedulers.collect::<Vec<_>>();
+        // A Slice 1 snapshot is scheduler-local and intentionally carries no source
+        // identity. Hosted Slice 2 configuration will collect separately identified
+        // sources; sharing one state here would silently overwrite their gauges.
+        if schedulers.len() > 1 {
+            return Err(ExecuteEnclavesError::ObservationRequiresSingleScheduler {
+                schedulers: schedulers.len(),
+            });
+        }
+        execute_scheduler_threads(schedulers.into_iter())
+    } else {
+        // Preserve the original lazy path when monitoring is disabled.
+        execute_scheduler_threads(schedulers)
+    }
+}
+
+fn execute_scheduler_threads(
+    schedulers: impl Iterator<Item = Scheduler>,
+) -> Result<tinymap::TinySecondaryMap<EnclaveKey, Env>, ExecuteEnclavesError> {
     let mut handles = Vec::new();
     for mut sched in schedulers {
         let enclave = sched.key;
@@ -793,9 +889,9 @@ mod tests {
         }
     }
 
-    fn scheduler_recording_start_origin(
+    fn enclave_recording_start_origin(
         seen_origin: Arc<Mutex<Option<std::time::Instant>>>,
-    ) -> (Scheduler, ReactionKey) {
+    ) -> (Enclave, ReactionKey) {
         let mut enclave = Enclave::default();
         let reactor = enclave.insert_reactor(Reactor::new("root", ()).boxed(), None);
         let scope = enclave.root_scope(reactor);
@@ -814,6 +910,13 @@ mod tests {
             scope,
             None,
         );
+        (enclave, reaction)
+    }
+
+    fn scheduler_recording_start_origin(
+        seen_origin: Arc<Mutex<Option<std::time::Instant>>>,
+    ) -> (Scheduler, ReactionKey) {
+        let (enclave, reaction) = enclave_recording_start_origin(seen_origin);
         (
             Scheduler::new(
                 EnclaveKey::from(0),
@@ -868,14 +971,74 @@ mod tests {
     }
 
     #[test]
+    fn live_scheduler_without_observation_does_not_track_event_queue_peaks() {
+        let (mut scheduler, reaction) =
+            scheduler_recording_start_origin(Arc::new(Mutex::new(None)));
+
+        scheduler.events.push_event(
+            Tag::ZERO,
+            std::iter::once((Level::from(0), reaction)),
+            false,
+        );
+
+        assert_eq!(scheduler.events.event_queue_observation(), None);
+    }
+
+    #[test]
+    fn direct_try_next_finalizes_observation_after_normal_shutdown() {
+        let (mut scheduler, _) = scheduler_recording_start_origin(Arc::new(Mutex::new(None)));
+        let observation =
+            std::sync::Arc::new(crate::ObservationState::new(std::time::Instant::now()));
+        scheduler.config.observation = Some(observation.clone());
+
+        scheduler.startup();
+        while scheduler.try_next().unwrap() {}
+
+        let sampled_at = std::time::Instant::now();
+        let snapshot = observation.snapshot(sampled_at).unwrap();
+        assert_eq!(snapshot.lifecycle, crate::SchedulerLifecycle::Stopped);
+        assert_eq!(snapshot.current_phase, crate::SchedulerPhase::Idle);
+        assert!(!scheduler.try_next().unwrap());
+        scheduler.startup();
+        assert_eq!(observation.snapshot(sampled_at).unwrap(), snapshot);
+    }
+
+    #[test]
+    fn execute_enclaves_rejects_one_observation_handle_for_multiple_schedulers() {
+        let enclaves = (0..2).map(|key| {
+            let (enclave, _) = enclave_recording_start_origin(Arc::new(Mutex::new(None)));
+            (EnclaveKey::from(key), enclave)
+        });
+        let observation =
+            std::sync::Arc::new(crate::ObservationState::new(std::time::Instant::now()));
+
+        let error = execute_enclaves(
+            enclaves,
+            Config::default()
+                .with_fast_forward(true)
+                .with_observation(observation),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ExecuteEnclavesError::ObservationRequiresSingleScheduler { schedulers: 2 }
+        ));
+    }
+
+    #[test]
     fn live_scheduler_rejects_async_boundary_ports() {
         let enclave = Enclave::default();
         let event_tx = enclave.event_tx.clone();
         let boundary = PortIndex::new(7);
+        let observation =
+            std::sync::Arc::new(crate::ObservationState::new(std::time::Instant::now()));
         let mut scheduler = Scheduler::new(
             EnclaveKey::from(0),
             enclave,
-            Config::default().with_fast_forward(true),
+            Config::default()
+                .with_fast_forward(true)
+                .with_observation(observation.clone()),
         );
         scheduler.startup();
         event_tx
@@ -889,6 +1052,43 @@ mod tests {
             scheduler.try_next(),
             Err(RuntimeError::AsyncBoundaryPortUnsupported(key)) if key == boundary
         ));
+        let sampled_at = std::time::Instant::now();
+        let snapshot = observation.snapshot(sampled_at).unwrap();
+        assert_eq!(snapshot.lifecycle, crate::SchedulerLifecycle::Failed);
+        assert_eq!(snapshot.current_phase, crate::SchedulerPhase::Idle);
+        assert!(!scheduler.try_next().unwrap());
+        scheduler.startup();
+        assert_eq!(observation.snapshot(sampled_at).unwrap(), snapshot);
+    }
+
+    #[test]
+    fn manual_startup_followed_by_event_loop_starts_scheduler_once() {
+        let captured = Captured::default();
+        let make_writer = {
+            let captured = captured.clone();
+            move || captured.clone()
+        };
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_level(false)
+            .with_writer(make_writer)
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            let (mut scheduler, _) = scheduler_recording_start_origin(Arc::new(Mutex::new(None)));
+            scheduler.startup();
+            scheduler.try_event_loop().unwrap();
+        });
+
+        let output = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+        assert_eq!(
+            output
+                .matches("event=\"runtime.scheduler.started\"")
+                .count(),
+            1,
+            "{output}"
+        );
     }
 
     #[test]

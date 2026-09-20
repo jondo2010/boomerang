@@ -1,7 +1,8 @@
 //! Bounded, snapshot-oriented scheduler observations.
 //!
 //! This module deliberately has no transport, serialization, or subscriber
-//! dependency. Hosted code can sample [`Observation`] without participating in
+//! dependency. A scheduler writes an [`ObservationState`] while hosted code
+//! samples it through [`ObservationState::snapshot`] without participating in
 //! scheduler execution.
 
 use std::{
@@ -49,13 +50,13 @@ impl SchedulerPhase {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum SchedulerLifecycle {
-    /// The scheduler has not yet begun startup.
+    /// Scheduler startup has not begun.
     NotStarted = 0,
-    /// The scheduler has started and may still be progressing logically.
+    /// Scheduler startup completed and execution may still be progressing logically.
     Running = 1,
-    /// The scheduler completed its normal shutdown path.
+    /// The scheduler completed normal shutdown finalization.
     Stopped = 2,
-    /// The scheduler left its event loop through an error path.
+    /// The scheduler terminated through a runtime error path.
     Failed = 3,
 }
 
@@ -70,7 +71,11 @@ impl SchedulerLifecycle {
     }
 }
 
-/// A coherent point-in-time view of scheduler phase accounting.
+/// A coherent point-in-time view of one scheduler's observations.
+///
+/// Elapsed times and cumulative work counters saturate at [`u64::MAX`]. Queue
+/// gauges describe the instant sampled, while peak occupancy covers the period
+/// for which queue observation has been enabled.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ObservationSnapshot {
     /// Lifecycle state reported by the scheduler, not packet delivery state.
@@ -101,19 +106,22 @@ pub struct ObservationSnapshot {
     pub scheduled_actions: u64,
     /// Events currently retained across the scheduler's root and modal queues.
     pub event_queue_occupancy: u64,
-    /// Slots currently reserved by those growable event queues.
+    /// Slots currently reserved by those growable event queues, not a size limit.
     pub event_queue_reserved_capacity: u64,
-    /// Event queues have no runtime-enforced size limit.
+    /// Runtime-enforced queue limit, or `None` for the current growable queues.
     pub event_queue_enforced_limit: Option<u64>,
-    /// Largest aggregate event-queue occupancy seen by the scheduler.
+    /// Largest aggregate event-queue occupancy seen while observation was enabled.
     pub event_queue_peak_occupancy: u64,
-    /// Number of scheduler tags completed since startup.
+    /// Number of scheduler tags completed since observation began.
     pub completed_logical_tags: u64,
-    /// Scheduler-monotonic time of the most recently completed logical tag.
+    /// Monotonic nanoseconds after the observation origin at which a tag last completed.
     pub last_logical_progress_ns: Option<u64>,
 }
 
-/// Atomic scheduler-observation storage independent of any sharing strategy.
+/// Bounded atomic observation storage for one scheduler writer and concurrent samplers.
+///
+/// The state owns no transport or publication queue. Snapshot attempts use a
+/// fixed retry budget, so sampling cannot block scheduler execution.
 #[derive(Debug)]
 pub struct ObservationState {
     origin: Instant,
@@ -139,11 +147,14 @@ pub struct ObservationState {
     last_logical_progress_ns: AtomicU64,
 }
 
-/// Hosted convenience ownership for independently running scheduler and exporter code.
+/// Shared ownership of one scheduler-local observation source.
+///
+/// The handle may be cloned for samplers, but must be attached to exactly one
+/// scheduler writer for its lifetime because gauges and lifecycle are source-local.
 pub type ObservationHandle = Arc<ObservationState>;
 
 impl ObservationState {
-    /// Starts observing one scheduler from `origin`.
+    /// Creates observation state whose monotonic timestamps are measured from `origin`.
     pub fn new(origin: Instant) -> Self {
         Self {
             origin,
@@ -174,35 +185,35 @@ impl ObservationState {
         let state = self;
         state.begin_update();
         let now_ns = elapsed_ns(state.origin, now);
-        let previous = SchedulerPhase::from_u8(state.phase.load(Ordering::Relaxed));
-        let started_ns = state.phase_started_ns.load(Ordering::Relaxed);
+        let previous = SchedulerPhase::from_u8(state.phase.load(Ordering::SeqCst));
+        let started_ns = state.phase_started_ns.load(Ordering::SeqCst);
         add_elapsed(state, previous, now_ns.saturating_sub(started_ns));
-        state.phase.store(phase as u8, Ordering::Relaxed);
-        state.phase_started_ns.store(now_ns, Ordering::Relaxed);
+        state.phase.store(phase as u8, Ordering::SeqCst);
+        state.phase_started_ns.store(now_ns, Ordering::SeqCst);
         state.end_update();
     }
 
-    /// Marks successful scheduler startup.
+    /// Marks completion of successful scheduler startup.
     pub fn mark_running(&self) {
         self.begin_update();
         self.lifecycle
-            .store(SchedulerLifecycle::Running as u8, Ordering::Release);
+            .store(SchedulerLifecycle::Running as u8, Ordering::SeqCst);
         self.end_update();
     }
 
-    /// Marks normal scheduler shutdown.
+    /// Marks completion of normal scheduler shutdown finalization.
     pub fn mark_stopped(&self) {
         self.begin_update();
         self.lifecycle
-            .store(SchedulerLifecycle::Stopped as u8, Ordering::Release);
+            .store(SchedulerLifecycle::Stopped as u8, Ordering::SeqCst);
         self.end_update();
     }
 
-    /// Marks scheduler termination through an error path.
+    /// Marks scheduler termination through a runtime error path.
     pub fn mark_failed(&self) {
         self.begin_update();
         self.lifecycle
-            .store(SchedulerLifecycle::Failed as u8, Ordering::Release);
+            .store(SchedulerLifecycle::Failed as u8, Ordering::SeqCst);
         self.end_update();
     }
 
@@ -212,7 +223,7 @@ impl ObservationState {
         saturating_add(&self.processed_tags, 1);
         saturating_add(&self.completed_logical_tags, 1);
         self.last_logical_progress_ns
-            .store(elapsed_ns(self.origin, now), Ordering::Release);
+            .store(elapsed_ns(self.origin, now), Ordering::SeqCst);
         self.end_update();
     }
 
@@ -255,56 +266,58 @@ impl ObservationState {
     pub fn record_event_queue(&self, occupancy: u64, reserved_capacity: u64, peak_occupancy: u64) {
         self.begin_update();
         self.event_queue_occupancy
-            .store(occupancy, Ordering::Relaxed);
+            .store(occupancy, Ordering::SeqCst);
         self.event_queue_reserved_capacity
-            .store(reserved_capacity, Ordering::Relaxed);
+            .store(reserved_capacity, Ordering::SeqCst);
         self.event_queue_peak_occupancy
-            .fetch_max(peak_occupancy.max(occupancy), Ordering::Relaxed);
+            .fetch_max(peak_occupancy.max(occupancy), Ordering::SeqCst);
         self.end_update();
     }
 
     /// Captures closed phase totals plus the elapsed portion of the current phase.
     ///
-    /// Returns `None` when concurrent writers prevent a coherent sample within
-    /// the fixed retry budget.
+    /// Returns `None` when scheduler updates prevent a coherent sample within
+    /// the fixed retry budget. Callers may skip that sample and retry later.
     pub fn snapshot(&self, now: Instant) -> Option<ObservationSnapshot> {
         let state = self;
         for _ in 0..SNAPSHOT_ATTEMPTS {
-            let before = state.generation.load(Ordering::Acquire);
+            // Every access participating in the snapshot protocol is sequentially
+            // consistent. This places both generation checks and every field access
+            // in one total order, so an accepted even generation cannot contain
+            // field values moved across either validation boundary on weak memory.
+            let before = state.generation.load(Ordering::SeqCst);
             if !before.is_multiple_of(2) {
                 std::hint::spin_loop();
                 continue;
             }
-            let phase = SchedulerPhase::from_u8(state.phase.load(Ordering::Relaxed));
-            let started_ns = state.phase_started_ns.load(Ordering::Relaxed);
+            let phase = SchedulerPhase::from_u8(state.phase.load(Ordering::SeqCst));
+            let started_ns = state.phase_started_ns.load(Ordering::SeqCst);
             let mut snapshot = ObservationSnapshot {
-                lifecycle: SchedulerLifecycle::from_u8(state.lifecycle.load(Ordering::Acquire)),
+                lifecycle: SchedulerLifecycle::from_u8(state.lifecycle.load(Ordering::SeqCst)),
                 current_phase: phase,
                 current_phase_started_ns: started_ns,
-                reaction_elapsed_ns: state.reaction_elapsed_ns.load(Ordering::Relaxed),
-                framework_elapsed_ns: state.framework_elapsed_ns.load(Ordering::Relaxed),
-                physical_wait_elapsed_ns: state.physical_wait_elapsed_ns.load(Ordering::Relaxed),
-                external_wait_elapsed_ns: state.external_wait_elapsed_ns.load(Ordering::Relaxed),
+                reaction_elapsed_ns: state.reaction_elapsed_ns.load(Ordering::SeqCst),
+                framework_elapsed_ns: state.framework_elapsed_ns.load(Ordering::SeqCst),
+                physical_wait_elapsed_ns: state.physical_wait_elapsed_ns.load(Ordering::SeqCst),
+                external_wait_elapsed_ns: state.external_wait_elapsed_ns.load(Ordering::SeqCst),
                 coordination_wait_elapsed_ns: state
                     .coordination_wait_elapsed_ns
-                    .load(Ordering::Relaxed),
-                processed_tags: state.processed_tags.load(Ordering::Relaxed),
-                processed_reactions: state.processed_reactions.load(Ordering::Relaxed),
-                processed_events: state.processed_events.load(Ordering::Relaxed),
-                set_ports: state.set_ports.load(Ordering::Relaxed),
-                scheduled_actions: state.scheduled_actions.load(Ordering::Relaxed),
-                event_queue_occupancy: state.event_queue_occupancy.load(Ordering::Relaxed),
+                    .load(Ordering::SeqCst),
+                processed_tags: state.processed_tags.load(Ordering::SeqCst),
+                processed_reactions: state.processed_reactions.load(Ordering::SeqCst),
+                processed_events: state.processed_events.load(Ordering::SeqCst),
+                set_ports: state.set_ports.load(Ordering::SeqCst),
+                scheduled_actions: state.scheduled_actions.load(Ordering::SeqCst),
+                event_queue_occupancy: state.event_queue_occupancy.load(Ordering::SeqCst),
                 event_queue_reserved_capacity: state
                     .event_queue_reserved_capacity
-                    .load(Ordering::Relaxed),
+                    .load(Ordering::SeqCst),
                 event_queue_enforced_limit: None,
-                event_queue_peak_occupancy: state
-                    .event_queue_peak_occupancy
-                    .load(Ordering::Relaxed),
-                completed_logical_tags: state.completed_logical_tags.load(Ordering::Relaxed),
+                event_queue_peak_occupancy: state.event_queue_peak_occupancy.load(Ordering::SeqCst),
+                completed_logical_tags: state.completed_logical_tags.load(Ordering::SeqCst),
                 last_logical_progress_ns: match state
                     .last_logical_progress_ns
-                    .load(Ordering::Acquire)
+                    .load(Ordering::SeqCst)
                 {
                     u64::MAX => None,
                     progress => Some(progress),
@@ -315,7 +328,7 @@ impl ObservationState {
                 phase,
                 elapsed_ns(state.origin, now).saturating_sub(started_ns),
             );
-            if state.generation.load(Ordering::Acquire) == before {
+            if state.generation.load(Ordering::SeqCst) == before {
                 return Some(snapshot);
             }
         }
@@ -324,7 +337,7 @@ impl ObservationState {
 
     fn begin_update(&self) {
         loop {
-            let generation = self.generation.load(Ordering::Acquire);
+            let generation = self.generation.load(Ordering::SeqCst);
             if !generation.is_multiple_of(2) {
                 std::hint::spin_loop();
                 continue;
@@ -334,8 +347,8 @@ impl ObservationState {
                 .compare_exchange_weak(
                     generation,
                     generation.wrapping_add(1),
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
                 )
                 .is_ok()
             {
@@ -345,13 +358,13 @@ impl ObservationState {
     }
 
     fn end_update(&self) {
-        self.generation.fetch_add(1, Ordering::Release);
+        self.generation.fetch_add(1, Ordering::SeqCst);
     }
 }
 
 fn saturating_add(counter: &AtomicU64, value: u64) {
     counter
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
             Some(current.saturating_add(value))
         })
         .expect("saturating observation update always returns a value");

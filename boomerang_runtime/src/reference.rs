@@ -80,6 +80,7 @@ fn preflight_reason(error: &ExecuteOwnedFederateError) -> &'static str {
     match error {
         ExecuteOwnedFederateError::ImageValidation { .. }
         | ExecuteOwnedFederateError::FederateNotFound { .. } => "image",
+        ExecuteOwnedFederateError::ObservationRequiresSingleScheduler { .. } => "observation",
         ExecuteOwnedFederateError::MissingEnclaveBinding { .. }
         | ExecuteOwnedFederateError::DuplicateEnclaveBinding { .. }
         | ExecuteOwnedFederateError::UnexpectedEnclaveBinding { .. }
@@ -402,6 +403,14 @@ pub enum ExecuteOwnedFederateError {
     FederateNotFound {
         /// Requested canonical Federate index.
         federate: FederateIndex,
+    },
+    /// One observation state cannot represent multiple scheduler-local sources.
+    #[error(
+        "one observation handle cannot be shared by {schedulers} schedulers; configure one scheduler-local source per handle"
+    )]
+    ObservationRequiresSingleScheduler {
+        /// Number of Enclave schedulers that would share the configured handle.
+        schedulers: usize,
     },
     /// One selected Enclave received no direct binding set.
     #[error("missing bindings for Enclave {enclave}")]
@@ -985,6 +994,10 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
         routes,
         ..
     } = bindings;
+    let schedulers = enclaves.len();
+    if config.observation().is_some() && schedulers > 1 {
+        return Err(ExecuteOwnedFederateError::ObservationRequiresSingleScheduler { schedulers });
+    }
     let route_bindings = endpoints
         .iter()
         .map(|route| {
@@ -1655,6 +1668,26 @@ mod scoped_spawn_tests {
             }),
             "missing worker spawn failure event in {events:#?}"
         );
+    }
+
+    #[test]
+    fn compiled_federate_rejects_one_observation_handle_for_multiple_schedulers() {
+        let observation = Arc::new(crate::ObservationState::new(std::time::Instant::now()));
+
+        let error = execute_owned_federate(
+            DEPLOYMENT,
+            FederateIndex::new(0),
+            bindings(),
+            Config::default()
+                .with_fast_forward(true)
+                .with_observation(observation),
+        )
+        .expect_err("one scheduler-local observation handle must not have multiple writers");
+
+        assert!(matches!(
+            error,
+            ExecuteOwnedFederateError::ObservationRequiresSingleScheduler { schedulers: 3 }
+        ));
     }
 
     /// Verifies compiled coordination preserves the complete selected Federate layout and policy.

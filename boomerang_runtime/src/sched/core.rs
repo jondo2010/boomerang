@@ -291,7 +291,10 @@ where
 
     fn observe_event_queue(&self) {
         if let Some(observation) = self.observation {
-            let (occupancy, reserved_capacity, peak_occupancy) = self.events.event_queue_observation();
+            let (occupancy, reserved_capacity, peak_occupancy) = self
+                .events
+                .event_queue_observation()
+                .expect("event queue observation enabled with scheduler observation");
             observation.record_event_queue(occupancy, reserved_capacity, peak_occupancy);
         }
     }
@@ -474,8 +477,8 @@ where
         self.release_tag_downstream(*self.current_tag);
     }
 
-    /// Final shutdown of the Scheduler. The last tag has already been processed.
-    fn shutdown(&mut self) {
+    /// Finalizes normal shutdown after the last tag has been processed.
+    pub(super) fn shutdown(&mut self) {
         self.events.shutdown();
         if let Some(observation) = self.observation {
             observation.enter(SchedulerPhase::Idle, std::time::Instant::now());
@@ -494,6 +497,16 @@ where
             set_ports = self.stats.set_ports(),
             scheduled_actions = self.stats.scheduled_actions(),
         );
+    }
+
+    /// Finalizes failed shutdown without running normal shutdown reporting.
+    pub(super) fn shutdown_failed(&mut self) {
+        self.shutdown_tx.shutdown();
+        self.events.shutdown();
+        if let Some(observation) = self.observation {
+            observation.enter(SchedulerPhase::Idle, std::time::Instant::now());
+            observation.mark_failed();
+        }
     }
 
     /// Try to receive an asynchronous event
@@ -659,7 +672,7 @@ where
                 match observe_coordination_wait(observation, || {
                     coordination.authorize_control(next_tag)
                 })
-                    .map_err(SchedulerError::FederateCoordination)
+                .map_err(SchedulerError::FederateCoordination)
                 {
                     Ok(FederateControlAuthorization::Authorized) => {}
                     Ok(FederateControlAuthorization::Interrupted(async_event)) => {
@@ -969,12 +982,7 @@ where
                         error @ SchedulerError::FederateFailureReported { .. } => error,
                         error => self.report_federate_failure(error),
                     };
-                    self.shutdown_tx.shutdown();
-                    self.events.shutdown();
-                    if let Some(observation) = self.observation {
-                        observation.enter(SchedulerPhase::Idle, std::time::Instant::now());
-                        observation.mark_failed();
-                    }
+                    self.shutdown_failed();
                     return Err(error);
                 }
             }
@@ -1005,7 +1013,8 @@ where
                     self.event_rx,
                     || {
                         if let Some(observation) = observation {
-                            observation.enter(SchedulerPhase::PhysicalWait, std::time::Instant::now());
+                            observation
+                                .enter(SchedulerPhase::PhysicalWait, std::time::Instant::now());
                         }
                     },
                     || {

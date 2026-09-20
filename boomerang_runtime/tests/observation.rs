@@ -29,13 +29,17 @@ fn snapshot_includes_an_ongoing_reaction_without_closing_it() {
     let observation = ObservationState::new(origin);
 
     observation.enter(SchedulerPhase::Reaction, origin + Duration::from_millis(10));
-    let snapshot = observation.snapshot(origin + Duration::from_millis(25)).unwrap();
+    let snapshot = observation
+        .snapshot(origin + Duration::from_millis(25))
+        .unwrap();
 
     assert_eq!(snapshot.current_phase, SchedulerPhase::Reaction);
     assert_eq!(snapshot.current_phase_started_ns, 10_000_000);
     assert_eq!(snapshot.reaction_elapsed_ns, 15_000_000);
 
-    let later = observation.snapshot(origin + Duration::from_millis(40)).unwrap();
+    let later = observation
+        .snapshot(origin + Duration::from_millis(40))
+        .unwrap();
     assert_eq!(later.current_phase, SchedulerPhase::Reaction);
     assert_eq!(later.reaction_elapsed_ns, 30_000_000);
 }
@@ -50,7 +54,9 @@ fn phase_transition_accounts_elapsed_time_once() {
         SchedulerPhase::PhysicalWait,
         origin + Duration::from_millis(9),
     );
-    let snapshot = observation.snapshot(origin + Duration::from_millis(12)).unwrap();
+    let snapshot = observation
+        .snapshot(origin + Duration::from_millis(12))
+        .unwrap();
 
     assert_eq!(snapshot.framework_elapsed_ns, 5_000_000);
     assert_eq!(snapshot.physical_wait_elapsed_ns, 3_000_000);
@@ -99,7 +105,9 @@ fn lifecycle_and_logical_progress_are_independent_of_measurement_time() {
     observation.mark_running();
     observation.record_completed_tag(origin + Duration::from_millis(7));
 
-    let running = observation.snapshot(origin + Duration::from_millis(20)).unwrap();
+    let running = observation
+        .snapshot(origin + Duration::from_millis(20))
+        .unwrap();
     assert_eq!(running.lifecycle, SchedulerLifecycle::Running);
     assert_eq!(running.completed_logical_tags, 1);
     assert_eq!(running.processed_tags, 1);

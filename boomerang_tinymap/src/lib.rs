@@ -39,6 +39,21 @@ pub trait Key: From<usize> + Copy + Ord {
     fn index(&self) -> usize;
 }
 
+/// Defines a dense key with const-capable, same-domain comparisons.
+///
+/// Equality and ordering require keys from the same domain:
+///
+/// ```compile_fail,E0308
+/// boomerang_tinymap::key_type!(ReactorIndex);
+/// boomerang_tinymap::key_type!(ActionIndex);
+/// const SAME: bool = ReactorIndex::new(0).const_eq(ActionIndex::new(0));
+/// ```
+///
+/// ```compile_fail,E0308
+/// boomerang_tinymap::key_type!(ReactorIndex);
+/// boomerang_tinymap::key_type!(ActionIndex);
+/// const ORDER: core::cmp::Ordering = ReactorIndex::new(0).const_cmp(ActionIndex::new(0));
+/// ```
 #[macro_export]
 macro_rules! key_type {
     ($(#[$outer:meta])* $vis:vis $name:ident) => {
@@ -57,6 +72,24 @@ macro_rules! key_type {
             /// Returns this key's u32 representation.
             pub const fn as_u32(self) -> u32 {
                 self.0
+            }
+
+            /// Compares keys for equality in a const context.
+            #[allow(dead_code)]
+            pub const fn const_eq(self, other: Self) -> bool {
+                self.0 == other.0
+            }
+
+            /// Compares key order in a const context.
+            #[allow(dead_code)]
+            pub const fn const_cmp(self, other: Self) -> ::core::cmp::Ordering {
+                if self.0 < other.0 {
+                    ::core::cmp::Ordering::Less
+                } else if self.0 > other.0 {
+                    ::core::cmp::Ordering::Greater
+                } else {
+                    ::core::cmp::Ordering::Equal
+                }
             }
         }
 
@@ -109,12 +142,15 @@ macro_rules! __key_type_from_str {
                 const PREFIX: &str = concat!(stringify!($name), "(");
                 if s.starts_with(PREFIX) && s.ends_with(')') {
                     let inner = &s[PREFIX.len()..s.len() - 1];
-                    inner
-                        .parse::<u32>()
-                        .map(Self)
-                        .map_err(|_| $crate::alloc::format!("Failed to parse inner value: {}", inner))
+                    inner.parse::<u32>().map(Self).map_err(|_| {
+                        $crate::alloc::format!("Failed to parse inner value: {}", inner)
+                    })
                 } else {
-                    Err($crate::alloc::format!("Invalid format for {}: {}", stringify!($name), s))
+                    Err($crate::alloc::format!(
+                        "Invalid format for {}: {}",
+                        stringify!($name),
+                        s
+                    ))
                 }
             }
         }

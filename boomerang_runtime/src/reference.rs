@@ -6,7 +6,7 @@
 //! a panic during an active phase emits cancellation with reason `unwind`.
 
 mod distributed;
-pub use distributed::execute_owned_federate_with_backend;
+pub use distributed::{execute_owned_federate_slice, execute_owned_federate_with_backend};
 
 use std::{
     any::{Any, TypeId},
@@ -338,7 +338,7 @@ struct ResolvedLocalRoute<'image> {
 /// Validated owned scheduler images and paired local routes, retaining canonical keys.
 struct PreparedFederate<'image> {
     /// This Federate's subset of the deployment-wide Enclave domain.
-    images: TinySecondaryMap<EnclaveIndex, &'image EnclaveImage<'image>>,
+    images: TinySecondaryMap<EnclaveIndex, EnclaveImageView<'image>>,
     /// Routes whose source and destination both belong to this subset.
     endpoints: Vec<ResolvedLocalRoute<'image>>,
 }
@@ -645,7 +645,7 @@ fn request_federate_shutdown(senders: &[crate::Sender<AsyncEvent>]) {
 
 /// Builds one coordinator from the selected immutable Federate layout and backend.
 fn build_federate_coordination<B: FederateCoordinationBackend>(
-    images: &TinySecondaryMap<EnclaveIndex, &EnclaveImage<'_>>,
+    images: &TinySecondaryMap<EnclaveIndex, EnclaveImageView<'_>>,
     channels: impl IntoIterator<
         Item = (
             EnclaveIndex,
@@ -779,6 +779,8 @@ fn preflight_owned_federate<'image>(
         .enclaves()
         .iter()
         .filter(|(key, _)| selected.enclaves().contains(*key))
+        .map(|(key, _)| key)
+        .zip(deployment.federate(federate).enclave_views())
         .collect();
     preflight_enclave_bindings(federate, &images, bindings)?;
     if let Some(route) = bindings.external_routes.first() {
@@ -795,7 +797,7 @@ fn preflight_owned_federate<'image>(
 /// Checks every owned payload binding without running any user initializer.
 fn preflight_enclave_bindings(
     federate: FederateIndex,
-    images: &TinySecondaryMap<EnclaveIndex, &EnclaveImage<'_>>,
+    images: &TinySecondaryMap<EnclaveIndex, EnclaveImageView<'_>>,
     bindings: &FederateBindings<'_>,
 ) -> Result<(), ExecuteOwnedFederateError> {
     if images.is_empty() {
@@ -811,17 +813,12 @@ fn preflight_enclave_bindings(
     if let Some(enclave) = bindings.duplicate_enclaves.keys().next() {
         return Err(ExecuteOwnedFederateError::DuplicateEnclaveBinding { enclave });
     }
-    for (enclave, raw) in images.iter() {
+    for (enclave, image) in images.iter() {
         let owned = bindings
             .enclaves
             .get(enclave)
             .ok_or(ExecuteOwnedFederateError::MissingEnclaveBinding { enclave })?;
-        let image = EnclaveImageView::new(raw).map_err(|error| {
-            ExecuteOwnedFederateError::ImageValidation {
-                message: error.to_string(),
-            }
-        })?;
-        OwnedStorage::validate_image_bindings(&image, owned)
+        OwnedStorage::validate_image_bindings(image, owned)
             .map_err(|source| ExecuteOwnedFederateError::EnclavePreflight { enclave, source })?;
     }
     Ok(())
@@ -830,7 +827,7 @@ fn preflight_enclave_bindings(
 /// Checks local route witnesses against the two already validated owned port bindings.
 fn preflight_local_bindings(
     federate: FederateIndex,
-    images: &TinySecondaryMap<EnclaveIndex, &EnclaveImage<'_>>,
+    images: &TinySecondaryMap<EnclaveIndex, EnclaveImageView<'_>>,
     endpoints: &[ResolvedLocalRoute<'_>],
     bindings: &FederateBindings<'_>,
 ) -> Result<(), ExecuteOwnedFederateError> {
@@ -881,9 +878,7 @@ fn preflight_local_bindings(
                 endpoint.destination_port,
             ),
         ] {
-            let image = EnclaveImageView::new(images[enclave])
-                .expect("root validation checked endpoint images");
-            let slot = image.ports()[port].binding();
+            let slot = images[enclave].ports()[port].binding();
             let (found_id, found) = bindings
                 .enclaves
                 .get(enclave)
@@ -998,8 +993,7 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
     let mut storage_phase = ConstructionPhase::started("storage");
     let mut storages = Vec::with_capacity(enclaves.len());
     for (enclave, owned) in enclaves {
-        let image = EnclaveImageView::new(images[enclave])
-            .expect("Federate preflight validated every selected Enclave image");
+        let image = images[enclave].reborrow();
         let span = tracing::debug_span!(target: "boomerang::runtime", "runtime.enclave",
             enclave = enclave.as_u32(), enclave_id = image.enclave_id().as_str());
         let _span = span.enter();
@@ -1384,8 +1378,9 @@ mod scoped_spawn_tests {
             ActionImage, ActionIndex, ActionSlotIndex, ActionTiming, BindingKind, BindingSlotId,
             BindingSlotIndex, CoordinationProjection, EnclaveId, FederateId, FederateImage,
             GlobalFederationImage, IndexSpan, LevelReactionImage, ReactionImage, ReactionIndex,
-            ReactorImage, ReactorIndex, RequiredBindingImage, RuntimeBackendId, ScopeImage,
-            ScopeIndex, SliceRange, StorageBounds, TargetId, TimerStartupImage,
+            ReactorImage, ReactorIndex, RecoveryPolicy, RequiredBindingImage, RtiImage,
+            RtiMemberImage, RuntimeBackendId, ScopeImage, ScopeIndex, SliceRange, StorageBounds,
+            TargetId, TimerStartupImage,
         },
         keepalive, EnclaveKey, FederateAcquisition, FederateCompletion,
         FederateCoordinationBackend, FederateCoordinationError, FederatePublication, SendContext,
@@ -1544,12 +1539,30 @@ mod scoped_spawn_tests {
     ];
     /// Canonical membership for the non-zero-range construction fixture.
     static OFFSET_MEMBERS: [FederateIndex; 2] = [FederateIndex::new(0), FederateIndex::new(1)];
+    static OFFSET_RTI_MEMBERS: [RtiMemberImage; 2] = [const {
+        RtiMemberImage::new(
+            RecoveryPolicy::FailStop,
+            SliceRange::new(0, 0),
+            SliceRange::new(0, 0),
+            SliceRange::new(0, 0),
+            32,
+        )
+    }; 2];
     /// Complete deployment fixture used to prove global Enclave indices are never rebased.
     static OFFSET_DEPLOYMENT: CompiledDeploymentImage<'static> = CompiledDeploymentImage {
         federation: GlobalFederationImage::new(&OFFSET_MEMBERS, &[]),
         federates: TinyMapView::new(&OFFSET_FEDERATES),
         enclaves: TinyMapView::new(&ENCLAVES),
-        coordination: CoordinationProjection::Local,
+        coordination: CoordinationProjection::CentralRti(RtiImage::new(
+            TinyMapView::new(&OFFSET_RTI_MEMBERS),
+            &[],
+            &[],
+            TinyMapView::new(&[]),
+            TinyMapView::new(&[]),
+            TinyMapView::new(&[]),
+            TinyMapView::new(&[]),
+            TinyMapView::new(&[]),
+        )),
     };
 
     fn initialize_state() {}
@@ -1561,6 +1574,59 @@ mod scoped_spawn_tests {
                 EnclaveBindings::new().bind_state(BindingSlotIndex::new(0), initialize_state),
             )
         })
+    }
+
+    #[test]
+    fn checked_image_preflight_preserves_dynamic_binding_validation() {
+        let enclave = EnclaveIndex::new(0);
+        const CHECKED: EnclaveImageView<'static> = match EnclaveImageView::new(&ENCLAVES[0]) {
+            Ok(view) => view,
+            Err(_) => panic!("invalid checked preflight fixture"),
+        };
+        let federate = FederateImage::new(
+            FederateId::new("host"),
+            TargetId::new("host"),
+            RuntimeBackendId::new("std"),
+            IndexSpan::new(0, 1),
+        );
+        let bindings = || FederateBindings::new().bind_enclave(enclave, EnclaveBindings::new());
+        for result in [
+            execute_owned_federate_slice(
+                FederateIndex::new(0),
+                &federate,
+                &[&CHECKED],
+                bindings(),
+                Config::default(),
+            ),
+            execute_owned_federate_with_backend(
+                FederateIndex::new(0),
+                &federate,
+                &[&CHECKED],
+                bindings(),
+                Config::default(),
+                |_| -> Result<LocalFederateCoordinationBackend, _> {
+                    panic!("invalid binding reached connect")
+                },
+            ),
+        ] {
+            assert!(matches!(
+                result,
+                Err(ExecuteOwnedFederateError::EnclavePreflight {
+                    enclave: rejected,
+                    source: OwnedStorageError::MissingBinding { .. },
+                }) if rejected == enclave
+            ));
+        }
+
+        let invalid = state_only_image(" invalid");
+        assert!(matches!(
+            EnclaveImageView::new(&invalid),
+            Err(ImageValidationError::InvalidStableId {
+                kind: "enclave",
+                index: 0,
+                id: " invalid",
+            })
+        ));
     }
 
     /// Test backend that grants one candidate, then panics after local-barrier entry.
@@ -1660,6 +1726,15 @@ mod scoped_spawn_tests {
     /// Verifies compiled coordination preserves the complete selected Federate layout and policy.
     #[test]
     fn compiled_coordination_uses_complete_federate_layout() {
+        let deployment = CompiledDeploymentView::new(OFFSET_DEPLOYMENT.clone()).unwrap();
+        let selected = deployment.federate(FederateIndex::new(1));
+        let images = deployment
+            .enclaves()
+            .iter()
+            .filter(|(key, _)| selected.enclaves().contains(*key))
+            .map(|(key, _)| key)
+            .zip(selected.enclave_views())
+            .collect();
         for (keep_alive, expected_lifecycle) in [
             (true, LifecyclePolicy::KeepAlive),
             (false, LifecyclePolicy::TerminateWhenIdle),
@@ -1672,11 +1747,7 @@ mod scoped_spawn_tests {
             ];
             let coordination: FederateCoordinationParts<LocalFederateCoordinationBackend> =
                 build_federate_coordination(
-                    &OFFSET_DEPLOYMENT
-                        .enclaves
-                        .iter()
-                        .filter(|(key, _)| OFFSET_FEDERATES[1].enclaves().contains(*key))
-                        .collect(),
+                    &images,
                     channels,
                     if keep_alive {
                         LifecyclePolicy::KeepAlive

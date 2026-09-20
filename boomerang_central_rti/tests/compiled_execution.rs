@@ -130,6 +130,14 @@ fn execute_pair(mismatch: bool, fail_rti: bool, fail_scheduler: bool) {
             },
         )
         .unwrap();
+        let source_images = view
+            .federate(MEMBERS[0])
+            .enclave_views()
+            .collect::<Vec<_>>();
+        let sink_images = view
+            .federate(MEMBERS[1])
+            .enclave_views()
+            .collect::<Vec<_>>();
         let (source, sink, server) = transport::start(rti, fail_rti);
         let source_thread = spawn_traced(move || {
             let _member = source_rti.execution_span().entered();
@@ -139,7 +147,7 @@ fn execute_pair(mismatch: bool, fail_rti: bool, fail_scheduler: bool) {
             execute_owned_federate_with_backend(
                 MEMBERS[0],
                 &FEDERATES[0],
-                &ENCLAVES[..1],
+                &source_images.iter().collect::<Vec<_>>(),
                 FederateBindings::new()
                     .bind_enclave(EnclaveIndex::new(0), source_bindings())
                     .bind_outbound_route(
@@ -171,7 +179,7 @@ fn execute_pair(mismatch: bool, fail_rti: bool, fail_scheduler: bool) {
             execute_owned_federate_with_backend(
                 MEMBERS[1],
                 &FEDERATES[1],
-                &ENCLAVES[1..],
+                &sink_images.iter().collect::<Vec<_>>(),
                 FederateBindings::new()
                     .bind_enclave(EnclaveIndex::new(1), sink_bindings())
                     .bind_enclave(EnclaveIndex::new(2), sink_bindings())
@@ -1034,10 +1042,14 @@ fn inbound_preflight_rejects_extra_and_foreign_bindings() {
                 .unwrap();
         let (tx, requests) = std::sync::mpsc::channel();
         let (_replies, rx) = std::sync::mpsc::channel();
+        let images = view
+            .federate(MEMBERS[1])
+            .enclave_views()
+            .collect::<Vec<_>>();
         let error = execute_owned_federate_with_backend(
             MEMBERS[1],
             &FEDERATES[1],
-            &ENCLAVES[1..],
+            &images.iter().collect::<Vec<_>>(),
             FederateBindings::new()
                 .bind_enclave(EnclaveIndex::new(1), sink_bindings())
                 .bind_enclave(EnclaveIndex::new(2), sink_bindings())

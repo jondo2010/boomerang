@@ -653,6 +653,22 @@ impl LevelReactionImage {
     pub const fn reaction(self) -> ReactionIndex {
         self.reaction
     }
+
+    /// Compares both the dependency level and reaction key in a const context.
+    pub(crate) const fn const_eq(self, other: Self) -> bool {
+        self.level == other.level && self.reaction.const_eq(other.reaction)
+    }
+
+    /// Orders by dependency level, breaking ties by reaction key, in a const context.
+    pub(crate) const fn const_cmp(self, other: Self) -> core::cmp::Ordering {
+        if self.level < other.level {
+            core::cmp::Ordering::Less
+        } else if self.level > other.level {
+            core::cmp::Ordering::Greater
+        } else {
+            self.reaction.const_cmp(other.reaction)
+        }
+    }
 }
 
 /// A precomputed timer or lifecycle action startup.
@@ -921,4 +937,27 @@ pub struct EnclaveImage<'a> {
     pub required_bindings: TinyMapView<'a, BindingSlotIndex, RequiredBindingImage<'a>>,
     /// Fixed mutable-storage and workspace bounds.
     pub storage_bounds: &'a StorageBounds,
+}
+
+#[cfg(test)]
+mod comparison_tests {
+    use super::{LevelReactionImage, ReactionIndex};
+    use core::cmp::Ordering;
+
+    #[test]
+    fn level_reaction_const_comparison_orders_by_level_then_reaction() {
+        const FIRST: LevelReactionImage = LevelReactionImage::new(0, ReactionIndex::new(u32::MAX));
+        const SECOND: LevelReactionImage = LevelReactionImage::new(1, ReactionIndex::new(0));
+        const THIRD: LevelReactionImage = LevelReactionImage::new(1, ReactionIndex::new(1));
+        const {
+            assert!(FIRST.const_eq(FIRST));
+            assert!(!SECOND.const_eq(LevelReactionImage::new(0, ReactionIndex::new(0))));
+            assert!(!SECOND.const_eq(THIRD));
+            assert!(matches!(FIRST.const_cmp(SECOND), Ordering::Less));
+            assert!(matches!(SECOND.const_cmp(FIRST), Ordering::Greater));
+            assert!(matches!(SECOND.const_cmp(THIRD), Ordering::Less));
+            assert!(matches!(THIRD.const_cmp(SECOND), Ordering::Greater));
+            assert!(matches!(SECOND.const_cmp(SECOND), Ordering::Equal));
+        }
+    }
 }

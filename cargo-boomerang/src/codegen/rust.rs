@@ -92,7 +92,7 @@ pub(super) fn render_launcher(
         .enumerate()
         .map(|(index, enclave)| render_enclave(index, enclave, aliases, &mut route_bindings))
         .collect::<Result<Vec<_>>>()?;
-    let deployment = render_deployment(slice, !distributed);
+    let deployment = render_federate(slice);
     let bindings = render_bindings(
         driver,
         enclaves,
@@ -136,14 +136,14 @@ pub(super) fn render_launcher(
             let sink = connection.sink();
             let bindings = generated_bindings(&rti_bindings, sink.clone())?;
             let execution = boomerang_runtime::execute_owned_federate_with_backend(
-                FEDERATE, &FEDERATE_IMAGE, &ENCLAVES, bindings, #config,
+                FEDERATE, &FEDERATE_IMAGE, &ENCLAVE_VIEWS, bindings, #config,
                 |inbound| CentralRtiClient::connect(sink, connection, rti_bindings, inbound, timeout),
             )?;
         }
     } else {
         quote! {
-            let execution = boomerang_runtime::execute_owned_federate(
-                DEPLOYMENT, FEDERATE, generated_bindings(), #config,
+            let execution = boomerang_runtime::execute_owned_federate_slice(
+                FEDERATE, &FEDERATE_IMAGE, &ENCLAVE_VIEWS, generated_bindings(), #config,
             )?;
         }
     };
@@ -189,7 +189,7 @@ pub(super) fn render_launcher(
 
 /// Serializes the actual local scheduler tables through the canonical image renderer.
 pub(super) fn image_fingerprint_input(slice: &FederateSlice<'_>) -> Result<String> {
-    let mut tables = render_deployment(slice, false);
+    let mut tables = render_federate(slice);
     for (index, enclave) in slice.enclaves().iter().enumerate() {
         tables.extend(enclave.with_image(|image| render_enclave_image(index, &image)));
     }
@@ -335,6 +335,8 @@ fn render_enclave_image(index: usize, image: &EnclaveImage<'_>) -> TokenStream {
     tokens.extend(render_routes(&prefix, image));
     tokens.extend(render_required_bindings(&prefix, image));
     let image_name = format_ident!("{prefix}_IMAGE");
+    let view_name = format_ident!("{prefix}_VIEW");
+    let invalid_image = format!("invalid generated Enclave image {prefix}");
     let enclave_id = image.enclave_id.as_str();
     let bounds = storage_bounds(image.storage_bounds);
     let reactors = format_ident!("{prefix}_REACTORS");
@@ -388,34 +390,26 @@ fn render_enclave_image(index: usize, image: &EnclaveImage<'_>) -> TokenStream {
             required_bindings: TinyMapView::new(&#required_bindings),
             storage_bounds: &#bounds,
         };
+        static #view_name: EnclaveImageView<'static> = match EnclaveImageView::new(&#image_name) {
+            Ok(view) => view,
+            Err(_) => panic!(#invalid_image),
+        };
     });
     tokens
 }
 
-/// Emits the deployment root tables around the selected Federate's Enclave images.
-fn render_deployment(slice: &FederateSlice<'_>, include_local_deployment: bool) -> TokenStream {
+/// Emits the selected Federate descriptor and its checked Enclave execution views.
+fn render_federate(slice: &FederateSlice<'_>) -> TokenStream {
     let enclave_count = slice.enclaves().len();
     let enclave_len = proc_macro2::Literal::usize_unsuffixed(enclave_count);
-    let enclave_images = (0..enclave_count).map(|index| format_ident!("E{index}_IMAGE"));
+    let enclave_views = (0..enclave_count).map(|index| format_ident!("E{index}_VIEW"));
     let federate = proc_macro2::Literal::u32_unsuffixed(slice.federate().as_u32());
     let id = slice.id().as_str();
     let target = slice.target().as_str();
     let runtime = slice.runtime().as_str();
     let enclave_range = index_span(slice.enclave_range());
-    let deployment = include_local_deployment.then(|| {
-        quote!(
-            static FEDERATES: [FederateImage; 1] = [FEDERATE_IMAGE];
-            static FEDERATION_MEMBERS: [FederateIndex; 1] = [FEDERATE];
-            const DEPLOYMENT: CompiledDeploymentImage<'static> = CompiledDeploymentImage {
-                federation: GlobalFederationImage::new(&FEDERATION_MEMBERS, &[]),
-                federates: TinyMapView::new(&FEDERATES),
-                enclaves: TinyMapView::new(&ENCLAVES),
-                coordination: CoordinationProjection::Local,
-            };
-        )
-    });
     quote! {
-        static ENCLAVES: [EnclaveImage<'static>; #enclave_len] = [#(#enclave_images),*];
+        static ENCLAVE_VIEWS: [&EnclaveImageView<'static>; #enclave_len] = [#(&#enclave_views),*];
         static FEDERATE: FederateIndex = FederateIndex::new(#federate);
         const FEDERATE_IMAGE: FederateImage<'static> = FederateImage::new(
             FederateId::new(#id),
@@ -423,7 +417,6 @@ fn render_deployment(slice: &FederateSlice<'_>, include_local_deployment: bool) 
             RuntimeBackendId::new(#runtime),
             #enclave_range,
         );
-        #deployment
     }
 }
 

@@ -143,11 +143,15 @@ fn execute_script(
 ) -> Result<boomerang_runtime::FederateExecution, boomerang_runtime::ExecuteOwnedFederateError> {
     let view = CompiledDeploymentView::new(DEPLOYMENT).unwrap();
     let bindings = RtiClientBindings::new(&view, MEMBERS[1], IDENTITY).unwrap();
+    let images = view
+        .federate(MEMBERS[1])
+        .enclave_views()
+        .collect::<Vec<_>>();
     let decoder = script.clone();
     execute_owned_federate_with_backend(
         MEMBERS[1],
         &FEDERATES[1],
-        &ENCLAVES[1..],
+        &images.iter().collect::<Vec<_>>(),
         FederateBindings::new()
             .bind_enclave(EnclaveIndex::new(1), sink_bindings())
             .bind_enclave(EnclaveIndex::new(2), sink_bindings())

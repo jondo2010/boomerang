@@ -1,5 +1,6 @@
 //! Compiled network route adapters reuse the owned execution fixture and scheduler.
 use super::*;
+use boomerang_runtime::image::EnclaveImageView;
 use boomerang_runtime::{
     execute_owned_federate_with_backend, BoundaryAdmissionError, BoundarySubmissionError,
     CoordinationRevision, FederateAcquisition, FederateCompletion, FederateCoordinationBackend,
@@ -80,7 +81,7 @@ fn bounded_capture_prepares_coordinator_and_scheduler_workers() {
         let execution = execute_owned_federate_with_backend(
             FederateIndex::new(0),
             &fixture_federate("host", "host", "std", IndexSpan::new(0, 1)),
-            std::slice::from_ref(&IMAGE),
+            &[&EnclaveImageView::new(&IMAGE).unwrap()],
             FederateBindings::new().bind_enclave(EnclaveIndex::new(0), bindings),
             Config::default().with_fast_forward(true),
             |_| Ok(GrantBackend::default()),
@@ -138,7 +139,7 @@ fn distributed_federate_trace_retains_validated_compiler_identity() {
         execute_owned_federate_with_backend(
             FederateIndex::new(3),
             &fixture_federate("source", "host", "std", IndexSpan::new(5, 1)),
-            &[ROUTED_SOURCE_IMAGE],
+            &[&EnclaveImageView::new(&ROUTED_SOURCE_IMAGE).unwrap()],
             FederateBindings::new()
                 .bind_enclave(EnclaveIndex::new(5), source_bindings())
                 .bind_outbound_route(
@@ -169,7 +170,7 @@ fn isolated_slices_execute_encoded_route_halves_at_canonical_enclave_keys() {
         let source = execute_owned_federate_with_backend(
             FederateIndex::new(3),
             &fixture_federate("source", "host", "std", IndexSpan::new(5, 1)),
-            &[ROUTED_SOURCE_IMAGE],
+            &[&EnclaveImageView::new(&ROUTED_SOURCE_IMAGE).unwrap()],
             FederateBindings::new()
                 .bind_enclave(EnclaveIndex::new(5), source_bindings())
                 .bind_outbound_route(
@@ -201,7 +202,7 @@ fn isolated_slices_execute_encoded_route_halves_at_canonical_enclave_keys() {
         let sink = execute_owned_federate_with_backend(
             FederateIndex::new(9),
             &fixture_federate("sink", "host", "std", IndexSpan::new(11, 1)),
-            &[ROUTED_SINK_IMAGE],
+            &[&EnclaveImageView::new(&ROUTED_SINK_IMAGE).unwrap()],
             FederateBindings::new()
                 .bind_enclave(EnclaveIndex::new(11), sink_bindings())
                 .bind_inbound_route(route_boundary(), PayloadType::<u32>::new(), decode_u32),
@@ -238,7 +239,7 @@ fn slice_backend_failure_wakes_and_joins_an_idle_scheduler() {
         let error = execute_owned_federate_with_backend(
             FederateIndex::new(9),
             &fixture_federate("sink", "host", "std", IndexSpan::new(11, 1)),
-            &[ROUTED_SINK_IMAGE],
+            &[&EnclaveImageView::new(&ROUTED_SINK_IMAGE).unwrap()],
             FederateBindings::new()
                 .bind_enclave(EnclaveIndex::new(11), sink_bindings())
                 .bind_inbound_route(route_boundary(), PayloadType::<u32>::new(), decode_u32),
@@ -276,7 +277,7 @@ fn slice_preserves_codec_and_submission_failures_through_scheduler_cleanup() {
             let error = execute_owned_federate_with_backend(
                 FederateIndex::new(3),
                 &fixture_federate("source", "host", "std", IndexSpan::new(5, 1)),
-                &[ROUTED_SOURCE_IMAGE],
+                &[&EnclaveImageView::new(&ROUTED_SOURCE_IMAGE).unwrap()],
                 FederateBindings::new()
                     .bind_enclave(EnclaveIndex::new(5), source_bindings())
                     .bind_outbound_route(
@@ -378,7 +379,7 @@ fn slice_preflight_rejects_external_binding_errors_before_initialization_or_conn
         let error = execute_owned_federate_with_backend(
             FederateIndex::new(9),
             &fixture_federate("sink", "host", "std", span),
-            &[ROUTED_SINK_IMAGE],
+            &[&EnclaveImageView::new(&ROUTED_SINK_IMAGE).unwrap()],
             bindings,
             Config::default(),
             |_| -> Result<GrantBackend, FederateCoordinationError> {

@@ -1378,8 +1378,9 @@ mod scoped_spawn_tests {
             ActionImage, ActionIndex, ActionSlotIndex, ActionTiming, BindingKind, BindingSlotId,
             BindingSlotIndex, CoordinationProjection, EnclaveId, FederateId, FederateImage,
             GlobalFederationImage, IndexSpan, LevelReactionImage, ReactionImage, ReactionIndex,
-            ReactorImage, ReactorIndex, RequiredBindingImage, RuntimeBackendId, ScopeImage,
-            ScopeIndex, SliceRange, StorageBounds, TargetId, TimerStartupImage,
+            ReactorImage, ReactorIndex, RecoveryPolicy, RequiredBindingImage, RtiImage,
+            RtiMemberImage, RuntimeBackendId, ScopeImage, ScopeIndex, SliceRange, StorageBounds,
+            TargetId, TimerStartupImage,
         },
         keepalive, EnclaveKey, FederateAcquisition, FederateCompletion,
         FederateCoordinationBackend, FederateCoordinationError, FederatePublication, SendContext,
@@ -1538,12 +1539,30 @@ mod scoped_spawn_tests {
     ];
     /// Canonical membership for the non-zero-range construction fixture.
     static OFFSET_MEMBERS: [FederateIndex; 2] = [FederateIndex::new(0), FederateIndex::new(1)];
+    static OFFSET_RTI_MEMBERS: [RtiMemberImage; 2] = [const {
+        RtiMemberImage::new(
+            RecoveryPolicy::FailStop,
+            SliceRange::new(0, 0),
+            SliceRange::new(0, 0),
+            SliceRange::new(0, 0),
+            32,
+        )
+    }; 2];
     /// Complete deployment fixture used to prove global Enclave indices are never rebased.
     static OFFSET_DEPLOYMENT: CompiledDeploymentImage<'static> = CompiledDeploymentImage {
         federation: GlobalFederationImage::new(&OFFSET_MEMBERS, &[]),
         federates: TinyMapView::new(&OFFSET_FEDERATES),
         enclaves: TinyMapView::new(&ENCLAVES),
-        coordination: CoordinationProjection::Local,
+        coordination: CoordinationProjection::CentralRti(RtiImage::new(
+            TinyMapView::new(&OFFSET_RTI_MEMBERS),
+            &[],
+            &[],
+            TinyMapView::new(&[]),
+            TinyMapView::new(&[]),
+            TinyMapView::new(&[]),
+            TinyMapView::new(&[]),
+            TinyMapView::new(&[]),
+        )),
     };
 
     fn initialize_state() {}

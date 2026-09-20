@@ -1450,8 +1450,9 @@ const fn validate_levels<'a>(
     let mut previous: Option<LevelReactionImage> = None;
     let mut position = 0;
     while position < len {
-        let index = start + position as u32;
-        let entry = values[index as usize];
+        let backing_index = start as usize + position;
+        let entry = values[backing_index];
+        let index = backing_index as u32;
         const_try!(validate_level_ref(table, index, entry, image));
         if let Some(before) = previous {
             if same_level(entry, before) {
@@ -1483,8 +1484,9 @@ const fn validate_lifecycle<'a>(
     let mut previous: Option<LevelReactionImage> = None;
     let mut position = 0;
     while position < len {
-        let index = start + position as u32;
-        let entry = values[index as usize];
+        let backing_index = start as usize + position;
+        let entry = values[backing_index];
+        let index = backing_index as u32;
         const_try!(check_action_ref(
             table,
             index,

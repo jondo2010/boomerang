@@ -16,7 +16,7 @@ use crate::{
     keepalive,
     key_set::KeySetView,
     ActionKey, CommonContext, Duration, EnclaveKey, Level, ReactionSetLimits, ReactorData,
-    RuntimeError, SendContext, Tag, TransitionKind,
+    RuntimeError, SchedulerPhase, SendContext, Tag, TransitionKind,
 };
 
 /// Immutable normalized schedule addressed by one exact family of dense key types.
@@ -172,6 +172,8 @@ where
     pub(super) key: EnclaveKey,
     /// Existing live scheduler configuration.
     pub(super) config: &'a Config,
+    /// Optional snapshot-only scheduler observation state.
+    pub(super) observation: Option<&'a crate::ObservationHandle>,
     /// Immutable dependency and modal schedule tables.
     pub(super) schedule: &'a S,
     /// Mutable reaction, action, and port execution storage.
@@ -262,14 +264,47 @@ fn receive_until_wall_clock_deadline(
     }
 }
 
+fn observe_coordination_wait<T>(
+    observation: Option<&crate::ObservationHandle>,
+    wait: impl FnOnce() -> T,
+) -> T {
+    if let Some(observation) = observation {
+        observation.enter(SchedulerPhase::CoordinationWait, std::time::Instant::now());
+    }
+    let result = wait();
+    if let Some(observation) = observation {
+        observation.enter(SchedulerPhase::Framework, std::time::Instant::now());
+    }
+    result
+}
+
 impl<S, E> SchedulerCore<'_, '_, S, E>
 where
     S: Schedule,
     E: ExecutionStorage<S>,
 {
+    fn observe(&self, phase: SchedulerPhase) {
+        if let Some(observation) = self.observation {
+            observation.enter(phase, std::time::Instant::now());
+        }
+    }
+
+    fn observe_event_queue(&self) {
+        if let Some(observation) = self.observation {
+            let (occupancy, reserved_capacity, peak_occupancy) = self
+                .events
+                .event_queue_observation()
+                .expect("event queue observation enabled with scheduler observation");
+            observation.record_event_queue(occupancy, reserved_capacity, peak_occupancy);
+        }
+    }
+
     /// Handle an asynchronous event from the event queue
     fn handle_async_event(&mut self, event: AsyncEvent) -> Result<(), E::Error> {
         self.stats.increment_processed_events();
+        if let Some(observation) = self.observation {
+            observation.increment_processed_events();
+        }
         let origin = event.kind_str();
         match event {
             AsyncEvent::TagRelease { enclave, tag } => {
@@ -405,6 +440,10 @@ where
 
     /// Execute startup of the Scheduler.
     pub(super) fn startup(&mut self) {
+        self.observe(SchedulerPhase::Framework);
+        if let Some(observation) = self.observation {
+            observation.mark_running();
+        }
         self.storage.prepare_startup_origin(self.start_time);
         let tag = Tag::ZERO;
 
@@ -438,9 +477,13 @@ where
         self.release_tag_downstream(*self.current_tag);
     }
 
-    /// Final shutdown of the Scheduler. The last tag has already been processed.
-    fn shutdown(&mut self) {
+    /// Finalizes normal shutdown after the last tag has been processed.
+    pub(super) fn shutdown(&mut self) {
         self.events.shutdown();
+        if let Some(observation) = self.observation {
+            observation.enter(SchedulerPhase::Idle, std::time::Instant::now());
+            observation.mark_stopped();
+        }
         let tag = self
             .shutdown_tag
             .expect("shutdown tag established before shutdown");
@@ -456,6 +499,16 @@ where
         );
     }
 
+    /// Finalizes failed shutdown without running normal shutdown reporting.
+    pub(super) fn shutdown_failed(&mut self) {
+        self.shutdown_tx.shutdown();
+        self.events.shutdown();
+        if let Some(observation) = self.observation {
+            observation.enter(SchedulerPhase::Idle, std::time::Instant::now());
+            observation.mark_failed();
+        }
+    }
+
     /// Try to receive an asynchronous event
     fn receive_event_async(&mut self) -> Option<AsyncEvent> {
         if let Some(shutdown) = *self.shutdown_tag {
@@ -465,7 +518,10 @@ where
                     event = "runtime.scheduler.waiting", enclave = self.key.as_u32(),
                     reason = "shutdown_deadline", tag_kind = shutdown.kind_str(), tag_offset_ns = shutdown.offset().whole_nanoseconds(), tag_microstep = shutdown.microstep(),
                 );
-                self.event_rx.recv_timeout(timeout).ok()
+                self.observe(SchedulerPhase::ExternalWait);
+                let event = self.event_rx.recv_timeout(timeout).ok();
+                self.observe(SchedulerPhase::Framework);
+                event
             } else {
                 None
             }
@@ -474,7 +530,10 @@ where
                 event = "runtime.scheduler.waiting", enclave = self.key.as_u32(),
                 reason = "keep_alive",
             );
-            self.event_rx.recv().ok()
+            self.observe(SchedulerPhase::ExternalWait);
+            let event = self.event_rx.recv().ok();
+            self.observe(SchedulerPhase::Framework);
+            event
         } else {
             None
         }
@@ -576,10 +635,10 @@ where
         control_only: bool,
         logical_horizon: Option<Tag>,
     ) -> Result<Option<bool>, SchedulerError<E::Error>> {
+        let observation = self.observation;
         if let Some(coordination) = self.federate_coordination.as_deref_mut() {
             if logical_horizon == Some(next_tag) && !self.events.has_nonterminal_work() {
-                match coordination
-                    .wait()
+                match observe_coordination_wait(observation, || coordination.wait())
                     .map_err(SchedulerError::FederateCoordination)
                 {
                     Ok(FederateIdleWait::Interrupted(async_event)) => {
@@ -610,9 +669,10 @@ where
         }
         if let Some(coordination) = self.federate_coordination.as_deref_mut() {
             if control_only {
-                match coordination
-                    .authorize_control(next_tag)
-                    .map_err(SchedulerError::FederateCoordination)
+                match observe_coordination_wait(observation, || {
+                    coordination.authorize_control(next_tag)
+                })
+                .map_err(SchedulerError::FederateCoordination)
                 {
                     Ok(FederateControlAuthorization::Authorized) => {}
                     Ok(FederateControlAuthorization::Interrupted(async_event)) => {
@@ -635,8 +695,7 @@ where
                     Err(error) => return Err(self.report_federate_failure(error)),
                 }
             } else {
-                match coordination
-                    .acquire_tag(next_tag)
+                match observe_coordination_wait(observation, || coordination.acquire_tag(next_tag))
                     .map_err(SchedulerError::FederateCoordination)
                 {
                     Ok(FederateTagAcquisition::Granted) => {}
@@ -669,9 +728,12 @@ where
         &mut self,
         next_tag: Tag,
     ) -> Result<Option<bool>, SchedulerError<E::Error>> {
+        let observation = self.observation;
         if self.federate_shutdown_tag != Some(next_tag) {
             for (_upstream_enclave_key, barrier) in self.upstream_enclaves.iter_mut() {
-                let async_event = match barrier.acquire_tag(next_tag, self.key, self.event_rx) {
+                let async_event = match observe_coordination_wait(observation, || {
+                    barrier.acquire_tag(next_tag, self.key, self.event_rx)
+                }) {
                     Ok(async_event) => async_event,
                     Err(error) => {
                         if let Some(keep_running) = self.handle_closed_event_channel()? {
@@ -791,6 +853,9 @@ where
         }
 
         self.stats.increment_processed_tags();
+        if let Some(observation) = self.observation {
+            observation.record_completed_tag(std::time::Instant::now());
+        }
         tracing::trace!(target: "boomerang::runtime",
             event = "runtime.scheduler.tag_processed", enclave = self.key.as_u32(),
             tag_kind = self.current_tag.kind_str(), tag_offset_ns = self.current_tag.offset().whole_nanoseconds(), tag_microstep = self.current_tag.microstep(), terminal = event.terminal,
@@ -812,15 +877,22 @@ where
 
     /// Waits for asynchronous work when the scheduler queue is empty.
     fn wait_for_next_event(&mut self) -> Result<bool, SchedulerError<E::Error>> {
+        let observation = self.observation;
         if let Some(coordination) = self.federate_coordination.as_deref_mut() {
             tracing::debug!(target: "boomerang::runtime",
                 event = "runtime.scheduler.waiting", enclave = self.key.as_u32(),
                 reason = "federate_coordination",
             );
-            match coordination
+            if let Some(observation) = observation {
+                observation.enter(SchedulerPhase::CoordinationWait, std::time::Instant::now());
+            }
+            let waited = coordination
                 .wait()
-                .map_err(SchedulerError::FederateCoordination)
-            {
+                .map_err(SchedulerError::FederateCoordination);
+            if let Some(observation) = observation {
+                observation.enter(SchedulerPhase::Framework, std::time::Instant::now());
+            }
+            match waited {
                 Ok(FederateIdleWait::Interrupted(async_event)) => {
                     self.handle_async_event(async_event)
                         .map_err(SchedulerError::Execution)?;
@@ -859,6 +931,7 @@ where
     /// Process one scheduler step, returning coordination failures to the caller.
     pub(super) fn try_next(&mut self) -> Result<bool, SchedulerError<E::Error>> {
         self.pump_pending_async_events()?;
+        self.observe_event_queue();
 
         if self.event_rx.is_closed() {
             if let Some(keep_running) = self.handle_closed_event_channel()? {
@@ -886,9 +959,13 @@ where
                 return Ok(keep_running);
             }
 
-            self.process_next_event(logical_horizon)
+            let result = self.process_next_event(logical_horizon);
+            self.observe_event_queue();
+            result
         } else {
-            self.wait_for_next_event()
+            let result = self.wait_for_next_event();
+            self.observe_event_queue();
+            result
         }
     }
 
@@ -905,8 +982,7 @@ where
                         error @ SchedulerError::FederateFailureReported { .. } => error,
                         error => self.report_federate_failure(error),
                     };
-                    self.shutdown_tx.shutdown();
-                    self.events.shutdown();
+                    self.shutdown_failed();
                     return Err(error);
                 }
             }
@@ -931,18 +1007,27 @@ where
                     reason = "wall_clock", duration_ns = advance.as_nanos(),
                 );
 
-                return receive_until_wall_clock_deadline(
+                let observation = self.observation;
+                let received = receive_until_wall_clock_deadline(
                     target,
                     self.event_rx,
-                    || {},
+                    || {
+                        if let Some(observation) = observation {
+                            observation
+                                .enter(SchedulerPhase::PhysicalWait, std::time::Instant::now());
+                        }
+                    },
                     || {
                         self.federate_coordination.as_deref_mut().map_or(
                             Ok(None),
                             FederateSchedulerCoordination::terminal_after_event_channel_closed,
                         )
                     },
-                )
-                .map_err(SchedulerError::FederateCoordination);
+                );
+                if let Some(observation) = observation {
+                    observation.enter(SchedulerPhase::Framework, std::time::Instant::now());
+                }
+                return received.map_err(SchedulerError::FederateCoordination);
             }
 
             std::cmp::Ordering::Greater => {
@@ -988,13 +1073,19 @@ where
 
             self.stats
                 .increment_processed_reactions(self.reaction_buffer.len());
+            if let Some(observation) = self.observation {
+                observation.add_processed_reactions(self.reaction_buffer.len() as u64);
+            }
 
             let outcome_count = self.reaction_buffer.len();
-            if let Err(error) = self.storage.execute_reactions(
+            self.observe(SchedulerPhase::Reaction);
+            let reaction_result = self.storage.execute_reactions(
                 self.reaction_buffer,
                 tag,
                 &mut self.outcomes[..outcome_count],
-            ) {
+            );
+            self.observe(SchedulerPhase::Framework);
+            if let Err(error) = reaction_result {
                 execution_error = Some(error);
                 return;
             }
@@ -1030,6 +1121,9 @@ where
                 // Submit events to the event queue for all scheduled actions
                 self.stats
                     .increment_scheduled_actions(outcome.scheduled_actions.len());
+                if let Some(observation) = self.observation {
+                    observation.add_scheduled_actions(outcome.scheduled_actions.len() as u64);
+                }
                 for &(action_key, tag) in &outcome.scheduled_actions {
                     self.events.push_action_event(
                         action_key,
@@ -1052,6 +1146,9 @@ where
 
                 for port_key in self.storage.set_ports() {
                     self.stats.increment_set_ports();
+                    if let Some(observation) = self.observation {
+                        observation.increment_set_ports();
+                    }
                     let downstream = self.schedule.port_triggers(port_key);
                     if has_modal_scopes {
                         next_levels.extend_above(downstream.filter(|&(_, reaction_key)| {

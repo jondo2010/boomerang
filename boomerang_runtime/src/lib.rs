@@ -13,6 +13,7 @@ mod event;
 pub mod image;
 pub mod keepalive;
 mod key_set;
+mod observation;
 pub mod port;
 pub mod reaction;
 mod reactor;
@@ -38,6 +39,9 @@ pub use env::{
     ScopeKey, TransitionKind,
 };
 pub use event::{AsyncEvent, AsyncEventTarget};
+pub use observation::{
+    ObservationHandle, ObservationSnapshot, ObservationState, SchedulerLifecycle, SchedulerPhase,
+};
 mod boundary;
 pub use boundary::{
     BoundaryAdmissionError, BoundarySubmissionError, InboundBoundaryAdapter, OutboundBoundarySink,

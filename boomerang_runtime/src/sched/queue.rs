@@ -213,6 +213,14 @@ impl<K: tinymap::Key, A: Copy + PartialEq> EventQueue<K, A> {
         self.event_queue.peek().map(|event| event.tag)
     }
 
+    /// Returns the current number of queued events and reserved heap slots.
+    pub(crate) fn observation_metrics(&self) -> (u64, u64) {
+        (
+            u64::try_from(self.event_queue.len()).unwrap_or(u64::MAX),
+            u64::try_from(self.event_queue.capacity()).unwrap_or(u64::MAX),
+        )
+    }
+
     /// Returns whether every event at the next tag contains only provisional control work.
     pub(crate) fn peek_is_control_only(&self) -> bool {
         let Some(tag) = self.peek_tag() else {

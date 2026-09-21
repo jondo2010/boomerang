@@ -203,7 +203,7 @@ pub(crate) fn run_owned_scheduler_with_coordination(
     let schedule = storage.scheduler_image();
     let reaction_limits = schedule.reaction_limits();
     let reaction_capacity = reaction_limits.num_keys;
-    let mut events = EventManager::new(reaction_limits, &schedule);
+    let mut events = EventManager::new(reaction_limits, &schedule, config.observation().is_some());
     let event_rx = storage.scheduler_event_rx();
     let shutdown_tx = storage.take_scheduler_shutdown_tx();
     let mut start_time = origin;
@@ -237,6 +237,7 @@ pub(crate) fn run_owned_scheduler_with_coordination(
     SchedulerCore {
         key,
         config,
+        observation: config.observation(),
         schedule: &schedule,
         storage,
         event_rx: &event_rx,

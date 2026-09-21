@@ -121,6 +121,7 @@ pub(super) fn render_launcher(
         timeout: #timeout,
         keep_alive: #keep_alive,
         physical_event_q_size: 1024,
+        observation: None,
     });
     let execute = if distributed {
         quote! {

@@ -35,7 +35,17 @@ pub struct TelemetryRecord<'a> {
 
 impl<'a> TelemetryRecord<'a> {
     /// Encodes this record canonically into caller-owned bounded storage.
+    ///
+    /// On success, the returned length selects the initialized prefix of `output`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the protocol version or record group is unsupported, the encoded
+    /// record would exceed [`MAX_DATAGRAM_BYTES`], or `output` cannot hold the entire record.
     pub fn encode_into(&self, output: &mut [u8]) -> Result<usize, CodecError> {
+        if self.protocol_version != PROTOCOL_VERSION {
+            return Err(CodecError::UnsupportedVersion(self.protocol_version));
+        }
         if !self.has_matching_group() {
             return Err(CodecError::GroupMismatch);
         }
@@ -53,6 +63,14 @@ impl<'a> TelemetryRecord<'a> {
     }
 
     /// Decodes a bounded canonical record borrowing stable text from `input`.
+    ///
+    /// `scratch` is temporary canonicalization storage and must be at least as long as `input`.
+    /// The returned process, Federate, and Enclave strings borrow from `input`, not `scratch`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for oversized, malformed, trailing, noncanonical, unsupported-version,
+    /// or group-mismatched input, or when `scratch` is shorter than `input`.
     pub fn decode(input: &'a [u8], scratch: &mut [u8]) -> Result<Self, CodecError> {
         if input.len() > MAX_DATAGRAM_BYTES {
             return Err(CodecError::Oversize);
@@ -126,9 +144,9 @@ pub enum RecordGroup {
 /// Absolute scheduler counters, gauges, peaks, lifecycle, and phase values.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SchedulerSample {
-    /// Scheduler lifecycle encoded by the owning adapter as a stable `u8`.
+    /// Adapter-defined scheduler lifecycle code; this portable core assigns no code meanings.
     pub lifecycle: u8,
-    /// Current scheduler phase encoded by the owning adapter as a stable `u8`.
+    /// Adapter-defined current scheduler phase code; this portable core assigns no code meanings.
     pub current_phase: u8,
     /// Monotonic nanoseconds at which the current phase began.
     pub current_phase_started_ns: u64,
@@ -280,6 +298,14 @@ mod tests {
 
     #[test]
     fn codec_rejects_malformed_and_unknown_version_records() {
+        let mut unsupported = scheduler_record();
+        unsupported.protocol_version = 2;
+        let mut output = [0; MAX_DATAGRAM_BYTES];
+        assert_eq!(
+            unsupported.encode_into(&mut output),
+            Err(CodecError::UnsupportedVersion(2))
+        );
+
         let mut scratch = [0; MAX_DATAGRAM_BYTES];
         assert_eq!(
             TelemetryRecord::decode(&[0xff], &mut scratch),

@@ -14,6 +14,23 @@ by `cargo-boomerang`, without a subscriber dependency. `hosted-tracing` adds
 streaming initialization and formatted retention; `bounded-tracing` independently
 adds native bounded capture and shutdown export.
 
+The independent `hosted-telemetry` feature adds `telemetry::TelemetrySource`
+and the async `telemetry::run_udp` worker. Create a source from a borrowed portable
+`TelemetryIdentity`, install its cloned `observation_handle()` on one scheduler,
+then run the worker on a hosted Tokio executor with a fixed source slice, UDP
+destination, positive sampling period, and shutdown future. Each source owns the
+observation state and its matching monotonic origin. Source identifiers must be
+stable logical names supplied by the caller, and the shutdown future should
+complete after scheduler finalization.
+
+The worker samples immediately and periodically, skips missed ticks, and makes
+one final publication attempt at shutdown. It reuses one 1,200-byte buffer and
+uses nonblocking sends with no queue or retry backlog. Each source emits independent
+scheduler and exporter-health record groups; send/encoding failures increment
+publication drops, and unavailable coherent snapshots increment snapshot misses.
+UDP delivery remains best effort. This feature is off by default and does not
+install tracing or change scheduler execution policy.
+
 The `runner` feature retains the older convenience API that builds, lowers, and
 executes a Reactor in one process. New production applications should use
 `cargo-boomerang` and generated launchers. The `test-tracing` feature remains a

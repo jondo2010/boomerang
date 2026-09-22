@@ -14,6 +14,9 @@ exclude.workspace = true
 [features]
 default = []
 
+## Hosted scheduler observation sampling and bounded UDP telemetry publication
+hosted-telemetry = ["dep:boomerang_runtime", "dep:boomerang_telemetry", "dep:tokio"]
+
 ## Native bounded coordination capture and shutdown export (no hosted formatter)
 bounded-tracing = ["launcher", "dep:tracing-bounded", "boomerang_runtime/bounded-tracing"]
 
@@ -48,9 +51,11 @@ tracing.workspace = true
 tracing-bounded = { workspace = true, optional = true }
 tracing-appender = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true }
+tokio = { version = "1", optional = true, features = ["rt", "net", "time", "macros"] }
 
 boomerang = { workspace = true, optional = true }
 boomerang_runtime = { workspace = true, optional = true }
+boomerang_telemetry = { workspace = true, optional = true }
 
 [dev-dependencies]
 tracing-subscriber = { workspace = true }

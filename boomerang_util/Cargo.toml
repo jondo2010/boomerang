@@ -15,7 +15,12 @@ exclude.workspace = true
 default = []
 
 ## Hosted scheduler observation sampling and bounded UDP telemetry publication
-hosted-telemetry = ["dep:boomerang_runtime", "dep:boomerang_telemetry", "dep:tokio"]
+hosted-telemetry = [
+    "dep:boomerang_runtime",
+    "dep:boomerang_telemetry",
+    "boomerang_telemetry/runtime-observation",
+    "dep:tokio",
+]
 
 ## Native bounded coordination capture and shutdown export (no hosted formatter)
 bounded-tracing = ["launcher", "dep:tracing-bounded", "boomerang_runtime/bounded-tracing"]

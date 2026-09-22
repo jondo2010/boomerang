@@ -2,6 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "runtime-observation")]
+use boomerang_runtime::{ObservationSnapshot, SchedulerLifecycle, SchedulerPhase};
+
 /// Maximum encoded size of one telemetry record.
 pub const MAX_DATAGRAM_BYTES: usize = 1_200;
 const PROTOCOL_VERSION: u8 = 1;
@@ -182,6 +185,71 @@ pub struct SchedulerSample {
     pub completed_logical_tags: u64,
     /// Monotonic nanoseconds of the latest logical progress, if available.
     pub last_logical_progress_ns: Option<u64>,
+}
+
+/// Converts a runtime scheduler observation into the portable v1 scheduler sample.
+///
+/// Lifecycle codes are not-started = 0, running = 1, stopped = 2, failed = 3.
+/// Phase codes are idle = 0, reaction = 1, framework = 2, physical-wait = 3,
+/// external-wait = 4, coordination-wait = 5.
+#[cfg(feature = "runtime-observation")]
+impl From<ObservationSnapshot> for SchedulerSample {
+    fn from(snapshot: ObservationSnapshot) -> Self {
+        let ObservationSnapshot {
+            lifecycle,
+            current_phase,
+            current_phase_started_ns,
+            reaction_elapsed_ns,
+            framework_elapsed_ns,
+            physical_wait_elapsed_ns,
+            external_wait_elapsed_ns,
+            coordination_wait_elapsed_ns,
+            processed_tags,
+            processed_reactions,
+            processed_events,
+            set_ports,
+            scheduled_actions,
+            event_queue_occupancy,
+            event_queue_reserved_capacity,
+            event_queue_enforced_limit,
+            event_queue_peak_occupancy,
+            completed_logical_tags,
+            last_logical_progress_ns,
+        } = snapshot;
+        Self {
+            lifecycle: match lifecycle {
+                SchedulerLifecycle::NotStarted => 0,
+                SchedulerLifecycle::Running => 1,
+                SchedulerLifecycle::Stopped => 2,
+                SchedulerLifecycle::Failed => 3,
+            },
+            current_phase: match current_phase {
+                SchedulerPhase::Idle => 0,
+                SchedulerPhase::Reaction => 1,
+                SchedulerPhase::Framework => 2,
+                SchedulerPhase::PhysicalWait => 3,
+                SchedulerPhase::ExternalWait => 4,
+                SchedulerPhase::CoordinationWait => 5,
+            },
+            current_phase_started_ns,
+            reaction_elapsed_ns,
+            framework_elapsed_ns,
+            physical_wait_elapsed_ns,
+            external_wait_elapsed_ns,
+            coordination_wait_elapsed_ns,
+            processed_tags,
+            processed_reactions,
+            processed_events,
+            set_ports,
+            scheduled_actions,
+            event_queue_occupancy,
+            event_queue_reserved_capacity,
+            event_queue_enforced_limit,
+            event_queue_peak_occupancy,
+            completed_logical_tags,
+            last_logical_progress_ns,
+        }
+    }
 }
 
 /// Absolute health counters measured by a future exporter adapter.

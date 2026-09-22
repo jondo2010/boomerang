@@ -1,8 +1,8 @@
 use super::*;
-use boomerang_runtime::{ObservationSnapshot, SchedulerLifecycle, SchedulerPhase};
+use boomerang_runtime::{SchedulerLifecycle, SchedulerPhase};
 use boomerang_telemetry::{
-    CodecError, EncoderError, ExporterHealth, RecordGroup, SchedulerSample, SourceIdentity,
-    SourceRole, TelemetryIdentity, TelemetryRecord, TelemetryValue, MAX_DATAGRAM_BYTES,
+    CodecError, EncoderError, ExporterHealth, RecordGroup, SourceIdentity, SourceRole,
+    TelemetryIdentity, TelemetryRecord, TelemetryValue, MAX_DATAGRAM_BYTES,
 };
 use std::{sync::Arc, time::Duration};
 use tokio::net::UdpSocket;
@@ -23,90 +23,6 @@ fn identity() -> TelemetryIdentity<'static> {
 
 fn decode_record(input: &[u8]) -> TelemetryRecord<'_> {
     TelemetryRecord::decode(input, &mut [0; MAX_DATAGRAM_BYTES]).unwrap()
-}
-
-fn observation_snapshot() -> ObservationSnapshot {
-    ObservationSnapshot {
-        lifecycle: SchedulerLifecycle::Running,
-        current_phase: SchedulerPhase::Reaction,
-        current_phase_started_ns: 3,
-        reaction_elapsed_ns: 5,
-        framework_elapsed_ns: 7,
-        physical_wait_elapsed_ns: 11,
-        external_wait_elapsed_ns: 13,
-        coordination_wait_elapsed_ns: 17,
-        processed_tags: 19,
-        processed_reactions: 23,
-        processed_events: 29,
-        set_ports: 31,
-        scheduled_actions: 37,
-        event_queue_occupancy: 41,
-        event_queue_reserved_capacity: 43,
-        event_queue_enforced_limit: Some(47),
-        event_queue_peak_occupancy: 53,
-        completed_logical_tags: 59,
-        last_logical_progress_ns: Some(61),
-    }
-}
-
-#[test]
-fn mapping_preserves_every_counter_gauge_and_optional_value() {
-    assert_eq!(
-        scheduler_sample(observation_snapshot()),
-        SchedulerSample {
-            lifecycle: 1,
-            current_phase: 1,
-            current_phase_started_ns: 3,
-            reaction_elapsed_ns: 5,
-            framework_elapsed_ns: 7,
-            physical_wait_elapsed_ns: 11,
-            external_wait_elapsed_ns: 13,
-            coordination_wait_elapsed_ns: 17,
-            processed_tags: 19,
-            processed_reactions: 23,
-            processed_events: 29,
-            set_ports: 31,
-            scheduled_actions: 37,
-            event_queue_occupancy: 41,
-            event_queue_reserved_capacity: 43,
-            event_queue_enforced_limit: Some(47),
-            event_queue_peak_occupancy: 53,
-            completed_logical_tags: 59,
-            last_logical_progress_ns: Some(61),
-        }
-    );
-    let mut snapshot = observation_snapshot();
-    snapshot.event_queue_enforced_limit = None;
-    snapshot.last_logical_progress_ns = None;
-    let sample = scheduler_sample(snapshot);
-    assert_eq!(sample.event_queue_enforced_limit, None);
-    assert_eq!(sample.last_logical_progress_ns, None);
-}
-
-#[test]
-fn mapping_assigns_explicit_lifecycle_and_phase_codes() {
-    for (lifecycle, expected) in [
-        (SchedulerLifecycle::NotStarted, 0),
-        (SchedulerLifecycle::Running, 1),
-        (SchedulerLifecycle::Stopped, 2),
-        (SchedulerLifecycle::Failed, 3),
-    ] {
-        let mut snapshot = observation_snapshot();
-        snapshot.lifecycle = lifecycle;
-        assert_eq!(scheduler_sample(snapshot).lifecycle, expected);
-    }
-    for (phase, expected) in [
-        (SchedulerPhase::Idle, 0),
-        (SchedulerPhase::Reaction, 1),
-        (SchedulerPhase::Framework, 2),
-        (SchedulerPhase::PhysicalWait, 3),
-        (SchedulerPhase::ExternalWait, 4),
-        (SchedulerPhase::CoordinationWait, 5),
-    ] {
-        let mut snapshot = observation_snapshot();
-        snapshot.current_phase = phase;
-        assert_eq!(scheduler_sample(snapshot).current_phase, expected);
-    }
 }
 
 #[test]

@@ -13,8 +13,10 @@ exclude.workspace = true
 
 [features]
 default = []
+runtime-observation = ["dep:boomerang_runtime"]
 
 [dependencies]
 serde = { version = "1.0", default-features = false, features = ["derive"] }
 postcard = { version = "1.1.3", default-features = false }
 thiserror.workspace = true
+boomerang_runtime = { workspace = true, optional = true }

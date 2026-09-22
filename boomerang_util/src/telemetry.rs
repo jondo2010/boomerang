@@ -8,12 +8,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use boomerang_runtime::{
-    ObservationHandle, ObservationSnapshot, ObservationState, SchedulerLifecycle, SchedulerPhase,
-};
-use boomerang_telemetry::{
-    EncoderError, SchedulerSample, TelemetryEncoder, TelemetryIdentity, MAX_DATAGRAM_BYTES,
-};
+use boomerang_runtime::{ObservationHandle, ObservationState};
+use boomerang_telemetry::{EncoderError, TelemetryEncoder, TelemetryIdentity, MAX_DATAGRAM_BYTES};
 use tokio::{net::UdpSocket, time::MissedTickBehavior};
 
 /// One hosted scheduler's observation state, monotonic clock, and telemetry encoder.
@@ -59,7 +55,7 @@ impl<'a> TelemetrySource<'a> {
             .encode_scheduler(
                 self.elapsed_ns(Instant::now()),
                 self.elapsed_ns(observed_at),
-                scheduler_sample(snapshot),
+                snapshot.into(),
                 output,
             )
             .map(Some)
@@ -157,69 +153,6 @@ fn publish(
 ) {
     if socket.try_send_to(bytes, destination).ok() != Some(bytes.len()) {
         source.encoder.note_publication_drop();
-    }
-}
-
-/// Converts all runtime observations to absolute portable telemetry values.
-///
-/// Hosted v1 lifecycle codes are not-started = 0, running = 1, stopped = 2,
-/// failed = 3. Phase codes are idle = 0, reaction = 1, framework = 2,
-/// physical-wait = 3, external-wait = 4, coordination-wait = 5.
-#[must_use]
-pub fn scheduler_sample(snapshot: ObservationSnapshot) -> SchedulerSample {
-    let ObservationSnapshot {
-        lifecycle,
-        current_phase,
-        current_phase_started_ns,
-        reaction_elapsed_ns,
-        framework_elapsed_ns,
-        physical_wait_elapsed_ns,
-        external_wait_elapsed_ns,
-        coordination_wait_elapsed_ns,
-        processed_tags,
-        processed_reactions,
-        processed_events,
-        set_ports,
-        scheduled_actions,
-        event_queue_occupancy,
-        event_queue_reserved_capacity,
-        event_queue_enforced_limit,
-        event_queue_peak_occupancy,
-        completed_logical_tags,
-        last_logical_progress_ns,
-    } = snapshot;
-    SchedulerSample {
-        lifecycle: match lifecycle {
-            SchedulerLifecycle::NotStarted => 0,
-            SchedulerLifecycle::Running => 1,
-            SchedulerLifecycle::Stopped => 2,
-            SchedulerLifecycle::Failed => 3,
-        },
-        current_phase: match current_phase {
-            SchedulerPhase::Idle => 0,
-            SchedulerPhase::Reaction => 1,
-            SchedulerPhase::Framework => 2,
-            SchedulerPhase::PhysicalWait => 3,
-            SchedulerPhase::ExternalWait => 4,
-            SchedulerPhase::CoordinationWait => 5,
-        },
-        current_phase_started_ns,
-        reaction_elapsed_ns,
-        framework_elapsed_ns,
-        physical_wait_elapsed_ns,
-        external_wait_elapsed_ns,
-        coordination_wait_elapsed_ns,
-        processed_tags,
-        processed_reactions,
-        processed_events,
-        set_ports,
-        scheduled_actions,
-        event_queue_occupancy,
-        event_queue_reserved_capacity,
-        event_queue_enforced_limit,
-        event_queue_peak_occupancy,
-        completed_logical_tags,
-        last_logical_progress_ns,
     }
 }
 

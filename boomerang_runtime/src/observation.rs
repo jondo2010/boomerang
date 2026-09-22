@@ -1,9 +1,16 @@
 //! Bounded, snapshot-oriented scheduler observations.
 //!
-//! This module deliberately has no transport, serialization, or subscriber
-//! dependency. A scheduler writes an [`ObservationState`] while hosted code
+//! A scheduler writes an [`ObservationState`] while hosted code
 //! samples it through [`ObservationState::snapshot`] without participating in
 //! scheduler execution.
+//!
+//! With the `serde` feature, [`ObservationSnapshot`] and its lifecycle and phase
+//! enums are the serializable payload of internal scheduler telemetry. This
+//! coupling is intentional: producers and consumers belong to a closed system
+//! and deploy atomically from the same build. Snapshot layout and enum changes
+//! therefore evolve with that deployment; they are not a separately stable wire
+//! schema. Serialization and transport remain outside scheduler execution, and
+//! [`ObservationState`] itself has no transport or subscriber dependency.
 
 use std::{
     sync::{
@@ -17,6 +24,7 @@ const SNAPSHOT_ATTEMPTS: usize = 32;
 
 /// The scheduler activity currently being observed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[repr(u8)]
 pub enum SchedulerPhase {
     /// The scheduler has no active operation to attribute.
@@ -48,6 +56,7 @@ impl SchedulerPhase {
 
 /// The scheduler lifecycle as observed independently of telemetry transport.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[repr(u8)]
 pub enum SchedulerLifecycle {
     /// Scheduler startup has not begun.
@@ -77,6 +86,7 @@ impl SchedulerLifecycle {
 /// gauges describe the instant sampled, while peak occupancy covers the period
 /// for which queue observation has been enabled.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ObservationSnapshot {
     /// Lifecycle state reported by the scheduler, not packet delivery state.
     pub lifecycle: SchedulerLifecycle,

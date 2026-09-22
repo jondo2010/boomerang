@@ -1,8 +1,6 @@
 use super::*;
-#[cfg(feature = "runtime-observation")]
 use boomerang_runtime::{ObservationSnapshot, SchedulerLifecycle, SchedulerPhase};
 
-#[cfg(feature = "runtime-observation")]
 fn observation_snapshot() -> ObservationSnapshot {
     ObservationSnapshot {
         lifecycle: SchedulerLifecycle::Running,
@@ -27,65 +25,46 @@ fn observation_snapshot() -> ObservationSnapshot {
     }
 }
 
-#[cfg(feature = "runtime-observation")]
 #[test]
-fn observation_snapshot_conversion_preserves_every_counter_gauge_and_optional_value() {
-    assert_eq!(
-        SchedulerSample::from(observation_snapshot()),
-        SchedulerSample {
-            lifecycle: 1,
-            current_phase: 1,
-            current_phase_started_ns: 3,
-            reaction_elapsed_ns: 5,
-            framework_elapsed_ns: 7,
-            physical_wait_elapsed_ns: 11,
-            external_wait_elapsed_ns: 13,
-            coordination_wait_elapsed_ns: 17,
-            processed_tags: 19,
-            processed_reactions: 23,
-            processed_events: 29,
-            set_ports: 31,
-            scheduled_actions: 37,
-            event_queue_occupancy: 41,
-            event_queue_reserved_capacity: 43,
-            event_queue_enforced_limit: Some(47),
-            event_queue_peak_occupancy: 53,
-            completed_logical_tags: 59,
-            last_logical_progress_ns: Some(61),
-        }
-    );
-    let mut snapshot = observation_snapshot();
-    snapshot.event_queue_enforced_limit = None;
-    snapshot.last_logical_progress_ns = None;
-    let sample = SchedulerSample::from(snapshot);
-    assert_eq!(sample.event_queue_enforced_limit, None);
-    assert_eq!(sample.last_logical_progress_ns, None);
+fn scheduler_encoding_round_trips_the_runtime_snapshot_directly() {
+    let snapshot = observation_snapshot();
+    let mut encoder = TelemetryEncoder::new(telemetry_identity());
+    let mut output = [0; MAX_DATAGRAM_BYTES];
+    let length = encoder
+        .encode_scheduler(1_000, 900, snapshot, &mut output)
+        .unwrap();
+    let TelemetryValue::Scheduler(decoded) = decode_record(&output[..length]).value else {
+        panic!("missing scheduler snapshot");
+    };
+    let decoded: ObservationSnapshot = decoded;
+    assert_eq!(decoded, snapshot);
 }
 
-#[cfg(feature = "runtime-observation")]
 #[test]
-fn observation_snapshot_conversion_assigns_explicit_lifecycle_and_phase_codes() {
-    for (lifecycle, expected) in [
-        (SchedulerLifecycle::NotStarted, 0),
-        (SchedulerLifecycle::Running, 1),
-        (SchedulerLifecycle::Stopped, 2),
-        (SchedulerLifecycle::Failed, 3),
+fn scheduler_round_trip_preserves_every_lifecycle_and_phase() {
+    for lifecycle in [
+        SchedulerLifecycle::NotStarted,
+        SchedulerLifecycle::Running,
+        SchedulerLifecycle::Stopped,
+        SchedulerLifecycle::Failed,
     ] {
-        let mut snapshot = observation_snapshot();
-        snapshot.lifecycle = lifecycle;
-        assert_eq!(SchedulerSample::from(snapshot).lifecycle, expected);
-    }
-    for (phase, expected) in [
-        (SchedulerPhase::Idle, 0),
-        (SchedulerPhase::Reaction, 1),
-        (SchedulerPhase::Framework, 2),
-        (SchedulerPhase::PhysicalWait, 3),
-        (SchedulerPhase::ExternalWait, 4),
-        (SchedulerPhase::CoordinationWait, 5),
-    ] {
-        let mut snapshot = observation_snapshot();
-        snapshot.current_phase = phase;
-        assert_eq!(SchedulerSample::from(snapshot).current_phase, expected);
+        for phase in [
+            SchedulerPhase::Idle,
+            SchedulerPhase::Reaction,
+            SchedulerPhase::Framework,
+            SchedulerPhase::PhysicalWait,
+            SchedulerPhase::ExternalWait,
+            SchedulerPhase::CoordinationWait,
+        ] {
+            let mut snapshot = observation_snapshot();
+            snapshot.lifecycle = lifecycle;
+            snapshot.current_phase = phase;
+            let mut record = scheduler_record();
+            record.value = TelemetryValue::Scheduler(snapshot);
+            let mut output = [0; MAX_DATAGRAM_BYTES];
+            let length = record.encode_into(&mut output).unwrap();
+            assert_eq!(decode_record(&output[..length]).value, record.value);
+        }
     }
 }
 
@@ -105,9 +84,9 @@ fn scheduler_record<'a>() -> TelemetryRecord<'a> {
         },
         sender_monotonic_ns: 1_000,
         observation_monotonic_ns: 900,
-        value: TelemetryValue::Scheduler(SchedulerSample {
-            lifecycle: 1,
-            current_phase: 2,
+        value: TelemetryValue::Scheduler(ObservationSnapshot {
+            lifecycle: SchedulerLifecycle::Running,
+            current_phase: SchedulerPhase::Framework,
             current_phase_started_ns: 800,
             reaction_elapsed_ns: 10,
             framework_elapsed_ns: 20,
@@ -142,7 +121,7 @@ fn telemetry_identity() -> TelemetryIdentity<'static> {
         },
     }
 }
-fn scheduler_sample() -> SchedulerSample {
+fn scheduler_sample() -> ObservationSnapshot {
     match scheduler_record().value {
         TelemetryValue::Scheduler(value) => value,
         TelemetryValue::ExporterHealth(_) => unreachable!(),

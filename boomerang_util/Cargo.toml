@@ -18,7 +18,6 @@ default = []
 hosted-telemetry = [
     "dep:boomerang_runtime",
     "dep:boomerang_telemetry",
-    "boomerang_telemetry/runtime-observation",
     "dep:tokio",
 ]
 

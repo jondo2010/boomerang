@@ -1,9 +1,21 @@
 #![no_std]
 
-use serde::{Deserialize, Serialize};
+//! Bounded internal telemetry for a closed system deployed atomically.
+//!
+//! Producers and consumers use the same build. Scheduler records carry the
+//! runtime's [`ObservationSnapshot`] directly, including its typed lifecycle and
+//! phase. That runtime coupling is intentional: payload changes evolve with the
+//! deployment, without a duplicate telemetry schema or a compatibility mapping.
+//! The record version identifies the envelope; it does not promise compatibility
+//! between independently deployed runtime versions.
+//!
+//! Encoding uses caller-owned bounded storage and no allocation. This crate has
+//! no default features and uses only `core` itself, but its runtime dependency
+//! currently requires `std`. It owns no observation state, clock, executor, or
+//! transport.
 
-#[cfg(feature = "runtime-observation")]
-use boomerang_runtime::{ObservationSnapshot, SchedulerLifecycle, SchedulerPhase};
+use boomerang_runtime::ObservationSnapshot;
+use serde::{Deserialize, Serialize};
 
 /// Maximum encoded size of one telemetry record.
 pub const MAX_DATAGRAM_BYTES: usize = 1_200;
@@ -12,7 +24,7 @@ const PROTOCOL_VERSION: u8 = 1;
 /// An independently interpretable telemetry v1 record.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct TelemetryRecord<'a> {
-    /// Version of the portable internal record format.
+    /// Version of the internal record envelope.
     pub protocol_version: u8,
     /// Kind of values carried by this record.
     pub group: RecordGroup,
@@ -144,114 +156,6 @@ pub enum RecordGroup {
     ExporterHealth = 1,
 }
 
-/// Absolute scheduler counters, gauges, peaks, lifecycle, and phase values.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct SchedulerSample {
-    /// Adapter-defined scheduler lifecycle code; this portable core assigns no code meanings.
-    pub lifecycle: u8,
-    /// Adapter-defined current scheduler phase code; this portable core assigns no code meanings.
-    pub current_phase: u8,
-    /// Monotonic nanoseconds at which the current phase began.
-    pub current_phase_started_ns: u64,
-    /// Cumulative nanoseconds spent in user reaction callbacks.
-    pub reaction_elapsed_ns: u64,
-    /// Cumulative nanoseconds spent in framework work.
-    pub framework_elapsed_ns: u64,
-    /// Cumulative nanoseconds waiting for physical time.
-    pub physical_wait_elapsed_ns: u64,
-    /// Cumulative nanoseconds waiting for external input.
-    pub external_wait_elapsed_ns: u64,
-    /// Cumulative nanoseconds waiting for Federate coordination.
-    pub coordination_wait_elapsed_ns: u64,
-    /// Cumulative scheduler tag-processing steps.
-    pub processed_tags: u64,
-    /// Cumulative enabled reaction callbacks selected for invocation.
-    pub processed_reactions: u64,
-    /// Cumulative asynchronous scheduler events handled.
-    pub processed_events: u64,
-    /// Cumulative present-port observations.
-    pub set_ports: u64,
-    /// Cumulative actions requested by reaction outcomes.
-    pub scheduled_actions: u64,
-    /// Event-queue occupancy at the observation point.
-    pub event_queue_occupancy: u64,
-    /// Event-queue slots reserved at the observation point.
-    pub event_queue_reserved_capacity: u64,
-    /// Runtime-enforced queue limit, if one exists.
-    pub event_queue_enforced_limit: Option<u64>,
-    /// Largest event-queue occupancy since observation started.
-    pub event_queue_peak_occupancy: u64,
-    /// Number of completed logical tags.
-    pub completed_logical_tags: u64,
-    /// Monotonic nanoseconds of the latest logical progress, if available.
-    pub last_logical_progress_ns: Option<u64>,
-}
-
-/// Converts a runtime scheduler observation into the portable v1 scheduler sample.
-///
-/// Lifecycle codes are not-started = 0, running = 1, stopped = 2, failed = 3.
-/// Phase codes are idle = 0, reaction = 1, framework = 2, physical-wait = 3,
-/// external-wait = 4, coordination-wait = 5.
-#[cfg(feature = "runtime-observation")]
-impl From<ObservationSnapshot> for SchedulerSample {
-    fn from(snapshot: ObservationSnapshot) -> Self {
-        let ObservationSnapshot {
-            lifecycle,
-            current_phase,
-            current_phase_started_ns,
-            reaction_elapsed_ns,
-            framework_elapsed_ns,
-            physical_wait_elapsed_ns,
-            external_wait_elapsed_ns,
-            coordination_wait_elapsed_ns,
-            processed_tags,
-            processed_reactions,
-            processed_events,
-            set_ports,
-            scheduled_actions,
-            event_queue_occupancy,
-            event_queue_reserved_capacity,
-            event_queue_enforced_limit,
-            event_queue_peak_occupancy,
-            completed_logical_tags,
-            last_logical_progress_ns,
-        } = snapshot;
-        Self {
-            lifecycle: match lifecycle {
-                SchedulerLifecycle::NotStarted => 0,
-                SchedulerLifecycle::Running => 1,
-                SchedulerLifecycle::Stopped => 2,
-                SchedulerLifecycle::Failed => 3,
-            },
-            current_phase: match current_phase {
-                SchedulerPhase::Idle => 0,
-                SchedulerPhase::Reaction => 1,
-                SchedulerPhase::Framework => 2,
-                SchedulerPhase::PhysicalWait => 3,
-                SchedulerPhase::ExternalWait => 4,
-                SchedulerPhase::CoordinationWait => 5,
-            },
-            current_phase_started_ns,
-            reaction_elapsed_ns,
-            framework_elapsed_ns,
-            physical_wait_elapsed_ns,
-            external_wait_elapsed_ns,
-            coordination_wait_elapsed_ns,
-            processed_tags,
-            processed_reactions,
-            processed_events,
-            set_ports,
-            scheduled_actions,
-            event_queue_occupancy,
-            event_queue_reserved_capacity,
-            event_queue_enforced_limit,
-            event_queue_peak_occupancy,
-            completed_logical_tags,
-            last_logical_progress_ns,
-        }
-    }
-}
-
 /// Absolute health counters measured by a future exporter adapter.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ExporterHealth {
@@ -265,7 +169,7 @@ pub struct ExporterHealth {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum TelemetryValue {
     /// Scheduler observation values.
-    Scheduler(SchedulerSample),
+    Scheduler(ObservationSnapshot),
     /// Exporter-health values.
     ExporterHealth(ExporterHealth),
 }
@@ -322,7 +226,7 @@ impl<'a> TelemetryEncoder<'a> {
             self.exporter_health.snapshot_misses.saturating_add(1);
     }
 
-    /// Encodes one scheduler sample into caller-owned bounded storage.
+    /// Encodes one runtime scheduler snapshot into caller-owned bounded storage.
     ///
     /// # Errors
     ///
@@ -332,14 +236,14 @@ impl<'a> TelemetryEncoder<'a> {
         &mut self,
         sender_monotonic_ns: u64,
         observation_monotonic_ns: u64,
-        sample: SchedulerSample,
+        snapshot: ObservationSnapshot,
         output: &mut [u8],
     ) -> Result<usize, EncoderError> {
         self.encode(
             RecordGroup::Scheduler,
             sender_monotonic_ns,
             observation_monotonic_ns,
-            TelemetryValue::Scheduler(sample),
+            TelemetryValue::Scheduler(snapshot),
             output,
         )
     }

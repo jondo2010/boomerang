@@ -1,4 +1,10 @@
 //! Hosted observation sampling and bounded UDP telemetry publication.
+//!
+//! Scheduler records carry [`boomerang_runtime::ObservationSnapshot`] directly.
+//! Producers and consumers form a closed system deployed atomically from the
+//! same build, so this adapter deliberately performs no payload conversion or
+//! lifecycle/phase mapping. Snapshot serialization is coupled to the runtime;
+//! sampling, encoding, and socket operations stay outside scheduler execution.
 
 use std::{
     future::Future,
@@ -55,7 +61,7 @@ impl<'a> TelemetrySource<'a> {
             .encode_scheduler(
                 self.elapsed_ns(Instant::now()),
                 self.elapsed_ns(observed_at),
-                snapshot.into(),
+                snapshot,
                 output,
             )
             .map(Some)

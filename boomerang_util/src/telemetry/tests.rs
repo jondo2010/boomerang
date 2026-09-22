@@ -49,8 +49,8 @@ fn source_samples_the_exposed_handle_using_its_observation_clock() {
     let TelemetryValue::Scheduler(sample) = record.value else {
         panic!("source did not emit scheduler observations");
     };
-    assert_eq!(sample.lifecycle, 1);
-    assert_eq!(sample.current_phase, 1);
+    assert_eq!(sample.lifecycle, SchedulerLifecycle::Running);
+    assert_eq!(sample.current_phase, SchedulerPhase::Reaction);
     assert_eq!(sample.reaction_elapsed_ns, record.observation_monotonic_ns);
     assert_eq!(sample.completed_logical_tags, 1);
     assert_eq!(sample.last_logical_progress_ns, Some(10));
@@ -131,7 +131,7 @@ async fn udp_worker_publishes_each_source_and_final_scheduler_state() {
         let TelemetryValue::Scheduler(sample) = value else {
             panic!("missing scheduler sample");
         };
-        assert_eq!(sample.lifecycle, 1);
+        assert_eq!(sample.lifecycle, SchedulerLifecycle::Running);
         let (enclave, group, sequence, value) = received.remove(0);
         assert_eq!(enclave, expected_enclave);
         assert_eq!((group, sequence), (RecordGroup::ExporterHealth, 0));
@@ -143,7 +143,10 @@ async fn udp_worker_publishes_each_source_and_final_scheduler_state() {
             })
         );
     }
-    for (enclave, lifecycle) in [("plant", 2), ("sensor", 3)] {
+    for (enclave, lifecycle) in [
+        ("plant", SchedulerLifecycle::Stopped),
+        ("sensor", SchedulerLifecycle::Failed),
+    ] {
         for expected_group in [RecordGroup::Scheduler, RecordGroup::ExporterHealth] {
             let mut bytes = [0; MAX_DATAGRAM_BYTES];
             let length = tokio::time::timeout(Duration::from_secs(2), receiver.recv(&mut bytes))

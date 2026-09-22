@@ -208,3 +208,13 @@ fn telemetry_encoder_exhausted_scheduler_does_not_block_health() {
         (RecordGroup::ExporterHealth, 0)
     );
 }
+
+#[test]
+fn errors_implement_display_and_convert_codec_failures() {
+    let error = EncoderError::from(CodecError::BufferTooSmall);
+    fn accepts_display(_: &impl core::fmt::Display) {}
+    fn accepts_error(_: &impl core::error::Error) {}
+
+    accepts_display(&error);
+    accepts_error(&error);
+}

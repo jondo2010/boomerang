@@ -343,30 +343,39 @@ impl<'a> TelemetryEncoder<'a> {
 }
 
 /// Stateful encoder failure.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum EncoderError {
     /// This record group successfully emitted `u64::MAX` and cannot wrap.
+    #[error("telemetry {0:?} sequence is exhausted")]
     SequenceExhausted(RecordGroup),
     /// Existing bounded codec failure while constructing a record.
-    Codec(CodecError),
+    #[error(transparent)]
+    Codec(#[from] CodecError),
 }
 
 /// Bounded codec failure without allocator- or transport-specific details.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum CodecError {
     /// A record or input exceeds the datagram ceiling.
+    #[error("telemetry record exceeds the datagram ceiling")]
     Oversize,
     /// Caller-provided output or scratch storage is too short.
+    #[error("caller-provided storage is too short")]
     BufferTooSmall,
     /// Bytes cannot be decoded as a telemetry record.
+    #[error("telemetry record is malformed")]
     Malformed,
     /// Bytes remain after a decoded record.
+    #[error("telemetry record has trailing data")]
     TrailingData,
     /// The input is a noncanonical representation of the decoded record.
+    #[error("telemetry record is not canonical")]
     NonCanonical,
     /// The record protocol version is not supported.
+    #[error("unsupported telemetry protocol version {0}")]
     UnsupportedVersion(u8),
     /// Record group and value variant disagree.
+    #[error("telemetry record group does not match its value")]
     GroupMismatch,
 }
 

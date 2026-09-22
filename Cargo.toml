@@ -59,6 +59,7 @@ members = [
     "boomerang_central_rti",
     "boomerang_macros",
     "boomerang_runtime",
+    "boomerang_telemetry",
     "boomerang_tinymap",
     "tracing-bounded",
     "cargo-boomerang",

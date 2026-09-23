@@ -64,16 +64,14 @@ impl<'a> TelemetryRecord<'a> {
         if !self.has_matching_group() {
             return Err(CodecError::GroupMismatch);
         }
-        let length =
-            postcard::experimental::serialized_size(self).map_err(|_| CodecError::Malformed)?;
+        let length = postcard::experimental::serialized_size(self)?;
         if length > MAX_DATAGRAM_BYTES {
             return Err(CodecError::Oversize);
         }
         let encoded = postcard::to_slice(
             self,
             output.get_mut(..length).ok_or(CodecError::BufferTooSmall)?,
-        )
-        .map_err(|_| CodecError::Malformed)?;
+        )?;
         Ok(encoded.len())
     }
 
@@ -84,8 +82,9 @@ impl<'a> TelemetryRecord<'a> {
     ///
     /// # Errors
     ///
-    /// Returns an error for oversized, malformed, trailing, noncanonical, unsupported-version,
-    /// or group-mismatched input, or when `scratch` is shorter than `input`.
+    /// Returns an error for oversized, trailing, noncanonical, unsupported-version, or
+    /// group-mismatched input, a concrete Postcard decoding error, or when `scratch` is shorter
+    /// than `input`.
     pub fn decode(input: &'a [u8], scratch: &mut [u8]) -> Result<Self, CodecError> {
         if input.len() > MAX_DATAGRAM_BYTES {
             return Err(CodecError::Oversize);
@@ -93,8 +92,7 @@ impl<'a> TelemetryRecord<'a> {
         let scratch = scratch
             .get_mut(..input.len())
             .ok_or(CodecError::BufferTooSmall)?;
-        let (record, remaining) = postcard::take_from_bytes::<TelemetryRecord<'a>>(input)
-            .map_err(|_| CodecError::Malformed)?;
+        let (record, remaining) = postcard::take_from_bytes::<TelemetryRecord<'a>>(input)?;
         if !remaining.is_empty() {
             return Err(CodecError::TrailingData);
         }
@@ -104,7 +102,7 @@ impl<'a> TelemetryRecord<'a> {
         if !record.has_matching_group() {
             return Err(CodecError::GroupMismatch);
         }
-        let canonical = postcard::to_slice(&record, scratch).map_err(|_| CodecError::Malformed)?;
+        let canonical = postcard::to_slice(&record, scratch)?;
         if canonical != input {
             return Err(CodecError::NonCanonical);
         }
@@ -315,7 +313,7 @@ impl<'a> TelemetryEncoder<'a> {
 }
 
 /// Stateful encoder failure.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum EncoderError {
     /// This record group successfully emitted `u64::MAX` and cannot wrap.
     #[error("telemetry {0:?} sequence is exhausted")]
@@ -326,7 +324,7 @@ pub enum EncoderError {
 }
 
 /// Bounded codec failure without allocator- or transport-specific details.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum CodecError {
     /// A record or input exceeds the datagram ceiling.
     #[error("telemetry record exceeds the datagram ceiling")]
@@ -334,9 +332,9 @@ pub enum CodecError {
     /// Caller-provided output or scratch storage is too short.
     #[error("caller-provided storage is too short")]
     BufferTooSmall,
-    /// Bytes cannot be decoded as a telemetry record.
-    #[error("telemetry record is malformed")]
-    Malformed,
+    /// Concrete Postcard encoding or decoding failure.
+    #[error("Postcard codec failed: {0}")]
+    Codec(#[from] postcard::Error),
     /// Bytes remain after a decoded record.
     #[error("telemetry record has trailing data")]
     TrailingData,

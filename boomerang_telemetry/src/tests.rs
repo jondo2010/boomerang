@@ -93,7 +93,7 @@ fn codec_rejects_undersized_buffers_and_oversized_input() {
     );
 }
 #[test]
-fn codec_rejects_malformed_and_unknown_version_records() {
+fn codec_retains_postcard_errors_and_rejects_unknown_versions() {
     let mut unsupported = scheduler_record();
     unsupported.protocol_version = 2;
     let mut output = [0; MAX_DATAGRAM_BYTES];
@@ -102,10 +102,10 @@ fn codec_rejects_malformed_and_unknown_version_records() {
         Err(CodecError::UnsupportedVersion(2))
     );
     let mut scratch = [0; MAX_DATAGRAM_BYTES];
-    assert_eq!(
+    assert!(matches!(
         TelemetryRecord::decode(&[0xff], &mut scratch),
-        Err(CodecError::Malformed)
-    );
+        Err(CodecError::Codec(_))
+    ));
     let record = scheduler_record();
     let mut encoded = [0; MAX_DATAGRAM_BYTES];
     let length = record.encode_into(&mut encoded).unwrap();

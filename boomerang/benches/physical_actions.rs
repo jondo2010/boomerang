@@ -64,7 +64,7 @@ fn bench(c: &mut Criterion) {
                     );
                     let send_ctx = enclave.create_send_context(enclave_key);
                     let action_ref = enclave.create_async_action_ref::<u32>(action_key);
-                    let mut scheduler = runtime::Scheduler::new(enclave_key, enclave, config);
+                    let mut scheduler = runtime::Scheduler::new(enclave_key, enclave, config, None);
                     let scheduler_thread = std::thread::spawn(move || {
                         scheduler.try_event_loop().unwrap();
                     });

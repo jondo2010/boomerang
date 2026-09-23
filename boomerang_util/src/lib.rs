@@ -9,6 +9,9 @@
 pub mod launcher;
 #[cfg(feature = "runner")]
 pub mod runner;
+/// Optional hosted scheduler telemetry sampling and publication.
+#[cfg(feature = "hosted-telemetry")]
+pub mod telemetry;
 #[cfg(feature = "test-tracing")]
 pub mod test_tracing;
 /// Bounded output retention for standard tracing subscribers.

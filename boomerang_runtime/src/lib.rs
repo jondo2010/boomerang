@@ -59,7 +59,11 @@ pub use reference::{
     execute_owned, execute_owned_federate, EnclaveExecution, ExecuteOwnedError,
     ExecuteOwnedFederateError, FederateBindings, FederateExecution, StateAccessError,
 };
-pub use reference::{execute_owned_federate_slice, execute_owned_federate_with_backend};
+pub use reference::{
+    execute_owned_federate_slice, execute_owned_federate_slice_with_observations,
+    execute_owned_federate_with_backend, execute_owned_federate_with_backend_and_observations,
+    execute_owned_federate_with_observations,
+};
 pub use refs::{Refs, RefsMut};
 pub use refs_extract::{ReactionRefs, ReactionRefsError, ReactionRefsExtract};
 pub use sched::*;

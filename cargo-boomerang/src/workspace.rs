@@ -249,6 +249,7 @@ pub(crate) fn resolve_workspace_with_output(
             rti: deployment.rti.clone(),
             execution: deployment.execution.clone(),
             tracing: deployment.tracing,
+            telemetry: deployment.telemetry,
             bounded_tracing: deployment.bounded_tracing.clone(),
             boundaries: deployment.boundaries.clone(),
         },

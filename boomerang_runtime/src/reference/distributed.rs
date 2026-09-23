@@ -175,8 +175,37 @@ pub fn execute_owned_federate_with_backend<'image, B: FederateCoordinationBacken
     federate: FederateIndex,
     image: &FederateImage<'image>,
     images: &[&EnclaveImageView<'image>],
+    bindings: FederateBindings<'_>,
+    config: Config,
+    connect: impl FnOnce(
+        BTreeMap<BoundaryId<'image>, InboundBoundaryAdapter>,
+    ) -> Result<B, crate::FederateCoordinationError>,
+) -> Result<FederateExecution, ExecuteOwnedFederateError> {
+    execute_owned_federate_with_backend_and_observations(
+        federate,
+        image,
+        images,
+        bindings,
+        config,
+        &[],
+        connect,
+    )
+}
+
+/// Executes a generated Federate through an injected backend with scheduler-local observations.
+///
+/// Observation handles are matched by canonical Enclave index immediately before scheduler
+/// construction and are never stored in [`Config`].
+pub fn execute_owned_federate_with_backend_and_observations<
+    'image,
+    B: FederateCoordinationBackend,
+>(
+    federate: FederateIndex,
+    image: &FederateImage<'image>,
+    images: &[&EnclaveImageView<'image>],
     mut bindings: FederateBindings<'_>,
     config: Config,
+    observations: &[(EnclaveIndex, crate::ObservationHandle)],
     connect: impl FnOnce(
         BTreeMap<BoundaryId<'image>, InboundBoundaryAdapter>,
     ) -> Result<B, crate::FederateCoordinationError>,
@@ -212,6 +241,7 @@ pub fn execute_owned_federate_with_backend<'image, B: FederateCoordinationBacken
         PreparedFederate { images, endpoints },
         bindings,
         config,
+        observations,
         lifecycle,
         move |storages| {
             let mut inbound = BTreeMap::new();
@@ -243,6 +273,21 @@ pub fn execute_owned_federate_slice<'image>(
     images: &[&EnclaveImageView<'image>],
     bindings: FederateBindings<'_>,
     config: Config,
+) -> Result<FederateExecution, ExecuteOwnedFederateError> {
+    execute_owned_federate_slice_with_observations(federate, image, images, bindings, config, &[])
+}
+
+/// Executes a generated Federate's checked Enclave views with local coordination and observations.
+///
+/// Observation handles are matched by canonical Enclave index immediately before scheduler
+/// construction and are never stored in [`Config`].
+pub fn execute_owned_federate_slice_with_observations<'image>(
+    federate: FederateIndex,
+    image: &FederateImage<'image>,
+    images: &[&EnclaveImageView<'image>],
+    bindings: FederateBindings<'_>,
+    config: Config,
+    observations: &[(EnclaveIndex, crate::ObservationHandle)],
 ) -> Result<FederateExecution, ExecuteOwnedFederateError> {
     tracing::debug!(target: "boomerang::runtime",
         event = "runtime.preflight.started", owner = "federate", federate = federate.as_u32());
@@ -280,6 +325,7 @@ pub fn execute_owned_federate_slice<'image>(
         prepared,
         bindings,
         config,
+        observations,
         lifecycle,
         |_| Ok(LocalFederateCoordinationBackend::default()),
         |_| false,

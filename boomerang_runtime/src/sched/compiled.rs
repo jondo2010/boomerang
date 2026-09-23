@@ -200,10 +200,28 @@ pub(crate) fn run_owned_scheduler_with_coordination(
     dependencies: EnclaveDependencies,
     federate_coordination: Option<&mut dyn FederateSchedulerCoordination>,
 ) -> Result<OwnedSchedulerOutcome, SchedulerError<OwnedStorageError>> {
+    run_owned_scheduler_with_coordination_and_observation(
+        storage,
+        config,
+        origin,
+        dependencies,
+        federate_coordination,
+        None,
+    )
+}
+
+pub(crate) fn run_owned_scheduler_with_coordination_and_observation(
+    storage: &mut OwnedStorage<'_>,
+    config: &Config,
+    origin: std::time::Instant,
+    dependencies: EnclaveDependencies,
+    federate_coordination: Option<&mut dyn FederateSchedulerCoordination>,
+    observation: Option<&crate::ObservationHandle>,
+) -> Result<OwnedSchedulerOutcome, SchedulerError<OwnedStorageError>> {
     let schedule = storage.scheduler_image();
     let reaction_limits = schedule.reaction_limits();
     let reaction_capacity = reaction_limits.num_keys;
-    let mut events = EventManager::new(reaction_limits, &schedule, config.observation().is_some());
+    let mut events = EventManager::new(reaction_limits, &schedule, observation.is_some());
     let event_rx = storage.scheduler_event_rx();
     let shutdown_tx = storage.take_scheduler_shutdown_tx();
     let mut start_time = origin;
@@ -237,7 +255,7 @@ pub(crate) fn run_owned_scheduler_with_coordination(
     SchedulerCore {
         key,
         config,
-        observation: config.observation(),
+        observation,
         schedule: &schedule,
         storage,
         event_rx: &event_rx,

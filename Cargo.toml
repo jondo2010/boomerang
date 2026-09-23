@@ -43,6 +43,7 @@ variadics_please = "1.1"
 # Local crates
 boomerang = { path = "boomerang", version = "0.3.0" }
 boomerang_runtime = { path = "boomerang_runtime", version = "0.3.0" }
+boomerang_telemetry = { path = "boomerang_telemetry", version = "0.3.0" }
 boomerang_tinymap = { path = "boomerang_tinymap", version = "0.3.0" }
 boomerang_util = { path = "boomerang_util", version = "0.3.0" }
 boomerang_builder = { path = "boomerang_builder", version = "0.3.0" }
@@ -59,6 +60,7 @@ members = [
     "boomerang_central_rti",
     "boomerang_macros",
     "boomerang_runtime",
+    "boomerang_telemetry",
     "boomerang_tinymap",
     "tracing-bounded",
     "cargo-boomerang",

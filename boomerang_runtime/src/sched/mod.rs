@@ -14,11 +14,12 @@ mod queue;
 
 // Kept at the scheduler-module boundary so sibling modules retain their narrow
 // `super::` imports while the generic core lives in its own implementation module.
-#[cfg(test)]
-pub(crate) use compiled::run_owned_scheduler_with_origin;
 pub(crate) use compiled::{
-    run_owned_scheduler, run_owned_scheduler_with_coordination, OwnedSchedulerOutcome,
+    run_owned_scheduler, run_owned_scheduler_with_coordination_and_observation,
+    OwnedSchedulerOutcome,
 };
+#[cfg(test)]
+pub(crate) use compiled::{run_owned_scheduler_with_coordination, run_owned_scheduler_with_origin};
 pub(crate) use core::{ExecutionStorage, ModeTransition, Schedule, SchedulerError};
 use core::{ReactionOutcome, SchedulerCore};
 
@@ -45,15 +46,6 @@ use crate::{
 /// Failure while starting or running a set of local enclave schedulers.
 #[derive(Debug, thiserror::Error)]
 pub enum ExecuteEnclavesError {
-    /// One observation state cannot represent multiple scheduler-local sources.
-    #[error(
-        "one observation handle cannot be shared by {schedulers} schedulers; configure one scheduler-local source per handle"
-    )]
-    ObservationRequiresSingleScheduler {
-        /// Number of non-empty schedulers that would share the configured handle.
-        schedulers: usize,
-    },
-
     #[error("failed to spawn scheduler thread for enclave {enclave}: {source}")]
     ThreadSpawn {
         enclave: EnclaveKey,
@@ -82,11 +74,6 @@ pub struct Config {
     pub physical_event_q_size: usize,
     /// Stop the scheduler after a certain amount of time has passed.
     pub timeout: Option<Duration>,
-    /// Optional bounded observation state for this scheduler-local source.
-    ///
-    /// A handle may have concurrent samplers but must be attached to only one
-    /// scheduler writer for its lifetime.
-    pub observation: Option<crate::ObservationHandle>,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -95,7 +82,6 @@ impl Default for Config {
             keep_alive: false,
             physical_event_q_size: 1024,
             timeout: None,
-            observation: None,
         }
     }
 }
@@ -124,21 +110,6 @@ impl Config {
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
         self
-    }
-
-    /// Attaches this configuration to one scheduler-local observation source.
-    ///
-    /// This adds bounded atomic instrumentation but no transport, serialization,
-    /// subscriber, or publication-queue work. Do not reuse the handle for another
-    /// scheduler writer.
-    pub fn with_observation(mut self, observation: crate::ObservationHandle) -> Self {
-        self.observation = Some(observation);
-        self
-    }
-
-    /// Returns the observation handle when scheduler-local sampling is enabled.
-    pub const fn observation(&self) -> Option<&crate::ObservationHandle> {
-        self.observation.as_ref()
     }
 }
 
@@ -538,6 +509,8 @@ pub struct Scheduler {
     has_modal_scopes: bool,
     /// Lifecycle of the public live scheduler API.
     state: LiveSchedulerState,
+    /// Optional live instrumentation for this scheduler only.
+    observation: Option<crate::ObservationHandle>,
 }
 
 impl Scheduler {
@@ -547,7 +520,12 @@ impl Scheduler {
     /// driving it with [`Self::try_next`], or use [`Self::try_event_loop`] to
     /// perform both operations. If observation is configured, its handle must
     /// not be attached to another scheduler writer.
-    pub fn new(key: EnclaveKey, enclave: Enclave, config: Config) -> Self {
+    pub fn new(
+        key: EnclaveKey,
+        enclave: Enclave,
+        config: Config,
+        observation: Option<crate::ObservationHandle>,
+    ) -> Self {
         let Enclave {
             env,
             graph,
@@ -567,7 +545,7 @@ impl Scheduler {
 
         let store = Store::new(env, contexts, &graph);
         let has_modal_scopes = graph.has_modal_scopes();
-        let events = EventManager::new(reaction_set_limits, &graph, config.observation().is_some());
+        let events = EventManager::new(reaction_set_limits, &graph, observation.is_some());
 
         let upstream_enclaves = upstream_enclaves
             .into_iter()
@@ -608,13 +586,14 @@ impl Scheduler {
             outcomes: (0..reaction_capacity).map(|_| Default::default()).collect(),
             has_modal_scopes,
             state: LiveSchedulerState::NotStarted,
+            observation,
         }
     }
 
     /// Borrow the live scheduler fields as the two capability concerns and concrete coordination.
     fn core(&mut self) -> SchedulerCore<'_, '_, ReactionGraph, Pin<Box<Store>>> {
         self.events
-            .set_event_queue_observation_enabled(self.config.observation().is_some());
+            .set_event_queue_observation_enabled(self.observation.is_some());
         let Self {
             key,
             config,
@@ -634,12 +613,13 @@ impl Scheduler {
             outcomes,
             has_modal_scopes,
             state: _,
+            observation: _,
         } = self;
 
         SchedulerCore {
             key: *key,
             config,
-            observation: config.observation(),
+            observation: self.observation.as_ref(),
             schedule: reaction_graph,
             storage: store,
             event_rx,
@@ -772,17 +752,13 @@ fn live_scheduler_result<T>(
 ///
 /// # Errors
 ///
-/// Returns [`ExecuteEnclavesError::ObservationRequiresSingleScheduler`] when
-/// observation is enabled for more than one non-empty scheduler, because one
-/// handle cannot represent multiple scheduler-local sources. Otherwise returns
-/// a typed thread-spawn, scheduler-runtime, or thread-panic error. Runtime and
-/// panic failures are reported after every successfully spawned scheduler thread
-/// has terminated.
+/// Returns a typed thread-spawn, scheduler-runtime, or thread-panic error. Runtime
+/// and panic failures are reported after every successfully spawned scheduler
+/// thread has terminated.
 pub fn execute_enclaves(
     enclaves: impl Iterator<Item = (EnclaveKey, Enclave)> + Send,
     config: Config,
 ) -> Result<tinymap::TinySecondaryMap<EnclaveKey, Env>, ExecuteEnclavesError> {
-    let observation_enabled = config.observation().is_some();
     let schedulers = enclaves.filter_map(move |(enclave_key, enclave)| {
         if enclave.env.reactions.is_empty() {
             // If there are no reactions, there is nothing to do
@@ -792,25 +768,11 @@ pub fn execute_enclaves(
             );
             None
         } else {
-            Some(Scheduler::new(enclave_key, enclave, config.clone()))
+            Some(Scheduler::new(enclave_key, enclave, config.clone(), None))
         }
     });
 
-    if observation_enabled {
-        let schedulers = schedulers.collect::<Vec<_>>();
-        // A Slice 1 snapshot is scheduler-local and intentionally carries no source
-        // identity. Hosted Slice 2 configuration will collect separately identified
-        // sources; sharing one state here would silently overwrite their gauges.
-        if schedulers.len() > 1 {
-            return Err(ExecuteEnclavesError::ObservationRequiresSingleScheduler {
-                schedulers: schedulers.len(),
-            });
-        }
-        execute_scheduler_threads(schedulers.into_iter())
-    } else {
-        // Preserve the original lazy path when monitoring is disabled.
-        execute_scheduler_threads(schedulers)
-    }
+    execute_scheduler_threads(schedulers)
 }
 
 fn execute_scheduler_threads(
@@ -922,6 +884,7 @@ mod tests {
                 EnclaveKey::from(0),
                 enclave,
                 Config::default().with_fast_forward(true),
+                None,
             ),
             reaction,
         )
@@ -949,10 +912,15 @@ mod tests {
     #[test]
     fn live_scheduler_observation_attributes_callback_elapsed_time_to_reactions() {
         let seen_origin = Arc::new(Mutex::new(None));
-        let (mut scheduler, reaction) = scheduler_recording_start_origin(seen_origin);
         let observation =
             std::sync::Arc::new(crate::ObservationState::new(std::time::Instant::now()));
-        scheduler.config.observation = Some(observation.clone());
+        let (enclave, reaction) = enclave_recording_start_origin(seen_origin);
+        let mut scheduler = Scheduler::new(
+            EnclaveKey::from(0),
+            enclave,
+            Config::default().with_fast_forward(true),
+            Some(observation.clone()),
+        );
 
         scheduler.startup();
         scheduler.events.push_event(
@@ -986,10 +954,15 @@ mod tests {
 
     #[test]
     fn direct_try_next_finalizes_observation_after_normal_shutdown() {
-        let (mut scheduler, _) = scheduler_recording_start_origin(Arc::new(Mutex::new(None)));
         let observation =
             std::sync::Arc::new(crate::ObservationState::new(std::time::Instant::now()));
-        scheduler.config.observation = Some(observation.clone());
+        let (enclave, _) = enclave_recording_start_origin(Arc::new(Mutex::new(None)));
+        let mut scheduler = Scheduler::new(
+            EnclaveKey::from(0),
+            enclave,
+            Config::default().with_fast_forward(true),
+            Some(observation.clone()),
+        );
 
         scheduler.startup();
         while scheduler.try_next().unwrap() {}
@@ -1004,29 +977,6 @@ mod tests {
     }
 
     #[test]
-    fn execute_enclaves_rejects_one_observation_handle_for_multiple_schedulers() {
-        let enclaves = (0..2).map(|key| {
-            let (enclave, _) = enclave_recording_start_origin(Arc::new(Mutex::new(None)));
-            (EnclaveKey::from(key), enclave)
-        });
-        let observation =
-            std::sync::Arc::new(crate::ObservationState::new(std::time::Instant::now()));
-
-        let error = execute_enclaves(
-            enclaves,
-            Config::default()
-                .with_fast_forward(true)
-                .with_observation(observation),
-        )
-        .unwrap_err();
-
-        assert!(matches!(
-            error,
-            ExecuteEnclavesError::ObservationRequiresSingleScheduler { schedulers: 2 }
-        ));
-    }
-
-    #[test]
     fn live_scheduler_rejects_async_boundary_ports() {
         let enclave = Enclave::default();
         let event_tx = enclave.event_tx.clone();
@@ -1036,9 +986,8 @@ mod tests {
         let mut scheduler = Scheduler::new(
             EnclaveKey::from(0),
             enclave,
-            Config::default()
-                .with_fast_forward(true)
-                .with_observation(observation.clone()),
+            Config::default().with_fast_forward(true),
+            Some(observation.clone()),
         );
         scheduler.startup();
         event_tx
@@ -1116,6 +1065,7 @@ mod tests {
                 EnclaveKey::from(1),
                 enclave,
                 Config::default().with_fast_forward(true),
+                None,
             );
             event_tx
                 .send(AsyncEvent::shutdown(Duration::nanoseconds(1)))

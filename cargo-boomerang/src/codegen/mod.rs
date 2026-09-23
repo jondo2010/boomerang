@@ -461,10 +461,13 @@ pub(crate) fn generate_analyzed_launcher(
         &slice,
         &aliases,
         &execution,
-        rust::render_tracing_init(
-            analyzed.resolved.deployment().tracing,
-            configuration.bounded_tracing.as_ref(),
-        ),
+        rust::LauncherInstrumentation {
+            tracing: rust::render_tracing_init(
+                analyzed.resolved.deployment().tracing,
+                configuration.bounded_tracing.as_ref(),
+            ),
+            telemetry: analyzed.resolved.deployment().telemetry,
+        },
         coordination,
         capabilities,
     )?;
@@ -843,17 +846,21 @@ fn render_manifest(
         dependency(resolved.table_store(), false, Vec::new())?,
     );
     if capabilities.hosted {
+        let mut util_features = vec![String::from(match resolved.deployment().tracing {
+            crate::manifest::TracingBackend::Off => "launcher",
+            crate::manifest::TracingBackend::Bounded => "bounded-tracing",
+            crate::manifest::TracingBackend::Hosted => "hosted-tracing",
+        })];
+        if resolved.deployment().telemetry == crate::manifest::TelemetryBackend::Hosted {
+            util_features.push(String::from("hosted-telemetry"));
+            dependencies.insert(
+                String::from("boomerang_telemetry"),
+                runtime_sibling_dependency(resolved.runtime(), "boomerang_telemetry", Vec::new())?,
+            );
+        }
         dependencies.insert(
             String::from("boomerang_util"),
-            runtime_sibling_dependency(
-                resolved.runtime(),
-                "boomerang_util",
-                vec![String::from(match resolved.deployment().tracing {
-                    crate::manifest::TracingBackend::Off => "launcher",
-                    crate::manifest::TracingBackend::Bounded => "bounded-tracing",
-                    crate::manifest::TracingBackend::Hosted => "hosted-tracing",
-                })],
-            )?,
+            runtime_sibling_dependency(resolved.runtime(), "boomerang_util", util_features)?,
         );
     }
     if distributed {

@@ -161,7 +161,7 @@ impl<T: ReactorData, C: PayloadEncoder<T>> crate::storage::owned::OutboundRoute
 
 /// Executes a generated Federate's owned Enclave slice through an injected backend.
 ///
-/// `images` must contain exactly `image.enclaves()` in canonical order. Existing canonical
+/// `images` must contain checked views for exactly `image.enclaves()` in canonical order. Canonical
 /// keys are retained; peer scheduler images and payload bindings are unnecessary. This validates
 /// the owned slice and its bindings, not the absent global federation. The deployment compiler
 /// and backend handshake must establish that the peer slices share the same coordination image.
@@ -174,7 +174,7 @@ impl<T: ReactorData, C: PayloadEncoder<T>> crate::storage::owned::OutboundRoute
 pub fn execute_owned_federate_with_backend<'image, B: FederateCoordinationBackend>(
     federate: FederateIndex,
     image: &FederateImage<'image>,
-    images: &'image [EnclaveImage<'image>],
+    images: &[&EnclaveImageView<'image>],
     bindings: FederateBindings<'_>,
     config: Config,
     connect: impl FnOnce(
@@ -202,7 +202,7 @@ pub fn execute_owned_federate_with_backend_and_observations<
 >(
     federate: FederateIndex,
     image: &FederateImage<'image>,
-    images: &'image [EnclaveImage<'image>],
+    images: &[&EnclaveImageView<'image>],
     mut bindings: FederateBindings<'_>,
     config: Config,
     observations: &[(EnclaveIndex, crate::ObservationHandle)],
@@ -262,12 +262,81 @@ pub fn execute_owned_federate_with_backend_and_observations<
     )
 }
 
+/// Executes a generated Federate's checked Enclave views with local coordination.
+///
+/// The views must match `image.enclaves()` in canonical order. Every route must pair within
+/// this slice. Binding, payload, storage, and timing checks still precede user initialization.
+/// Exogenous event sources require [`Config::keep_alive`] and explicit shutdown.
+pub fn execute_owned_federate_slice<'image>(
+    federate: FederateIndex,
+    image: &FederateImage<'image>,
+    images: &[&EnclaveImageView<'image>],
+    bindings: FederateBindings<'_>,
+    config: Config,
+) -> Result<FederateExecution, ExecuteOwnedFederateError> {
+    execute_owned_federate_slice_with_observations(federate, image, images, bindings, config, &[])
+}
+
+/// Executes a generated Federate's checked Enclave views with local coordination and observations.
+///
+/// Observation handles are matched by canonical Enclave index immediately before scheduler
+/// construction and are never stored in [`Config`].
+pub fn execute_owned_federate_slice_with_observations<'image>(
+    federate: FederateIndex,
+    image: &FederateImage<'image>,
+    images: &[&EnclaveImageView<'image>],
+    bindings: FederateBindings<'_>,
+    config: Config,
+    observations: &[(EnclaveIndex, crate::ObservationHandle)],
+) -> Result<FederateExecution, ExecuteOwnedFederateError> {
+    tracing::debug!(target: "boomerang::runtime",
+        event = "runtime.preflight.started", owner = "federate", federate = federate.as_u32());
+    let preflight = || {
+        let images = prepare_images(image, images)?;
+        preflight_enclave_bindings(federate, &images, &bindings)?;
+        if let Some(route) = bindings.external_routes.first() {
+            return Err(ExecuteOwnedFederateError::UnexpectedRouteBinding {
+                boundary: route.boundary.as_str().to_owned(),
+                federate,
+            });
+        }
+        let (endpoints, _) = resolve_routes(federate, &images, &bindings)?;
+        preflight_local_bindings(federate, &images, &endpoints, &bindings)?;
+        Ok(PreparedFederate { images, endpoints })
+    };
+    let prepared = match preflight() {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            tracing::warn!(target: "boomerang::runtime", event = "runtime.preflight.rejected",
+                owner = "federate", federate = federate.as_u32(), reason = preflight_reason(&error));
+            return Err(error);
+        }
+    };
+    let span = federate_span(federate, image, "local");
+    let _span = span.enter();
+    tracing::debug!(target: "boomerang::runtime",
+        event = "runtime.preflight.completed", owner = "federate", federate = federate.as_u32());
+    let lifecycle = if config.keep_alive {
+        LifecyclePolicy::KeepAlive
+    } else {
+        LifecyclePolicy::TerminateWhenIdle
+    };
+    execute_prepared_federate(
+        prepared,
+        bindings,
+        config,
+        observations,
+        lifecycle,
+        |_| Ok(LocalFederateCoordinationBackend::default()),
+        |_| false,
+    )
+}
+
 /// Validates owned layout coordinates before materializing the sparse canonical lookup.
 fn prepare_images<'image>(
     image: &FederateImage<'image>,
-    images: &'image [EnclaveImage<'image>],
-) -> Result<TinySecondaryMap<EnclaveIndex, &'image EnclaveImage<'image>>, ExecuteOwnedFederateError>
-{
+    images: &[&EnclaveImageView<'image>],
+) -> Result<TinySecondaryMap<EnclaveIndex, EnclaveImageView<'image>>, ExecuteOwnedFederateError> {
     let fail = |message: &str| ExecuteOwnedFederateError::ImageValidation {
         message: message.into(),
     };
@@ -291,7 +360,7 @@ fn prepare_images<'image>(
     }
     if images
         .windows(2)
-        .any(|pair| pair[0].enclave_id >= pair[1].enclave_id)
+        .any(|pair| pair[0].enclave_id() >= pair[1].enclave_id())
     {
         return Err(fail(
             "Federate Enclave identities must be unique and sorted",
@@ -299,7 +368,7 @@ fn prepare_images<'image>(
     }
     Ok((span.start()..end)
         .zip(images)
-        .map(|(key, image)| (EnclaveIndex::from(key), image))
+        .map(|(key, image)| (EnclaveIndex::from(key), image.reborrow()))
         .collect())
 }
 
@@ -312,13 +381,13 @@ type ResolvedRoutes<'image> = (
 /// Matches compiled halves by stable boundary identity without inferring peer key domains.
 fn resolve_routes<'image>(
     federate: FederateIndex,
-    images: &TinySecondaryMap<EnclaveIndex, &'image EnclaveImage<'image>>,
+    images: &TinySecondaryMap<EnclaveIndex, EnclaveImageView<'image>>,
     bindings: &FederateBindings<'_>,
 ) -> Result<ResolvedRoutes<'image>, ExecuteOwnedFederateError> {
     let mut halves = BTreeMap::<_, (Option<_>, Option<_>)>::new();
     let invalid = |message: String| ExecuteOwnedFederateError::ImageValidation { message };
-    for (enclave, &image) in images.iter() {
-        for (index, route) in image.routes.iter() {
+    for (enclave, image) in images.iter() {
+        for (index, route) in image.routes().iter() {
             let pair = halves.entry(route.boundary()).or_default();
             let half = match route.direction() {
                 RouteDirection::Outbound => &mut pair.0,
@@ -393,7 +462,7 @@ fn resolve_routes<'image>(
                 delay_nanos: route.delay_nanos(),
             });
         }
-        let slot = images[enclave].ports[route.local_port()].binding();
+        let slot = images[enclave].ports()[route.local_port()].binding();
         let (found_id, found) = bindings.enclaves[enclave]
             .port_payload_type(slot)
             .expect("port bindings passed preflight");

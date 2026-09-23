@@ -87,6 +87,7 @@ impl TelemetryExporter {
         destination: SocketAddr,
         period: Duration,
     ) -> io::Result<Self> {
+        validate_period(period)?;
         let mut sources = identities
             .into_iter()
             .map(TelemetrySource::new)
@@ -96,20 +97,54 @@ impl TelemetryExporter {
             .map(TelemetrySource::observation_handle)
             .collect();
         let (shutdown, receiver) = tokio::sync::oneshot::channel();
+        let (startup_tx, startup_rx) = std::sync::mpsc::sync_channel(1);
         let thread = std::thread::Builder::new()
             .name(String::from("boomerang-telemetry"))
             .spawn(move || {
-                let runtime = tokio::runtime::Builder::new_current_thread()
+                let runtime = match tokio::runtime::Builder::new_current_thread()
                     .enable_io()
                     .enable_time()
-                    .build();
-                if let Ok(runtime) = runtime {
-                    let _ =
-                        runtime.block_on(run_udp(&mut sources, destination, period, async move {
-                            let _ = receiver.await;
-                        }));
+                    .build()
+                {
+                    Ok(runtime) => runtime,
+                    Err(error) => {
+                        let _ = startup_tx.send(Err(error));
+                        return;
+                    }
+                };
+                let socket = match runtime.block_on(bind_udp(destination)) {
+                    Ok(socket) => socket,
+                    Err(error) => {
+                        let _ = startup_tx.send(Err(error));
+                        return;
+                    }
+                };
+                if startup_tx.send(Ok(())).is_err() {
+                    return;
                 }
+                runtime.block_on(run_udp_with_socket(
+                    socket,
+                    &mut sources,
+                    destination,
+                    period,
+                    async move {
+                        let _ = receiver.await;
+                    },
+                ));
             })?;
+        match startup_rx.recv() {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                let _ = thread.join();
+                return Err(error);
+            }
+            Err(_) => {
+                let _ = thread.join();
+                return Err(io::Error::other(
+                    "telemetry exporter exited before startup completed",
+                ));
+            }
+        }
         Ok(Self {
             observations,
             shutdown: Some(shutdown),
@@ -237,12 +272,24 @@ pub async fn run_udp(
     period: Duration,
     shutdown: impl Future<Output = ()>,
 ) -> io::Result<()> {
+    validate_period(period)?;
+    let socket = bind_udp(destination).await?;
+    run_udp_with_socket(socket, sources, destination, period, shutdown).await;
+    Ok(())
+}
+
+fn validate_period(period: Duration) -> io::Result<()> {
     if period.is_zero() {
-        return Err(io::Error::new(
+        Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "telemetry sampling period must be positive",
-        ));
+        ))
+    } else {
+        Ok(())
     }
+}
+
+async fn bind_udp(destination: SocketAddr) -> io::Result<UdpSocket> {
     let local_address = SocketAddr::new(
         match destination {
             SocketAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
@@ -252,6 +299,16 @@ pub async fn run_udp(
     );
     let socket = UdpSocket::bind(local_address).await?;
     socket.writable().await?;
+    Ok(socket)
+}
+
+async fn run_udp_with_socket(
+    socket: UdpSocket,
+    sources: &mut [TelemetrySource<'_>],
+    destination: SocketAddr,
+    period: Duration,
+    shutdown: impl Future<Output = ()>,
+) {
     let mut interval = tokio::time::interval(period);
     interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut output = [0; MAX_DATAGRAM_BYTES];
@@ -261,7 +318,7 @@ pub async fn run_udp(
             biased;
             () = &mut shutdown => {
                 publish_round(&socket, destination, sources, &mut output);
-                return Ok(());
+                return;
             }
             _ = interval.tick() => publish_round(&socket, destination, sources, &mut output),
         }

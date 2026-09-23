@@ -36,6 +36,11 @@ impl<'a, K: Key, V> TinyMapView<'a, K, V> {
         self.data.len()
     }
 
+    /// Returns the densely ordered backing values without exposing raw-key conversion.
+    pub const fn as_slice(&self) -> &'a [V] {
+        self.data
+    }
+
     /// Returns whether this view has no values.
     pub const fn is_empty(&self) -> bool {
         self.data.is_empty()
@@ -137,6 +142,13 @@ mod tests {
             assert!(core::ptr::eq(&copy[TestKey::new(0)], &values[0]));
         }
         assert!(core::ptr::eq(&view[TestKey::new(0)], &values[0]));
+    }
+
+    #[test]
+    fn borrowed_view_exposes_exact_backing_slice() {
+        let slice = VIEW.as_slice();
+
+        assert!(core::ptr::eq(slice, &VALUES));
     }
 
     #[test]

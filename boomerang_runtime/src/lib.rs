@@ -60,6 +60,7 @@ pub use reference::{
     ExecuteOwnedFederateError, FederateBindings, FederateExecution, StateAccessError,
 };
 pub use reference::{
+    execute_owned_federate_slice, execute_owned_federate_slice_with_observations,
     execute_owned_federate_with_backend, execute_owned_federate_with_backend_and_observations,
     execute_owned_federate_with_observations,
 };

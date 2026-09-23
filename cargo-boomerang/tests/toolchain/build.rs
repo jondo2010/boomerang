@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     fs,
     net::UdpSocket,
     path::{Path, PathBuf},
@@ -990,18 +991,51 @@ fn generated_central_deployment_publishes_hosted_telemetry_without_changing_payl
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("sensor received command 42"));
 
-    let mut datagram = [0; boomerang_telemetry::MAX_DATAGRAM_BYTES];
-    let (length, _) = listener
-        .recv_from(&mut datagram)
-        .expect("scheduler telemetry datagram");
-    let mut scratch = [0; boomerang_telemetry::MAX_DATAGRAM_BYTES];
-    let record = boomerang_telemetry::TelemetryRecord::decode(&datagram[..length], &mut scratch)
-        .expect("canonical telemetry record");
-    assert_eq!(record.run_id.len(), 16);
-    assert!(matches!(
-        record.source.role,
-        boomerang_telemetry::SourceRole::Federate
-    ));
+    let mut run_ids = BTreeSet::new();
+    let mut scheduler_sources = BTreeSet::new();
+    loop {
+        let mut datagram = [0; boomerang_telemetry::MAX_DATAGRAM_BYTES];
+        let length = match listener.recv_from(&mut datagram) {
+            Ok((length, _)) => length,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                break;
+            }
+            Err(error) => panic!("failed to receive telemetry: {error}"),
+        };
+        let mut scratch = [0; boomerang_telemetry::MAX_DATAGRAM_BYTES];
+        let record =
+            boomerang_telemetry::TelemetryRecord::decode(&datagram[..length], &mut scratch)
+                .expect("canonical telemetry record");
+        run_ids.insert(record.run_id);
+        if let boomerang_telemetry::TelemetryValue::Scheduler(_) = record.value {
+            assert_eq!(
+                record.source.role,
+                boomerang_telemetry::SourceRole::Federate
+            );
+            scheduler_sources.insert((
+                record.source.federate_id.unwrap().to_owned(),
+                record.source.enclave_id.unwrap().to_owned(),
+            ));
+        }
+    }
+    assert_eq!(
+        run_ids.len(),
+        1,
+        "generated processes must share one run ID"
+    );
+    assert_eq!(
+        scheduler_sources,
+        BTreeSet::from([
+            ("host".to_owned(), "backup".to_owned()),
+            ("host".to_owned(), "controller".to_owned()),
+            ("sensor".to_owned(), "sensor".to_owned()),
+        ])
+    );
 }
 
 fn assert_trace_dependencies(manifest: &std::path::Path, mode: &str) {

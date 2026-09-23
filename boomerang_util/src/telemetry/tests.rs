@@ -83,6 +83,20 @@ fn source_encoding_respects_the_caller_buffer_without_consuming_sequence() {
     assert_eq!(decode_record(&output[..length]).group_sequence, 0);
 }
 
+#[test]
+fn exporter_rejects_zero_period_before_starting_thread() {
+    let error = match TelemetryExporter::start(
+        [identity()],
+        "127.0.0.1:9".parse().unwrap(),
+        Duration::ZERO,
+    ) {
+        Ok(_) => panic!("zero cadence must be rejected synchronously"),
+        Err(error) => error,
+    };
+
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn udp_worker_publishes_each_source_and_final_scheduler_state() {
     let receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();

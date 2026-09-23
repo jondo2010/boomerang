@@ -144,6 +144,9 @@ pub fn run_with_output(
     let mut local_paths = Some((local_summary, local_launcher));
     let mut processes = processes::Processes::default();
     let timeout = std::time::Duration::from_secs(10);
+    let telemetry_run_id = (analyzed.resolved.deployment().telemetry
+        == crate::TelemetryBackend::Hosted)
+        .then(telemetry_run_id);
     let address = if let Some(mut rti) = published.rti {
         let path = directory
             .path()
@@ -153,10 +156,12 @@ pub fn run_with_output(
             Phase::Running,
             format_args!("{} (central RTI)", path.display()),
         )?;
-        Some(processes.start_rti(
-            Command::new(&path).env("BOOMERANG_RTI_BIND", "127.0.0.1:0"),
-            timeout,
-        )?)
+        let mut command = Command::new(&path);
+        command.env("BOOMERANG_RTI_BIND", "127.0.0.1:0");
+        if let Some(run_id) = &telemetry_run_id {
+            command.env("BOOMERANG_TELEMETRY_RUN_ID", run_id);
+        }
+        Some(processes.start_rti(&mut command, timeout)?)
     } else {
         None
     };
@@ -185,6 +190,9 @@ pub fn run_with_output(
         )?;
         let mut command = Command::new(&path);
         command.env(EXECUTION_SUMMARY_ENV, &summary);
+        if let Some(run_id) = &telemetry_run_id {
+            command.env("BOOMERANG_TELEMETRY_RUN_ID", run_id);
+        }
         if let Some(address) = address {
             command.env("BOOMERANG_RTI_ADDRESS", address.to_string());
         } else {
@@ -209,6 +217,17 @@ pub fn run_with_output(
         None
     };
     Ok(RunOutcome { status, summary })
+}
+
+fn telemetry_run_id() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let entropy = format!("{now}:{}", std::process::id());
+    blake3::hash(entropy.as_bytes()).to_hex()[..32].to_owned()
 }
 
 /// Creates one private canonical directory for the summary and executable copy.

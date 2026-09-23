@@ -84,6 +84,9 @@ pub struct Deployment<F = Federate> {
     /// Subscriber compiled into generated executables; not a runtime mode switch.
     #[serde(default)]
     pub tracing: TracingBackend,
+    /// Telemetry exporter compiled into generated executables; endpoint settings stay runtime-only.
+    #[serde(default)]
+    pub telemetry: TelemetryBackend,
     /// Deployment defaults for bounded capture; only valid with `tracing = "bounded"`.
     #[serde(rename = "bounded-tracing")]
     pub bounded_tracing: Option<BoundedTracingSettings>,
@@ -102,6 +105,17 @@ pub enum TracingBackend {
     Bounded,
     /// Hosted streaming formatter, filtered by `RUST_LOG` (off by default).
     #[default]
+    Hosted,
+}
+
+/// Deployment-wide build choice for generated runtime telemetry exporters.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub enum TelemetryBackend {
+    /// Do not compile the telemetry exporter or its hosted dependencies.
+    #[default]
+    Off,
+    /// Compile the hosted Tokio UDP exporter; endpoint settings are read at launch.
     Hosted,
 }
 

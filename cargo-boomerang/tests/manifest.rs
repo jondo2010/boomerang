@@ -77,6 +77,22 @@ fn tracing_backend_is_a_validated_build_choice() {
 }
 
 #[test]
+fn hosted_telemetry_is_an_explicit_build_choice() {
+    let source = format!(
+        "{}\n[deployments.production]\ntelemetry = \"hosted\"\n",
+        one_federate_without_coordination(),
+    );
+    assert!(parse_manifest(&source).is_ok());
+
+    let invalid = source.replace("hosted", "automatic");
+    let error = parse_manifest(&invalid).unwrap_err().to_string();
+    assert!(
+        error.contains("deployments.production.telemetry"),
+        "{error}"
+    );
+}
+
+#[test]
 fn bounded_tracing_tables_validate_before_building() {
     let source = format!(
         "{}\n[deployments.production]\ntracing = \"bounded\"\n\

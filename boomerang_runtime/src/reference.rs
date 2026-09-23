@@ -6,7 +6,9 @@
 //! a panic during an active phase emits cancellation with reason `unwind`.
 
 mod distributed;
-pub use distributed::execute_owned_federate_with_backend;
+pub use distributed::{
+    execute_owned_federate_with_backend, execute_owned_federate_with_backend_and_observations,
+};
 
 use std::{
     any::{Any, TypeId},
@@ -31,7 +33,7 @@ use crate::{
             EnclaveDependencies, FederateCoordinationParts, FederateSchedulerCoordination,
             LifecyclePolicy, LocalFederateCoordinationBackend,
         },
-        run_owned_scheduler_with_coordination,
+        run_owned_scheduler_with_coordination_and_observation,
     },
     storage::owned::StoredState,
     AsyncEvent, Config, EnclaveBindings, FederateCoordinationBackend, OwnedSchedulerOutcome,
@@ -80,7 +82,6 @@ fn preflight_reason(error: &ExecuteOwnedFederateError) -> &'static str {
     match error {
         ExecuteOwnedFederateError::ImageValidation { .. }
         | ExecuteOwnedFederateError::FederateNotFound { .. } => "image",
-        ExecuteOwnedFederateError::ObservationRequiresSingleScheduler { .. } => "observation",
         ExecuteOwnedFederateError::MissingEnclaveBinding { .. }
         | ExecuteOwnedFederateError::DuplicateEnclaveBinding { .. }
         | ExecuteOwnedFederateError::UnexpectedEnclaveBinding { .. }
@@ -403,14 +404,6 @@ pub enum ExecuteOwnedFederateError {
     FederateNotFound {
         /// Requested canonical Federate index.
         federate: FederateIndex,
-    },
-    /// One observation state cannot represent multiple scheduler-local sources.
-    #[error(
-        "one observation handle cannot be shared by {schedulers} schedulers; configure one scheduler-local source per handle"
-    )]
-    ObservationRequiresSingleScheduler {
-        /// Number of Enclave schedulers that would share the configured handle.
-        schedulers: usize,
     },
     /// One selected Enclave received no direct binding set.
     #[error("missing bindings for Enclave {enclave}")]
@@ -927,7 +920,28 @@ pub fn execute_owned_federate(
     bindings: FederateBindings<'_>,
     config: Config,
 ) -> Result<FederateExecution, ExecuteOwnedFederateError> {
-    execute_owned_federate_with_spawn_guard(deployment, federate, bindings, config, |_| false)
+    execute_owned_federate_with_observations(deployment, federate, bindings, config, &[])
+}
+
+/// Executes every Enclave with optional scheduler-local observation handles.
+///
+/// Observation handles are live construction inputs, separate from immutable [`Config`]
+/// policy. Entries are matched by canonical Enclave index; absent entries disable observation.
+pub fn execute_owned_federate_with_observations(
+    deployment: CompiledDeploymentImage<'_>,
+    federate: FederateIndex,
+    bindings: FederateBindings<'_>,
+    config: Config,
+    observations: &[(EnclaveIndex, crate::ObservationHandle)],
+) -> Result<FederateExecution, ExecuteOwnedFederateError> {
+    execute_owned_federate_with_spawn_guard(
+        deployment,
+        federate,
+        bindings,
+        config,
+        observations,
+        |_| false,
+    )
 }
 
 /// Executes one owned Federate while consulting a deterministic scoped-spawn failure seam.
@@ -940,6 +954,7 @@ fn execute_owned_federate_with_spawn_guard(
     federate: FederateIndex,
     bindings: FederateBindings<'_>,
     config: Config,
+    observations: &[(EnclaveIndex, crate::ObservationHandle)],
     fail_spawn: impl FnMut(Option<EnclaveIndex>) -> bool,
 ) -> Result<FederateExecution, ExecuteOwnedFederateError> {
     tracing::debug!(target: "boomerang::runtime",
@@ -970,6 +985,7 @@ fn execute_owned_federate_with_spawn_guard(
         prepared,
         bindings,
         config,
+        observations,
         lifecycle,
         |_| Ok(LocalFederateCoordinationBackend::default()),
         fail_spawn,
@@ -981,6 +997,7 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
     prepared: PreparedFederate<'image>,
     bindings: FederateBindings<'_>,
     config: Config,
+    observations: &[(EnclaveIndex, crate::ObservationHandle)],
     lifecycle: LifecyclePolicy,
     connect: impl FnOnce(
         &mut [(EnclaveIndex, OwnedStorage<'image>)],
@@ -994,10 +1011,6 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
         routes,
         ..
     } = bindings;
-    let schedulers = enclaves.len();
-    if config.observation().is_some() && schedulers > 1 {
-        return Err(ExecuteOwnedFederateError::ObservationRequiresSingleScheduler { schedulers });
-    }
     let route_bindings = endpoints
         .iter()
         .map(|route| {
@@ -1177,6 +1190,9 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
             );
             let result_tx = result_tx.clone();
             let config = config.clone();
+            let observation = observations
+                .iter()
+                .find_map(|(key, handle)| (*key == enclave).then(|| handle.clone()));
             let (participant_enclave, mut participant) = participant_ports
                 .next()
                 .expect("compiled Federate construction provides every scheduler participant");
@@ -1202,12 +1218,13 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
                             "enclave", enclave = enclave.as_u32())
                         .entered();
                         let execution = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                            run_owned_scheduler_with_coordination(
+                            run_owned_scheduler_with_coordination_and_observation(
                                 &mut storage,
                                 &config,
                                 origin,
                                 coordination,
                                 Some(&mut participant as &mut dyn FederateSchedulerCoordination),
+                                observation.as_ref(),
                             )
                         }));
                         let result = match execution {
@@ -1400,8 +1417,9 @@ mod scoped_spawn_tests {
             ReactorImage, ReactorIndex, RequiredBindingImage, RuntimeBackendId, ScopeImage,
             ScopeIndex, SliceRange, StorageBounds, TargetId, TimerStartupImage,
         },
-        keepalive, EnclaveKey, FederateAcquisition, FederateCompletion,
-        FederateCoordinationBackend, FederateCoordinationError, FederatePublication, SendContext,
+        keepalive, run_owned_scheduler_with_coordination, EnclaveKey, FederateAcquisition,
+        FederateCompletion, FederateCoordinationBackend, FederateCoordinationError,
+        FederatePublication, SendContext,
     };
 
     #[derive(Clone, Default)]
@@ -1646,6 +1664,7 @@ mod scoped_spawn_tests {
                 FederateIndex::new(0),
                 bindings(),
                 Config::default().with_fast_forward(true),
+                &[],
                 move |spawn| spawn == failed_spawn,
             )
             .expect_err("the selected scoped thread creation must fail")
@@ -1668,26 +1687,6 @@ mod scoped_spawn_tests {
             }),
             "missing worker spawn failure event in {events:#?}"
         );
-    }
-
-    #[test]
-    fn compiled_federate_rejects_one_observation_handle_for_multiple_schedulers() {
-        let observation = Arc::new(crate::ObservationState::new(std::time::Instant::now()));
-
-        let error = execute_owned_federate(
-            DEPLOYMENT,
-            FederateIndex::new(0),
-            bindings(),
-            Config::default()
-                .with_fast_forward(true)
-                .with_observation(observation),
-        )
-        .expect_err("one scheduler-local observation handle must not have multiple writers");
-
-        assert!(matches!(
-            error,
-            ExecuteOwnedFederateError::ObservationRequiresSingleScheduler { schedulers: 3 }
-        ));
     }
 
     /// Verifies compiled coordination preserves the complete selected Federate layout and policy.

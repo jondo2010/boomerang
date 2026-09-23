@@ -18,9 +18,145 @@ use boomerang_runtime::{ObservationHandle, ObservationState};
 use boomerang_telemetry::{EncoderError, TelemetryEncoder, TelemetryIdentity, MAX_DATAGRAM_BYTES};
 use tokio::{net::UdpSocket, time::MissedTickBehavior};
 
+/// Owns one hosted UDP telemetry task and the observation handles for one process's schedulers.
+///
+/// Dropping this guard requests one final best-effort publication before joining the exporter
+/// thread. The scheduler never waits on individual UDP sends.
+pub struct TelemetryExporter {
+    observations: Vec<ObservationHandle>,
+    shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl TelemetryExporter {
+    /// Starts telemetry from the generated launch environment when an endpoint is configured.
+    ///
+    /// `BOOMERANG_TELEMETRY_ENDPOINT` enables publication. Enabled launchers also require a
+    /// shared 32-digit hexadecimal `BOOMERANG_TELEMETRY_RUN_ID`; cadence defaults to 100 ms and
+    /// can be overridden with positive integer `BOOMERANG_TELEMETRY_PERIOD_MS`.
+    pub fn from_environment(
+        artifact_id: [u8; 32],
+        process_id: &'static str,
+        process_incarnation: u64,
+        sources: impl IntoIterator<Item = boomerang_telemetry::SourceIdentity<'static>>,
+    ) -> io::Result<Option<Self>> {
+        let endpoint = match std::env::var("BOOMERANG_TELEMETRY_ENDPOINT") {
+            Ok(value) => value.parse().map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("invalid telemetry endpoint: {error}"),
+                )
+            })?,
+            Err(std::env::VarError::NotPresent) => return Ok(None),
+            Err(error) => return Err(io::Error::new(io::ErrorKind::InvalidInput, error)),
+        };
+        let run_id = std::env::var("BOOMERANG_TELEMETRY_RUN_ID").map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "BOOMERANG_TELEMETRY_RUN_ID is required when telemetry is enabled",
+            )
+        })?;
+        let period = std::env::var("BOOMERANG_TELEMETRY_PERIOD_MS")
+            .ok()
+            .map(|value| value.parse::<u64>())
+            .transpose()
+            .map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("invalid telemetry period: {error}"),
+                )
+            })?
+            .unwrap_or(100);
+        let run_id = decode_run_id(&run_id)?;
+        let identities = sources.into_iter().map(|source| TelemetryIdentity {
+            run_id,
+            artifact_id,
+            process_id,
+            process_incarnation,
+            source,
+        });
+        Self::start(identities, endpoint, Duration::from_millis(period)).map(Some)
+    }
+
+    /// Starts one Tokio UDP exporter for a fixed set of scheduler sources.
+    ///
+    /// The identity must borrow static generated metadata because publication outlives launcher
+    /// setup until this guard is dropped.
+    pub fn start(
+        identities: impl IntoIterator<Item = TelemetryIdentity<'static>>,
+        destination: SocketAddr,
+        period: Duration,
+    ) -> io::Result<Self> {
+        let mut sources = identities
+            .into_iter()
+            .map(TelemetrySource::new)
+            .collect::<Vec<_>>();
+        let observations = sources
+            .iter()
+            .map(TelemetrySource::observation_handle)
+            .collect();
+        let (shutdown, receiver) = tokio::sync::oneshot::channel();
+        let thread = std::thread::Builder::new()
+            .name(String::from("boomerang-telemetry"))
+            .spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_io()
+                    .enable_time()
+                    .build();
+                if let Ok(runtime) = runtime {
+                    let _ =
+                        runtime.block_on(run_udp(&mut sources, destination, period, async move {
+                            let _ = receiver.await;
+                        }));
+                }
+            })?;
+        Ok(Self {
+            observations,
+            shutdown: Some(shutdown),
+            thread: Some(thread),
+        })
+    }
+
+    /// Returns source-order-preserving scheduler observation handles owned by this exporter.
+    #[must_use]
+    pub fn observation_handles(&self) -> Vec<ObservationHandle> {
+        self.observations.iter().map(Arc::clone).collect()
+    }
+}
+
+fn decode_run_id(value: &str) -> io::Result<[u8; 16]> {
+    if value.len() != 32 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "BOOMERANG_TELEMETRY_RUN_ID must contain 32 hexadecimal digits",
+        ));
+    }
+    let mut bytes = [0; 16];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "BOOMERANG_TELEMETRY_RUN_ID must contain 32 hexadecimal digits",
+            )
+        })?;
+    }
+    Ok(bytes)
+}
+
+impl Drop for TelemetryExporter {
+    fn drop(&mut self) {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
 /// One hosted scheduler's observation state, monotonic clock, and telemetry encoder.
 ///
-/// Install a clone from [`Self::observation_handle`] in that scheduler's configuration.
+/// Pass a clone from [`Self::observation_handle`] when constructing that scheduler.
 /// Constructing the state and its clock together ensures observation fields and record
 /// timestamps share one origin. Identity strings remain borrowed from the caller.
 pub struct TelemetrySource<'a> {

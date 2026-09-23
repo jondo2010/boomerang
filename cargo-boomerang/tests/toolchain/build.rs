@@ -1,7 +1,9 @@
 use std::{
     fs,
+    net::UdpSocket,
     path::{Path, PathBuf},
     process::{Command, Output},
+    time::Duration,
 };
 
 use cargo_metadata::MetadataCommand;
@@ -952,6 +954,54 @@ fn generated_central_deployment_publishes_isolated_artifacts_and_exchanges_tagge
         stderr.contains("BOOMERANG_RTI_ADDRESS is required"),
         "{stderr}"
     );
+}
+
+#[test]
+fn generated_central_deployment_publishes_hosted_telemetry_without_changing_payload_exchange() {
+    let _guard = support::toolchain_lock();
+    let target = support::toolchain_target();
+    support::reset_deployment_output(&target, "sensor-telemetry");
+    let _hosted = support::hosted_fixture();
+    let _telemetry = support::fixture_variant("sensor-telemetry", "sensor-slice", |config| {
+        config
+            .as_table_mut()
+            .unwrap()
+            .insert("telemetry".into(), "hosted".into());
+    });
+    let listener = UdpSocket::bind("127.0.0.1:0").unwrap();
+    listener
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_cargo-boomerang"))
+        .args(["boomerang", "--workspace"])
+        .arg(fixture_workspace())
+        .args(["run", "--deployment", "sensor-telemetry"])
+        .env(
+            "BOOMERANG_TELEMETRY_ENDPOINT",
+            listener.local_addr().unwrap().to_string(),
+        )
+        .env("CARGO_TARGET_DIR", &target)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("sensor received command 42"));
+
+    let mut datagram = [0; boomerang_telemetry::MAX_DATAGRAM_BYTES];
+    let (length, _) = listener
+        .recv_from(&mut datagram)
+        .expect("scheduler telemetry datagram");
+    let mut scratch = [0; boomerang_telemetry::MAX_DATAGRAM_BYTES];
+    let record = boomerang_telemetry::TelemetryRecord::decode(&datagram[..length], &mut scratch)
+        .expect("canonical telemetry record");
+    assert_eq!(record.run_id.len(), 16);
+    assert!(matches!(
+        record.source.role,
+        boomerang_telemetry::SourceRole::Federate
+    ));
 }
 
 fn assert_trace_dependencies(manifest: &std::path::Path, mode: &str) {

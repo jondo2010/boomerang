@@ -45,6 +45,7 @@ fn bounded_runtime_trace_distinguishes_physical_and_logical_admission() {
             EnclaveKey::new(7),
             enclave,
             Config::default().with_fast_forward(true),
+            None,
         );
         scheduler.startup();
         // Use the keyboard's real nonblocking submission API. The scheduler assigns

@@ -35,6 +35,7 @@ tracing-core.workspace = true
 syn = { version = "3", features = ["full"] }
 
 [dev-dependencies]
+boomerang_telemetry.workspace = true
 owned-reference-payloads = { path = "tests/fixtures/owned-reference-payloads" }
 
 [[bin]]

@@ -55,7 +55,7 @@ tracing.workspace = true
 tracing-bounded = { workspace = true, optional = true }
 tracing-appender = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true }
-tokio = { version = "1", optional = true, features = ["rt", "net", "time", "macros"] }
+tokio = { version = "1", optional = true, features = ["rt", "sync", "net", "time", "macros"] }
 
 boomerang = { workspace = true, optional = true }
 boomerang_runtime = { workspace = true, optional = true }

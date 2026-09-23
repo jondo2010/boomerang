@@ -21,7 +21,8 @@ pub use driver::{run_descriptor_driver, DriverOutput};
 pub use manifest::{
     load_manifest, parse_manifest, Binding, Boundary, BoundaryFailurePolicy, CodecPolicy,
     Coordination, CoordinationBackend, Deployment, ExecutionPolicy, Federate, Manifest,
-    RecoveryPolicy, Rti, SecurityPolicy, TimingPolicy, Topology, TracingBackend, TransportPolicy,
+    RecoveryPolicy, Rti, SecurityPolicy, TelemetryBackend, TimingPolicy, Topology, TracingBackend,
+    TransportPolicy,
 };
 pub use output::{ColorChoice, CommandOutput};
 pub use run::{run, run_with_output, ExecutionSummary, RunOutcome};

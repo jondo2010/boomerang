@@ -122,7 +122,7 @@ fn bench(c: &mut Criterion) {
                     let RuntimeAssembly { enclaves, .. } =
                         assembly.into_runtime_assembly(&config).unwrap();
                     let (enclave_key, enclave) = enclaves.into_iter().next().unwrap();
-                    runtime::Scheduler::new(enclave_key, enclave, config)
+                    runtime::Scheduler::new(enclave_key, enclave, config, None)
                 },
                 |mut sched| {
                     sched.try_event_loop().unwrap();

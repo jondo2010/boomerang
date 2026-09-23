@@ -20,7 +20,7 @@ use tinymap::{IndexSpan, SliceRange};
 
 use crate::{
     codegen::LauncherCapabilities,
-    manifest::{ExecutionPolicy, TracingBackend},
+    manifest::{ExecutionPolicy, TelemetryBackend, TracingBackend},
     DriverOutput,
 };
 
@@ -72,15 +72,21 @@ pub(crate) fn format_rust(tokens: TokenStream) -> Result<String> {
 }
 
 /// Renders one complete static launcher source file from validated compiler output.
+pub(super) struct LauncherInstrumentation {
+    pub(super) tracing: TokenStream,
+    pub(super) telemetry: TelemetryBackend,
+}
+
 pub(super) fn render_launcher(
     driver: &DriverOutput,
     slice: &FederateSlice<'_>,
     aliases: &BTreeMap<String, String>,
     execution: &ExecutionPolicy,
-    tracing: TokenStream,
+    instrumentation: LauncherInstrumentation,
     coordination: Option<TokenStream>,
     capabilities: LauncherCapabilities,
 ) -> Result<String> {
+    let LauncherInstrumentation { tracing, telemetry } = instrumentation;
     let fingerprint = super::fingerprints::federate_image(slice, driver.bindings())?;
     let fingerprint_bytes = fingerprint.as_bytes().iter();
     let distributed = coordination.is_some();
@@ -116,12 +122,42 @@ pub(super) fn render_launcher(
         .then(|| quote!(boomerang_util::launcher::write_execution_summary(&execution)?;));
     let fast_forward = execution.fast_forward;
     let keep_alive = execution.keep_alive;
+    let (telemetry_init, observation) = if telemetry == TelemetryBackend::Hosted {
+        let federate_id = slice.id().as_str();
+        let sources = enclaves.iter().map(|enclave| {
+            let enclave_id = enclave.id().to_canonical_string();
+            quote!(boomerang_telemetry::SourceIdentity {
+                role: boomerang_telemetry::SourceRole::Federate,
+                federate_id: Some(#federate_id), enclave_id: Some(#enclave_id),
+            })
+        });
+        let keys = (0..enclaves.len()).map(|offset| {
+            let key = slice.enclave_range().start() + offset;
+            quote!(EnclaveIndex::new(#key as u32))
+        });
+        (
+            quote! {
+                let _telemetry = boomerang_util::telemetry::TelemetryExporter::from_environment(
+                    FEDERATE_IMAGE_FINGERPRINT.bytes(),
+                    #federate_id,
+                    0,
+                    [#(#sources),*],
+                )?;
+            },
+            quote! {
+                _telemetry.as_ref().map_or_else(Vec::new, |exporter| {
+                    [#(#keys),*].into_iter().zip(exporter.observation_handles()).collect()
+                })
+            },
+        )
+    } else {
+        (quote! {}, quote!(Vec::new()))
+    };
     let config = quote!(Config {
         fast_forward: #fast_forward,
         timeout: #timeout,
         keep_alive: #keep_alive,
         physical_event_q_size: 1024,
-        observation: None,
     });
     let execute = if distributed {
         quote! {
@@ -136,21 +172,24 @@ pub(super) fn render_launcher(
             let connection = hosted::connect(address, FEDERATE, wire_contract(), timeout)?;
             let sink = connection.sink();
             let bindings = generated_bindings(&rti_bindings, sink.clone())?;
-            let execution = boomerang_runtime::execute_owned_federate_with_backend(
+            let execution = boomerang_runtime::execute_owned_federate_with_backend_and_observations(
                 FEDERATE, &FEDERATE_IMAGE, &ENCLAVES, bindings, #config,
+                &telemetry_observations,
                 |inbound| CentralRtiClient::connect(sink, connection, rti_bindings, inbound, timeout),
             )?;
         }
     } else {
         quote! {
-            let execution = boomerang_runtime::execute_owned_federate(
-                DEPLOYMENT, FEDERATE, generated_bindings(), #config,
+            let execution = boomerang_runtime::execute_owned_federate_with_observations(
+                DEPLOYMENT, FEDERATE, generated_bindings(), #config, &telemetry_observations,
             )?;
         }
     };
     let main = quote! {
         fn main() -> Result<(), Box<dyn std::error::Error>> {
             #init_tracing
+            #telemetry_init
+            let telemetry_observations = #observation;
             #execute
             #write_execution_summary
             Ok(())

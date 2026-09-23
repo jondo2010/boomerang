@@ -1,27 +1,6 @@
 use std::time::{Duration, Instant};
 
-use std::sync::Arc;
-
-use boomerang_runtime::{
-    Config, ObservationHandle, ObservationState, SchedulerLifecycle, SchedulerPhase,
-};
-
-#[test]
-fn config_retains_an_opt_in_observation_handle() {
-    let observation: ObservationHandle = Arc::new(ObservationState::new(Instant::now()));
-    let config = Config::default().with_observation(observation.clone());
-
-    assert!(config.observation().is_some());
-    assert_eq!(
-        config
-            .observation()
-            .unwrap()
-            .snapshot(Instant::now())
-            .unwrap()
-            .current_phase,
-        SchedulerPhase::Idle
-    );
-}
+use boomerang_runtime::{ObservationState, SchedulerLifecycle, SchedulerPhase};
 
 #[test]
 fn snapshot_includes_an_ongoing_reaction_without_closing_it() {

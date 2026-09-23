@@ -864,7 +864,7 @@ fn test_dependency_use_on_logical_action() -> anyhow::Result<()> {
     let config = runtime::Config::default()
         .with_fast_forward(true)
         .with_timeout(runtime::Duration::seconds(1));
-    let mut sched = runtime::Scheduler::new(enclave_key, enclave, config);
+    let mut sched = runtime::Scheduler::new(enclave_key, enclave, config, None);
     sched.try_event_loop()?;
 
     Ok(())
@@ -1063,7 +1063,7 @@ fn test_dependency_use_accessible() -> anyhow::Result<()> {
     );
 
     let config = runtime::Config::default().with_fast_forward(true);
-    let mut sched = runtime::Scheduler::new(enclave_key, enclave, config);
+    let mut sched = runtime::Scheduler::new(enclave_key, enclave, config, None);
     sched.try_event_loop()?;
 
     Ok(())

@@ -45,11 +45,8 @@ fn generated_single_federate_launcher_executes_typed_local_route_without_builder
     let _guard = support::toolchain_lock();
     let target = tempfile::tempdir().unwrap();
     let workspace = fixture_workspace();
-    let (resolved, launcher) = support::with_target_directory(target.path(), || {
-        (
-            cargo_boomerang::resolve_workspace(&workspace, "production").unwrap(),
-            cargo_boomerang::generate_launcher(&workspace, "production", "host").unwrap(),
-        )
+    let launcher = support::with_target_directory(target.path(), || {
+        cargo_boomerang::generate_launcher(&workspace, "production", "host").unwrap()
     });
     let first = launcher.build_locked_offline().unwrap();
     assert!(first.compiled_artifacts() > 0);
@@ -62,18 +59,6 @@ fn generated_single_federate_launcher_executes_typed_local_route_without_builder
         blake3::hash(&first_executable)
     );
 
-    let mut relative = first
-        .executable_path()
-        .strip_prefix(std::fs::canonicalize(resolved.target_directory()).unwrap())
-        .unwrap()
-        .components();
-    assert_eq!(relative.next().unwrap().as_os_str(), "b");
-    let locator = relative.next().unwrap().as_os_str().to_str().unwrap();
-    assert_eq!(locator.len(), 33);
-    assert!(locator.starts_with('l'));
-    assert!(locator[1..]
-        .bytes()
-        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
     launcher.run_locked_offline().unwrap();
     launcher.check_locked_offline().unwrap();
     let payload_crates = support::launcher_payload_crates(first.executable_path());

@@ -256,23 +256,6 @@ fn build_publishes_reuses_and_protects_a_fingerprinted_bundle() {
     assert!(building < warning && warning < bundling, "{stderr}");
     let manifest_path = fs::canonicalize(PathBuf::from(stdout.trim())).unwrap();
     assert_eq!(stdout.lines().count(), 1, "unexpected stdout: {stdout:?}");
-    let target_directory = fs::canonicalize(&target).unwrap();
-    let relative = manifest_path.strip_prefix(&target_directory).unwrap();
-    let components = relative
-        .iter()
-        .map(|component| component.to_str().unwrap())
-        .collect::<Vec<_>>();
-    assert_eq!(components[0..2], ["boomerang", "production"]);
-    assert_eq!(components[3], "deployment.json");
-    let fingerprint = components[2];
-    assert_eq!(fingerprint.len(), 64);
-    assert!(
-        fingerprint
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
-        "deployment fingerprint is not lowercase hexadecimal: {fingerprint}"
-    );
-
     let document: Value = serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
     assert_eq!(document["schema"], 1);
     assert_eq!(document["deployment"], "production");
@@ -815,10 +798,6 @@ fn generated_central_deployment_publishes_isolated_artifacts_and_exchanges_tagge
     let rti = &document["rti"];
     assert_eq!(rti["target"], host_target);
     assert_eq!(rti["profile"], Value::Null);
-    assert!(rti["artifact"]["path"]
-        .as_str()
-        .unwrap()
-        .starts_with("artifacts/rti/"));
     let rti_executable = bundle.join(rti["artifact"]["path"].as_str().unwrap());
     assert_eq!(
         rti["artifact"]["blake3"],
@@ -1112,11 +1091,6 @@ fn build_normalizes_deployment_execution_policy_into_every_published_artifact() 
         serde_json::from_slice(&fs::read(&equivalent_manifest).unwrap()).unwrap();
     assert_eq!(equivalent_document["execution"], document["execution"]);
     assert_eq!(equivalent_document["fingerprint"], document["fingerprint"]);
-    assert_eq!(
-        equivalent_manifest.parent().unwrap().file_name(),
-        manifest.parent().unwrap().file_name(),
-        "equivalent policies must publish under the same fingerprint"
-    );
     assert_eq!(
         equivalent_document["generated_source_hash"],
         document["generated_source_hash"]

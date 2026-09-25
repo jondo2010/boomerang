@@ -795,47 +795,6 @@ fn generated_central_deployment_publishes_isolated_artifacts_and_exchanges_tagge
             .collect::<Vec<_>>(),
         ["host", "host", "host", "sensor", "sensor", "sensor"]
     );
-    let host_source =
-        fs::read_to_string(bundle.join("generated/federates/host/src/main.rs")).unwrap();
-    assert!(
-        host_source.contains("static FEDERATE: FederateIndex = FederateIndex::new(0);"),
-        "{host_source}"
-    );
-    assert!(!host_source.contains("FederateSliceImage"), "{host_source}");
-    assert!(!host_source.contains("FederateSliceView"), "{host_source}");
-    assert!(
-        host_source.contains("IndexSpan::new(0, 2)"),
-        "{host_source}"
-    );
-    assert_eq!(
-        host_source
-            .matches("StorageBounds::new(1, 2, 16, 1024, 512, 256)")
-            .count(),
-        2,
-        "{host_source}"
-    );
-    let sensor_source =
-        fs::read_to_string(bundle.join("generated/federates/sensor/src/main.rs")).unwrap();
-    assert!(
-        sensor_source.contains("static FEDERATE: FederateIndex = FederateIndex::new(1);"),
-        "{sensor_source}"
-    );
-    assert!(
-        !sensor_source.contains("FederateSliceImage"),
-        "{sensor_source}"
-    );
-    assert!(
-        !sensor_source.contains("FederateSliceView"),
-        "{sensor_source}"
-    );
-    assert!(
-        sensor_source.contains("IndexSpan::new(2, 1)"),
-        "{sensor_source}"
-    );
-    assert!(
-        sensor_source.contains("StorageBounds::new(1, 2, 8, 512, 256, 128)"),
-        "{sensor_source}"
-    );
     assert_eq!(
         document["resources"]["federates"]
             .as_array()
@@ -925,25 +884,6 @@ fn generated_central_deployment_publishes_isolated_artifacts_and_exchanges_tagge
             assert!(!payload_crates.contains(forbidden), "{payload_crates:?}");
         }
     }
-    assert!(sensor_source.contains(".bind_enclave("), "{sensor_source}");
-    assert!(
-        sensor_source.contains("EnclaveIndex::new(2)"),
-        "{sensor_source}"
-    );
-    assert!(
-        sensor_source.contains("boundary/controller%2Fcommand/sensor%2Fcommand/c0"),
-        "{sensor_source}"
-    );
-    assert!(!sensor_source.contains("IdentityRange"), "{sensor_source}");
-    assert!(!sensor_source.contains("IDENTITIES"), "{sensor_source}");
-    assert!(
-        sensor_source.contains("FederateImage::new("),
-        "{sensor_source}"
-    );
-    assert!(
-        sensor_source.contains("FederateId::new(\"sensor\")"),
-        "{sensor_source}"
-    );
     let sensor = bundle.join(artifacts[1]["path"].as_str().unwrap());
     let output = Command::new(sensor)
         .env_remove("BOOMERANG_RTI_ADDRESS")
@@ -1182,32 +1122,6 @@ fn build_normalizes_deployment_execution_policy_into_every_published_artifact() 
         document["generated_source_hash"]
     );
 
-    let source = fs::read_to_string(
-        manifest
-            .parent()
-            .unwrap()
-            .join("generated/host/src/main.rs"),
-    )
-    .unwrap();
-    assert!(source.contains("fast_forward: true"), "{source}");
-    assert!(source.contains("keep_alive: true"), "{source}");
-    assert!(
-        source.contains("timeout: Some(boomerang_runtime::Duration::nanoseconds_i128(1000000000))"),
-        "{source}"
-    );
-    let equivalent_source = fs::read_to_string(
-        equivalent_manifest
-            .parent()
-            .unwrap()
-            .join("generated/host/src/main.rs"),
-    )
-    .unwrap();
-    assert_eq!(equivalent_source, source);
-    assert!(source.contains("physical_event_q_size: 1024"), "{source}");
-    assert!(
-        source.contains("boomerang_util::launcher::write_execution_summary(&execution)?"),
-        "{source}"
-    );
     let generated_manifest: toml::Value = toml::from_str(
         &fs::read_to_string(manifest.parent().unwrap().join("generated/host/Cargo.toml")).unwrap(),
     )

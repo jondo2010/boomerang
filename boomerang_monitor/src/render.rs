@@ -1,11 +1,19 @@
-use std::{fmt::Display, fmt::Write, time::Duration};
+use std::{
+    fmt::{self, Display, Write},
+    time::Duration,
+};
 
 use crate::{MonitorSnapshot, SequenceSnapshot};
 
-/// Render one already-computed snapshot as deterministic human-readable text.
-/// This function does not update receiver state or derive rates.
-pub fn render_text(snapshot: &MonitorSnapshot) -> String {
-    let mut output = String::new();
+/// Diagnostic, human-readable output. This is intentionally not a stable or
+/// structured serialization format; use [`render_json`] for structured output.
+impl Display for MonitorSnapshot {
+    fn fmt(&self, output: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write_diagnostic(output, self)
+    }
+}
+
+fn write_diagnostic(output: &mut impl Write, snapshot: &MonitorSnapshot) -> fmt::Result {
     let counters = &snapshot.counters;
     writeln!(
         output,
@@ -19,7 +27,7 @@ pub fn render_text(snapshot: &MonitorSnapshot) -> String {
         counters.discontinuities,
         counters.history_evictions,
     )
-    .expect("writing to String cannot fail");
+    ?;
     writeln!(
         output,
         "malformed oversize={} codec={} trailing_data={} noncanonical={} unsupported_version={} group_mismatch={} buffer_too_small={} records",
@@ -31,14 +39,14 @@ pub fn render_text(snapshot: &MonitorSnapshot) -> String {
         counters.malformed.group_mismatch,
         counters.malformed.buffer_too_small,
     )
-    .expect("writing to String cannot fail");
+    ?;
 
     for source in &snapshot.sources {
         let identity = &source.identity;
-        output.push_str("source run_id=");
-        write_hex(&mut output, &identity.run_id);
-        output.push_str(" artifact_id=");
-        write_hex(&mut output, &identity.artifact_id);
+        output.write_str("source run_id=")?;
+        write_hex(output, &identity.run_id)?;
+        output.write_str(" artifact_id=")?;
+        write_hex(output, &identity.artifact_id)?;
         writeln!(
             output,
             " process_id={:?} process_incarnation={} role={:?} federate_id={:?} enclave_id={:?}",
@@ -47,11 +55,10 @@ pub fn render_text(snapshot: &MonitorSnapshot) -> String {
             identity.role,
             identity.federate_id,
             identity.enclave_id,
-        )
-        .expect("writing to String cannot fail");
+        )?;
 
         if let Some(scheduler) = &source.scheduler {
-            write_sequence(&mut output, "scheduler", &scheduler.sequence);
+            write_sequence(output, "scheduler", &scheduler.sequence)?;
             let sample = &scheduler.latest;
             let raw = &sample.raw;
             let rates = &sample.rates;
@@ -60,72 +67,65 @@ pub fn render_text(snapshot: &MonitorSnapshot) -> String {
                 "  history_retained={} samples history_evictions={} samples",
                 scheduler.history.len(),
                 scheduler.history_evictions
-            )
-            .expect("writing to String cannot fail");
+            )?;
             write_sample_times(
-                &mut output,
+                output,
                 sample.sender_monotonic_ns,
                 sample.observation_monotonic_ns,
                 sample.received_at,
-            );
+            )?;
             writeln!(
                 output,
                 "  lifecycle={:?} current_phase={:?}",
                 raw.lifecycle, raw.current_phase
-            )
-            .expect("writing to String cannot fail");
+            )?;
             write_line(
-                &mut output,
+                output,
                 "current_phase_started_ns",
                 raw.current_phase_started_ns,
                 "ns",
-            );
+            )?;
             write_line(
-                &mut output,
+                output,
                 "event_queue_occupancy",
                 raw.event_queue_occupancy,
                 "events",
-            );
+            )?;
             write_line(
-                &mut output,
+                output,
                 "event_queue_reserved_capacity",
                 raw.event_queue_reserved_capacity,
                 "events",
-            );
+            )?;
             write_optional_line(
-                &mut output,
+                output,
                 "event_queue_enforced_limit",
                 raw.event_queue_enforced_limit,
                 "events",
-            );
+            )?;
             write_line(
-                &mut output,
+                output,
                 "event_queue_peak_occupancy",
                 raw.event_queue_peak_occupancy,
                 "events",
-            );
+            )?;
             write_optional_line(
-                &mut output,
+                output,
                 "last_logical_progress_ns",
                 raw.last_logical_progress_ns,
                 "ns",
-            );
+            )?;
 
             macro_rules! counter_and_rate {
-                ($raw_field:ident, $rate_field:ident, $raw_unit:literal, $rate_unit:literal) => {
-                    write_line(
-                        &mut output,
-                        stringify!($raw_field),
-                        raw.$raw_field,
-                        $raw_unit,
-                    );
+                ($raw_field:ident, $rate_field:ident, $raw_unit:literal, $rate_unit:literal) => {{
+                    write_line(output, stringify!($raw_field), raw.$raw_field, $raw_unit)?;
                     write_optional_line(
-                        &mut output,
+                        output,
                         stringify!($rate_field),
                         rates.$rate_field,
                         $rate_unit,
-                    );
-                };
+                    )?;
+                }};
             }
             counter_and_rate!(
                 reaction_elapsed_ns,
@@ -186,28 +186,28 @@ pub fn render_text(snapshot: &MonitorSnapshot) -> String {
         }
 
         if let Some(exporter) = &source.exporter_health {
-            write_sequence(&mut output, "exporter_health", &exporter.sequence);
+            write_sequence(output, "exporter_health", &exporter.sequence)?;
             write_sample_times(
-                &mut output,
+                output,
                 exporter.latest.sender_monotonic_ns,
                 exporter.latest.observation_monotonic_ns,
                 exporter.latest.received_at,
-            );
+            )?;
             write_line(
-                &mut output,
+                output,
                 "publication_drops",
                 exporter.latest.raw.publication_drops,
                 "records",
-            );
+            )?;
             write_line(
-                &mut output,
+                output,
                 "snapshot_misses",
                 exporter.latest.raw.snapshot_misses,
                 "snapshots",
-            );
+            )?;
         }
     }
-    output
+    Ok(())
 }
 
 /// Serialize the exact snapshot model as pretty JSON.
@@ -216,10 +216,11 @@ pub fn render_json(snapshot: &MonitorSnapshot) -> Result<String, serde_json::Err
     serde_json::to_string_pretty(snapshot)
 }
 
-fn write_hex(output: &mut String, bytes: &[u8]) {
+fn write_hex(output: &mut impl Write, bytes: &[u8]) -> fmt::Result {
     for byte in bytes {
-        write!(output, "{byte:02x}").expect("writing to String cannot fail");
+        write!(output, "{byte:02x}")?;
     }
+    Ok(())
 }
 
 fn available<T: Display>(value: Option<T>) -> String {
@@ -230,7 +231,11 @@ fn age(value: Option<Duration>) -> String {
     value.map_or_else(|| "unavailable".to_owned(), |value| format!("{value:?}"))
 }
 
-fn write_sequence(output: &mut String, group: &str, sequence: &SequenceSnapshot) {
+fn write_sequence(
+    output: &mut impl Write,
+    group: &str,
+    sequence: &SequenceSnapshot,
+) -> fmt::Result {
     writeln!(
         output,
         "{group} sequence={} age={} fresh_at={} skipped={} stale_or_reordered={} discontinuities={}",
@@ -241,26 +246,37 @@ fn write_sequence(output: &mut String, group: &str, sequence: &SequenceSnapshot)
         sequence.stale_or_reordered,
         sequence.discontinuities,
     )
-    .expect("writing to String cannot fail");
+    ?;
+    Ok(())
 }
 
 fn write_sample_times(
-    output: &mut String,
+    output: &mut impl Write,
     sender_ns: u64,
     observation_ns: u64,
     received_at: Duration,
-) {
-    write_line(output, "sender_monotonic_ns", sender_ns, "ns");
-    write_line(output, "observation_monotonic_ns", observation_ns, "ns");
-    writeln!(output, "  received_at={received_at:?}").expect("writing to String cannot fail");
+) -> fmt::Result {
+    write_line(output, "sender_monotonic_ns", sender_ns, "ns")?;
+    write_line(output, "observation_monotonic_ns", observation_ns, "ns")?;
+    writeln!(output, "  received_at={received_at:?}")
 }
 
-fn write_line<T: Display>(output: &mut String, name: &str, value: T, unit: &str) {
-    writeln!(output, "  {name}={value} {unit}").expect("writing to String cannot fail");
+fn write_line<T: Display>(
+    output: &mut impl Write,
+    name: &str,
+    value: T,
+    unit: &str,
+) -> fmt::Result {
+    writeln!(output, "  {name}={value} {unit}")
 }
 
-fn write_optional_line<T: Display>(output: &mut String, name: &str, value: Option<T>, unit: &str) {
-    write_line(output, name, available(value), unit);
+fn write_optional_line<T: Display>(
+    output: &mut impl Write,
+    name: &str,
+    value: Option<T>,
+    unit: &str,
+) -> fmt::Result {
+    write_line(output, name, available(value), unit)
 }
 
 #[cfg(test)]

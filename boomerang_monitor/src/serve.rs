@@ -49,7 +49,7 @@ pub fn serve(options: &MonitorOptions) -> Result<MonitorSnapshot, MonitorError> 
     let origin = Instant::now();
     let mut receiver = Receiver::new(options.receiver);
     // The extra byte distinguishes an oversized datagram from a valid full-size
-    // record; UDP truncates any remaining payload beyond the receive buffer.
+    // record on platforms that return truncated UDP payloads.
     let mut buffer = [0; MAX_DATAGRAM_BYTES + 1];
     let mut scratch = [0; MAX_DATAGRAM_BYTES];
     let mut accepted = 0_usize;
@@ -70,6 +70,11 @@ pub fn serve(options: &MonitorOptions) -> Result<MonitorSnapshot, MonitorError> 
                         return Ok(receiver.snapshot(received_at));
                     }
                 }
+            }
+            #[cfg(windows)]
+            Err(error) if error.raw_os_error() == Some(10040) => {
+                // WSAEMSGSIZE consumes the datagram but returns no usable bytes.
+                receiver.record_oversized_datagram();
             }
             Err(error)
                 if options.idle_timeout.is_some()
@@ -251,5 +256,26 @@ mod tests {
         assert_eq!(snapshot.counters.accepted, 1);
         assert_eq!(snapshot.counters.malformed.oversize, 1);
         assert_eq!(snapshot.counters.rejected(), 1);
+    }
+
+    #[test]
+    fn datagram_larger_than_receive_buffer_is_rejected_without_stopping_serving() {
+        let options = local_options(1, Duration::from_secs(2));
+        let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let endpoint = options.listen;
+        let mut oversized = full_health_record();
+        oversized.extend_from_slice(&[0, 0]);
+        assert!(oversized.len() > MAX_DATAGRAM_BYTES + 1);
+        let sender_thread = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(30));
+            sender.send_to(&oversized, endpoint).unwrap();
+            sender.send_to(&health_record(), endpoint).unwrap();
+        });
+        let snapshot = serve(&options).unwrap();
+        sender_thread.join().unwrap();
+        assert_eq!(snapshot.counters.accepted, 1);
+        assert_eq!(snapshot.counters.malformed.oversize, 1);
+        assert_eq!(snapshot.counters.rejected(), 1);
+        assert_eq!(snapshot.sources.len(), 1);
     }
 }

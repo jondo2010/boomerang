@@ -1,10 +1,9 @@
+#[cfg(feature = "monitor")]
+use std::{collections::BTreeSet, net::UdpSocket, time::Duration};
 use std::{
-    collections::BTreeSet,
     fs,
-    net::UdpSocket,
     path::{Path, PathBuf},
     process::{Command, Output},
-    time::Duration,
 };
 
 use cargo_metadata::MetadataCommand;
@@ -958,7 +957,8 @@ fn generated_central_deployment_publishes_isolated_artifacts_and_exchanges_tagge
 }
 
 #[test]
-fn generated_central_deployment_publishes_hosted_telemetry_without_changing_payload_exchange() {
+#[cfg(feature = "monitor")]
+fn generated_central_deployment_feeds_monitor_json_without_changing_payload_exchange() {
     let _guard = support::toolchain_lock();
     let target = support::toolchain_target();
     support::reset_deployment_output(&target, "sensor-telemetry");
@@ -969,57 +969,86 @@ fn generated_central_deployment_publishes_hosted_telemetry_without_changing_payl
             .unwrap()
             .insert("telemetry".into(), "hosted".into());
     });
-    let listener = UdpSocket::bind("127.0.0.1:0").unwrap();
-    listener
-        .set_read_timeout(Some(Duration::from_secs(2)))
+    // Compile before starting the monitor's idle deadline.
+    let built = build_fixture("sensor-telemetry", &target);
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let probe = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let listen = probe.local_addr().unwrap();
+    drop(probe);
+    let mut monitor = Command::new(env!("CARGO_BIN_EXE_cargo-boomerang"))
+        .args(["boomerang", "monitor", "--listen", &listen.to_string()])
+        // The host's initial/final rounds contribute at most eight records.
+        // Ten also includes the sensor, regardless of shutdown ordering.
+        .args(["--json", "--max-records", "10", "--idle-timeout", "120s"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .unwrap();
+    // Observe the listener binding before launching a short-lived deployment.
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        if monitor.try_wait().unwrap().is_some() {
+            let output = monitor.wait_with_output().unwrap();
+            panic!(
+                "monitor exited before binding: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        match UdpSocket::bind(listen) {
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => break,
+            Ok(probe) => drop(probe),
+            Err(error) => panic!("failed to probe monitor listener: {error}"),
+        }
+        if std::time::Instant::now() >= deadline {
+            monitor.kill().unwrap();
+            let output = monitor.wait_with_output().unwrap();
+            panic!(
+                "monitor did not bind: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
     let output = Command::new(env!("CARGO_BIN_EXE_cargo-boomerang"))
         .args(["boomerang", "--workspace"])
         .arg(fixture_workspace())
         .args(["run", "--deployment", "sensor-telemetry"])
-        .env(
-            "BOOMERANG_TELEMETRY_ENDPOINT",
-            listener.local_addr().unwrap().to_string(),
-        )
+        .env("BOOMERANG_TELEMETRY_ENDPOINT", listen.to_string())
+        // Keep startup skew from adding periodic rounds before the sensor starts.
+        .env("BOOMERANG_TELEMETRY_PERIOD_MS", "60000")
         .env("CARGO_TARGET_DIR", &target)
         .output()
         .unwrap();
+    let monitored = monitor.wait_with_output().unwrap();
     assert!(
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("sensor received command 42"));
+    assert!(
+        monitored.status.success(),
+        "{}",
+        String::from_utf8_lossy(&monitored.stderr)
+    );
+    let snapshot: Value = serde_json::from_slice(&monitored.stdout).unwrap();
+    assert_eq!(snapshot["counters"]["accepted"], 10);
 
     let mut run_ids = BTreeSet::new();
     let mut scheduler_sources = BTreeSet::new();
-    loop {
-        let mut datagram = [0; boomerang_telemetry::MAX_DATAGRAM_BYTES];
-        let length = match listener.recv_from(&mut datagram) {
-            Ok((length, _)) => length,
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                ) =>
-            {
-                break;
-            }
-            Err(error) => panic!("failed to receive telemetry: {error}"),
-        };
-        let mut scratch = [0; boomerang_telemetry::MAX_DATAGRAM_BYTES];
-        let record =
-            boomerang_telemetry::TelemetryRecord::decode(&datagram[..length], &mut scratch)
-                .expect("canonical telemetry record");
-        run_ids.insert(record.run_id);
-        if let boomerang_telemetry::TelemetryValue::Scheduler(_) = record.value {
-            assert_eq!(
-                record.source.role,
-                boomerang_telemetry::SourceRole::Federate
-            );
+    for source in snapshot["sources"].as_array().unwrap() {
+        let identity = &source["identity"];
+        let run_id: [u8; 16] = serde_json::from_value(identity["run_id"].clone()).unwrap();
+        run_ids.insert(run_id);
+        if !source["scheduler"].is_null() {
+            assert_eq!(identity["role"], "Federate");
             scheduler_sources.insert((
-                record.source.federate_id.unwrap().to_owned(),
-                record.source.enclave_id.unwrap().to_owned(),
+                identity["federate_id"].as_str().unwrap().to_owned(),
+                identity["enclave_id"].as_str().unwrap().to_owned(),
             ));
         }
     }
@@ -1036,6 +1065,39 @@ fn generated_central_deployment_publishes_hosted_telemetry_without_changing_payl
             ("sensor".to_owned(), "sensor".to_owned()),
         ])
     );
+}
+
+#[test]
+#[cfg(feature = "monitor")]
+fn monitor_rejects_invalid_options_before_binding() {
+    let occupied = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let listen = occupied.local_addr().unwrap().to_string();
+    for options in [
+        vec!["--listen", "not-a-socket"],
+        vec!["--listen", &listen, "--max-records", "0"],
+        vec!["--listen", &listen, "--max-records", "invalid"],
+        vec!["--listen", &listen, "--idle-timeout", "invalid"],
+        vec!["--listen", &listen, "--idle-timeout", "0s"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_cargo-boomerang"))
+            .args(["boomerang", "monitor"])
+            .args(&options)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2), "{options:?}: {output:?}");
+        assert!(output.stdout.is_empty());
+    }
+}
+
+#[test]
+#[cfg(not(feature = "monitor"))]
+fn monitor_requires_feature() {
+    let output = Command::new(env!("CARGO_BIN_EXE_cargo-boomerang"))
+        .args(["boomerang", "monitor", "--help"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert!(output.stdout.is_empty());
 }
 
 fn assert_trace_dependencies(manifest: &std::path::Path, mode: &str) {

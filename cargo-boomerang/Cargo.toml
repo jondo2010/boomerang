@@ -7,12 +7,16 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
+[features]
+monitor = ["dep:boomerang_monitor"]
+
 [dependencies]
 anstream = "1.0"
 anyhow.workspace = true
 blake3.workspace = true
 boomerang_builder = { workspace = true, features = ["descriptor-fingerprint", "host-interchange"] }
 boomerang_federated.workspace = true
+boomerang_monitor = { workspace = true, optional = true }
 boomerang_runtime = { workspace = true, features = ["serde"] }
 boomerang_util = { workspace = true, features = ["launcher"] }
 cargo_metadata.workspace = true
@@ -35,7 +39,6 @@ tracing-core.workspace = true
 syn = { version = "3", features = ["full"] }
 
 [dev-dependencies]
-boomerang_telemetry.workspace = true
 owned-reference-payloads = { path = "tests/fixtures/owned-reference-payloads" }
 
 [[bin]]

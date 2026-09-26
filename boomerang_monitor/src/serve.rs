@@ -48,7 +48,10 @@ pub fn serve(options: &MonitorOptions) -> Result<MonitorSnapshot, MonitorError> 
         .map_err(MonitorError::Receive)?;
     let origin = Instant::now();
     let mut receiver = Receiver::new(options.receiver);
-    let mut buffer = [0; MAX_DATAGRAM_BYTES];
+    // The extra byte distinguishes an oversized datagram from a valid full-size
+    // record; UDP truncates any remaining payload beyond the receive buffer.
+    let mut buffer = [0; MAX_DATAGRAM_BYTES + 1];
+    let mut scratch = [0; MAX_DATAGRAM_BYTES];
     let mut accepted = 0_usize;
 
     loop {
@@ -56,7 +59,7 @@ pub fn serve(options: &MonitorOptions) -> Result<MonitorSnapshot, MonitorError> 
             Ok((length, _sender)) => {
                 let received_at = origin.elapsed();
                 if matches!(
-                    receiver.ingest(&buffer[..length], received_at),
+                    receiver.ingest_with_scratch(&buffer[..length], received_at, &mut scratch),
                     IngestOutcome::Accepted
                 ) {
                     accepted = accepted.saturating_add(1);
@@ -91,8 +94,8 @@ mod tests {
     use super::{serve, MonitorError, MonitorOptions};
     use crate::ReceiverConfig;
     use boomerang_telemetry::{
-        ExporterHealth, RecordGroup, SourceIdentity, SourceRole, TelemetryRecord, TelemetryValue,
-        MAX_DATAGRAM_BYTES,
+        CodecError, ExporterHealth, RecordGroup, SourceIdentity, SourceRole, TelemetryRecord,
+        TelemetryValue, MAX_DATAGRAM_BYTES,
     };
     use std::{net::UdpSocket, num::NonZeroUsize, time::Duration};
 
@@ -109,14 +112,14 @@ mod tests {
         }
     }
 
-    fn health_record() -> Vec<u8> {
+    fn health_record_for(process_id: &str) -> Result<Vec<u8>, CodecError> {
         let record = TelemetryRecord {
             protocol_version: 1,
             group: RecordGroup::ExporterHealth,
             group_sequence: 0,
             run_id: [1; 16],
             artifact_id: [2; 32],
-            process_id: "pid",
+            process_id,
             process_incarnation: 3,
             source: SourceIdentity {
                 role: SourceRole::Federate,
@@ -131,8 +134,22 @@ mod tests {
             }),
         };
         let mut bytes = [0; MAX_DATAGRAM_BYTES];
-        let len = record.encode_into(&mut bytes).unwrap();
-        bytes[..len].to_vec()
+        let len = record.encode_into(&mut bytes)?;
+        Ok(bytes[..len].to_vec())
+    }
+
+    fn health_record() -> Vec<u8> {
+        health_record_for("pid").unwrap()
+    }
+
+    fn full_health_record() -> Vec<u8> {
+        (0..=MAX_DATAGRAM_BYTES)
+            .find_map(|length| {
+                let process_id = "p".repeat(length);
+                let encoded = health_record_for(&process_id).ok()?;
+                (encoded.len() == MAX_DATAGRAM_BYTES).then_some(encoded)
+            })
+            .expect("current codec can encode a canonical full-size health record")
     }
 
     #[test]
@@ -192,5 +209,47 @@ mod tests {
                 rejected: 1
             }
         ));
+    }
+
+    #[test]
+    fn oversized_datagram_with_valid_full_size_prefix_does_not_reach_accepted_target() {
+        let options = local_options(1, Duration::from_millis(200));
+        let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let endpoint = options.listen;
+        let mut datagram = full_health_record();
+        datagram.push(0);
+        assert_eq!(datagram.len(), MAX_DATAGRAM_BYTES + 1);
+        let sender_thread = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(30));
+            sender.send_to(&datagram, endpoint).unwrap();
+        });
+        let result = serve(&options);
+        sender_thread.join().unwrap();
+        assert!(matches!(
+            result.unwrap_err(),
+            MonitorError::IdleTimeout {
+                accepted: 0,
+                rejected: 1
+            }
+        ));
+    }
+
+    #[test]
+    fn oversized_datagram_is_counted_in_the_oversize_category() {
+        let options = local_options(1, Duration::from_secs(2));
+        let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let endpoint = options.listen;
+        let mut oversized = full_health_record();
+        oversized.push(0);
+        let sender_thread = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(30));
+            sender.send_to(&oversized, endpoint).unwrap();
+            sender.send_to(&health_record(), endpoint).unwrap();
+        });
+        let snapshot = serve(&options).unwrap();
+        sender_thread.join().unwrap();
+        assert_eq!(snapshot.counters.accepted, 1);
+        assert_eq!(snapshot.counters.malformed.oversize, 1);
+        assert_eq!(snapshot.counters.rejected(), 1);
     }
 }

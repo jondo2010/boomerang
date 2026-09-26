@@ -22,10 +22,10 @@ repository root:
 ```
 
 The left pane runs Snake. The right pane runs the optional monitor client,
-collects two startup telemetry records over UDP on `127.0.0.1:9000`, and prints
-one JSON snapshot before waiting for Enter. This is intentionally a completed
-snapshot demonstration: the monitor is not a live dashboard yet. The later
-dashboard slice will replace this finite output with live presentation.
+collects the first two observed telemetry records over UDP on `127.0.0.1:9000`,
+and prints one JSON snapshot before waiting for Enter. This is intentionally a
+completed snapshot demonstration: the monitor is not a live dashboard yet. The
+later dashboard slice will replace this finite output with live presentation.
 
 The keyboard-only demo prints each arrow key:
 

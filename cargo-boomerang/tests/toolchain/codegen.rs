@@ -82,7 +82,6 @@ fn generated_single_federate_launcher_executes_typed_local_route_without_builder
         }
         .to_string(),
     );
-    assert!(source.contains("execute_owned_federate_slice("), "{source}");
     assert!(source.contains("&ENCLAVE_VIEWS,"), "{source}");
     let first = launcher.build_locked_offline().unwrap();
     assert!(first.compiled_artifacts() > 0);

@@ -10,4 +10,7 @@ fi
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 cd "$repo_root"
 
+cargo build -p cargo-boomerang --features monitor
+cargo run -p cargo-boomerang --features monitor -- boomerang --workspace examples/snake build --deployment snake
+
 exec zellij --new-session-with-layout examples/snake/telemetry-demo.kdl

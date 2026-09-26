@@ -408,6 +408,13 @@ impl Receiver {
         self.ingest_with_scratch(datagram, received_at, &mut scratch)
     }
 
+    /// Winsock reports an oversized UDP datagram as a receive error, without
+    /// returning bytes to decode or a source to register.
+    #[cfg(windows)]
+    pub(crate) fn record_oversized_datagram(&mut self) {
+        self.counters.malformed.record(&CodecError::Oversize);
+    }
+
     /// Transport path for reusing caller-owned codec scratch across datagrams.
     pub(crate) fn ingest_with_scratch(
         &mut self,

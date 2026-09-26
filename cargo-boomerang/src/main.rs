@@ -1,6 +1,10 @@
 use std::path::PathBuf;
+#[cfg(feature = "monitor")]
+use std::{net::SocketAddr, num::NonZeroUsize, time::Duration};
 
 use anyhow::{anyhow, Result};
+#[cfg(feature = "monitor")]
+use boomerang_monitor::{render_json, serve, MonitorOptions, ReceiverConfig};
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 
 use cargo_boomerang::{ColorChoice, CommandOutput};
@@ -65,6 +69,22 @@ impl From<CliColorChoice> for ColorChoice {
 /// Deployment-tool operations.
 #[derive(Subcommand)]
 enum BoomerangCommand {
+    /// Receive framework telemetry and print the completed monitor snapshot.
+    #[cfg(feature = "monitor")]
+    Monitor {
+        /// Local UDP socket address on which to receive telemetry.
+        #[arg(long)]
+        listen: SocketAddr,
+        /// Print the structured snapshot as JSON.
+        #[arg(long)]
+        json: bool,
+        /// Stop after this many accepted records; otherwise listen indefinitely.
+        #[arg(long)]
+        max_records: Option<NonZeroUsize>,
+        /// Fail after waiting this long for the next datagram (for example, 5s).
+        #[arg(long, value_parser = parse_idle_timeout)]
+        idle_timeout: Option<Duration>,
+    },
     /// Build and publish one immutable fingerprinted deployment bundle.
     Build {
         /// Deployment name declared in `Boomerang.toml`.
@@ -102,6 +122,27 @@ fn main() -> Result<()> {
     let output = CommandOutput::new(quiet, verbose, color);
 
     match command {
+        #[cfg(feature = "monitor")]
+        BoomerangCommand::Monitor {
+            listen,
+            json,
+            max_records,
+            idle_timeout,
+        } => {
+            let options = MonitorOptions {
+                listen,
+                json,
+                max_records,
+                idle_timeout,
+                receiver: ReceiverConfig::default(),
+            };
+            let snapshot = serve(&options)?;
+            if options.json {
+                println!("{}", render_json(&snapshot)?);
+            } else {
+                println!("{snapshot}");
+            }
+        }
         BoomerangCommand::Build { deployment } => {
             let manifest = cargo_boomerang::build_with_output(workspace, &deployment, &output)?;
             println!("{}", manifest.display());
@@ -121,6 +162,15 @@ fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(feature = "monitor")]
+fn parse_idle_timeout(value: &str) -> Result<Duration, String> {
+    let duration = humantime::parse_duration(value).map_err(|error| error.to_string())?;
+    if duration.is_zero() {
+        return Err("idle timeout must be greater than zero".into());
+    }
+    Ok(duration)
 }
 
 fn numeric_exit_code(status: &std::process::ExitStatus) -> Result<i32> {

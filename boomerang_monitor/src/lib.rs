@@ -27,7 +27,7 @@ pub use receiver::{
     MonitorSnapshot, Receiver, ReceiverConfig, ReceiverCounters, SchedulerRates, SchedulerSample,
     SchedulerSnapshot, SequenceSnapshot, SourceIdentitySnapshot, SourceSnapshot,
 };
-pub use render::{render_json, render_text};
+pub use render::render_json;
 pub use serve::{serve, MonitorError, MonitorOptions};
 
 #[cfg(test)]

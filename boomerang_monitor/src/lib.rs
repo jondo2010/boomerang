@@ -5,11 +5,11 @@
 //! and deployment are built atomically as one closed system, so their record
 //! layouts may evolve together; this is not an independently stable protocol.
 //!
-//! [`Receiver`] owns bounded source registration, copied identity metadata,
-//! and scheduler history. A source is the complete telemetry identity: run and
-//! artifact IDs, process ID and incarnation, role, and optional Federate and
-//! Enclave IDs. Scheduler and exporter-health record groups each maintain their
-//! own sequence ordering. Stale or reordered records cannot replace current
+//! [`Receiver`] bounds its source registry, total copied identity metadata,
+//! and each source's scheduler history. A source is the complete telemetry
+//! identity: run and artifact IDs, process ID and incarnation, role, and optional
+//! Federate and Enclave IDs. Scheduler and exporter-health record groups maintain
+//! independent sequence ordering. Stale or reordered records cannot replace current
 //! values or history.
 //!
 //! Scheduler rates derive only from accepted scheduler records and strictly

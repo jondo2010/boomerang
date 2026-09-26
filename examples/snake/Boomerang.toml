@@ -5,6 +5,7 @@ package = "snake"
 entry = "snake::topology"
 
 [deployments.snake]
+telemetry = "hosted"
 bindings.snake = { package = "snake-game", component = "game" }
 bindings.keyboard = { package = "snake-keyboard", component = "keyboard" }
 

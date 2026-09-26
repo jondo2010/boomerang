@@ -1,0 +1,10 @@
+layout {
+    pane split_direction="vertical" {
+        pane name="Snake" command="sh" {
+            args "-lc" "BOOMERANG_TELEMETRY_ENDPOINT=127.0.0.1:9000 cargo run -p cargo-boomerang -- boomerang --workspace examples/snake run --deployment snake"
+        }
+        pane name="Telemetry snapshot" command="sh" {
+            args "-lc" "cargo run -p cargo-boomerang --features monitor -- boomerang monitor --listen 127.0.0.1:9000 --json --max-records 2 --idle-timeout 30s; status=$?; printf '\\nMonitor exited with status %s. Press Enter for a shell.\\n' \"$status\"; read _; exec \"${SHELL:-/bin/sh}\""
+        }
+    }
+}

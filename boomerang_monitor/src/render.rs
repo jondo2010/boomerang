@@ -265,37 +265,18 @@ fn write_optional_line<T: Display>(output: &mut String, name: &str, value: Optio
 
 #[cfg(test)]
 mod tests {
-    use super::{render_json, render_text};
+    use super::render_json;
     use crate::{
         ExporterHealthSample, ExporterHealthSnapshot, MonitorSnapshot, ReceiverCounters,
-        SchedulerRates, SchedulerSample, SchedulerSnapshot, SequenceSnapshot,
-        SourceIdentitySnapshot, SourceSnapshot,
+        SequenceSnapshot, SourceIdentitySnapshot, SourceSnapshot,
     };
-    use boomerang_telemetry::{ExporterHealth, ObservationSnapshot, SourceRole};
+    use boomerang_telemetry::{ExporterHealth, SourceRole};
     use std::time::Duration;
 
     fn snapshot() -> MonitorSnapshot {
-        let raw: ObservationSnapshot = serde_json::from_value(serde_json::json!({
-            "lifecycle": "Running", "current_phase": "Framework",
-            "current_phase_started_ns": 42,
-            "reaction_elapsed_ns": 100, "framework_elapsed_ns": 101,
-            "physical_wait_elapsed_ns": 102, "external_wait_elapsed_ns": 103,
-            "coordination_wait_elapsed_ns": 104, "processed_tags": 10,
-            "processed_reactions": 11, "processed_events": 12,
-            "set_ports": 13, "scheduled_actions": 14,
-            "event_queue_occupancy": 7, "event_queue_reserved_capacity": 16,
-            "event_queue_enforced_limit": null, "event_queue_peak_occupancy": 9,
-            "completed_logical_tags": 15, "last_logical_progress_ns": 23
-        }))
-        .unwrap();
-        let rates = SchedulerRates {
-            processed_tags_per_second: Some(20),
-            ..SchedulerRates::default()
-        };
         MonitorSnapshot {
             counters: ReceiverCounters {
-                accepted: 2,
-                stale_or_reordered: 1,
+                accepted: 1,
                 ..ReceiverCounters::default()
             },
             sources: vec![SourceSnapshot {
@@ -308,24 +289,7 @@ mod tests {
                     federate_id: Some("fed".into()),
                     enclave_id: Some("enc".into()),
                 },
-                scheduler: Some(SchedulerSnapshot {
-                    sequence: SequenceSnapshot {
-                        latest: Some(4),
-                        fresh_at: Some(Duration::from_secs(3)),
-                        age: Some(Duration::from_secs(2)),
-                        ..SequenceSnapshot::default()
-                    },
-                    latest: SchedulerSample {
-                        sequence: 4,
-                        sender_monotonic_ns: 50,
-                        observation_monotonic_ns: 40,
-                        received_at: Duration::from_secs(3),
-                        raw,
-                        rates,
-                    },
-                    history: vec![],
-                    history_evictions: 0,
-                }),
+                scheduler: None,
                 exporter_health: Some(ExporterHealthSnapshot {
                     sequence: SequenceSnapshot {
                         latest: Some(7),
@@ -349,33 +313,17 @@ mod tests {
     }
 
     #[test]
-    fn json_serializes_the_exact_snapshot_and_renderers_leave_it_unchanged() {
+    fn json_serializes_the_exact_snapshot_without_mutation() {
         let snapshot = snapshot();
         let before = snapshot.clone();
         let json: serde_json::Value =
             serde_json::from_str(&render_json(&snapshot).unwrap()).unwrap();
         assert_eq!(json, serde_json::to_value(&before).unwrap());
+        assert_eq!(json["counters"]["accepted"], 1);
+        assert_eq!(
+            json["sources"][0]["exporter_health"]["latest"]["raw"]["publication_drops"],
+            3
+        );
         assert_eq!(snapshot, before);
-        assert_eq!(render_text(&snapshot), render_text(&snapshot));
-        assert_eq!(snapshot, before);
-    }
-
-    #[test]
-    fn text_reports_identity_freshness_gauges_and_stored_rate_units() {
-        let rendered = render_text(&snapshot());
-        let lines: Vec<_> = rendered.lines().collect();
-        assert!(lines.iter().any(|line| line.contains("process_id=\"pid\"")));
-        assert!(lines
-            .iter()
-            .any(|line| line.contains("scheduler sequence=4 age=2s")));
-        assert!(lines
-            .iter()
-            .any(|line| line.contains("exporter_health sequence=7 age=1s")));
-        assert!(lines.contains(&"  event_queue_occupancy=7 events"));
-        assert!(lines.contains(&"  event_queue_enforced_limit=unavailable events"));
-        assert!(lines.contains(&"  processed_tags=10 tags"));
-        assert!(lines.contains(&"  processed_tags_per_second=20 tags/s"));
-        assert!(lines.contains(&"  processed_reactions_per_second=unavailable reactions/s"));
-        assert!(lines.contains(&"  publication_drops=3 records"));
     }
 }

@@ -18,31 +18,7 @@
 //! receiver state or infer rates. Presentation-only dashboard work is tracked
 //! separately under #263 and must reuse these receiver semantics.
 
-mod receiver {
-    /// Limits for receiver-owned state.
-    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    pub struct ReceiverConfig {
-        pub max_sources: usize,
-        pub history_capacity: usize,
-        pub max_metadata_bytes: usize,
-    }
-
-    impl Default for ReceiverConfig {
-        fn default() -> Self {
-            Self {
-                max_sources: 64,
-                history_capacity: 120,
-                max_metadata_bytes: 64 * 1024,
-            }
-        }
-    }
-
-    /// Receiver state; Task 2 supplies ingest and snapshot behavior.
-    pub struct Receiver;
-
-    /// Receiver observation; Task 2 supplies its data shape.
-    pub struct MonitorSnapshot;
-}
+mod receiver;
 
 mod render {}
 
@@ -63,7 +39,11 @@ mod serve {
     }
 }
 
-pub use receiver::{MonitorSnapshot, Receiver, ReceiverConfig};
+pub use receiver::{
+    ExporterHealthSample, ExporterHealthSnapshot, IngestOutcome, MalformedCounters,
+    MonitorSnapshot, Receiver, ReceiverConfig, ReceiverCounters, SchedulerRates, SchedulerSample,
+    SchedulerSnapshot, SequenceSnapshot, SourceIdentitySnapshot, SourceSnapshot,
+};
 pub use serve::{serve, MonitorError, MonitorOptions};
 
 #[cfg(test)]

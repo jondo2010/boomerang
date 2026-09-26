@@ -405,7 +405,17 @@ impl Receiver {
     /// changing samples, rates, history, or receipt freshness.
     pub fn ingest(&mut self, datagram: &[u8], received_at: Duration) -> IngestOutcome {
         let mut scratch = [0; MAX_DATAGRAM_BYTES];
-        let record = match TelemetryRecord::decode(datagram, &mut scratch) {
+        self.ingest_with_scratch(datagram, received_at, &mut scratch)
+    }
+
+    /// Transport path for reusing caller-owned codec scratch across datagrams.
+    pub(crate) fn ingest_with_scratch(
+        &mut self,
+        datagram: &[u8],
+        received_at: Duration,
+        scratch: &mut [u8; MAX_DATAGRAM_BYTES],
+    ) -> IngestOutcome {
+        let record = match TelemetryRecord::decode(datagram, scratch) {
             Ok(record) => record,
             Err(error) => {
                 self.counters.malformed.record(&error);

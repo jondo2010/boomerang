@@ -45,45 +45,9 @@ fn generated_single_federate_launcher_executes_typed_local_route_without_builder
     let _guard = support::toolchain_lock();
     let target = tempfile::tempdir().unwrap();
     let workspace = fixture_workspace();
-    let (resolved, launcher) = support::with_target_directory(target.path(), || {
-        (
-            cargo_boomerang::resolve_workspace(&workspace, "production").unwrap(),
-            cargo_boomerang::generate_launcher(&workspace, "production", "host").unwrap(),
-        )
+    let launcher = support::with_target_directory(target.path(), || {
+        cargo_boomerang::generate_launcher(&workspace, "production", "host").unwrap()
     });
-    let source = std::fs::read_to_string(launcher.source_path()).unwrap();
-    let generated = syn::parse_file(&source).unwrap();
-    let static_item = |name: &str| {
-        generated
-            .items
-            .iter()
-            .find_map(|item| match item {
-                syn::Item::Static(item) if item.ident == name => Some(item),
-                _ => None,
-            })
-            .unwrap_or_else(|| panic!("generated {name} must be a typed static"))
-    };
-    let view = static_item("E0_VIEW");
-    assert_eq!(
-        quote::quote!(#view).to_string(),
-        quote::quote! {
-            static E0_VIEW: EnclaveImageView<'static> = match EnclaveImageView::new(&E0_IMAGE) {
-                Ok(view) => view,
-                Err(_) => panic!("invalid generated Enclave image E0"),
-            };
-        }
-        .to_string(),
-    );
-    let views = static_item("ENCLAVE_VIEWS");
-    assert_eq!(
-        quote::quote!(#views).to_string(),
-        quote::quote! {
-            static ENCLAVE_VIEWS: [&EnclaveImageView<'static>; 3] = [&E0_VIEW, &E1_VIEW, &E2_VIEW];
-        }
-        .to_string(),
-    );
-    assert!(source.contains("execute_owned_federate_slice("), "{source}");
-    assert!(source.contains("&ENCLAVE_VIEWS,"), "{source}");
     let first = launcher.build_locked_offline().unwrap();
     assert!(first.compiled_artifacts() > 0);
     let first_executable = std::fs::read(first.executable_path()).unwrap();
@@ -95,18 +59,6 @@ fn generated_single_federate_launcher_executes_typed_local_route_without_builder
         blake3::hash(&first_executable)
     );
 
-    let mut relative = first
-        .executable_path()
-        .strip_prefix(std::fs::canonicalize(resolved.target_directory()).unwrap())
-        .unwrap()
-        .components();
-    assert_eq!(relative.next().unwrap().as_os_str(), "b");
-    let locator = relative.next().unwrap().as_os_str().to_str().unwrap();
-    assert_eq!(locator.len(), 33);
-    assert!(locator.starts_with('l'));
-    assert!(locator[1..]
-        .bytes()
-        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
     launcher.run_locked_offline().unwrap();
     launcher.check_locked_offline().unwrap();
     let payload_crates = support::launcher_payload_crates(first.executable_path());

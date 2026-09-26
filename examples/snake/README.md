@@ -11,6 +11,22 @@ wraps at the edges, and speeds up as the snake eats food. Reversing directly int
 the snake is ignored; colliding with its body ends the game and prints the score.
 Run it in an interactive terminal. Raw mode is restored on normal shutdown.
 
+## Telemetry snapshot demo
+
+Snake's checked-in deployment enables the hosted telemetry exporter. With
+[`zellij`](https://zellij.dev/) installed, launch the two-pane demo from the
+repository root:
+
+```sh
+./examples/snake/telemetry-demo.sh
+```
+
+The left pane runs Snake. The right pane runs the optional monitor client,
+collects the first two observed telemetry records over UDP on `127.0.0.1:9000`,
+and prints one JSON snapshot before waiting for Enter. This is intentionally a
+completed snapshot demonstration: the monitor is not a live dashboard yet. The
+later dashboard slice will replace this finite output with live presentation.
+
 The keyboard-only demo prints each arrow key:
 
 ```sh

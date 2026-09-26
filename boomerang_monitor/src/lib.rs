@@ -19,31 +19,15 @@
 //! separately under #263 and must reuse these receiver semantics.
 
 mod receiver;
-
-mod render {}
-
-mod serve {
-    use super::receiver::MonitorSnapshot;
-
-    /// Monitor command options; Task 3 supplies its data shape.
-    pub struct MonitorOptions;
-
-    /// Monitor command error; Task 3 supplies its variants.
-    #[derive(Debug, thiserror::Error)]
-    #[error("monitor serving is not implemented yet")]
-    pub struct MonitorError;
-
-    /// Serve telemetry; Task 3 supplies the UDP loop.
-    pub fn serve(_options: &MonitorOptions) -> Result<MonitorSnapshot, MonitorError> {
-        unimplemented!("monitor serving is implemented in Task 3")
-    }
-}
+mod render;
+mod serve;
 
 pub use receiver::{
     ExporterHealthSample, ExporterHealthSnapshot, IngestOutcome, MalformedCounters,
     MonitorSnapshot, Receiver, ReceiverConfig, ReceiverCounters, SchedulerRates, SchedulerSample,
     SchedulerSnapshot, SequenceSnapshot, SourceIdentitySnapshot, SourceSnapshot,
 };
+pub use render::{render_json, render_text};
 pub use serve::{serve, MonitorError, MonitorOptions};
 
 #[cfg(test)]

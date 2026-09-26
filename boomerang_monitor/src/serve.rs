@@ -27,14 +27,23 @@ pub struct MonitorOptions {
 /// Errors while binding, receiving, or presenting a monitor snapshot.
 #[derive(Debug, thiserror::Error)]
 pub enum MonitorError {
+    /// Binding the requested local UDP address failed.
     #[error("cannot bind telemetry monitor UDP socket: {0}")]
     Bind(#[source] io::Error),
+    /// Receiving a UDP datagram failed for a reason other than configured idleness.
     #[error("cannot receive telemetry monitor UDP datagram: {0}")]
     Receive(#[source] io::Error),
+    /// The configured idle interval elapsed before the accepted-record target.
     #[error(
         "telemetry monitor idle timeout after {accepted} accepted and {rejected} rejected records"
     )]
-    IdleTimeout { accepted: u64, rejected: u64 },
+    IdleTimeout {
+        /// Records accepted before the idle deadline.
+        accepted: u64,
+        /// Records rejected before the idle deadline.
+        rejected: u64,
+    },
+    /// Serializing the completed snapshot as JSON failed.
     #[error("cannot render telemetry monitor JSON: {0}")]
     Json(#[from] serde_json::Error),
 }

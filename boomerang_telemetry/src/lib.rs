@@ -14,6 +14,7 @@
 //! currently requires `std`. It owns no observation state, clock, executor, or
 //! transport.
 
+/// Scheduler observation payload carried directly in scheduler telemetry records.
 pub use boomerang_runtime::ObservationSnapshot;
 use serde::{Deserialize, Serialize};
 

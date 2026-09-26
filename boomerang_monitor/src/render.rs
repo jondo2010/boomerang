@@ -212,6 +212,10 @@ fn write_diagnostic(output: &mut impl Write, snapshot: &MonitorSnapshot) -> fmt:
 
 /// Serialize the exact snapshot model as pretty JSON.
 /// This function does not update receiver state or derive rates.
+///
+/// # Errors
+///
+/// Returns a serialization error if a future snapshot field cannot be represented by JSON.
 pub fn render_json(snapshot: &MonitorSnapshot) -> Result<String, serde_json::Error> {
     serde_json::to_string_pretty(snapshot)
 }

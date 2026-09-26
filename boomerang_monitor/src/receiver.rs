@@ -13,7 +13,9 @@ use serde::Serialize;
 /// Limits for receiver-owned state. Zero disables registration or history retention.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ReceiverConfig {
+    /// Maximum distinct complete source identities retained by the receiver.
     pub max_sources: usize,
+    /// Maximum scheduler samples retained for each registered source.
     pub history_capacity: usize,
     /// Aggregate bytes of copied process, Federate, and Enclave identity text.
     pub max_metadata_bytes: usize,
@@ -32,26 +34,39 @@ impl Default for ReceiverConfig {
 /// Whether a datagram changed a group's current observation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum IngestOutcome {
+    /// The datagram advanced its group state and was retained.
     Accepted,
+    /// The datagram could not be decoded as a valid canonical telemetry record.
     Malformed(CodecError),
+    /// A new source exceeded the configured source-count limit.
     SourceLimitRejected,
+    /// A new source exceeded the configured copied-metadata byte limit.
     MetadataLimitRejected,
+    /// The record sequence repeated or moved backwards within its group.
     StaleOrReordered,
 }
 
 /// Mutually exclusive codec rejection categories.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
 pub struct MalformedCounters {
+    /// Inputs larger than the telemetry datagram ceiling.
     pub oversize: u64,
+    /// Concrete Postcard codec failures.
     pub codec: u64,
+    /// Inputs containing bytes after a decoded record.
     pub trailing_data: u64,
+    /// Decodable inputs that are not in canonical Postcard form.
     pub noncanonical: u64,
+    /// Inputs with an unsupported telemetry envelope version.
     pub unsupported_version: u64,
+    /// Inputs whose record group disagrees with the value variant.
     pub group_mismatch: u64,
+    /// Inputs that could not use the caller-provided decode scratch storage.
     pub buffer_too_small: u64,
 }
 
 impl MalformedCounters {
+    /// Returns the saturating sum of every malformed-input category.
     pub fn total(&self) -> u64 {
         [
             self.oversize,
@@ -83,18 +98,26 @@ impl MalformedCounters {
 /// Aggregate receiver statistics. Counts saturate rather than wrap at `u64::MAX`.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
 pub struct ReceiverCounters {
+    /// Records accepted into a source's group state.
     pub accepted: u64,
+    /// Rejections classified by telemetry codec failure.
     pub malformed: MalformedCounters,
+    /// New sources rejected because the registry is full.
     pub source_limit_rejected: u64,
+    /// New sources rejected because copied identity metadata exceeds its budget.
     pub metadata_limit_rejected: u64,
+    /// Records rejected because their group sequence did not advance.
     pub stale_or_reordered: u64,
+    /// Missing sequence values inferred from accepted forward sequence gaps.
     pub skipped_sequences: u64,
     /// Accepted scheduler intervals with one or more discontinuity conditions.
     pub discontinuities: u64,
+    /// Scheduler samples discarded because bounded history could not retain them.
     pub history_evictions: u64,
 }
 
 impl ReceiverCounters {
+    /// Returns the saturating sum of all rejected input categories.
     pub fn rejected(&self) -> u64 {
         self.malformed
             .total()
@@ -107,12 +130,19 @@ impl ReceiverCounters {
 /// Owned identity, without runtime dense keys or inferred process ordinals.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct SourceIdentitySnapshot {
+    /// Run identifier shared by sources in one generated deployment run.
     pub run_id: [u8; 16],
+    /// Fingerprint of the generated artifact that emitted the record.
     pub artifact_id: [u8; 32],
+    /// Stable operating-system process identity copied from the record.
     pub process_id: String,
+    /// Process-start incarnation distinguishing reused process identities.
     pub process_incarnation: u64,
+    /// Logical role of the telemetry producer.
     pub role: SourceRole,
+    /// Federate identity when the source belongs to a Federate.
     pub federate_id: Option<String>,
+    /// Enclave identity when the source belongs to an Enclave.
     pub enclave_id: Option<String>,
 }
 
@@ -181,9 +211,13 @@ impl PartialOrd for SourceKey {
 /// Group-local delivery state; rejected input never refreshes `fresh_at`.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
 pub struct SequenceSnapshot {
+    /// Most recent accepted sequence in this group, if any.
     pub latest: Option<u64>,
+    /// Sequence values skipped by accepted forward gaps.
     pub skipped: u64,
+    /// Repeated or lower sequences rejected for this group.
     pub stale_or_reordered: u64,
+    /// Accepted scheduler intervals that made rates unavailable.
     pub discontinuities: u64,
     /// Receipt time of the last accepted record on the receiver's clock.
     pub fresh_at: Option<Duration>,
@@ -229,7 +263,10 @@ macro_rules! scheduler_rates {
         /// discontinuity makes every rate unavailable for that sample. An
         /// individual rate above `u64::MAX` is also unavailable, never wrapped.
         #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
-        pub struct SchedulerRates { $(pub $rate: Option<u64>,)+ }
+        pub struct SchedulerRates {
+            $(#[doc = concat!("Per-second rate for [`ObservationSnapshot::", stringify!($counter), "`].")]
+            pub $rate: Option<u64>,)+
+        }
 
         impl SchedulerRates {
             fn between(previous: &SchedulerSample, observation_ns: u64, raw: &ObservationSnapshot) -> (Self, bool) {
@@ -265,27 +302,41 @@ scheduler_rates! {
 /// One accepted scheduler observation with its already-derived rates.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub struct SchedulerSample {
+    /// Scheduler-group sequence carried by this accepted record.
     pub sequence: u64,
+    /// Producer monotonic timestamp at encoding, in nanoseconds.
     pub sender_monotonic_ns: u64,
+    /// Producer monotonic timestamp of the scheduler observation, in nanoseconds.
     pub observation_monotonic_ns: u64,
+    /// Receiver-local elapsed time at datagram receipt.
     pub received_at: Duration,
+    /// Raw scheduler observation carried directly by the telemetry record.
     pub raw: ObservationSnapshot,
+    /// Rates derived from this sample and its accepted predecessor.
     pub rates: SchedulerRates,
 }
 
 /// One accepted exporter-health record, independent of scheduler observations.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub struct ExporterHealthSample {
+    /// Exporter-health group sequence carried by this accepted record.
     pub sequence: u64,
+    /// Producer monotonic timestamp at encoding, in nanoseconds.
     pub sender_monotonic_ns: u64,
+    /// Producer monotonic timestamp of the observation, in nanoseconds.
     pub observation_monotonic_ns: u64,
+    /// Receiver-local elapsed time at datagram receipt.
     pub received_at: Duration,
+    /// Cumulative exporter-health counters carried by the record.
     pub raw: ExporterHealth,
 }
 
+/// Scheduler-specific state retained for one telemetry source.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct SchedulerSnapshot {
+    /// Ordering, freshness, and discontinuity state for scheduler records.
     pub sequence: SequenceSnapshot,
+    /// Most recent accepted scheduler sample.
     pub latest: SchedulerSample,
     /// Accepted samples in observation arrival order, oldest retained first.
     pub history: Vec<SchedulerSample>,
@@ -293,23 +344,32 @@ pub struct SchedulerSnapshot {
     pub history_evictions: u64,
 }
 
+/// Exporter-health state retained independently for one telemetry source.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ExporterHealthSnapshot {
+    /// Ordering and freshness state for exporter-health records.
     pub sequence: SequenceSnapshot,
+    /// Most recent accepted exporter-health sample.
     pub latest: ExporterHealthSample,
 }
 
+/// All retained telemetry state for one complete source identity.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct SourceSnapshot {
+    /// Complete stable identity of this source.
     pub identity: SourceIdentitySnapshot,
+    /// Scheduler state, if the source has accepted a scheduler record.
     pub scheduler: Option<SchedulerSnapshot>,
+    /// Exporter-health state, if the source has accepted an exporter-health record.
     pub exporter_health: Option<ExporterHealthSnapshot>,
 }
 
 /// Deterministically ordered rendering input. Creating it cannot mutate the receiver.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
 pub struct MonitorSnapshot {
+    /// Aggregate receiver input and bounded-state counters.
     pub counters: ReceiverCounters,
+    /// Sources in deterministic complete-identity order.
     pub sources: Vec<SourceSnapshot>,
 }
 
@@ -392,6 +452,7 @@ pub struct Receiver {
 }
 
 impl Receiver {
+    /// Creates empty bounded receiver state from explicit limits.
     pub fn new(config: ReceiverConfig) -> Self {
         Self {
             config,
@@ -403,6 +464,7 @@ impl Receiver {
 
     /// Decode before registering a source; reject stale group input before
     /// changing samples, rates, history, or receipt freshness.
+    /// Decodes and incorporates one datagram using temporary bounded scratch storage.
     pub fn ingest(&mut self, datagram: &[u8], received_at: Duration) -> IngestOutcome {
         let mut scratch = [0; MAX_DATAGRAM_BYTES];
         self.ingest_with_scratch(datagram, received_at, &mut scratch)
@@ -467,6 +529,7 @@ impl Receiver {
         )
     }
 
+    /// Returns a deterministic snapshot without changing receiver state.
     pub fn snapshot(&self, now: Duration) -> MonitorSnapshot {
         MonitorSnapshot {
             counters: self.counters,

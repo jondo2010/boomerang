@@ -1,0 +1,17 @@
+[package]
+name = "boomerang_monitor"
+description = "Hosted receiver for Boomerang's internal telemetry records."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+exclude.workspace = true
+
+[dependencies]
+boomerang_telemetry.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true

@@ -4,7 +4,7 @@ use std::{net::SocketAddr, num::NonZeroUsize, time::Duration};
 
 use anyhow::{anyhow, Result};
 #[cfg(feature = "monitor")]
-use boomerang_monitor::{render_json, serve, MonitorOptions, ReceiverConfig};
+use boomerang_monitor::{serve, MonitorOptions, ReceiverConfig};
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 
 use cargo_boomerang::{ColorChoice, CommandOutput};
@@ -138,9 +138,9 @@ fn main() -> Result<()> {
             };
             let snapshot = serve(&options)?;
             if options.json {
-                println!("{}", render_json(&snapshot)?);
+                println!("{}", serde_json::to_string_pretty(&snapshot)?);
             } else {
-                println!("{snapshot}");
+                println!("{snapshot:#?}");
             }
         }
         BoomerangCommand::Build { deployment } => {

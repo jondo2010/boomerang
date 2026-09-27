@@ -21,7 +21,6 @@
 #![deny(missing_docs)]
 
 mod receiver;
-mod render;
 mod serve;
 
 /// Receiver state, snapshots, and ingestion outcomes.
@@ -30,8 +29,6 @@ pub use receiver::{
     MonitorSnapshot, Receiver, ReceiverConfig, ReceiverCounters, SchedulerRates, SchedulerSample,
     SchedulerSnapshot, SequenceSnapshot, SourceIdentitySnapshot, SourceSnapshot,
 };
-/// JSON rendering for the monitor snapshot model.
-pub use render::render_json;
 /// Hosted UDP serving options and errors.
 pub use serve::{serve, MonitorError, MonitorOptions};
 

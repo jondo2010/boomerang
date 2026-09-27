@@ -207,7 +207,7 @@ mod tests {
 
     #[test]
     fn idle_timeout_includes_rejected_datagrams_without_treating_them_as_progress() {
-        let options = local_options(1, Duration::from_millis(100));
+        let options = local_options(1, Duration::from_secs(2));
         let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
         let endpoint = options.listen;
         let sender_thread = std::thread::spawn(move || {

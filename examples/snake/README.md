@@ -78,11 +78,7 @@ let keyboard_enclave = app.enclave("keyboard")?;
 let snake_enclave = app.enclave("snake")?;
 let keyboard = app.component("keyboard", keyboard::definition(), &keyboard_enclave)?;
 let snake = app.component("snake", game::definition(), &snake_enclave)?;
-app.connect_with_semantics(
-    &keyboard.key,
-    &snake.key,
-    ConnectionSemantics::Physical { after: None },
-)?;
+app.connect(&keyboard.key, &snake.key)?;
 app.connect(&keyboard.ready, &snake.ready)?;
 app.finish()
 ```
@@ -90,8 +86,7 @@ app.finish()
 The constructors declare actions, ports, reactions, and timing in the compiler
 topology. Runtime initialization occurs when the generated executable starts.
 The enclave boundary is explicit, and connections require matching payload types
-and output-to-input direction. The externally timed keyboard event currently
-uses physical connection semantics across the scheduler boundary.
+and output-to-input direction.
 
 Compile the component crates and both deployments without starting the game:
 

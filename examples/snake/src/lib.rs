@@ -3,9 +3,7 @@
 use snake_game::game;
 use snake_keyboard::{display, keyboard};
 
-use boomerang::builder::compiler::{
-    ApplicationTopology, ConnectionSemantics, TopologyAuthoringError, TopologyBuilder,
-};
+use boomerang::builder::compiler::{ApplicationTopology, TopologyAuthoringError, TopologyBuilder};
 
 pub fn topology() -> Result<ApplicationTopology, TopologyAuthoringError> {
     let mut app = TopologyBuilder::new("application/keyboard/snake")?;
@@ -13,11 +11,7 @@ pub fn topology() -> Result<ApplicationTopology, TopologyAuthoringError> {
     let snake_enclave = app.enclave("snake")?;
     let keyboard = app.component("keyboard", keyboard::definition(), &keyboard_enclave)?;
     let snake = app.component("snake", game::definition(), &snake_enclave)?;
-    app.connect_with_semantics(
-        &keyboard.key,
-        &snake.key,
-        ConnectionSemantics::Physical { after: None },
-    )?;
+    app.connect(&keyboard.key, &snake.key)?;
     // Initialize the terminal before Snake renders and starts its game clock.
     app.connect(&keyboard.ready, &snake.ready)?;
     app.finish()
@@ -56,15 +50,6 @@ mod tests {
             assert!(connections.contains(&("keyboard/key".into(), format!("{consumer}/key"))));
             if consumer == "snake" {
                 assert!(connections.contains(&("keyboard/ready".into(), "snake/ready".into())));
-                let key = topology
-                    .connections()
-                    .find(|(_, connection)| connection.source().to_string() == "keyboard/key")
-                    .unwrap()
-                    .1;
-                assert_eq!(
-                    key.semantics(),
-                    ConnectionSemantics::Physical { after: None }
-                );
             }
         }
     }

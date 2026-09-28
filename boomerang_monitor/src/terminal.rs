@@ -5,11 +5,15 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use futures_util::{Stream, StreamExt};
 use ratatui::{
     backend::Backend,
-    layout::{Alignment, Constraint, Direction, Layout},
+    buffer::Buffer,
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     symbols,
     text::{Line, Span},
-    widgets::{Axis, Block, Borders, Chart, Dataset, GraphType, Paragraph, Row, Table, TableState},
+    widgets::{
+        Axis, Block, Borders, Chart, Dataset, GraphType, Paragraph, Row, StatefulWidget, Table,
+        TableState, Widget,
+    },
     Terminal,
 };
 use tokio::{net::UdpSocket, time::MissedTickBehavior};
@@ -294,7 +298,13 @@ fn render(frame: &mut ratatui::Frame<'_>, snapshot: &MonitorSnapshot, state: &Da
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
         .split(outer[0]);
-    render_sources(frame, panes[0], snapshot, state);
+    let mut table_state =
+        TableState::default().with_selected(state.selected_index(&snapshot.sources));
+    frame.render_stateful_widget(
+        SourceOverview::new(snapshot, state.table_mode()),
+        panes[0],
+        &mut table_state,
+    );
     render_selected(frame, panes[1], snapshot, state);
     frame.render_widget(
         Paragraph::new(Line::from(vec![
@@ -313,50 +323,58 @@ fn render(frame: &mut ratatui::Frame<'_>, snapshot: &MonitorSnapshot, state: &Da
     );
 }
 
-fn render_sources(
-    frame: &mut ratatui::Frame<'_>,
-    area: ratatui::layout::Rect,
-    snapshot: &MonitorSnapshot,
-    state: &DashboardState,
-) {
-    let (headers, widths) = table_columns(state.table_mode());
-    let rows = snapshot.sources.iter().map(|source| {
-        let alert = source_has_alert(source);
-        let row = Row::new(source_row(source, state.table_mode()));
-        if alert {
-            row.style(Style::default().fg(Color::Red))
+struct SourceOverview<'a> {
+    snapshot: &'a MonitorSnapshot,
+    mode: TableMode,
+}
+
+impl<'a> SourceOverview<'a> {
+    fn new(snapshot: &'a MonitorSnapshot, mode: TableMode) -> Self {
+        Self { snapshot, mode }
+    }
+}
+
+impl StatefulWidget for SourceOverview<'_> {
+    type State = TableState;
+
+    fn render(self, area: Rect, buffer: &mut Buffer, state: &mut Self::State) {
+        let (headers, widths) = table_columns(self.mode);
+        let rows = self.snapshot.sources.iter().map(|source| {
+            let alert = source_has_alert(source);
+            let row = Row::new(source_row(source, self.mode));
+            if alert {
+                row.style(Style::default().fg(Color::Red))
+            } else {
+                row
+            }
+        });
+        let header = Row::new(headers).style(Style::default().add_modifier(Modifier::BOLD));
+        let title = if area.width < 60 {
+            format!(
+                "Sources {} · {}",
+                self.snapshot.sources.len(),
+                table_mode_label(self.mode)
+            )
         } else {
-            row
-        }
-    });
-    let header = Row::new(headers).style(Style::default().add_modifier(Modifier::BOLD));
-    let title = if area.width < 60 {
-        format!(
-            "Sources {} · {}",
-            snapshot.sources.len(),
-            table_mode_label(state.table_mode())
-        )
-    } else {
-        format!(
-            "Sources {} · {} · accepted {} rejected {}",
-            snapshot.sources.len(),
-            table_mode_label(state.table_mode()),
-            snapshot.counters.accepted,
-            snapshot.counters.rejected()
-        )
-    };
-    let table = Table::new(rows, widths)
-        .header(header)
-        .block(Block::default().borders(Borders::ALL).title(title))
-        .row_highlight_style(
-            Style::default()
-                .bg(Color::DarkGray)
-                .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol("> ");
-    let mut table_state =
-        TableState::default().with_selected(state.selected_index(&snapshot.sources));
-    frame.render_stateful_widget(table, area, &mut table_state);
+            format!(
+                "Sources {} · {} · accepted {} rejected {}",
+                self.snapshot.sources.len(),
+                table_mode_label(self.mode),
+                self.snapshot.counters.accepted,
+                self.snapshot.counters.rejected()
+            )
+        };
+        let table = Table::new(rows, widths)
+            .header(header)
+            .block(Block::default().borders(Borders::ALL).title(title))
+            .row_highlight_style(
+                Style::default()
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol("> ");
+        StatefulWidget::render(table, area, buffer, state);
+    }
 }
 
 fn table_mode_label(mode: TableMode) -> &'static str {
@@ -499,14 +517,14 @@ fn render_selected(
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Length(7), Constraint::Min(0)])
                 .split(area);
-            render_details(frame, parts[0], source);
-            render_plot(frame, parts[1], source, state.plot());
+            frame.render_widget(SelectedDetails::new(source), parts[0]);
+            frame.render_widget(TelemetryPlot::new(source, state.plot()), parts[1]);
         }
         SelectedPresentation::PlotOnly if source.scheduler.is_some() => {
-            render_plot(frame, area, source, state.plot());
+            frame.render_widget(TelemetryPlot::new(source, state.plot()), area);
         }
         SelectedPresentation::PlotOnly | SelectedPresentation::DetailsOnly => {
-            render_details(frame, area, source);
+            frame.render_widget(SelectedDetails::new(source), area);
         }
     }
 }
@@ -528,19 +546,26 @@ fn selected_presentation(area: ratatui::layout::Rect) -> SelectedPresentation {
     }
 }
 
-fn render_details(
-    frame: &mut ratatui::Frame<'_>,
-    area: ratatui::layout::Rect,
-    source: &crate::SourceSnapshot,
-) {
-    frame.render_widget(
-        Paragraph::new(detail_lines(source)).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(format!("Selected: {}", source_label(&source.identity))),
-        ),
-        area,
-    );
+struct SelectedDetails<'a> {
+    source: &'a crate::SourceSnapshot,
+}
+
+impl<'a> SelectedDetails<'a> {
+    fn new(source: &'a crate::SourceSnapshot) -> Self {
+        Self { source }
+    }
+}
+
+impl Widget for SelectedDetails<'_> {
+    fn render(self, area: Rect, buffer: &mut Buffer) {
+        Paragraph::new(detail_lines(self.source))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(format!("Selected: {}", source_label(&self.source.identity))),
+            )
+            .render(area, buffer);
+    }
 }
 
 fn detail_lines(source: &crate::SourceSnapshot) -> Vec<Line<'static>> {
@@ -741,155 +766,163 @@ fn detail_line(row: DetailRow) -> Line<'static> {
     Line::from(spans)
 }
 
-fn render_plot(
-    frame: &mut ratatui::Frame<'_>,
-    area: ratatui::layout::Rect,
-    source: &crate::SourceSnapshot,
+struct TelemetryPlot<'a> {
+    source: &'a crate::SourceSnapshot,
     plot: PlotKind,
-) {
-    let Some(scheduler) = source.scheduler.as_ref() else {
-        return;
-    };
-    let history = &scheduler.history;
-    let latest_observation_ns = history
-        .last()
-        .map_or(0, |sample| sample.observation_monotonic_ns);
-    let x_min = history
-        .first()
-        .map_or(-1.0, |sample| {
-            relative_observation_seconds(latest_observation_ns, sample.observation_monotonic_ns)
-        })
-        .min(-1.0);
-    let (metric_title, y_unit, series): (&str, &str, Vec<PlotSeries<'_>>) = match plot {
-        PlotKind::Throughput => (
-            "Throughput",
-            "ops/s",
-            vec![
-                (
-                    "reactions",
-                    Color::Cyan,
-                    rate_points(history, |rates| rates.processed_reactions_per_second, 1.0),
-                ),
-                (
-                    "events",
-                    Color::Yellow,
-                    rate_points(history, |rates| rates.processed_events_per_second, 1.0),
-                ),
-                (
-                    "tags",
-                    Color::Green,
-                    rate_points(
-                        history,
-                        |rates| rates.completed_logical_tags_per_second,
-                        1.0,
+}
+
+impl<'a> TelemetryPlot<'a> {
+    fn new(source: &'a crate::SourceSnapshot, plot: PlotKind) -> Self {
+        Self { source, plot }
+    }
+}
+
+impl Widget for TelemetryPlot<'_> {
+    fn render(self, area: Rect, buffer: &mut Buffer) {
+        let Some(scheduler) = self.source.scheduler.as_ref() else {
+            return;
+        };
+        let history = &scheduler.history;
+        let latest_observation_ns = history
+            .last()
+            .map_or(0, |sample| sample.observation_monotonic_ns);
+        let x_min = history
+            .first()
+            .map_or(-1.0, |sample| {
+                relative_observation_seconds(latest_observation_ns, sample.observation_monotonic_ns)
+            })
+            .min(-1.0);
+        let (metric_title, y_unit, series): (&str, &str, Vec<PlotSeries<'_>>) = match self.plot {
+            PlotKind::Throughput => (
+                "Throughput",
+                "ops/s",
+                vec![
+                    (
+                        "reactions",
+                        Color::Cyan,
+                        rate_points(history, |rates| rates.processed_reactions_per_second, 1.0),
                     ),
-                ),
-            ],
-        ),
-        PlotKind::SchedulerTime => (
-            "Scheduler time (not OS CPU)",
-            "ms/s",
-            vec![
-                (
-                    "reaction",
-                    Color::Cyan,
-                    rate_points(
-                        history,
-                        |rates| rates.reaction_elapsed_ns_per_second,
-                        1_000_000.0,
+                    (
+                        "events",
+                        Color::Yellow,
+                        rate_points(history, |rates| rates.processed_events_per_second, 1.0),
                     ),
-                ),
-                (
-                    "framework",
-                    Color::Magenta,
-                    rate_points(
-                        history,
-                        |rates| rates.framework_elapsed_ns_per_second,
-                        1_000_000.0,
+                    (
+                        "tags",
+                        Color::Green,
+                        rate_points(
+                            history,
+                            |rates| rates.completed_logical_tags_per_second,
+                            1.0,
+                        ),
                     ),
-                ),
-                (
-                    "physical wait",
-                    Color::Blue,
-                    rate_points(
-                        history,
-                        |rates| rates.physical_wait_elapsed_ns_per_second,
-                        1_000_000.0,
+                ],
+            ),
+            PlotKind::SchedulerTime => (
+                "Scheduler time (not OS CPU)",
+                "ms/s",
+                vec![
+                    (
+                        "reaction",
+                        Color::Cyan,
+                        rate_points(
+                            history,
+                            |rates| rates.reaction_elapsed_ns_per_second,
+                            1_000_000.0,
+                        ),
                     ),
-                ),
-                (
-                    "external wait",
-                    Color::Yellow,
-                    rate_points(
-                        history,
-                        |rates| rates.external_wait_elapsed_ns_per_second,
-                        1_000_000.0,
+                    (
+                        "framework",
+                        Color::Magenta,
+                        rate_points(
+                            history,
+                            |rates| rates.framework_elapsed_ns_per_second,
+                            1_000_000.0,
+                        ),
                     ),
-                ),
-                (
-                    "coordination wait",
-                    Color::Green,
-                    rate_points(
-                        history,
-                        |rates| rates.coordination_wait_elapsed_ns_per_second,
-                        1_000_000.0,
+                    (
+                        "physical wait",
+                        Color::Blue,
+                        rate_points(
+                            history,
+                            |rates| rates.physical_wait_elapsed_ns_per_second,
+                            1_000_000.0,
+                        ),
                     ),
-                ),
-            ],
-        ),
-    };
-    let title = if area.width < 64 {
-        format!(
-            "{} — {metric_title} [{y_unit}]",
-            compact_source_label(&source.identity)
-        )
-    } else {
-        format!(
-            "{} — {metric_title} [{y_unit}]",
-            source_label(&source.identity)
-        )
-    };
-    let y_max = series
-        .iter()
-        .flat_map(|(_, _, points)| points.iter().map(|(_, y)| *y))
-        .fold(1.0_f64, f64::max);
-    let y_upper = y_max.ceil().max(1.0);
-    let datasets = series
-        .iter()
-        .map(|(_name, color, points)| {
-            Dataset::default()
-                .marker(symbols::Marker::Braille)
-                .graph_type(GraphType::Scatter)
-                .style(Style::default().fg(*color))
-                .data(points)
-        })
-        .collect::<Vec<_>>();
-    let x_labels = vec![Span::raw(format!("{x_min:.0}s")), Span::raw("latest")];
-    let y_labels = vec![
-        Span::raw("0"),
-        Span::raw(format_value(y_upper / 2.0)),
-        Span::raw(format_value(y_upper)),
-    ];
-    let chart = Chart::new(datasets)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(title)
-                .title_bottom(plot_legend(plot)),
-        )
-        .x_axis(
-            Axis::default()
-                .title("source time")
-                .bounds([x_min, 0.0])
-                .labels(x_labels),
-        )
-        .y_axis(
-            Axis::default()
-                .title(y_unit)
-                .bounds([0.0, y_upper])
-                .labels(y_labels),
-        );
-    frame.render_widget(chart, area);
+                    (
+                        "external wait",
+                        Color::Yellow,
+                        rate_points(
+                            history,
+                            |rates| rates.external_wait_elapsed_ns_per_second,
+                            1_000_000.0,
+                        ),
+                    ),
+                    (
+                        "coordination wait",
+                        Color::Green,
+                        rate_points(
+                            history,
+                            |rates| rates.coordination_wait_elapsed_ns_per_second,
+                            1_000_000.0,
+                        ),
+                    ),
+                ],
+            ),
+        };
+        let title = if area.width < 64 {
+            format!(
+                "{} — {metric_title} [{y_unit}]",
+                compact_source_label(&self.source.identity)
+            )
+        } else {
+            format!(
+                "{} — {metric_title} [{y_unit}]",
+                source_label(&self.source.identity)
+            )
+        };
+        let y_max = series
+            .iter()
+            .flat_map(|(_, _, points)| points.iter().map(|(_, y)| *y))
+            .fold(1.0_f64, f64::max);
+        let y_upper = y_max.ceil().max(1.0);
+        let datasets = series
+            .iter()
+            .map(|(_name, color, points)| {
+                Dataset::default()
+                    .marker(symbols::Marker::Braille)
+                    .graph_type(GraphType::Scatter)
+                    .style(Style::default().fg(*color))
+                    .data(points)
+            })
+            .collect::<Vec<_>>();
+        let x_labels = vec![Span::raw(format!("{x_min:.0}s")), Span::raw("latest")];
+        let y_labels = vec![
+            Span::raw("0"),
+            Span::raw(format_value(y_upper / 2.0)),
+            Span::raw(format_value(y_upper)),
+        ];
+        let chart = Chart::new(datasets)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(title)
+                    .title_bottom(plot_legend(self.plot)),
+            )
+            .x_axis(
+                Axis::default()
+                    .title("source time")
+                    .bounds([x_min, 0.0])
+                    .labels(x_labels),
+            )
+            .y_axis(
+                Axis::default()
+                    .title(y_unit)
+                    .bounds([0.0, y_upper])
+                    .labels(y_labels),
+            );
+        chart.render(area, buffer);
+    }
 }
 
 fn plot_legend(plot: PlotKind) -> Line<'static> {
@@ -1011,7 +1044,7 @@ mod tests {
     use super::{
         classify_freshness, detail_rows, run_dashboard_with, selected_presentation,
         with_terminal_lifecycle, DashboardAction, DashboardState, Freshness, PlotKind,
-        SelectedPresentation, TableMode,
+        SelectedDetails, SelectedPresentation, SourceOverview, TableMode, TelemetryPlot,
     };
     use crate::{MonitorOptions, Receiver, ReceiverConfig, SourceIdentitySnapshot, SourceSnapshot};
     use boomerang_telemetry::{
@@ -1019,7 +1052,11 @@ mod tests {
         MAX_DATAGRAM_BYTES,
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    use ratatui::{backend::TestBackend, Terminal};
+    use ratatui::{
+        backend::TestBackend,
+        widgets::{StatefulWidget, TableState, Widget},
+        Terminal,
+    };
     use std::{
         net::UdpSocket,
         num::NonZeroUsize,
@@ -1128,6 +1165,16 @@ mod tests {
             .snapshot(Duration::from_millis(100))
             .sources
             .remove(0)
+    }
+
+    #[test]
+    fn dashboard_pieces_use_ratatui_widget_contracts() {
+        fn assert_widget<T: Widget>() {}
+        fn assert_stateful_widget<T: StatefulWidget<State = TableState>>() {}
+
+        assert_stateful_widget::<SourceOverview<'_>>();
+        assert_widget::<SelectedDetails<'_>>();
+        assert_widget::<TelemetryPlot<'_>>();
     }
 
     #[test]

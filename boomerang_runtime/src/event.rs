@@ -15,6 +15,8 @@ pub enum AsyncEventTarget {
 
 /// `AsyncEvent` is used to inject events into the scheduler from outside of the normal event loop.
 pub enum AsyncEvent {
+    /// Federate coordination changed and the scheduler must recompute its pending candidate.
+    FederateResume,
     /// A release event is used by upstream enclaves to signal that they have completed processing the tag.
     TagRelease {
         /// The key of the enclave that is releasing the `Tag``.
@@ -59,6 +61,7 @@ pub enum AsyncEvent {
 impl Debug for AsyncEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::FederateResume => f.write_str("FederateResume"),
             Self::TagRelease { enclave, tag } => f
                 .debug_struct("TagRelease")
                 .field("enclave", enclave)
@@ -99,6 +102,7 @@ impl Debug for AsyncEvent {
 impl Display for AsyncEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            AsyncEvent::FederateResume => f.write_str("FederateResume"),
             AsyncEvent::TagRelease { enclave, tag } => {
                 write!(f, "TagRelease[enclave={enclave:?},tag={tag:.3}]")
             }
@@ -130,6 +134,7 @@ impl AsyncEvent {
     /// Stable event category for native tracing, without inspecting its payload.
     pub fn kind_str(&self) -> &'static str {
         match self {
+            Self::FederateResume => "federate_resume",
             Self::TagRelease { .. } => "tag_release",
             Self::TagReleaseProvisional { .. } => "tag_release_provisional",
             Self::Logical { .. } => "logical",

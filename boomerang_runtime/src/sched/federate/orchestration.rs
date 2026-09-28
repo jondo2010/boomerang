@@ -389,7 +389,8 @@ impl<B: FederateCoordinationBackend> FederateCoordinator<B> {
                     }
                     self.send_all(ParticipantCommand::Action(action))?;
                 }
-                action @ CoordinationAction::Resume { .. } => {
+                action @ CoordinationAction::Resume { enclave, .. } => {
+                    self.wake_scheduler_event_waits_except(enclave);
                     self.send_available(ParticipantCommand::Action(action));
                 }
                 action @ (CoordinationAction::Stop | CoordinationAction::Abort) => {
@@ -455,6 +456,15 @@ impl<B: FederateCoordinationBackend> FederateCoordinator<B> {
     fn send_available(&self, command: ParticipantCommand) {
         for sender in self.commands.values() {
             let _ = sender.send(command);
+        }
+    }
+
+    /// Interrupts scheduler waits that do not poll the Federate command channel.
+    fn wake_scheduler_event_waits_except(&self, origin: EnclaveIndex) {
+        for (enclave, sender) in self.events.iter() {
+            if enclave != origin {
+                let _ = sender.try_send(AsyncEvent::FederateResume);
+            }
         }
     }
 
@@ -665,13 +675,18 @@ impl EnclaveCoordinationPort {
 
     /// Takes queued work and reports that it invalidates an idle or fixed-point candidate.
     fn take_active_event(&self) -> Result<Option<AsyncEvent>, FederateCoordinationError> {
-        let event = self.event_rx.try_recv().ok().flatten();
-        if event.as_ref().is_some_and(revises_candidate) {
-            self.report(CoordinatorReport::Scheduler(SchedulerMessage::Active {
-                enclave: self.enclave,
-            }))?;
+        loop {
+            let event = self.event_rx.try_recv().ok().flatten();
+            if matches!(event, Some(AsyncEvent::FederateResume)) {
+                continue;
+            }
+            if event.as_ref().is_some_and(revises_candidate) {
+                self.report(CoordinatorReport::Scheduler(SchedulerMessage::Active {
+                    enclave: self.enclave,
+                }))?;
+            }
+            return Ok(event);
         }
-        Ok(event)
     }
 }
 
@@ -2129,6 +2144,46 @@ mod tests {
                     && matches!(event, Ok(FederateIdleWait::Stopped))));
             assert!(observations.iter().any(|(enclave, event)| *enclave == peer
                 && matches!(event, Ok(FederateIdleWait::Stopped))));
+        });
+    }
+
+    /// Verifies revised work wakes peers blocked outside the Federate command wait.
+    #[test]
+    fn active_scheduler_wakes_peer_scheduler_event_waits() {
+        let eventful = EnclaveIndex::new(3);
+        let peer = EnclaveIndex::new(7);
+        let (eventful_tx, eventful_rx) = kanal::unbounded();
+        let (peer_tx, peer_rx) = kanal::unbounded();
+        let peer_observer = peer_rx.clone();
+        let FederateCoordinationParts {
+            abort_handle,
+            coordinator,
+            participants,
+            ..
+        } = FederateCoordinationParts::new(
+            [
+                (eventful, eventful_tx, eventful_rx),
+                (peer, peer_tx, peer_rx),
+            ],
+            LifecyclePolicy::KeepAlive,
+            LocalFederateCoordinationBackend::default(),
+        )
+        .unwrap();
+        let mut participants = participants.into_iter();
+        let (_, mut eventful_participant) = participants.next().unwrap();
+
+        std::thread::scope(|scope| {
+            let coordinator_handle = scope.spawn(move || coordinator.run());
+            eventful_participant.active();
+            let wake = peer_observer.recv_timeout(StdDuration::from_secs(1));
+            abort_handle.abort();
+            coordinator_handle
+                .join()
+                .unwrap()
+                .coordination_result
+                .unwrap();
+
+            assert!(matches!(wake, Ok(AsyncEvent::FederateResume)));
         });
     }
 

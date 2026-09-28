@@ -26,6 +26,8 @@ monitor first and receives framework telemetry over UDP on `127.0.0.1:9000`.
 Use Up/Down to select a source, `1` for throughput, `2` for scheduler-accounted
 time, and `q` to leave the dashboard. Finishing Snake leaves the last bounded
 state visible so its freshness can transition through stale and disconnected.
+The Snake deployment exposes separate `host/keyboard` and `host/snake` enclave
+sources while keeping both schedulers in the same hosted Federate process.
 
 The keyboard-only demo prints each arrow key:
 
@@ -63,26 +65,33 @@ The deployment manifests select those modules with each binding's `component`
 path. The Snake manifest binds `snake-game::game` and
 `snake-keyboard::keyboard`; the keyboard demo keeps its own manifest because the
 current schema has one topology entry per manifest, and binds
-`snake-keyboard::{keyboard, display}`. Each composition shares one enclave, so
-Ctrl-C and game-over shut down both components and restore terminal settings.
+`snake-keyboard::{keyboard, display}`. Snake places its two components in
+separate enclaves so their scheduler activity and lifecycle remain visible
+independently; the keyboard-only composition keeps both components together.
 
 Each `component!` declaration generates a host-side `definition()` constructor.
 The topology library composes those definitions with typed port handles:
 
 ```rust
 let mut app = TopologyBuilder::new("application/keyboard/snake")?;
-let enclave = app.enclave("keyboard")?;
-let keyboard = app.component("keyboard", keyboard::definition(), &enclave)?;
-let snake = app.component("snake", game::definition(), &enclave)?;
-app.connect(&keyboard.key, &snake.key)?;
+let keyboard_enclave = app.enclave("keyboard")?;
+let snake_enclave = app.enclave("snake")?;
+let keyboard = app.component("keyboard", keyboard::definition(), &keyboard_enclave)?;
+let snake = app.component("snake", game::definition(), &snake_enclave)?;
+app.connect_with_semantics(
+    &keyboard.key,
+    &snake.key,
+    ConnectionSemantics::Physical { after: None },
+)?;
 app.connect(&keyboard.ready, &snake.ready)?;
 app.finish()
 ```
 
 The constructors declare actions, ports, reactions, and timing in the compiler
 topology. Runtime initialization occurs when the generated executable starts.
-The shared enclave is explicit, and connections require matching payload types
-and output-to-input direction.
+The enclave boundary is explicit, and connections require matching payload types
+and output-to-input direction. The externally timed keyboard event currently
+uses physical connection semantics across the scheduler boundary.
 
 Compile the component crates and both deployments without starting the game:
 

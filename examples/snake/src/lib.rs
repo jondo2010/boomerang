@@ -3,15 +3,21 @@
 use snake_game::game;
 use snake_keyboard::{display, keyboard};
 
-use boomerang::builder::compiler::{ApplicationTopology, TopologyAuthoringError, TopologyBuilder};
+use boomerang::builder::compiler::{
+    ApplicationTopology, ConnectionSemantics, TopologyAuthoringError, TopologyBuilder,
+};
 
 pub fn topology() -> Result<ApplicationTopology, TopologyAuthoringError> {
     let mut app = TopologyBuilder::new("application/keyboard/snake")?;
-    // Both components share the enclave's shutdown lifecycle.
-    let enclave = app.enclave("keyboard")?;
-    let keyboard = app.component("keyboard", keyboard::definition(), &enclave)?;
-    let snake = app.component("snake", game::definition(), &enclave)?;
-    app.connect(&keyboard.key, &snake.key)?;
+    let keyboard_enclave = app.enclave("keyboard")?;
+    let snake_enclave = app.enclave("snake")?;
+    let keyboard = app.component("keyboard", keyboard::definition(), &keyboard_enclave)?;
+    let snake = app.component("snake", game::definition(), &snake_enclave)?;
+    app.connect_with_semantics(
+        &keyboard.key,
+        &snake.key,
+        ConnectionSemantics::Physical { after: None },
+    )?;
     // Initialize the terminal before Snake renders and starts its game clock.
     app.connect(&keyboard.ready, &snake.ready)?;
     app.finish()
@@ -32,13 +38,12 @@ mod tests {
 
     #[test]
     fn keyboard_component_drives_both_example_consumers() {
-        for (topology, consumer) in [
-            (topology().unwrap(), "snake"),
-            (keyboard_topology().unwrap(), "display"),
+        for (topology, consumer, enclave_count) in [
+            (topology().unwrap(), "snake", 2),
+            (keyboard_topology().unwrap(), "display", 1),
         ] {
             assert_eq!(topology.components().count(), 2);
-            // Both components share an enclave, including its shutdown lifecycle.
-            assert_eq!(topology.enclaves().count(), 1);
+            assert_eq!(topology.enclaves().count(), enclave_count);
             let connections: Vec<_> = topology
                 .connections()
                 .map(|(_, connection)| {
@@ -51,6 +56,15 @@ mod tests {
             assert!(connections.contains(&("keyboard/key".into(), format!("{consumer}/key"))));
             if consumer == "snake" {
                 assert!(connections.contains(&("keyboard/ready".into(), "snake/ready".into())));
+                let key = topology
+                    .connections()
+                    .find(|(_, connection)| connection.source().to_string() == "keyboard/key")
+                    .unwrap()
+                    .1;
+                assert_eq!(
+                    key.semantics(),
+                    ConnectionSemantics::Physical { after: None }
+                );
             }
         }
     }

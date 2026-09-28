@@ -5,7 +5,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use futures_util::{Stream, StreamExt};
 use ratatui::{
     backend::Backend,
-    layout::{Constraint, Direction, Layout},
+    layout::{Alignment, Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     symbols,
     text::{Line, Span},
@@ -95,12 +95,47 @@ pub enum DashboardAction {
     Exit,
 }
 
+/// Metric columns shown in the source overview table.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum TableMode {
+    /// Lifecycle, scheduler freshness, and sequence integrity.
+    #[default]
+    Status,
+    /// Receiver-derived scheduler throughput rates.
+    Activity,
+    /// Event-queue occupancy, peak, and enforced limit.
+    Queue,
+    /// Exporter loss counters and freshness.
+    Exporter,
+}
+
+impl TableMode {
+    fn next(self) -> Self {
+        match self {
+            Self::Status => Self::Activity,
+            Self::Activity => Self::Queue,
+            Self::Queue => Self::Exporter,
+            Self::Exporter => Self::Status,
+        }
+    }
+
+    fn previous(self) -> Self {
+        match self {
+            Self::Status => Self::Exporter,
+            Self::Activity => Self::Status,
+            Self::Queue => Self::Activity,
+            Self::Exporter => Self::Queue,
+        }
+    }
+}
+
 /// Source selection and plot choice independent of telemetry receiver state.
 #[derive(Debug, Default)]
 pub struct DashboardState {
     selected: usize,
     selected_identity: Option<crate::SourceIdentitySnapshot>,
     plot: PlotKind,
+    table_mode: TableMode,
 }
 
 impl DashboardState {
@@ -132,6 +167,11 @@ impl DashboardState {
         self.plot
     }
 
+    /// Metric columns currently shown in the source overview table.
+    pub fn table_mode(&self) -> TableMode {
+        self.table_mode
+    }
+
     /// Apply one key event without modifying receiver-owned telemetry state.
     pub fn handle_key(
         &mut self,
@@ -155,6 +195,8 @@ impl DashboardState {
             }
             (KeyCode::Char('1'), _) => self.plot = PlotKind::Throughput,
             (KeyCode::Char('2'), _) => self.plot = PlotKind::SchedulerTime,
+            (KeyCode::Tab, _) => self.table_mode = self.table_mode.next(),
+            (KeyCode::BackTab, _) => self.table_mode = self.table_mode.previous(),
             _ => {}
         }
         DashboardAction::Continue
@@ -262,6 +304,8 @@ fn render(frame: &mut ratatui::Frame<'_>, snapshot: &MonitorSnapshot, state: &Da
             Span::raw(" throughput  "),
             Span::styled("2", Style::default().fg(Color::Cyan)),
             Span::raw(" scheduler time  "),
+            Span::styled("Tab", Style::default().fg(Color::Cyan)),
+            Span::raw(" table  "),
             Span::styled("q", Style::default().fg(Color::Cyan)),
             Span::raw(" quit"),
         ])),
@@ -275,49 +319,158 @@ fn render_sources(
     snapshot: &MonitorSnapshot,
     state: &DashboardState,
 ) {
+    let (headers, widths) = table_columns(state.table_mode());
     let rows = snapshot.sources.iter().map(|source| {
-        let scheduler = source.scheduler.as_ref();
-        let state = scheduler
-            .map(|scheduler| format!("{:?}", scheduler.latest.raw.lifecycle))
-            .unwrap_or_else(|| "unavailable".into());
-        let freshness = freshness_label(classify_freshness(
-            scheduler.and_then(|scheduler| scheduler.sequence.age),
-        ));
-        let gaps = scheduler.map_or(0, |scheduler| scheduler.sequence.skipped);
-        Row::new([
-            source_label(&source.identity),
-            state,
-            freshness.into(),
-            gaps.to_string(),
-        ])
+        let alert = source_has_alert(source);
+        let row = Row::new(source_row(source, state.table_mode()));
+        if alert {
+            row.style(Style::default().fg(Color::Red))
+        } else {
+            row
+        }
     });
-    let header = Row::new(["Source", "State", "Scheduler", "Gap"])
-        .style(Style::default().add_modifier(Modifier::BOLD));
-    let table = Table::new(
-        rows,
-        [
-            Constraint::Percentage(42),
-            Constraint::Percentage(24),
-            Constraint::Percentage(22),
-            Constraint::Percentage(12),
-        ],
-    )
-    .header(header)
-    .block(Block::default().borders(Borders::ALL).title(format!(
-        "Sources {}  accepted {} rejected {}",
-        snapshot.sources.len(),
-        snapshot.counters.accepted,
-        snapshot.counters.rejected()
-    )))
-    .row_highlight_style(
-        Style::default()
-            .bg(Color::DarkGray)
-            .add_modifier(Modifier::BOLD),
-    )
-    .highlight_symbol("> ");
+    let header = Row::new(headers).style(Style::default().add_modifier(Modifier::BOLD));
+    let title = if area.width < 60 {
+        format!(
+            "Sources {} · {}",
+            snapshot.sources.len(),
+            table_mode_label(state.table_mode())
+        )
+    } else {
+        format!(
+            "Sources {} · {} · accepted {} rejected {}",
+            snapshot.sources.len(),
+            table_mode_label(state.table_mode()),
+            snapshot.counters.accepted,
+            snapshot.counters.rejected()
+        )
+    };
+    let table = Table::new(rows, widths)
+        .header(header)
+        .block(Block::default().borders(Borders::ALL).title(title))
+        .row_highlight_style(
+            Style::default()
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("> ");
     let mut table_state =
         TableState::default().with_selected(state.selected_index(&snapshot.sources));
     frame.render_stateful_widget(table, area, &mut table_state);
+}
+
+fn table_mode_label(mode: TableMode) -> &'static str {
+    match mode {
+        TableMode::Status => "Status",
+        TableMode::Activity => "Activity",
+        TableMode::Queue => "Queue",
+        TableMode::Exporter => "Exporter",
+    }
+}
+
+fn table_columns(mode: TableMode) -> (Vec<&'static str>, Vec<Constraint>) {
+    let headers = match mode {
+        TableMode::Status => vec!["", "Source", "State", "Health", "Seq"],
+        TableMode::Activity => vec!["", "Source", "Rxn/s", "Evt/s", "Tag/s"],
+        TableMode::Queue => vec!["", "Source", "Used", "Peak", "Limit"],
+        TableMode::Exporter => vec!["", "Source", "Drops", "Miss", "Age"],
+    };
+    (
+        headers,
+        vec![
+            Constraint::Length(1),
+            Constraint::Percentage(40),
+            Constraint::Percentage(20),
+            Constraint::Percentage(20),
+            Constraint::Percentage(20),
+        ],
+    )
+}
+
+fn source_row(source: &crate::SourceSnapshot, mode: TableMode) -> Vec<String> {
+    let scheduler = source.scheduler.as_ref();
+    let exporter = source.exporter_health.as_ref();
+    let mut row = vec![
+        if source_has_alert(source) { "!" } else { "" }.into(),
+        compact_source_label(&source.identity),
+    ];
+    match mode {
+        TableMode::Status => row.extend([
+            scheduler
+                .map(|scheduler| format!("{:?}", scheduler.latest.raw.lifecycle))
+                .unwrap_or_else(|| "unavailable".into()),
+            freshness_label(classify_freshness(
+                scheduler.and_then(|scheduler| scheduler.sequence.age),
+            ))
+            .into(),
+            scheduler.map_or_else(
+                || "-".into(),
+                |scheduler| {
+                    format!(
+                        "{}/{}",
+                        scheduler.sequence.skipped, scheduler.sequence.discontinuities
+                    )
+                },
+            ),
+        ]),
+        TableMode::Activity => row.extend([
+            scheduler
+                .and_then(|value| value.latest.rates.processed_reactions_per_second)
+                .map_or_else(|| "-".into(), |value| value.to_string()),
+            scheduler
+                .and_then(|value| value.latest.rates.processed_events_per_second)
+                .map_or_else(|| "-".into(), |value| value.to_string()),
+            scheduler
+                .and_then(|value| value.latest.rates.completed_logical_tags_per_second)
+                .map_or_else(|| "-".into(), |value| value.to_string()),
+        ]),
+        TableMode::Queue => row.extend([
+            scheduler.map_or_else(
+                || "-".into(),
+                |value| value.latest.raw.event_queue_occupancy.to_string(),
+            ),
+            scheduler.map_or_else(
+                || "-".into(),
+                |value| value.latest.raw.event_queue_peak_occupancy.to_string(),
+            ),
+            scheduler
+                .and_then(|value| value.latest.raw.event_queue_enforced_limit)
+                .map_or_else(|| "?".into(), |value| value.to_string()),
+        ]),
+        TableMode::Exporter => row.extend([
+            exporter.map_or_else(
+                || "-".into(),
+                |value| value.latest.raw.publication_drops.to_string(),
+            ),
+            exporter.map_or_else(
+                || "-".into(),
+                |value| value.latest.raw.snapshot_misses.to_string(),
+            ),
+            duration_label(exporter.and_then(|value| value.sequence.age)),
+        ]),
+    }
+    row
+}
+
+fn source_has_alert(source: &crate::SourceSnapshot) -> bool {
+    let scheduler_alert = source.scheduler.as_ref().is_some_and(|scheduler| {
+        matches!(
+            classify_freshness(scheduler.sequence.age),
+            Freshness::Stale | Freshness::Disconnected
+        ) || scheduler.sequence.skipped > 0
+            || scheduler.sequence.stale_or_reordered > 0
+            || scheduler.sequence.discontinuities > 0
+    });
+    let exporter_alert = source.exporter_health.as_ref().is_some_and(|exporter| {
+        matches!(
+            classify_freshness(exporter.sequence.age),
+            Freshness::Stale | Freshness::Disconnected
+        ) || exporter.sequence.skipped > 0
+            || exporter.sequence.stale_or_reordered > 0
+            || exporter.latest.raw.publication_drops > 0
+            || exporter.latest.raw.snapshot_misses > 0
+    });
+    scheduler_alert || exporter_alert
 }
 
 fn render_selected(
@@ -470,10 +623,19 @@ fn render_plot(
         return;
     };
     let history = &scheduler.history;
-    let x_max = history.len().saturating_sub(1).max(1) as f64;
-    let (metric_title, series): (&str, Vec<PlotSeries<'_>>) = match plot {
+    let latest_observation_ns = history
+        .last()
+        .map_or(0, |sample| sample.observation_monotonic_ns);
+    let x_min = history
+        .first()
+        .map_or(-1.0, |sample| {
+            relative_observation_seconds(latest_observation_ns, sample.observation_monotonic_ns)
+        })
+        .min(-1.0);
+    let (metric_title, y_unit, series): (&str, &str, Vec<PlotSeries<'_>>) = match plot {
         PlotKind::Throughput => (
-            "Throughput (operations/s)",
+            "Throughput",
+            "ops/s",
             vec![
                 (
                     "reactions",
@@ -497,7 +659,8 @@ fn render_plot(
             ],
         ),
         PlotKind::SchedulerTime => (
-            "Scheduler-accounted time (ms/s, not OS CPU)",
+            "Scheduler time (not OS CPU)",
+            "ms/s",
             vec![
                 (
                     "reaction",
@@ -547,27 +710,97 @@ fn render_plot(
             ],
         ),
     };
-    let title = format!("{} — {}", source_label(&source.identity), metric_title);
+    let title = if area.width < 64 {
+        format!(
+            "{} — {metric_title} [{y_unit}]",
+            compact_source_label(&source.identity)
+        )
+    } else {
+        format!(
+            "{} — {metric_title} [{y_unit}]",
+            source_label(&source.identity)
+        )
+    };
     let y_max = series
         .iter()
         .flat_map(|(_, _, points)| points.iter().map(|(_, y)| *y))
         .fold(1.0_f64, f64::max);
+    let y_upper = y_max.ceil().max(1.0);
     let datasets = series
         .iter()
-        .map(|(name, color, points)| {
+        .map(|(_name, color, points)| {
             Dataset::default()
-                .name(*name)
                 .marker(symbols::Marker::Braille)
                 .graph_type(GraphType::Scatter)
                 .style(Style::default().fg(*color))
                 .data(points)
         })
         .collect::<Vec<_>>();
+    let x_labels = vec![Span::raw(format!("{x_min:.0}s")), Span::raw("latest")];
+    let y_labels = vec![
+        Span::raw("0"),
+        Span::raw(format_value(y_upper / 2.0)),
+        Span::raw(format_value(y_upper)),
+    ];
     let chart = Chart::new(datasets)
-        .block(Block::default().borders(Borders::ALL).title(title))
-        .x_axis(Axis::default().bounds([0.0, x_max]))
-        .y_axis(Axis::default().bounds([0.0, y_max * 1.05]));
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(title)
+                .title_bottom(plot_legend(plot)),
+        )
+        .x_axis(
+            Axis::default()
+                .title("source time")
+                .bounds([x_min, 0.0])
+                .labels(x_labels),
+        )
+        .y_axis(
+            Axis::default()
+                .title(y_unit)
+                .bounds([0.0, y_upper])
+                .labels(y_labels),
+        );
     frame.render_widget(chart, area);
+}
+
+fn plot_legend(plot: PlotKind) -> Line<'static> {
+    let entries: &[(&str, Color)] = match plot {
+        PlotKind::Throughput => &[
+            ("R rxn", Color::Cyan),
+            ("E evt", Color::Yellow),
+            ("T tag", Color::Green),
+        ],
+        PlotKind::SchedulerTime => &[
+            ("R react", Color::Cyan),
+            ("F fw", Color::Magenta),
+            ("P phys", Color::Blue),
+            ("E ext", Color::Yellow),
+            ("C coord", Color::Green),
+        ],
+    };
+    Line::from(
+        entries
+            .iter()
+            .enumerate()
+            .flat_map(|(index, (label, color))| {
+                let separator = (index > 0).then(|| Span::raw("  "));
+                separator.into_iter().chain(std::iter::once(Span::styled(
+                    (*label).to_owned(),
+                    Style::default().fg(*color),
+                )))
+            })
+            .collect::<Vec<_>>(),
+    )
+    .alignment(Alignment::Right)
+}
+
+fn format_value(value: f64) -> String {
+    if value >= 10.0 || value.fract() == 0.0 {
+        format!("{value:.0}")
+    } else {
+        format!("{value:.1}")
+    }
 }
 
 fn rate_points(
@@ -575,13 +808,27 @@ fn rate_points(
     rate: impl Fn(&crate::SchedulerRates) -> Option<u64>,
     scale: f64,
 ) -> Vec<(f64, f64)> {
+    let latest_observation_ns = history
+        .last()
+        .map_or(0, |sample| sample.observation_monotonic_ns);
     history
         .iter()
-        .enumerate()
-        .filter_map(|(index, sample)| {
-            rate(&sample.rates).map(|value| (index as f64, value as f64 / scale))
+        .filter_map(|sample| {
+            rate(&sample.rates).map(|value| {
+                (
+                    relative_observation_seconds(
+                        latest_observation_ns,
+                        sample.observation_monotonic_ns,
+                    ),
+                    value as f64 / scale,
+                )
+            })
         })
         .collect()
+}
+
+fn relative_observation_seconds(latest_ns: u64, observation_ns: u64) -> f64 {
+    -(latest_ns.saturating_sub(observation_ns) as f64 / 1_000_000_000.0)
 }
 
 fn source_label(identity: &crate::SourceIdentitySnapshot) -> String {
@@ -590,6 +837,16 @@ fn source_label(identity: &crate::SourceIdentitySnapshot) -> String {
         identity.role,
         identity.federate_id.as_deref().unwrap_or("unknown"),
         identity.enclave_id.as_deref().unwrap_or("unknown"),
+        identity.process_id,
+        identity.process_incarnation
+    )
+}
+
+fn compact_source_label(identity: &crate::SourceIdentitySnapshot) -> String {
+    format!(
+        "{}/{}@{}#{}",
+        identity.federate_id.as_deref().unwrap_or("?"),
+        identity.enclave_id.as_deref().unwrap_or("?"),
         identity.process_id,
         identity.process_incarnation
     )
@@ -625,7 +882,7 @@ fn nanoseconds_label(nanoseconds: u64) -> String {
 mod tests {
     use super::{
         classify_freshness, run_dashboard_with, selected_presentation, with_terminal_lifecycle,
-        DashboardAction, DashboardState, Freshness, PlotKind, SelectedPresentation,
+        DashboardAction, DashboardState, Freshness, PlotKind, SelectedPresentation, TableMode,
     };
     use crate::{MonitorOptions, ReceiverConfig, SourceIdentitySnapshot, SourceSnapshot};
     use boomerang_telemetry::{
@@ -699,6 +956,30 @@ mod tests {
     }
 
     #[test]
+    fn tab_cycles_source_table_modes_and_backtab_reverses() {
+        let mut state = DashboardState::default();
+
+        assert_eq!(state.table_mode(), TableMode::Status);
+        for expected in [
+            TableMode::Activity,
+            TableMode::Queue,
+            TableMode::Exporter,
+            TableMode::Status,
+        ] {
+            assert_eq!(
+                state.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &[]),
+                DashboardAction::Continue
+            );
+            assert_eq!(state.table_mode(), expected);
+        }
+        assert_eq!(
+            state.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT), &[]),
+            DashboardAction::Continue
+        );
+        assert_eq!(state.table_mode(), TableMode::Exporter);
+    }
+
+    #[test]
     fn selected_source_identity_survives_an_earlier_sorted_insertion() {
         let mut state = DashboardState::default();
         let initial = vec![source("b"), source("c")];
@@ -716,6 +997,18 @@ mod tests {
         assert_eq!(
             selected_presentation(ratatui::layout::Rect::new(0, 0, 46, 7)),
             SelectedPresentation::PlotOnly
+        );
+    }
+
+    #[test]
+    fn plot_points_use_source_observation_seconds_relative_to_latest() {
+        assert_eq!(
+            super::relative_observation_seconds(12_000_000_000, 10_000_000_000),
+            -2.0
+        );
+        assert_eq!(
+            super::relative_observation_seconds(12_000_000_000, 12_000_000_000),
+            0.0
         );
     }
 

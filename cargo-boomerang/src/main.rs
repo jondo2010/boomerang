@@ -1,10 +1,10 @@
 use std::path::PathBuf;
 #[cfg(feature = "monitor")]
-use std::{net::SocketAddr, num::NonZeroUsize, time::Duration};
+use std::{io::IsTerminal, net::SocketAddr, num::NonZeroUsize, time::Duration};
 
 use anyhow::{anyhow, Result};
 #[cfg(feature = "monitor")]
-use boomerang_monitor::{serve, MonitorOptions, ReceiverConfig};
+use boomerang_monitor::{serve, serve_dashboard, MonitorOptions, ReceiverConfig};
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 
 use cargo_boomerang::{ColorChoice, CommandOutput};
@@ -78,6 +78,9 @@ enum BoomerangCommand {
         /// Print the structured snapshot as JSON.
         #[arg(long)]
         json: bool,
+        /// Disable the live dashboard and print the completed diagnostic snapshot.
+        #[arg(long, conflicts_with = "json")]
+        no_interactive: bool,
         /// Stop after this many accepted records; otherwise listen indefinitely.
         #[arg(long)]
         max_records: Option<NonZeroUsize>,
@@ -126,6 +129,7 @@ fn main() -> Result<()> {
         BoomerangCommand::Monitor {
             listen,
             json,
+            no_interactive,
             max_records,
             idle_timeout,
         } => {
@@ -136,11 +140,23 @@ fn main() -> Result<()> {
                 idle_timeout,
                 receiver: ReceiverConfig::default(),
             };
-            let snapshot = serve(&options)?;
-            if options.json {
-                println!("{}", serde_json::to_string_pretty(&snapshot)?);
-            } else {
-                println!("{snapshot:#?}");
+            match monitor_presentation(
+                json,
+                no_interactive,
+                std::io::stdin().is_terminal(),
+                std::io::stdout().is_terminal(),
+            ) {
+                MonitorPresentation::Json => {
+                    let snapshot = serve(&options)?;
+                    println!("{}", serde_json::to_string_pretty(&snapshot)?);
+                }
+                MonitorPresentation::Debug => {
+                    let snapshot = serve(&options)?;
+                    println!("{snapshot:#?}");
+                }
+                MonitorPresentation::Dashboard => {
+                    serve_dashboard(&options)?;
+                }
             }
         }
         BoomerangCommand::Build { deployment } => {
@@ -165,6 +181,30 @@ fn main() -> Result<()> {
 }
 
 #[cfg(feature = "monitor")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MonitorPresentation {
+    Dashboard,
+    Debug,
+    Json,
+}
+
+#[cfg(feature = "monitor")]
+fn monitor_presentation(
+    json: bool,
+    no_interactive: bool,
+    stdin_is_terminal: bool,
+    stdout_is_terminal: bool,
+) -> MonitorPresentation {
+    if json {
+        MonitorPresentation::Json
+    } else if no_interactive || !stdin_is_terminal || !stdout_is_terminal {
+        MonitorPresentation::Debug
+    } else {
+        MonitorPresentation::Dashboard
+    }
+}
+
+#[cfg(feature = "monitor")]
 fn parse_idle_timeout(value: &str) -> Result<Duration, String> {
     let duration = humantime::parse_duration(value).map_err(|error| error.to_string())?;
     if duration.is_zero() {
@@ -182,6 +222,8 @@ fn numeric_exit_code(status: &std::process::ExitStatus) -> Result<i32> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::numeric_exit_code;
+    #[cfg(feature = "monitor")]
+    use super::{monitor_presentation, MonitorPresentation};
     use std::{os::unix::process::ExitStatusExt, process::ExitStatus};
 
     #[test]
@@ -195,6 +237,27 @@ mod tests {
                 .to_string()
                 .contains("terminated without a numeric exit code"),
             "{error:#}"
+        );
+    }
+
+    #[cfg(feature = "monitor")]
+    #[test]
+    fn monitor_output_is_interactive_only_for_an_unredirected_terminal() {
+        assert_eq!(
+            monitor_presentation(false, false, true, true),
+            MonitorPresentation::Dashboard
+        );
+        assert_eq!(
+            monitor_presentation(false, false, true, false),
+            MonitorPresentation::Debug
+        );
+        assert_eq!(
+            monitor_presentation(false, true, true, true),
+            MonitorPresentation::Debug
+        );
+        assert_eq!(
+            monitor_presentation(true, false, true, true),
+            MonitorPresentation::Json
         );
     }
 }

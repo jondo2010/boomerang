@@ -22,6 +22,7 @@
 
 mod receiver;
 mod serve;
+mod terminal;
 
 /// Receiver state, snapshots, and ingestion outcomes.
 pub use receiver::{
@@ -31,6 +32,7 @@ pub use receiver::{
 };
 /// Hosted UDP serving options and errors.
 pub use serve::{serve, MonitorError, MonitorOptions};
+pub use terminal::serve_dashboard;
 
 #[cfg(test)]
 mod tests {

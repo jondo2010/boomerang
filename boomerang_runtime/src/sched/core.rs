@@ -307,6 +307,7 @@ where
         }
         let origin = event.kind_str();
         match event {
+            AsyncEvent::FederateResume => {}
             AsyncEvent::TagRelease { enclave, tag } => {
                 self.upstream_enclaves
                     .get_mut(enclave)

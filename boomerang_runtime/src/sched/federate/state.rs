@@ -146,6 +146,8 @@ pub(crate) enum CoordinationAction {
     },
     /// Resume participants after a changed candidate invalidates fixed-point work.
     Resume {
+        /// Participant whose new work invalidated the fixed point.
+        enclave: EnclaveIndex,
         /// New candidate revision that invalidated the fixed point.
         revision: CoordinationRevision,
     },
@@ -543,6 +545,7 @@ impl FederateCoordinationState {
         self.participants[enclave].published = false;
 
         Ok(vec![CoordinationAction::Resume {
+            enclave,
             revision: self.revision,
         }])
     }
@@ -754,6 +757,7 @@ impl FederateCoordinationState {
         let mut actions = vec![CoordinationAction::Publish(publication)];
         if resume {
             actions.push(CoordinationAction::Resume {
+                enclave,
                 revision: self.revision,
             });
         }
@@ -1059,6 +1063,7 @@ mod tests {
                     .handle_scheduler(SchedulerMessage::Active { enclave: first })
                     .unwrap(),
                 vec![CoordinationAction::Resume {
+                    enclave: first,
                     revision: resumed_revision,
                 }]
             );

@@ -544,73 +544,201 @@ fn render_details(
 }
 
 fn detail_lines(source: &crate::SourceSnapshot) -> Vec<Line<'static>> {
-    let Some(scheduler) = source.scheduler.as_ref() else {
-        return vec![
-            Line::from("scheduler: unavailable"),
-            exporter_line(source.exporter_health.as_ref()),
-        ];
-    };
-    let raw = &scheduler.latest.raw;
-    let age = duration_label(scheduler.sequence.age);
-    let progress = raw
-        .last_logical_progress_ns
-        .map(|last| {
-            scheduler
-                .latest
-                .observation_monotonic_ns
-                .saturating_sub(last)
-        })
-        .map(nanoseconds_label)
-        .unwrap_or_else(|| "unknown".into());
-    let phase_elapsed = nanoseconds_label(
-        scheduler
-            .latest
-            .observation_monotonic_ns
-            .saturating_sub(raw.current_phase_started_ns),
+    detail_rows(source).into_iter().map(detail_line).collect()
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct DetailItem {
+    label: &'static str,
+    value: String,
+}
+
+impl DetailItem {
+    fn new(label: &'static str, value: impl Into<String>) -> Self {
+        Self {
+            label,
+            value: value.into(),
+        }
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct DetailRow {
+    label: &'static str,
+    items: Vec<DetailItem>,
+}
+
+impl DetailRow {
+    fn new(label: &'static str, items: Vec<DetailItem>) -> Self {
+        Self { label, items }
+    }
+}
+
+fn detail_rows(source: &crate::SourceSnapshot) -> Vec<DetailRow> {
+    let scheduler = source.scheduler.as_ref();
+    let exporter = source.exporter_health.as_ref();
+    let runtime = scheduler.map_or_else(
+        || vec![DetailItem::new("state", "unavailable")],
+        |scheduler| {
+            let raw = &scheduler.latest.raw;
+            vec![
+                DetailItem::new("state", format!("{:?}", raw.lifecycle)),
+                DetailItem::new("phase", compact_phase_label(raw.current_phase)),
+                DetailItem::new(
+                    "fresh",
+                    format!(
+                        "{} {}",
+                        freshness_label(classify_freshness(scheduler.sequence.age)),
+                        duration_label(scheduler.sequence.age)
+                    ),
+                ),
+            ]
+        },
     );
+    let progress = scheduler.map_or_else(
+        || vec![DetailItem::new("tags", "unavailable")],
+        |scheduler| {
+            let raw = &scheduler.latest.raw;
+            let progress = raw
+                .last_logical_progress_ns
+                .map(|last| {
+                    scheduler
+                        .latest
+                        .observation_monotonic_ns
+                        .saturating_sub(last)
+                })
+                .map(nanoseconds_label)
+                .unwrap_or_else(|| "unknown".into());
+            let phase_elapsed = nanoseconds_label(
+                scheduler
+                    .latest
+                    .observation_monotonic_ns
+                    .saturating_sub(raw.current_phase_started_ns),
+            );
+            vec![
+                DetailItem::new("tags", raw.completed_logical_tags.to_string()),
+                DetailItem::new("last", progress),
+                DetailItem::new("sequence", scheduler.latest.sequence.to_string()),
+                DetailItem::new("phase", phase_elapsed),
+            ]
+        },
+    );
+    let queue = scheduler.map_or_else(
+        || vec![DetailItem::new("used", "unavailable")],
+        |scheduler| {
+            let raw = &scheduler.latest.raw;
+            vec![
+                DetailItem::new("used", raw.event_queue_occupancy.to_string()),
+                DetailItem::new("peak", raw.event_queue_peak_occupancy.to_string()),
+                DetailItem::new("reserved", raw.event_queue_reserved_capacity.to_string()),
+                DetailItem::new(
+                    "limit",
+                    raw.event_queue_enforced_limit
+                        .map_or_else(|| "unknown".into(), |value| value.to_string()),
+                ),
+            ]
+        },
+    );
+    let exporter_status = exporter.map_or_else(
+        || vec![DetailItem::new("fresh", "unavailable")],
+        |exporter| {
+            let freshness = classify_freshness(exporter.sequence.age);
+            vec![DetailItem::new(
+                "fresh",
+                if freshness == Freshness::Live {
+                    freshness_label(freshness).into()
+                } else {
+                    format!(
+                        "{} {}",
+                        freshness_label(freshness),
+                        duration_label(exporter.sequence.age)
+                    )
+                },
+            )]
+        },
+    );
+    let errors = vec![
+        DetailItem::new(
+            "sched s/r/d/e",
+            scheduler.map_or_else(
+                || "unavailable".into(),
+                |value| {
+                    format!(
+                        "{}/{}/{}/{}",
+                        compact_counter(value.sequence.skipped),
+                        compact_counter(value.sequence.stale_or_reordered),
+                        compact_counter(value.sequence.discontinuities),
+                        compact_counter(value.history_evictions)
+                    )
+                },
+            ),
+        ),
+        DetailItem::new(
+            "export s/r/d/m",
+            exporter.map_or_else(
+                || "unavailable".into(),
+                |value| {
+                    format!(
+                        "{}/{}/{}/{}",
+                        compact_counter(value.sequence.skipped),
+                        compact_counter(value.sequence.stale_or_reordered),
+                        compact_counter(value.latest.raw.publication_drops),
+                        compact_counter(value.latest.raw.snapshot_misses)
+                    )
+                },
+            ),
+        ),
+    ];
     vec![
-        Line::from(format!(
-            "{:?}  {:?} {phase_elapsed}  |  {} age {age}",
-            raw.lifecycle,
-            raw.current_phase,
-            freshness_label(classify_freshness(scheduler.sequence.age))
-        )),
-        Line::from(format!(
-            "tags {}  progress {progress} ago  |  sequence {}",
-            raw.completed_logical_tags, scheduler.latest.sequence
-        )),
-        Line::from(format!(
-            "queue {}  peak {}  reserved {}  enforced limit {}",
-            raw.event_queue_occupancy,
-            raw.event_queue_peak_occupancy,
-            raw.event_queue_reserved_capacity,
-            raw.event_queue_enforced_limit
-                .map_or_else(|| "unknown".into(), |value| value.to_string())
-        )),
-        Line::from(format!(
-            "skipped {}  reordered {}  discontinuities {}  evicted {}",
-            scheduler.sequence.skipped,
-            scheduler.sequence.stale_or_reordered,
-            scheduler.sequence.discontinuities,
-            scheduler.history_evictions
-        )),
-        exporter_line(source.exporter_health.as_ref()),
+        DetailRow::new("Runtime", runtime),
+        DetailRow::new("Progress", progress),
+        DetailRow::new("Queue", queue),
+        DetailRow::new("Exporter", exporter_status),
+        DetailRow::new("Errors", errors),
     ]
 }
 
-fn exporter_line(exporter: Option<&crate::ExporterHealthSnapshot>) -> Line<'static> {
-    exporter.map_or_else(
-        || Line::from("exporter health: unavailable"),
-        |exporter| {
-            Line::from(format!(
-                "export drops {}  misses {}  |  {} age {}",
-                exporter.latest.raw.publication_drops,
-                exporter.latest.raw.snapshot_misses,
-                freshness_label(classify_freshness(exporter.sequence.age)),
-                duration_label(exporter.sequence.age)
-            ))
-        },
-    )
+fn compact_phase_label(phase: impl std::fmt::Debug) -> String {
+    let label = format!("{phase:?}");
+    label.strip_suffix("Wait").unwrap_or(&label).to_owned()
+}
+
+fn compact_counter(mut value: u64) -> String {
+    const UNITS: [&str; 7] = ["", "k", "M", "G", "T", "P", "E"];
+    let mut unit = 0;
+    while unit + 1 < UNITS.len() && value >= 1_000 {
+        value = value / 1_000 + u64::from(value % 1_000 >= 500);
+        unit += 1;
+    }
+    if unit > 0 && unit + 1 < UNITS.len() && value >= 100 {
+        let tenths = value / 100 + u64::from(value % 100 >= 50);
+        return if tenths >= 10 {
+            format!("1{}", UNITS[unit + 1])
+        } else {
+            format!(".{tenths}{}", UNITS[unit + 1])
+        };
+    }
+    format!("{value}{}", UNITS[unit])
+}
+
+fn detail_line(row: DetailRow) -> Line<'static> {
+    let mut spans = vec![Span::styled(
+        format!("{:<8}", row.label),
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )];
+    for (index, item) in row.items.into_iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::raw("│"));
+        }
+        spans.push(Span::styled(
+            format!("{} ", item.label),
+            Style::default().add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::raw(item.value));
+    }
+    Line::from(spans)
 }
 
 fn render_plot(
@@ -881,10 +1009,11 @@ fn nanoseconds_label(nanoseconds: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_freshness, run_dashboard_with, selected_presentation, with_terminal_lifecycle,
-        DashboardAction, DashboardState, Freshness, PlotKind, SelectedPresentation, TableMode,
+        classify_freshness, detail_rows, run_dashboard_with, selected_presentation,
+        with_terminal_lifecycle, DashboardAction, DashboardState, Freshness, PlotKind,
+        SelectedPresentation, TableMode,
     };
-    use crate::{MonitorOptions, ReceiverConfig, SourceIdentitySnapshot, SourceSnapshot};
+    use crate::{MonitorOptions, Receiver, ReceiverConfig, SourceIdentitySnapshot, SourceSnapshot};
     use boomerang_telemetry::{
         ExporterHealth, RecordGroup, SourceIdentity, SourceRole, TelemetryRecord, TelemetryValue,
         MAX_DATAGRAM_BYTES,
@@ -915,6 +1044,127 @@ mod tests {
             scheduler: None,
             exporter_health: None,
         }
+    }
+
+    fn detail_source() -> SourceSnapshot {
+        let raw = serde_json::from_value(serde_json::json!({
+            "lifecycle": "Running", "current_phase": "Framework",
+            "current_phase_started_ns": 42,
+            "reaction_elapsed_ns": 1, "framework_elapsed_ns": 2,
+            "physical_wait_elapsed_ns": 3, "external_wait_elapsed_ns": 4,
+            "coordination_wait_elapsed_ns": 5, "processed_tags": 6,
+            "processed_reactions": 7, "processed_events": 8,
+            "set_ports": 9, "scheduled_actions": 10,
+            "event_queue_occupancy": 11, "event_queue_reserved_capacity": 12,
+            "event_queue_enforced_limit": null, "event_queue_peak_occupancy": 13,
+            "completed_logical_tags": 14, "last_logical_progress_ns": 23
+        }))
+        .unwrap();
+        let mut receiver = Receiver::new(ReceiverConfig::default());
+        for record in [
+            TelemetryRecord {
+                protocol_version: 1,
+                group: RecordGroup::Scheduler,
+                group_sequence: 0,
+                run_id: [1; 16],
+                artifact_id: [2; 32],
+                process_id: "worker",
+                process_incarnation: 3,
+                source: SourceIdentity {
+                    role: SourceRole::Federate,
+                    federate_id: Some("host"),
+                    enclave_id: Some("sensor"),
+                },
+                sender_monotonic_ns: 100,
+                observation_monotonic_ns: 90,
+                value: TelemetryValue::Scheduler(raw),
+            },
+            TelemetryRecord {
+                protocol_version: 1,
+                group: RecordGroup::ExporterHealth,
+                group_sequence: 0,
+                run_id: [1; 16],
+                artifact_id: [2; 32],
+                process_id: "worker",
+                process_incarnation: 3,
+                source: SourceIdentity {
+                    role: SourceRole::Federate,
+                    federate_id: Some("host"),
+                    enclave_id: Some("sensor"),
+                },
+                sender_monotonic_ns: 100,
+                observation_monotonic_ns: 90,
+                value: TelemetryValue::ExporterHealth(ExporterHealth {
+                    publication_drops: 2,
+                    snapshot_misses: 3,
+                }),
+            },
+            TelemetryRecord {
+                protocol_version: 1,
+                group: RecordGroup::ExporterHealth,
+                group_sequence: 0,
+                run_id: [1; 16],
+                artifact_id: [2; 32],
+                process_id: "worker",
+                process_incarnation: 3,
+                source: SourceIdentity {
+                    role: SourceRole::Federate,
+                    federate_id: Some("host"),
+                    enclave_id: Some("sensor"),
+                },
+                sender_monotonic_ns: 100,
+                observation_monotonic_ns: 90,
+                value: TelemetryValue::ExporterHealth(ExporterHealth {
+                    publication_drops: 99,
+                    snapshot_misses: 99,
+                }),
+            },
+        ] {
+            let mut bytes = [0; MAX_DATAGRAM_BYTES];
+            let length = record.encode_into(&mut bytes).unwrap();
+            receiver.ingest(&bytes[..length], Duration::ZERO);
+        }
+        receiver
+            .snapshot(Duration::from_millis(100))
+            .sources
+            .remove(0)
+    }
+
+    #[test]
+    fn details_group_loss_counters_separately_and_show_live_age_once() {
+        let rows = detail_rows(&detail_source());
+
+        assert_eq!(
+            rows.iter().map(|row| row.label).collect::<Vec<_>>(),
+            ["Runtime", "Progress", "Queue", "Exporter", "Errors"]
+        );
+        assert_eq!(
+            rows.iter()
+                .map(|row| { row.items.iter().map(|item| item.label).collect::<Vec<_>>() })
+                .collect::<Vec<_>>(),
+            [
+                vec!["state", "phase", "fresh"],
+                vec!["tags", "last", "sequence", "phase"],
+                vec!["used", "peak", "reserved", "limit"],
+                vec!["fresh"],
+                vec!["sched s/r/d/e", "export s/r/d/m"],
+            ]
+        );
+        assert_eq!(rows[0].items[2].value, "live 100ms");
+        assert_eq!(rows[3].items[0].value, "live");
+        assert_eq!(rows[4].items[0].value, "0/0/0/0");
+        assert_eq!(rows[4].items[1].value, "0/1/2/3");
+    }
+
+    #[test]
+    fn compact_error_counters_have_a_three_column_ceiling() {
+        assert_eq!(super::compact_counter(999), "999");
+        assert_eq!(super::compact_counter(1_000), "1k");
+        assert_eq!(super::compact_counter(100_000), ".1M");
+        assert_eq!(super::compact_counter(499_999), ".5M");
+        assert_eq!(super::compact_counter(999_999), "1M");
+        assert_eq!(super::compact_counter(1_000_000), "1M");
+        assert_eq!(super::compact_counter(u64::MAX), "18E");
     }
 
     #[test]

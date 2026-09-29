@@ -7,10 +7,10 @@ use boomerang::builder::compiler::{ApplicationTopology, TopologyAuthoringError, 
 
 pub fn topology() -> Result<ApplicationTopology, TopologyAuthoringError> {
     let mut app = TopologyBuilder::new("application/keyboard/snake")?;
-    // Both components share the enclave's shutdown lifecycle.
-    let enclave = app.enclave("keyboard")?;
-    let keyboard = app.component("keyboard", keyboard::definition(), &enclave)?;
-    let snake = app.component("snake", game::definition(), &enclave)?;
+    let keyboard_enclave = app.enclave("keyboard")?;
+    let snake_enclave = app.enclave("snake")?;
+    let keyboard = app.component("keyboard", keyboard::definition(), &keyboard_enclave)?;
+    let snake = app.component("snake", game::definition(), &snake_enclave)?;
     app.connect(&keyboard.key, &snake.key)?;
     // Initialize the terminal before Snake renders and starts its game clock.
     app.connect(&keyboard.ready, &snake.ready)?;
@@ -32,13 +32,12 @@ mod tests {
 
     #[test]
     fn keyboard_component_drives_both_example_consumers() {
-        for (topology, consumer) in [
-            (topology().unwrap(), "snake"),
-            (keyboard_topology().unwrap(), "display"),
+        for (topology, consumer, enclave_count) in [
+            (topology().unwrap(), "snake", 2),
+            (keyboard_topology().unwrap(), "display", 1),
         ] {
             assert_eq!(topology.components().count(), 2);
-            // Both components share an enclave, including its shutdown lifecycle.
-            assert_eq!(topology.enclaves().count(), 1);
+            assert_eq!(topology.enclaves().count(), enclave_count);
             let connections: Vec<_> = topology
                 .connections()
                 .map(|(_, connection)| {

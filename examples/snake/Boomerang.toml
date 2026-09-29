@@ -11,6 +11,7 @@ bindings.keyboard = { package = "snake-keyboard", component = "keyboard" }
 
 federates.host = { groups = [
     "placement/keyboard",
+    "placement/snake",
 ], runtime = "std", recovery = "fail-stop" }
 
 execution = { fast-forward = false, keep-alive = true }

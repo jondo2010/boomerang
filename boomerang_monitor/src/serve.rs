@@ -46,6 +46,12 @@ pub enum MonitorError {
     /// Serializing the completed snapshot as JSON failed.
     #[error("cannot render telemetry monitor JSON: {0}")]
     Json(#[from] serde_json::Error),
+    /// Initializing, drawing, or restoring the hosted terminal failed.
+    #[error("cannot present telemetry monitor terminal: {0}")]
+    Terminal(#[source] io::Error),
+    /// Reading an interactive terminal event failed.
+    #[error("cannot read telemetry monitor terminal input: {0}")]
+    TerminalInput(#[source] io::Error),
 }
 
 /// Receive bounded UDP datagrams and return a snapshot once the accepted-record

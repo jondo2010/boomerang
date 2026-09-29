@@ -1,5 +1,5 @@
 #!/bin/sh
-# Launch Snake and one completed telemetry snapshot in a two-pane Zellij session.
+# Launch Snake above its live telemetry dashboard in a Zellij session.
 set -eu
 
 if ! command -v zellij >/dev/null 2>&1; then

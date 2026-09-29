@@ -11,7 +11,7 @@ wraps at the edges, and speeds up as the snake eats food. Reversing directly int
 the snake is ignored; colliding with its body ends the game and prints the score.
 Run it in an interactive terminal. Raw mode is restored on normal shutdown.
 
-## Telemetry snapshot demo
+## Live telemetry dashboard
 
 Snake's checked-in deployment enables the hosted telemetry exporter. With
 [`zellij`](https://zellij.dev/) installed, launch the two-pane demo from the
@@ -21,11 +21,13 @@ repository root:
 ./examples/snake/telemetry-demo.sh
 ```
 
-The left pane runs Snake. The right pane runs the optional monitor client,
-collects the first two observed telemetry records over UDP on `127.0.0.1:9000`,
-and prints one debug snapshot before waiting for Enter. This is intentionally a
-completed snapshot demonstration: the monitor is not a live dashboard yet. The
-later dashboard slice will replace this finite output with live presentation.
+The top pane runs Snake. The wide, shallow bottom pane starts the optional live
+monitor first and receives framework telemetry over UDP on `127.0.0.1:9000`.
+Use Up/Down to select a source, `1` for throughput, `2` for scheduler-accounted
+time, and `q` to leave the dashboard. Finishing Snake leaves the last bounded
+state visible so its freshness can transition through stale and disconnected.
+The Snake deployment exposes separate `host/keyboard` and `host/snake` enclave
+sources while keeping both schedulers in the same hosted Federate process.
 
 The keyboard-only demo prints each arrow key:
 
@@ -63,17 +65,19 @@ The deployment manifests select those modules with each binding's `component`
 path. The Snake manifest binds `snake-game::game` and
 `snake-keyboard::keyboard`; the keyboard demo keeps its own manifest because the
 current schema has one topology entry per manifest, and binds
-`snake-keyboard::{keyboard, display}`. Each composition shares one enclave, so
-Ctrl-C and game-over shut down both components and restore terminal settings.
+`snake-keyboard::{keyboard, display}`. Snake places its two components in
+separate enclaves so their scheduler activity and lifecycle remain visible
+independently; the keyboard-only composition keeps both components together.
 
 Each `component!` declaration generates a host-side `definition()` constructor.
 The topology library composes those definitions with typed port handles:
 
 ```rust
 let mut app = TopologyBuilder::new("application/keyboard/snake")?;
-let enclave = app.enclave("keyboard")?;
-let keyboard = app.component("keyboard", keyboard::definition(), &enclave)?;
-let snake = app.component("snake", game::definition(), &enclave)?;
+let keyboard_enclave = app.enclave("keyboard")?;
+let snake_enclave = app.enclave("snake")?;
+let keyboard = app.component("keyboard", keyboard::definition(), &keyboard_enclave)?;
+let snake = app.component("snake", game::definition(), &snake_enclave)?;
 app.connect(&keyboard.key, &snake.key)?;
 app.connect(&keyboard.ready, &snake.ready)?;
 app.finish()
@@ -81,7 +85,7 @@ app.finish()
 
 The constructors declare actions, ports, reactions, and timing in the compiler
 topology. Runtime initialization occurs when the generated executable starts.
-The shared enclave is explicit, and connections require matching payload types
+The enclave boundary is explicit, and connections require matching payload types
 and output-to-input direction.
 
 Compile the component crates and both deployments without starting the game:

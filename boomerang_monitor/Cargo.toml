@@ -12,6 +12,10 @@ exclude.workspace = true
 
 [dependencies]
 boomerang_telemetry.workspace = true
+crossterm.workspace = true
+futures-util.workspace = true
+ratatui.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 thiserror.workspace = true
+tokio.workspace = true

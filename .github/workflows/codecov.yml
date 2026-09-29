@@ -32,20 +32,43 @@ jobs:
         shell: bash
         run: echo "CARGO_TARGET_DIR=target" >> "$GITHUB_ENV"
 
-      - uses: swatinem/rust-cache@v2
-        with:
-          workspaces: . -> target
-
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
 
-      - name: Generate code coverage
-        run: |
-          cargo fetch
+      - name: Fetch dependencies
+        run: cargo fetch
+
+      - name: Collect workspace coverage
+        run: >-
           cargo llvm-cov --no-report --all-features --workspace
-          # Exercise the tool-owned facet cfg values independently of Cargo features.
-          RUSTFLAGS='--cfg boomerang_facet="payload"' cargo llvm-cov --no-clean -p boomerang --lib --no-default-features
-          RUSTFLAGS='--cfg boomerang_facet="descriptor"' cargo llvm-cov --no-clean -p boomerang --lib --no-default-features --features hosted
+          --exclude cargo-boomerang
+
+      - name: Collect cargo-boomerang fast coverage
+        run: >-
+          cargo llvm-cov --no-clean -p cargo-boomerang --all-features
+          --lib --bin cargo-boomerang --test manifest --test workspace
+
+      - name: Collect generated-launcher smoke coverage
+        run: >-
+          cargo llvm-cov --no-clean -p cargo-boomerang --all-features
+          --test toolchain --
+          run::generated_monolith_cli_matches_owned_execution --exact
+
+      # Exercise the tool-owned facet cfg values independently of Cargo features.
+      - name: Collect payload facet coverage
+        run: >-
+          RUSTFLAGS='--cfg boomerang_facet="payload"'
+          cargo llvm-cov --no-clean -p boomerang --lib --no-default-features
+
+      - name: Collect descriptor facet coverage
+        run: >-
+          RUSTFLAGS='--cfg boomerang_facet="descriptor"'
+          cargo llvm-cov --no-clean -p boomerang --lib --no-default-features
+          --features hosted
+
+      - name: Generate LCOV report
+        shell: bash
+        run: |
           # Generated workspaces fall outside cargo-llvm-cov's object discovery.
           # Use Cargo outputs; publication tests deliberately corrupt bundled copies.
           objects=()

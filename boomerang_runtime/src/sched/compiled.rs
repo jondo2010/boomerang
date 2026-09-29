@@ -559,7 +559,7 @@ mod tests {
                     }
                 },
             );
-        OwnedStorage::new(EnclaveImageView::new(image).unwrap(), bindings).unwrap()
+        OwnedStorage::new(EnclaveImageView::new(image.clone()).unwrap(), bindings).unwrap()
     }
 
     /// Builds a scripted coordination port over one shared call log.

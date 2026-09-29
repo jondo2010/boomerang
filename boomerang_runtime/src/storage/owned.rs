@@ -1641,26 +1641,26 @@ mod tests {
 
     /// Returns a fresh validated view of the immutable test image.
     fn image() -> EnclaveImageView<'static> {
-        EnclaveImageView::new(&IMAGE).expect("test image is valid")
+        EnclaveImageView::new(IMAGE.clone()).expect("test image is valid")
     }
 
     /// Returns a validated image whose action delay cannot fit the runtime duration type.
     fn unrepresentable_action_image() -> EnclaveImageView<'static> {
-        EnclaveImageView::new(&UNREPRESENTABLE_ACTION_IMAGE).expect("test image is valid")
+        EnclaveImageView::new(UNREPRESENTABLE_ACTION_IMAGE.clone()).expect("test image is valid")
     }
 
     /// Returns a validated image whose global startup delay cannot fit the runtime duration type.
     fn unrepresentable_startup_image() -> EnclaveImageView<'static> {
-        EnclaveImageView::new(&UNREPRESENTABLE_STARTUP_IMAGE).expect("test image is valid")
+        EnclaveImageView::new(UNREPRESENTABLE_STARTUP_IMAGE.clone()).expect("test image is valid")
     }
 
     /// Returns a valid image with a reaction filter broader than its static scope.
     fn filtered_mode_image() -> EnclaveImageView<'static> {
-        EnclaveImageView::new(&FILTERED_MODE_IMAGE).expect("test image is valid")
+        EnclaveImageView::new(FILTERED_MODE_IMAGE.clone()).expect("test image is valid")
     }
 
     fn routed_image() -> EnclaveImageView<'static> {
-        EnclaveImageView::new(&ROUTED_IMAGE).expect("test image is valid")
+        EnclaveImageView::new(ROUTED_IMAGE.clone()).expect("test image is valid")
     }
 
     /// Returns bindings for every non-lifecycle storage slot in [`IMAGE`].
@@ -1780,7 +1780,7 @@ mod tests {
             actions: TinyMapView::new(&actions),
             ..IMAGE
         };
-        let image = EnclaveImageView::new(&periodic_image).expect("periodic image is structural");
+        let image = EnclaveImageView::new(periodic_image).expect("periodic image is structural");
         INITIALIZER_CALLS.store(0, Ordering::SeqCst);
 
         let error = OwnedStorage::new(image, counted_bindings()).unwrap_err();
@@ -1803,7 +1803,7 @@ mod tests {
             actions: TinyMapView::new(&actions),
             ..IMAGE
         };
-        let image = EnclaveImageView::new(&periodic_image).expect("periodic image is structural");
+        let image = EnclaveImageView::new(periodic_image).expect("periodic image is structural");
         INITIALIZER_CALLS.store(0, Ordering::SeqCst);
 
         let error = OwnedStorage::new(image, counted_bindings()).unwrap_err();
@@ -1823,7 +1823,7 @@ mod tests {
             actions: TinyMapView::new(&actions),
             ..IMAGE
         };
-        let image = EnclaveImageView::new(&timer_image).expect("timer image is structural");
+        let image = EnclaveImageView::new(timer_image).expect("timer image is structural");
 
         let error = OwnedStorage::new(image, complete_bindings()).unwrap_err();
 
@@ -1880,7 +1880,7 @@ mod tests {
             reaction_actions: &duplicate_actions,
             ..IMAGE
         };
-        let image = EnclaveImageView::new(&aliased_image).expect("aliased image is structural");
+        let image = EnclaveImageView::new(aliased_image).expect("aliased image is structural");
         INITIALIZER_CALLS.store(0, Ordering::SeqCst);
 
         let error = OwnedStorage::new(image, counted_bindings()).unwrap_err();
@@ -2127,7 +2127,7 @@ mod tests {
             required_bindings: TinyMapView::new(&required_bindings),
             ..IMAGE
         };
-        let image = EnclaveImageView::new(&image).unwrap();
+        let image = EnclaveImageView::new(image).unwrap();
         let seen_origin = Arc::new(Mutex::new(None));
         let reaction_origin = Arc::clone(&seen_origin);
         let bindings = EnclaveBindings::new()

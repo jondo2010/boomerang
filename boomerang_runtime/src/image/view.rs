@@ -265,10 +265,13 @@ impl<'a> CompiledDeploymentView<'a> {
 
     /// Returns a validated Federate descriptor independent of this aggregate view.
     pub fn federate(&self, key: FederateIndex) -> FederateImageView<'a> {
-        FederateImageView {
-            enclaves: self.image.enclaves,
-            federate: self.image.federates[key].clone(),
-        }
+        let federate = self.image.federates[key].clone();
+        let enclaves = self
+            .image
+            .enclaves
+            .get_span(federate.enclaves())
+            .expect("compiled deployment ranges are validated");
+        FederateImageView { enclaves, federate }
     }
 
     /// Returns the backend-neutral federation structure.
@@ -282,19 +285,70 @@ impl<'a> CompiledDeploymentView<'a> {
     }
 }
 
-/// A validated Federate descriptor with borrowed Enclave images.
+/// A validated Federate descriptor with borrowed raw Enclave descriptors.
 ///
 /// The view owns its Federate descriptor and retains the original Enclave table's key domain.
 /// It can outlive the deployment view that selected it; backing tables and identities stay borrowed.
+/// Invalid generated metadata fails during const evaluation:
+///
+/// ```compile_fail,E0080
+/// use boomerang_runtime::image::*;
+/// use tinymap::IndexSpan;
+///
+/// static EMPTY: [EnclaveImage<'static>; 0] = [];
+/// const INVALID: FederateImageView<'static> = match FederateImageView::new(
+///     FederateImage::new(
+///         FederateId::new("host"),
+///         TargetId::new("target"),
+///         RuntimeBackendId::new("runtime"),
+///         IndexSpan::new(0, 1),
+///     ),
+///     &EMPTY,
+/// ) {
+///     Ok(view) => view,
+///     Err(_) => panic!("invalid generated Federate image"),
+/// };
+/// ```
+///
+/// The proof retains the raw descriptor slice borrow and cannot escape it:
+///
+/// ```compile_fail,E0515
+/// use boomerang_runtime::image::{EnclaveImage, FederateImage, FederateImageView};
+///
+/// fn escape<'a>(
+///     federate: FederateImage<'a>,
+///     enclave: EnclaveImage<'a>,
+/// ) -> FederateImageView<'a> {
+///     let enclaves = [enclave];
+///     FederateImageView::new(federate, &enclaves).unwrap()
+/// }
+/// ```
 #[derive(Debug)]
 pub struct FederateImageView<'a> {
-    /// Complete Enclave table preserving deployment-wide keys and validated ranges.
-    enclaves: TinyMapView<'a, EnclaveIndex, EnclaveImage<'a>>,
+    /// Exact normalized descriptor slice for the Federate's deployment-wide span.
+    enclaves: &'a [EnclaveImage<'a>],
     /// Validated Federate descriptor selected from the deployment table.
     federate: FederateImage<'a>,
 }
 
 impl<'a> FederateImageView<'a> {
+    /// Validates a Federate descriptor against its borrowed raw Enclave descriptors.
+    ///
+    /// This const-capable constructor proves the Federate-local identities, canonical global
+    /// Enclave span, slice cardinality, nested Enclave structure, and identity order.
+    /// Deployment-wide ownership, federation routes, and backend coordination remain obligations
+    /// of host compilation and the selected backend. The returned proof cannot outlive either the
+    /// descriptor's identity data or the borrowed raw descriptor slice.
+    pub const fn new(
+        federate: FederateImage<'a>,
+        enclaves: &'a [EnclaveImage<'a>],
+    ) -> Result<Self, ImageValidationError<'a>> {
+        match validate_federate_const(&federate, 0, "federate", "Enclave key domain", enclaves) {
+            Ok(_) => Ok(Self { enclaves, federate }),
+            Err(fault) => Err(fault.error),
+        }
+    }
+
     /// Returns the stable Federate identity.
     pub fn id(&self) -> FederateId<'a> {
         self.federate.id()
@@ -317,19 +371,32 @@ impl<'a> FederateImageView<'a> {
 
     /// Iterates validated Enclave views in canonical identity order.
     pub fn enclave_views(&self) -> impl ExactSizeIterator<Item = EnclaveImageView<'a>> + 'a {
-        let images = self
-            .enclaves
-            .get_span(self.federate.enclaves())
-            .expect("compiled deployment ranges are validated");
-        images.iter().map(EnclaveImageView::validated)
+        let enclaves = self.enclaves;
+        enclaves.iter().cloned().map(EnclaveImageView::validated)
+    }
+
+    pub(crate) const fn descriptor(&self) -> &FederateImage<'a> {
+        &self.federate
     }
 }
 
-/// A validated, allocation-free borrowed view of one Enclave image.
+/// A validated, allocation-free view of one Enclave image.
+///
+/// The view owns the lightweight descriptor, so a local descriptor binding need not outlive it;
+/// the tables referenced by that descriptor still must:
+///
+/// ```
+/// use boomerang_runtime::image::{EnclaveImage, EnclaveImageView};
+///
+/// fn retain_descriptor<'a>(image: EnclaveImage<'a>) -> EnclaveImageView<'a> {
+///     let local_descriptor = image;
+///     EnclaveImageView::new(local_descriptor).unwrap()
+/// }
+/// ```
 #[derive(Debug)]
 pub struct EnclaveImageView<'a> {
-    /// Immutable image borrowed for this view's lifetime.
-    image: &'a EnclaveImage<'a>,
+    /// Immutable descriptor whose backing tables remain borrowed.
+    image: EnclaveImage<'a>,
 }
 
 struct ValidationFault<'a> {
@@ -352,24 +419,22 @@ macro_rules! const_fail {
 }
 
 impl<'a> EnclaveImageView<'a> {
-    /// Validates `image` and borrows all of its tables without copying.
-    ///
-    /// Validation errors borrow identity data, independently of the shorter image borrow.
-    pub const fn new<'data: 'a>(
-        image: &'a EnclaveImage<'data>,
-    ) -> Result<Self, ImageValidationError<'data>> {
-        match validate_enclave_const(image) {
+    /// Consumes `image` and validates its borrowed backing tables without copying them.
+    pub const fn new(image: EnclaveImage<'a>) -> Result<Self, ImageValidationError<'a>> {
+        match validate_enclave_const(&image) {
             Ok(()) => Ok(Self { image }),
             Err(fault) => Err(fault.error),
         }
     }
 
-    fn validated(image: &'a EnclaveImage<'a>) -> Self {
+    fn validated(image: EnclaveImage<'a>) -> Self {
         Self { image }
     }
-    /// Creates another borrow of the same validated image without duplicating its records.
+    /// Shallow-clones the validated descriptor without duplicating its backing records.
     pub(crate) fn reborrow(&self) -> Self {
-        Self { image: self.image }
+        Self {
+            image: self.image.clone(),
+        }
     }
 
     /// Returns the stable Enclave identity.
@@ -377,38 +442,38 @@ impl<'a> EnclaveImageView<'a> {
         self.image.enclave_id
     }
     /// Returns the dense reactor table.
-    pub const fn reactors(&self) -> &'a TinyMapView<'a, ReactorIndex, ReactorImage> {
-        &self.image.reactors
+    pub const fn reactors(&self) -> TinyMapView<'a, ReactorIndex, ReactorImage> {
+        self.image.reactors
     }
     /// Returns the dense action table.
-    pub const fn actions(&self) -> &'a TinyMapView<'a, ActionIndex, ActionImage> {
-        &self.image.actions
+    pub const fn actions(&self) -> TinyMapView<'a, ActionIndex, ActionImage> {
+        self.image.actions
     }
     /// Returns the dense port table.
-    pub const fn ports(&self) -> &'a TinyMapView<'a, PortIndex, PortImage> {
-        &self.image.ports
+    pub const fn ports(&self) -> TinyMapView<'a, PortIndex, PortImage> {
+        self.image.ports
     }
     /// Returns the dense reaction table.
-    pub const fn reactions(&self) -> &'a TinyMapView<'a, ReactionIndex, ReactionImage> {
-        &self.image.reactions
+    pub const fn reactions(&self) -> TinyMapView<'a, ReactionIndex, ReactionImage> {
+        self.image.reactions
     }
     /// Returns the dense mode table.
-    pub const fn modes(&self) -> &'a TinyMapView<'a, ModeIndex, ModeImage> {
-        &self.image.modes
+    pub const fn modes(&self) -> TinyMapView<'a, ModeIndex, ModeImage> {
+        self.image.modes
     }
     /// Returns the dense scope table.
-    pub const fn scopes(&self) -> &'a TinyMapView<'a, ScopeIndex, ScopeImage> {
-        &self.image.scopes
+    pub const fn scopes(&self) -> TinyMapView<'a, ScopeIndex, ScopeImage> {
+        self.image.scopes
     }
     /// Returns the dense boundary-route table.
-    pub const fn routes(&self) -> &'a TinyMapView<'a, RouteIndex, RouteImage<'a>> {
-        &self.image.routes
+    pub const fn routes(&self) -> TinyMapView<'a, RouteIndex, RouteImage<'a>> {
+        self.image.routes
     }
     /// Returns the dense required-binding table.
     pub const fn required_bindings(
         &self,
-    ) -> &'a TinyMapView<'a, BindingSlotIndex, RequiredBindingImage<'a>> {
-        &self.image.required_bindings
+    ) -> TinyMapView<'a, BindingSlotIndex, RequiredBindingImage<'a>> {
+        self.image.required_bindings
     }
     /// Resolves a route's stable boundary identity.
     pub fn route_boundary_id(&self, key: RouteIndex) -> BoundaryId<'a> {
@@ -586,40 +651,6 @@ fn check_range<'a, T>(
     Ok(())
 }
 
-/// Validates one monotonic owner-allocated span against its dense target table.
-fn check_span<'a, K: Key>(
-    table: &'static str,
-    index: u32,
-    field: &'static str,
-    target: &'static str,
-    span: IndexSpan<K>,
-    len: usize,
-    previous_end: &mut usize,
-) -> Result<(), ImageValidationError<'a>> {
-    let end = span.checked_end();
-    if end.is_none_or(|end| end > len) {
-        return Err(ImageValidationError::RangeOutOfBounds {
-            table,
-            index,
-            field,
-            target,
-            start: span.start(),
-            len: span.len(),
-        });
-    }
-    if span.start() < *previous_end {
-        return Err(ImageValidationError::RangesNotMonotonic {
-            table,
-            index,
-            field,
-            start: span.start(),
-            previous_end: *previous_end,
-        });
-    }
-    *previous_end = end.expect("checked dense span has an end");
-    Ok(())
-}
-
 const fn utf8_scalar(bytes: &[u8], offset: usize) -> (u32, usize) {
     let first = bytes[offset];
     if first < 0x80 {
@@ -696,6 +727,15 @@ fn validate_id<'a>(
     if !valid_id(id) {
         return Err(ImageValidationError::InvalidStableId { kind, index, id });
     }
+    validate_id_order(kind, index, id, previous)
+}
+
+fn validate_id_order<'a>(
+    kind: &'static str,
+    index: u32,
+    id: &'a str,
+    previous: &mut Option<&'a str>,
+) -> Result<(), ImageValidationError<'a>> {
     if let Some(before) = *previous {
         if id == before {
             return Err(ImageValidationError::DuplicateStableId { kind, index, id });
@@ -977,19 +1017,21 @@ fn validate_compiled_deployment<'a>(
     for (i, federate) in image.federates.values().enumerate() {
         let index = i as u32;
         let id = federate.id();
-        validate_id("federate", index, id.as_str(), &mut previous_federate)?;
-        for (field, value) in [
-            ("target", federate.target().as_str()),
-            ("runtime", federate.runtime().as_str()),
-        ] {
-            if !valid_id(value) {
-                return Err(ImageValidationError::InvalidStableId {
-                    kind: field,
-                    index,
-                    id: value,
-                });
-            }
+        let end = match validate_federate_metadata(federate, index, "federates", "enclaves") {
+            Ok(end) => end,
+            Err(fault) => return Err(fault.error),
+        };
+        if end > image.enclaves.len() {
+            return Err(ImageValidationError::RangeOutOfBounds {
+                table: "federates",
+                index,
+                field: "enclaves",
+                target: "enclaves",
+                start: federate.enclaves().start(),
+                len: federate.enclaves().len(),
+            });
         }
+        validate_id_order("federate", index, id.as_str(), &mut previous_federate)?;
         if federate.enclaves().start() != enclave_end {
             return Err(ImageValidationError::OwnershipMismatch {
                 table: "federates",
@@ -997,15 +1039,15 @@ fn validate_compiled_deployment<'a>(
                 field: "enclaves",
             });
         }
-        check_span(
-            "federates",
+        if let Err(fault) = validate_federate_enclaves(
+            federate,
             index,
-            "enclaves",
-            "enclaves",
-            federate.enclaves(),
-            image.enclaves.len(),
-            &mut enclave_end,
-        )?;
+            "federates",
+            &image.enclaves.as_slice()[federate.enclaves().start()..end],
+        ) {
+            return Err(fault.error);
+        }
+        enclave_end = end;
     }
     if enclave_end != image.enclaves.len() {
         return Err(ImageValidationError::OwnershipMismatch {
@@ -1090,24 +1132,6 @@ fn validate_compiled_deployment<'a>(
         }
     }
 
-    for federate in image.federates.values() {
-        let mut previous_enclave = None;
-        let enclaves = image
-            .enclaves
-            .get_span(federate.enclaves())
-            .expect("compiled deployment ranges are validated");
-        for (offset, enclave) in enclaves.iter().enumerate() {
-            let index = u32::try_from(federate.enclaves().start() + offset)
-                .expect("validated Enclave key fits its u32 representation");
-            validate(enclave)?;
-            validate_id(
-                "enclave",
-                index,
-                enclave.enclave_id.as_str(),
-                &mut previous_enclave,
-            )?;
-        }
-    }
     validate_route_pairs(image)?;
     Ok(())
 }
@@ -1363,6 +1387,173 @@ const fn validate_enclave_id<'a>(
         }
     }
     Ok(())
+}
+
+const fn validate_federate_metadata<'a>(
+    federate: &FederateImage<'a>,
+    index: u32,
+    table: &'static str,
+    span_target: &'static str,
+) -> Result<usize, ValidationFault<'a>> {
+    const_try!(validate_enclave_id(
+        "federate",
+        index,
+        federate.id().as_str(),
+        None,
+    ));
+    const_try!(validate_enclave_id(
+        "target",
+        index,
+        federate.target().as_str(),
+        None,
+    ));
+    const_try!(validate_enclave_id(
+        "runtime",
+        index,
+        federate.runtime().as_str(),
+        None,
+    ));
+
+    let span = federate.enclaves();
+    let end = match span.checked_end() {
+        Some(end) if end <= <EnclaveIndex as Key>::MAX_LEN => end,
+        _ => {
+            return Err(enclave_fault(ImageValidationError::RangeOutOfBounds {
+                table,
+                index,
+                field: "enclaves",
+                target: span_target,
+                start: span.start(),
+                len: span.len(),
+            }));
+        }
+    };
+    Ok(end)
+}
+
+const fn validate_federate_enclaves<'a>(
+    federate: &FederateImage<'a>,
+    index: u32,
+    table: &'static str,
+    enclaves: &[EnclaveImage<'a>],
+) -> Result<(), ValidationFault<'a>> {
+    let span = federate.enclaves();
+    if enclaves.len() != span.len() {
+        return Err(enclave_fault(ImageValidationError::OwnershipMismatch {
+            table,
+            index,
+            field: "enclaves",
+        }));
+    }
+
+    let mut previous = None;
+    let mut offset = 0;
+    while offset < span.len() {
+        let enclave = &enclaves[offset];
+        const_try!(validate_enclave_const(enclave));
+        let id = enclave.enclave_id.as_str();
+        const_try!(validate_enclave_id(
+            "enclave",
+            (span.start() + offset) as u32,
+            id,
+            previous,
+        ));
+        previous = Some(id);
+        offset += 1;
+    }
+    validate_federate_route_pairs(enclaves)
+}
+
+const fn validate_federate_route_pairs<'a>(
+    enclaves: &[EnclaveImage<'a>],
+) -> Result<(), ValidationFault<'a>> {
+    let mut enclave_offset = 0;
+    while enclave_offset < enclaves.len() {
+        let routes = enclaves[enclave_offset].routes.as_slice();
+        let mut route_offset = 0;
+        while route_offset < routes.len() {
+            let route = &routes[route_offset];
+            let boundary = route.boundary().as_str();
+            let mut inbound = None;
+            let mut outbound = None;
+            let mut inbound_count = 0;
+            let mut outbound_count = 0;
+
+            let mut candidate_enclave_offset = 0;
+            while candidate_enclave_offset < enclaves.len() {
+                let candidates = enclaves[candidate_enclave_offset].routes.as_slice();
+                let mut candidate_route_offset = 0;
+                while candidate_route_offset < candidates.len() {
+                    let candidate = &candidates[candidate_route_offset];
+                    if compare_utf8(candidate.boundary().as_str(), boundary) == 0 {
+                        match candidate.direction() {
+                            RouteDirection::Inbound => {
+                                inbound_count += 1;
+                                inbound = Some(candidate);
+                            }
+                            RouteDirection::Outbound => {
+                                outbound_count += 1;
+                                outbound = Some(candidate);
+                            }
+                        }
+                    }
+                    candidate_route_offset += 1;
+                }
+                candidate_enclave_offset += 1;
+            }
+
+            if inbound_count > 1 {
+                return Err(enclave_fault(ImageValidationError::DuplicateRouteHalf {
+                    boundary,
+                    direction: RouteDirection::Inbound,
+                }));
+            }
+            if outbound_count > 1 {
+                return Err(enclave_fault(ImageValidationError::DuplicateRouteHalf {
+                    boundary,
+                    direction: RouteDirection::Outbound,
+                }));
+            }
+            if let (Some(inbound), Some(outbound)) = (inbound, outbound) {
+                if !matches!(
+                    (inbound.timing_domain(), outbound.timing_domain()),
+                    (TimingDomain::Logical, TimingDomain::Logical)
+                        | (TimingDomain::Physical, TimingDomain::Physical)
+                ) {
+                    return Err(enclave_fault(ImageValidationError::RoutePairMismatch {
+                        boundary,
+                        field: "timing_domain",
+                    }));
+                }
+                if inbound.delay_nanos() != outbound.delay_nanos() {
+                    return Err(enclave_fault(ImageValidationError::RoutePairMismatch {
+                        boundary,
+                        field: "delay_nanos",
+                    }));
+                }
+            }
+            route_offset += 1;
+        }
+        enclave_offset += 1;
+    }
+    Ok(())
+}
+
+const fn validate_federate_const<'a>(
+    federate: &FederateImage<'a>,
+    index: u32,
+    table: &'static str,
+    span_target: &'static str,
+    enclaves: &[EnclaveImage<'a>],
+) -> Result<usize, ValidationFault<'a>> {
+    let end = const_try!(validate_federate_metadata(
+        federate,
+        index,
+        table,
+        span_target,
+    ));
+    const_try!(validate_federate_enclaves(federate, index, table, enclaves,));
+    Ok(end)
 }
 
 const fn mode_span_contains(span: IndexSpan<ModeIndex>, mode: ModeIndex) -> bool {
@@ -2285,13 +2476,6 @@ const fn validate_enclave_const<'a>(image: &EnclaveImage<'a>) -> Result<(), Vali
     Ok(())
 }
 
-fn validate<'a>(image: &EnclaveImage<'a>) -> Result<(), ImageValidationError<'a>> {
-    match validate_enclave_const(image) {
-        Ok(()) => Ok(()),
-        Err(fault) => Err(fault.error),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::super::*;
@@ -2329,6 +2513,21 @@ mod tests {
 
     const fn binding_image(id: &'static str, kind: BindingKind) -> RequiredBindingImage<'static> {
         RequiredBindingImage::new(BindingSlotId::new(id), kind)
+    }
+
+    macro_rules! federate_view_error_parity {
+        ($federate:expr, $enclaves:expr) => {{
+            const ERROR: ImageValidationError<'static> =
+                match FederateImageView::new($federate, $enclaves) {
+                    Ok(_) => panic!("invalid Federate view accepted"),
+                    Err(error) => error,
+                };
+            assert_eq!(
+                FederateImageView::new($federate, $enclaves).unwrap_err(),
+                ERROR
+            );
+            ERROR
+        }};
     }
 
     #[test]
@@ -2373,7 +2572,7 @@ mod tests {
             VALIDATED_NON_ASCII_IMAGE.enclave_id().as_str(),
             "plänt/控制"
         );
-        assert!(EnclaveImageView::new(&NON_ASCII_IMAGE).is_ok());
+        assert!(EnclaveImageView::new(NON_ASCII_IMAGE).is_ok());
 
         for (constant, image, rejected) in [
             (
@@ -2396,7 +2595,7 @@ mod tests {
                 } if *id == rejected
             ));
             assert!(matches!(
-                EnclaveImageView::new(image),
+                EnclaveImageView::new(image.clone()),
                 Err(ImageValidationError::InvalidStableId {
                     kind: "enclave",
                     index: 0,
@@ -2404,6 +2603,251 @@ mod tests {
                 }) if id == rejected
             ));
         }
+
+        for (error, kind, rejected) in [
+            (
+                federate_view_error_parity!(
+                    federate_image(
+                        "\u{2003}host",
+                        "aarch64-unknown-none",
+                        "static",
+                        IndexSpan::new(0, 0)
+                    ),
+                    &EMPTY_ENCLAVE_IMAGES
+                ),
+                "federate",
+                "\u{2003}host",
+            ),
+            (
+                federate_view_error_parity!(
+                    federate_image(
+                        "host",
+                        "aarch64-unknown-none",
+                        "static\u{80}",
+                        IndexSpan::new(0, 0)
+                    ),
+                    &EMPTY_ENCLAVE_IMAGES
+                ),
+                "runtime",
+                "static\u{80}",
+            ),
+        ] {
+            assert!(matches!(
+                error,
+                ImageValidationError::InvalidStableId {
+                    kind: actual_kind,
+                    index: 0,
+                    id,
+                } if actual_kind == kind && id == rejected
+            ));
+        }
+    }
+
+    #[test]
+    fn federate_view_const_and_runtime_validation_have_identical_boundaries() {
+        const CHECKED: FederateImageView<'static> = match FederateImageView::new(
+            federate_image("höst", "target", "runtime", IndexSpan::new(7, 2)),
+            &CHECKED_ENCLAVE_IMAGES,
+        ) {
+            Ok(view) => view,
+            Err(_) => panic!("valid Federate view rejected"),
+        };
+        const EMPTY_BOUNDARY: FederateImageView<'static> = match FederateImageView::new(
+            federate_image(
+                "host",
+                "target",
+                "runtime",
+                IndexSpan::new(<EnclaveIndex as tinymap::Key>::MAX_LEN, 0),
+            ),
+            &EMPTY_ENCLAVE_IMAGES,
+        ) {
+            Ok(view) => view,
+            Err(_) => panic!("empty key-boundary span rejected"),
+        };
+
+        assert_eq!(CHECKED.id().as_str(), "höst");
+        assert_eq!(CHECKED.enclaves(), IndexSpan::new(7, 2));
+        assert_eq!(
+            CHECKED
+                .enclave_views()
+                .map(|view| view.enclave_id().as_str())
+                .collect::<Vec<_>>(),
+            ["plant/control", "plant/otherx"]
+        );
+        assert_eq!(EMPTY_BOUNDARY.enclave_views().len(), 0);
+
+        let reversed = federate_view_error_parity!(
+            federate_image("host", "target", "runtime", IndexSpan::new(7, 2)),
+            &REVERSED_ENCLAVE_IMAGES
+        );
+        assert!(matches!(
+            reversed,
+            ImageValidationError::StableIdsNotSorted {
+                kind: "enclave",
+                index: 8,
+                id: "plant/control",
+            }
+        ));
+        let duplicate = federate_view_error_parity!(
+            federate_image("host", "target", "runtime", IndexSpan::new(7, 2)),
+            &DUPLICATE_ENCLAVE_IMAGES
+        );
+        assert!(matches!(
+            duplicate,
+            ImageValidationError::DuplicateStableId {
+                kind: "enclave",
+                index: 8,
+                id: "plant/control",
+            }
+        ));
+        let duplicate_route_half = federate_view_error_parity!(
+            federate_image("host", "target", "runtime", IndexSpan::new(7, 2)),
+            &DUPLICATE_ROUTE_HALF_ENCLAVE_IMAGES
+        );
+        assert!(matches!(
+            duplicate_route_half,
+            ImageValidationError::DuplicateRouteHalf {
+                boundary: "network/in",
+                direction: RouteDirection::Inbound,
+            }
+        ));
+        let mismatched_route_pair = federate_view_error_parity!(
+            federate_image("host", "target", "runtime", IndexSpan::new(7, 2)),
+            &MISMATCHED_ROUTE_PAIR_ENCLAVE_IMAGES
+        );
+        assert!(matches!(
+            mismatched_route_pair,
+            ImageValidationError::RoutePairMismatch {
+                boundary: "network/in",
+                field: "timing_domain",
+            }
+        ));
+        let mismatched_route_delay = federate_view_error_parity!(
+            federate_image("host", "target", "runtime", IndexSpan::new(7, 2)),
+            &MISMATCHED_ROUTE_DELAY_ENCLAVE_IMAGES
+        );
+        assert!(matches!(
+            mismatched_route_delay,
+            ImageValidationError::RoutePairMismatch {
+                boundary: "network/in",
+                field: "delay_nanos",
+            }
+        ));
+        let cardinality = federate_view_error_parity!(
+            federate_image("host", "target", "runtime", IndexSpan::new(7, 1)),
+            &CHECKED_ENCLAVE_IMAGES
+        );
+        assert!(matches!(
+            cardinality,
+            ImageValidationError::OwnershipMismatch {
+                table: "federate",
+                index: 0,
+                field: "enclaves",
+            }
+        ));
+        let nested = federate_view_error_parity!(
+            federate_image("host", "target", "runtime", IndexSpan::new(7, 1)),
+            &STRUCTURALLY_INVALID_ENCLAVE_IMAGES
+        );
+        assert!(matches!(
+            nested,
+            ImageValidationError::ReferenceOutOfBounds {
+                table: "image",
+                index: 0,
+                field: "root_reactor",
+                target: "reactors",
+                referenced: 0,
+            }
+        ));
+        for error in [
+            federate_view_error_parity!(
+                federate_image("host", "target", "runtime", IndexSpan::new(usize::MAX, 2)),
+                &CHECKED_ENCLAVE_IMAGES
+            ),
+            federate_view_error_parity!(
+                federate_image(
+                    "host",
+                    "target",
+                    "runtime",
+                    IndexSpan::new(<EnclaveIndex as tinymap::Key>::MAX_LEN, 2)
+                ),
+                &CHECKED_ENCLAVE_IMAGES
+            ),
+        ] {
+            assert!(matches!(
+                error,
+                ImageValidationError::RangeOutOfBounds {
+                    table: "federate",
+                    index: 0,
+                    field: "enclaves",
+                    target: "Enclave key domain",
+                    ..
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn checked_federate_execution_consumes_proof_without_structural_revalidation() {
+        let enclave = EnclaveIndex::new(0);
+        let enclaves = [IMAGE];
+        let invalid_federate =
+            federate_image(" invalid", "target", "runtime", IndexSpan::new(0, 1));
+        assert!(matches!(
+            FederateImageView::new(invalid_federate.clone(), &enclaves),
+            Err(ImageValidationError::InvalidStableId {
+                kind: "federate",
+                index: 0,
+                id: " invalid",
+            })
+        ));
+
+        let mut view = FederateImageView::new(
+            federate_image("host", "target", "runtime", IndexSpan::new(0, 1)),
+            &enclaves,
+        )
+        .unwrap();
+        view.federate = invalid_federate;
+        let bindings =
+            || crate::FederateBindings::new().bind_enclave(enclave, crate::EnclaveBindings::new());
+        for result in [
+            crate::execute_owned_federate_slice(
+                FederateIndex::new(0),
+                &view,
+                bindings(),
+                crate::Config::default(),
+            ),
+            crate::execute_owned_federate_with_backend(
+                FederateIndex::new(0),
+                &view,
+                bindings(),
+                crate::Config::default(),
+                |_| -> Result<crate::sched::federate::LocalFederateCoordinationBackend, _> {
+                    panic!("missing binding reached backend connection")
+                },
+            ),
+        ] {
+            assert!(matches!(
+                result,
+                Err(crate::ExecuteOwnedFederateError::EnclavePreflight {
+                    enclave: rejected,
+                    source: crate::OwnedStorageError::MissingBinding { .. },
+                }) if rejected == enclave
+            ));
+        }
+
+        let invalid_enclave = EnclaveImage {
+            enclave_id: EnclaveId::new(" invalid"),
+            ..IMAGE
+        };
+        assert!(matches!(
+            EnclaveImageView::new(invalid_enclave),
+            Err(ImageValidationError::InvalidStableId {
+                kind: "enclave",
+                index: 0,
+                id: " invalid",
+            })
+        ));
     }
 
     const RANGE_0_0: SliceRange<PortIndex> = SliceRange::new(0, 0);
@@ -2560,6 +3004,20 @@ mod tests {
         TimingDomain::Physical,
         10,
     )];
+    static MISMATCHED_OUTBOUND_ROUTES: [RouteImage; 1] = [route_image(
+        "network/in",
+        PortIndex::new(1),
+        RouteDirection::Outbound,
+        TimingDomain::Logical,
+        10,
+    )];
+    static MISMATCHED_DELAY_ROUTES: [RouteImage; 1] = [route_image(
+        "network/in",
+        PortIndex::new(1),
+        RouteDirection::Outbound,
+        TimingDomain::Physical,
+        11,
+    )];
     static EMPTY_ROUTES: [RouteImage; 0] = [];
     static REQUIRED_BINDINGS: [RequiredBindingImage; 6] = [
         binding_image("reaction/r0", BindingKind::Reaction),
@@ -2598,7 +3056,7 @@ mod tests {
         storage_bounds: &StorageBounds::new(2, 1, 8, 0, 0, 4),
     };
 
-    const VALIDATED_IMAGE: EnclaveImageView<'static> = match EnclaveImageView::new(&IMAGE) {
+    const VALIDATED_IMAGE: EnclaveImageView<'static> = match EnclaveImageView::new(IMAGE) {
         Ok(view) => view,
         Err(_) => panic!("valid Enclave image fixture rejected"),
     };
@@ -2608,7 +3066,7 @@ mod tests {
         ..IMAGE
     };
     const VALIDATED_NON_ASCII_IMAGE: EnclaveImageView<'static> =
-        match EnclaveImageView::new(&NON_ASCII_IMAGE) {
+        match EnclaveImageView::new(NON_ASCII_IMAGE) {
             Ok(view) => view,
             Err(_) => panic!("valid non-ASCII Enclave identity rejected"),
         };
@@ -2617,7 +3075,7 @@ mod tests {
         ..IMAGE
     };
     const UNICODE_WHITESPACE_ERROR: ImageValidationError<'static> =
-        match EnclaveImageView::new(&UNICODE_WHITESPACE_IMAGE) {
+        match EnclaveImageView::new(UNICODE_WHITESPACE_IMAGE) {
             Ok(_) => panic!("Unicode whitespace identity accepted"),
             Err(error) => error,
         };
@@ -2626,7 +3084,7 @@ mod tests {
         ..IMAGE
     };
     const UNICODE_CONTROL_ERROR: ImageValidationError<'static> =
-        match EnclaveImageView::new(&UNICODE_CONTROL_IMAGE) {
+        match EnclaveImageView::new(UNICODE_CONTROL_IMAGE) {
             Ok(_) => panic!("Unicode control identity accepted"),
             Err(error) => error,
         };
@@ -2636,6 +3094,38 @@ mod tests {
         routes: TinyMapView::new(&OUTBOUND_ROUTES),
         ..IMAGE
     };
+    static CHECKED_ENCLAVE_IMAGES: [EnclaveImage<'static>; 2] = [IMAGE, SECOND_IMAGE];
+    static REVERSED_ENCLAVE_IMAGES: [EnclaveImage<'static>; 2] = [SECOND_IMAGE, IMAGE];
+    static DUPLICATE_ENCLAVE_IMAGES: [EnclaveImage<'static>; 2] = [IMAGE, IMAGE];
+    static DUPLICATE_ROUTE_HALF_ENCLAVE_IMAGES: [EnclaveImage<'static>; 2] = [
+        IMAGE,
+        EnclaveImage {
+            enclave_id: EnclaveId::new("plant/otherx"),
+            ..IMAGE
+        },
+    ];
+    static MISMATCHED_ROUTE_PAIR_ENCLAVE_IMAGES: [EnclaveImage<'static>; 2] = [
+        IMAGE,
+        EnclaveImage {
+            enclave_id: EnclaveId::new("plant/otherx"),
+            routes: TinyMapView::new(&MISMATCHED_OUTBOUND_ROUTES),
+            ..IMAGE
+        },
+    ];
+    static MISMATCHED_ROUTE_DELAY_ENCLAVE_IMAGES: [EnclaveImage<'static>; 2] = [
+        IMAGE,
+        EnclaveImage {
+            enclave_id: EnclaveId::new("plant/otherx"),
+            routes: TinyMapView::new(&MISMATCHED_DELAY_ROUTES),
+            ..IMAGE
+        },
+    ];
+    static EMPTY_ENCLAVE_IMAGES: [EnclaveImage<'static>; 0] = [];
+    static EMPTY_REACTOR_IMAGES: [ReactorImage; 0] = [];
+    static STRUCTURALLY_INVALID_ENCLAVE_IMAGES: [EnclaveImage<'static>; 1] = [EnclaveImage {
+        reactors: TinyMapView::new(&EMPTY_REACTOR_IMAGES),
+        ..IMAGE
+    }];
     const FEDERATES: [FederateImage; 1] = [federate_image(
         "host",
         "aarch64-unknown-linux-gnu",
@@ -2752,7 +3242,11 @@ mod tests {
     }
 
     #[test]
-    fn compiled_views_outlive_local_deployment_descriptor() {
+    fn compiled_views_outlive_local_descriptors() {
+        let enclave = {
+            let image = IMAGE;
+            EnclaveImageView::new(image).unwrap()
+        };
         let (federate, members) = {
             let view = {
                 let image = COMPILED;
@@ -2765,6 +3259,7 @@ mod tests {
         assert_eq!(federate.id().as_str(), "host");
         assert_eq!(federate.enclaves(), IndexSpan::new(0, 2));
         assert_eq!(federate.enclave_views().count(), 2);
+        assert_eq!(enclave.enclave_id().as_str(), "plant/control");
     }
 
     #[test]
@@ -3249,7 +3744,7 @@ mod tests {
                 actions: TinyMapView::new(&actions),
                 ..IMAGE
             };
-            let view = EnclaveImageView::new(&image).unwrap();
+            let view = EnclaveImageView::new(image).unwrap();
             assert!(core::ptr::eq(
                 view.actions()[ActionIndex::new(0)].timing(),
                 actions[0].timing()
@@ -3314,7 +3809,7 @@ mod tests {
 
         for (name, image, expected) in cases {
             assert_eq!(
-                EnclaveImageView::new(&image).unwrap_err(),
+                EnclaveImageView::new(image).unwrap_err(),
                 expected,
                 "{name}"
             );
@@ -3344,7 +3839,7 @@ mod tests {
             ..IMAGE
         };
 
-        let error = EnclaveImageView::new(&image).expect_err("scope cycle must be rejected");
+        let error = EnclaveImageView::new(image).expect_err("scope cycle must be rejected");
 
         assert_eq!(error, ImageValidationError::ScopeParentCycle { scope: 0 });
     }
@@ -3388,7 +3883,7 @@ mod tests {
                 ..IMAGE
             };
             assert_eq!(
-                EnclaveImageView::new(&image).unwrap_err(),
+                EnclaveImageView::new(image).unwrap_err(),
                 expected,
                 "{name}"
             );
@@ -3540,7 +4035,7 @@ mod tests {
 
         for (name, image, expected) in cases {
             assert_eq!(
-                EnclaveImageView::new(&image).unwrap_err(),
+                EnclaveImageView::new(image).unwrap_err(),
                 expected,
                 "{name}"
             );
@@ -3578,7 +4073,7 @@ mod tests {
         };
 
         assert_eq!(
-            EnclaveImageView::new(&image).unwrap_err(),
+            EnclaveImageView::new(image).unwrap_err(),
             ImageValidationError::ReferenceOutOfBounds {
                 table: "image",
                 index: 0,

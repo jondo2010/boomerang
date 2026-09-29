@@ -346,7 +346,7 @@ impl OwnedEnclaveImage {
         f: impl FnOnce(EnclaveImageView<'_>) -> T,
     ) -> Result<T, CompiledDeploymentValidationError> {
         self.with_image(|image| {
-            EnclaveImageView::new(&image)
+            EnclaveImageView::new(image)
                 .map(f)
                 .map_err(CompiledDeploymentValidationError::from_image)
         })

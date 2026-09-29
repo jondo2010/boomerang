@@ -130,14 +130,8 @@ fn execute_pair(mismatch: bool, fail_rti: bool, fail_scheduler: bool) {
             },
         )
         .unwrap();
-        let source_images = view
-            .federate(MEMBERS[0])
-            .enclave_views()
-            .collect::<Vec<_>>();
-        let sink_images = view
-            .federate(MEMBERS[1])
-            .enclave_views()
-            .collect::<Vec<_>>();
+        let source_view = view.federate(MEMBERS[0]);
+        let sink_view = view.federate(MEMBERS[1]);
         let (source, sink, server) = transport::start(rti, fail_rti);
         let source_thread = spawn_traced(move || {
             let _member = source_rti.execution_span().entered();
@@ -146,8 +140,7 @@ fn execute_pair(mismatch: bool, fail_rti: bool, fail_scheduler: bool) {
                 .unwrap();
             execute_owned_federate_with_backend(
                 MEMBERS[0],
-                &FEDERATES[0],
-                &source_images.iter().collect::<Vec<_>>(),
+                &source_view,
                 FederateBindings::new()
                     .bind_enclave(EnclaveIndex::new(0), source_bindings())
                     .bind_outbound_route(
@@ -178,8 +171,7 @@ fn execute_pair(mismatch: bool, fail_rti: bool, fail_scheduler: bool) {
             let _member = sink_rti.execution_span().entered();
             execute_owned_federate_with_backend(
                 MEMBERS[1],
-                &FEDERATES[1],
-                &sink_images.iter().collect::<Vec<_>>(),
+                &sink_view,
                 FederateBindings::new()
                     .bind_enclave(EnclaveIndex::new(1), sink_bindings())
                     .bind_enclave(EnclaveIndex::new(2), sink_bindings())
@@ -1042,14 +1034,10 @@ fn inbound_preflight_rejects_extra_and_foreign_bindings() {
                 .unwrap();
         let (tx, requests) = std::sync::mpsc::channel();
         let (_replies, rx) = std::sync::mpsc::channel();
-        let images = view
-            .federate(MEMBERS[1])
-            .enclave_views()
-            .collect::<Vec<_>>();
+        let federate_view = view.federate(MEMBERS[1]);
         let error = execute_owned_federate_with_backend(
             MEMBERS[1],
-            &FEDERATES[1],
-            &images.iter().collect::<Vec<_>>(),
+            &federate_view,
             FederateBindings::new()
                 .bind_enclave(EnclaveIndex::new(1), sink_bindings())
                 .bind_enclave(EnclaveIndex::new(2), sink_bindings())

@@ -671,7 +671,7 @@ fn request_federate_shutdown(senders: &[crate::Sender<AsyncEvent>]) {
 
 /// Builds one coordinator from the selected immutable Federate layout and backend.
 fn build_federate_coordination<B: FederateCoordinationBackend>(
-    images: &TinySecondaryMap<EnclaveIndex, EnclaveImageView<'_>>,
+    participant_indices: &[EnclaveIndex],
     channels: impl IntoIterator<
         Item = (
             EnclaveIndex,
@@ -682,7 +682,6 @@ fn build_federate_coordination<B: FederateCoordinationBackend>(
     lifecycle_policy: LifecyclePolicy,
     backend: B,
 ) -> Result<FederateCoordinationParts<B>, ExecuteOwnedFederateError> {
-    let participant_indices = images.keys().collect::<Vec<_>>();
     let mut channels = channels.into_iter().collect::<Vec<_>>();
     let ordered_channels = participant_indices.iter().copied().map(|enclave| {
         let position = channels
@@ -1042,9 +1041,13 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
         })
         .collect::<BTreeMap<_, _>>();
     let mut storage_phase = ConstructionPhase::started("storage");
-    let mut storages = Vec::with_capacity(enclaves.len());
-    for (enclave, owned) in enclaves {
-        let image = images[enclave].reborrow();
+    let participant_indices = images.keys().collect::<Vec<_>>();
+    let mut storages = Vec::with_capacity(participant_indices.len());
+    for ((enclave, image), (binding_enclave, owned)) in images.into_iter().zip(enclaves) {
+        assert_eq!(
+            enclave, binding_enclave,
+            "preflight must align every selected Enclave with its bindings"
+        );
         let span = tracing::debug_span!(target: "boomerang::runtime", "runtime.enclave",
             enclave = enclave.as_u32(), enclave_id = image.enclave_id().as_str());
         let _span = span.enter();
@@ -1135,7 +1138,7 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
     };
     let enclave_count = storages.len();
     let parts = build_federate_coordination(
-        &images,
+        &participant_indices,
         storages.iter().map(|(enclave, storage)| {
             (
                 *enclave,
@@ -1397,7 +1400,7 @@ pub fn execute_owned<'image>(
 ) -> Result<EnclaveExecution, ExecuteOwnedError<'image>> {
     tracing::debug!(target: "boomerang::runtime",
         event = "runtime.preflight.started", owner = "enclave");
-    let image = match crate::image::EnclaveImageView::new(image) {
+    let image = match crate::image::EnclaveImageView::new(image.clone()) {
         Ok(image) => image,
         Err(error) => {
             tracing::warn!(target: "boomerang::runtime",
@@ -1455,10 +1458,10 @@ mod scoped_spawn_tests {
         image::{
             ActionImage, ActionIndex, ActionSlotIndex, ActionTiming, BindingKind, BindingSlotId,
             BindingSlotIndex, CoordinationProjection, EnclaveId, FederateId, FederateImage,
-            GlobalFederationImage, IndexSpan, LevelReactionImage, ReactionImage, ReactionIndex,
-            ReactorImage, ReactorIndex, RecoveryPolicy, RequiredBindingImage, RtiImage,
-            RtiMemberImage, RuntimeBackendId, ScopeImage, ScopeIndex, SliceRange, StorageBounds,
-            TargetId, TimerStartupImage,
+            FederateImageView, GlobalFederationImage, IndexSpan, LevelReactionImage, ReactionImage,
+            ReactionIndex, ReactorImage, ReactorIndex, RecoveryPolicy, RequiredBindingImage,
+            RtiImage, RtiMemberImage, RuntimeBackendId, ScopeImage, ScopeIndex, SliceRange,
+            StorageBounds, TargetId, TimerStartupImage,
         },
         keepalive, run_owned_scheduler_with_coordination, EnclaveKey, FederateAcquisition,
         FederateCompletion, FederateCoordinationBackend, FederateCoordinationError,
@@ -1658,29 +1661,25 @@ mod scoped_spawn_tests {
     #[test]
     fn checked_image_preflight_preserves_dynamic_binding_validation() {
         let enclave = EnclaveIndex::new(0);
-        const CHECKED: EnclaveImageView<'static> = match EnclaveImageView::new(&ENCLAVES[0]) {
-            Ok(view) => view,
-            Err(_) => panic!("invalid checked preflight fixture"),
-        };
         let federate = FederateImage::new(
             FederateId::new("host"),
             TargetId::new("host"),
             RuntimeBackendId::new("std"),
             IndexSpan::new(0, 1),
         );
+        let checked = FederateImageView::new(federate, &ENCLAVES[..1])
+            .expect("valid checked Federate fixture");
         let bindings = || FederateBindings::new().bind_enclave(enclave, EnclaveBindings::new());
         for result in [
             execute_owned_federate_slice(
                 FederateIndex::new(0),
-                &federate,
-                &[&CHECKED],
+                &checked,
                 bindings(),
                 Config::default(),
             ),
             execute_owned_federate_with_backend(
                 FederateIndex::new(0),
-                &federate,
-                &[&CHECKED],
+                &checked,
                 bindings(),
                 Config::default(),
                 |_| -> Result<LocalFederateCoordinationBackend, _> {
@@ -1699,7 +1698,7 @@ mod scoped_spawn_tests {
 
         let invalid = state_only_image(" invalid");
         assert!(matches!(
-            EnclaveImageView::new(&invalid),
+            EnclaveImageView::new(invalid),
             Err(ImageValidationError::InvalidStableId {
                 kind: "enclave",
                 index: 0,
@@ -1866,13 +1865,13 @@ mod scoped_spawn_tests {
     fn compiled_coordination_uses_complete_federate_layout() {
         let deployment = CompiledDeploymentView::new(OFFSET_DEPLOYMENT.clone()).unwrap();
         let selected = deployment.federate(FederateIndex::new(1));
-        let images = deployment
-            .enclaves()
-            .iter()
-            .filter(|(key, _)| selected.enclaves().contains(*key))
-            .map(|(key, _)| key)
-            .zip(selected.enclave_views())
-            .collect();
+        let participant_indices = selected.enclaves();
+        let participant_indices = (participant_indices.start()
+            ..participant_indices
+                .checked_end()
+                .expect("validated selected Enclave span"))
+            .map(EnclaveIndex::from)
+            .collect::<Vec<_>>();
         for (keep_alive, expected_lifecycle) in [
             (true, LifecyclePolicy::KeepAlive),
             (false, LifecyclePolicy::TerminateWhenIdle),
@@ -1885,7 +1884,7 @@ mod scoped_spawn_tests {
             ];
             let coordination: FederateCoordinationParts<LocalFederateCoordinationBackend> =
                 build_federate_coordination(
-                    &images,
+                    &participant_indices,
                     channels,
                     if keep_alive {
                         LifecyclePolicy::KeepAlive
@@ -2112,7 +2111,7 @@ mod scoped_spawn_tests {
         }
 
         let mut storage = OwnedStorage::new(
-            EnclaveImageView::new(&BARRIER_IMAGE).unwrap(),
+            EnclaveImageView::new(BARRIER_IMAGE.clone()).unwrap(),
             EnclaveBindings::new()
                 .bind_state(BindingSlotIndex::new(0), initialize_state)
                 .bind_reaction(BindingSlotIndex::new(1), |_, _, _, _| Ok(())),

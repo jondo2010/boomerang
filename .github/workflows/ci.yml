@@ -98,6 +98,12 @@ jobs:
         if: matrix.os == 'ubuntu-latest' && matrix.toolchain == 'stable'
         run: cargo test -p cargo-boomerang --test toolchain -- --test-threads=1
 
+      - name: test cargo-boomerang monitor toolchain
+        if: matrix.os == 'ubuntu-latest' && matrix.toolchain == 'stable'
+        run: |
+          cargo test -p cargo-boomerang --all-features --test toolchain build::generated_central_deployment_feeds_monitor_json_without_changing_payload_exchange -- --exact --test-threads=1
+          cargo test -p cargo-boomerang --all-features --test toolchain build::monitor_rejects_invalid_options_before_binding -- --exact --test-threads=1
+
       - name: smoke test cargo-boomerang toolchain
         if: matrix.os != 'ubuntu-latest' || matrix.toolchain != 'stable'
         run: >-

@@ -374,7 +374,7 @@ impl ObservationState {
 
 fn saturating_add(counter: &AtomicU64, value: u64) {
     counter
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+        .try_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
             Some(current.saturating_add(value))
         })
         .expect("saturating observation update always returns a value");

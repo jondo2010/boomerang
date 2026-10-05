@@ -25,7 +25,11 @@ fixedbitset = { version = "0.5", optional = true, default-features = false }
 serde = { version = "1.0", optional = true, default-features = false, features = ["derive", "alloc"] }
 thiserror = { workspace = true, default-features = false }
 
-[dev-dependencies]
+[target.'cfg(not(target_os = "none"))'.dev-dependencies]
 itertools = { workspace = true }
 serde_json = "*"
 toml = { workspace = true }
+
+[[example]]
+name = "pinned_image"
+crate-type = ["lib"]

@@ -13,7 +13,7 @@ The crate provides dense tables and sequences for a build-once, execute-many lif
 storage-agnostic code uses phase-specific types:
 
 ```text
-build -> seal -> move to final location -> borrow views -> execute -> drop
+build -> seal -> move to final location -> pin -> link -> execute -> drop
 ```
 
 - `TinyVecBuilder`, `TinyMapBuilder`, and `TinySecondaryMapBuilder` initialize tables and are the
@@ -22,8 +22,10 @@ build -> seal -> move to final location -> borrow views -> execute -> drop
   location.
 - Storage-erased `Ref` views expose shared runtime access. `Mut` views permit value mutation
   without insertion, removal, or replacement of the table shape.
-- Whole-image pinning and linking, when stable non-owning handles are required, happen above these
-  table types after the sealed ownership root reaches its final location.
+- Whole-image pinning and linking, when stable non-owning handles are required, happen after the
+  sealed ownership root reaches its final location. The root contains pre-sized `HandleTable`
+  fields and exposes linking only through `Pin<&mut Root>`. The resulting `LinkedHandleTable`
+  guard is shared-only and is the sole source of `Handle` values, tying them to the pinned root.
 
 The backing is an owning construction detail. Choose inline storage for a compile-time capacity,
 borrowed storage for caller-provided `MaybeUninit` slots, or the `alloc`-gated heap constructor for
@@ -85,6 +87,13 @@ and [`KeySet`](https://docs.rs/boomerang_tinymap/latest/boomerang_tinymap/struct
 available with `alloc` for hosted compatibility during migration. They retain their existing
 mutable APIs and do not enforce the new sealed lifecycle. New generated-image and runtime
 interfaces should use the phase-specific builder, sealed-owner, and borrowed-view types.
+
+Generated bounded images keep heterogeneous ownership explicit: concrete runtime objects remain
+fields, arrays, fixed storage, or generated enums in the pinned root. `TinyMap` does not become a
+heterogeneous owner. Linking only records stable, non-owning pointers in already-sized private
+handle tables; it neither allocates nor changes table shape. Handles perform no destruction, and
+the linked guard must be dropped before the root. Code that needs ordered shutdown should provide
+an explicit shutdown phase while the guard is live instead of relying on value destructor order.
 
 The [`key_type!`](https://docs.rs/boomerang_tinymap/latest/boomerang_tinymap/macro.key_type.html)
 macro declares transparent `u32` dense keys. Generated keys do not implement Serde traits;

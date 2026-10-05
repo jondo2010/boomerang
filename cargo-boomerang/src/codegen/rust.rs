@@ -201,7 +201,7 @@ pub(super) fn render_launcher(
             Config, EnclaveBindings, FederateBindings, ReactorData,
         };
         use boomerang_runtime::image::*;
-        use tinymap::{IndexSpan, SliceRange, TinyMapView};
+        use tinymap::{IndexSpan, SliceRange, TinyMapRef};
 
         fn generated_state<'a, T: ReactorData>(
             state: &'a mut dyn ReactorData,
@@ -404,12 +404,12 @@ fn render_enclave_image(index: usize, image: &EnclaveImage<'_>) -> TokenStream {
     tokens.extend(quote! {
         const #image_name: EnclaveImage<'static> = EnclaveImage {
             enclave_id: EnclaveId::new(#enclave_id),
-            reactors: TinyMapView::new(&#reactors),
-            actions: TinyMapView::new(&#actions),
-            ports: TinyMapView::new(&#ports),
-            reactions: TinyMapView::new(&#reactions),
-            modes: TinyMapView::new(&#modes),
-            scopes: TinyMapView::new(&#scopes),
+            reactors: TinyMapRef::from_slice(&#reactors),
+            actions: TinyMapRef::from_slice(&#actions),
+            ports: TinyMapRef::from_slice(&#ports),
+            reactions: TinyMapRef::from_slice(&#reactions),
+            modes: TinyMapRef::from_slice(&#modes),
+            scopes: TinyMapRef::from_slice(&#scopes),
             reaction_triggers: &#reaction_triggers,
             reaction_use_ports: &#reaction_use_ports,
             reaction_effect_ports: &#reaction_effect_ports,
@@ -425,8 +425,8 @@ fn render_enclave_image(index: usize, image: &EnclaveImage<'_>) -> TokenStream {
             timer_startup_actions: &#timer_startup_actions,
             shutdown_reactions: &#shutdown_reactions,
             shutdown_actions: &#shutdown_actions,
-            routes: TinyMapView::new(&#routes),
-            required_bindings: TinyMapView::new(&#required_bindings),
+            routes: TinyMapRef::from_slice(&#routes),
+            required_bindings: TinyMapRef::from_slice(&#required_bindings),
             storage_bounds: &#bounds,
         };
     });

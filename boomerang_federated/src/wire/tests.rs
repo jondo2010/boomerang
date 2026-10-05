@@ -44,8 +44,8 @@ fn contract() -> Contract<'static, Member, Route, (Member, Member)> {
     Contract::new(
         CoordinationFingerprint::new([1; 32]),
         [2; 32],
-        TinyMapView::new(&MEMBERS),
-        TinyMapView::new(&ROUTES),
+        TinyMapRef::from_slice(&MEMBERS),
+        TinyMapRef::from_slice(&ROUTES),
         |v| (v.0, v.1),
     )
 }
@@ -352,8 +352,8 @@ fn invalid_rosters_and_terminal_failure_cannot_reopen_admission() {
         let invalid = Contract::<Member, Route, _>::new(
             CoordinationFingerprint::new([1; 32]),
             [2; 32],
-            TinyMapView::new(&members),
-            TinyMapView::new(&ROUTES),
+            TinyMapRef::from_slice(&members),
+            TinyMapRef::from_slice(&ROUTES),
             |v| (v.0, v.1),
         );
         assert!(matches!(

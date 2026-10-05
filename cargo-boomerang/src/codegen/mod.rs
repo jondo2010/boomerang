@@ -1157,7 +1157,7 @@ pub(crate) fn generate_analyzed_rti(
     );
     let source = rust::format_rust(quote::quote! {
         use boomerang_runtime::image::*;
-        use tinymap::{TinyMapView, SliceRange};
+        use tinymap::{TinyMapRef, SliceRange};
         #coordination
         fn main() -> Result<(), Box<dyn std::error::Error>> {
             use std::io::Write;

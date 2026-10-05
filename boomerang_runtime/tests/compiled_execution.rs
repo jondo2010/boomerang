@@ -19,7 +19,7 @@ use boomerang_runtime::{
         LifecycleReactionImage, ModeImage, ModeIndex, PortImage, PortIndex, ReactionImage,
         ReactionIndex, ReactorImage, ReactorIndex, RequiredBindingImage, RouteDirection,
         RouteImage, RuntimeBackendId, ScopeImage, ScopeIndex, SliceRange, StateSlotIndex,
-        StorageBounds, TargetId, TimerStartupImage, TimingDomain, TinyMapView,
+        StorageBounds, TargetId, TimerStartupImage, TimingDomain, TinyMapRef,
     },
     ActionRef, CommonContext, CompiledModeEffectRef, Config, Context, Duration, EnclaveBindings,
     EnclaveKey, ExecuteOwnedError, ExecuteOwnedFederateError, FederateBindings, InputRef,
@@ -322,12 +322,12 @@ const fn fixture_scope(
 }
 const IMAGE: EnclaveImage<'static> = EnclaveImage {
     enclave_id: EnclaveId::new("compiled/reference"),
-    reactors: TinyMapView::new(&REACTORS),
-    actions: TinyMapView::new(&ACTIONS),
-    ports: TinyMapView::new(&PORTS),
-    reactions: TinyMapView::new(&REACTIONS),
-    modes: TinyMapView::new(&MODES),
-    scopes: TinyMapView::new(&SCOPES),
+    reactors: TinyMapRef::from_slice(&REACTORS),
+    actions: TinyMapRef::from_slice(&ACTIONS),
+    ports: TinyMapRef::from_slice(&PORTS),
+    reactions: TinyMapRef::from_slice(&REACTIONS),
+    modes: TinyMapRef::from_slice(&MODES),
+    scopes: TinyMapRef::from_slice(&SCOPES),
     reaction_triggers: &REACTION_TRIGGERS,
     reaction_use_ports: &[],
     reaction_effect_ports: &[],
@@ -343,13 +343,13 @@ const IMAGE: EnclaveImage<'static> = EnclaveImage {
     timer_startup_actions: &STARTUP_ACTIONS,
     shutdown_reactions: &[],
     shutdown_actions: &[],
-    routes: TinyMapView::new(&ROUTES),
-    required_bindings: TinyMapView::new(&REQUIRED_BINDINGS),
+    routes: TinyMapRef::from_slice(&ROUTES),
+    required_bindings: TinyMapRef::from_slice(&REQUIRED_BINDINGS),
     storage_bounds: &StorageBounds::new(1, 1, 1, 0, 0, 0),
 };
 
 static COALESCED_IMAGE: EnclaveImage<'static> = EnclaveImage {
-    actions: TinyMapView::new(&COALESCED_ACTIONS),
+    actions: TinyMapRef::from_slice(&COALESCED_ACTIONS),
     reaction_triggers: &COALESCED_REACTION_TRIGGERS,
     startup_actions: &COALESCED_STARTUP_ACTIONS,
     storage_bounds: &StorageBounds::new(1, 2, 1, 0, 0, 0),
@@ -357,9 +357,9 @@ static COALESCED_IMAGE: EnclaveImage<'static> = EnclaveImage {
 };
 
 static ROUTED_IMAGE: EnclaveImage<'static> = EnclaveImage {
-    ports: TinyMapView::new(&ROUTED_PORTS),
-    routes: TinyMapView::new(&ROUTED_ROUTES),
-    required_bindings: TinyMapView::new(&ROUTED_REQUIRED_BINDINGS),
+    ports: TinyMapRef::from_slice(&ROUTED_PORTS),
+    routes: TinyMapRef::from_slice(&ROUTED_ROUTES),
+    required_bindings: TinyMapRef::from_slice(&ROUTED_REQUIRED_BINDINGS),
     ..IMAGE
 };
 /// Bounds deadlock detection to one second outside Miri and 30 seconds under Miri, whose

@@ -78,6 +78,15 @@ impl<K: Key, V> Clone for TinyMapRef<'_, K, V> {
 
 impl<K: Key, V> Copy for TinyMapRef<'_, K, V> {}
 
+impl<K: Key, V: core::fmt::Debug> core::fmt::Debug for TinyMapRef<'_, K, V> {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("TinyMapRef")
+            .field("values", &self.values.as_slice())
+            .finish()
+    }
+}
+
 /// A borrowed value-mutation view of a sealed dense table.
 pub struct TinyMapMut<'a, K: Key, V> {
     values: TinyVecMut<'a, V>,
@@ -256,6 +265,11 @@ impl<'a, K: Key, V> TinyMapRef<'a, K, V> {
             values: TinyVecRef::from_slice(values),
             marker: PhantomData,
         }
+    }
+
+    /// Returns the exact borrowed values in the owner's dense key order.
+    pub const fn as_slice(&self) -> &'a [V] {
+        self.values.as_slice()
     }
 
     /// Returns the number of values.

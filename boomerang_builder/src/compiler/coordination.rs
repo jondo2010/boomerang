@@ -22,7 +22,7 @@ use crate::runtime::image::{
     PhysicalBoundaryIndex, RtiDependencyImage, RtiImage, RtiMemberImage, RtiRouteImage,
     RtiRouteIndex, TransportCapabilityIndex,
 };
-use tinymap::{SliceRange, TinyMap};
+use tinymap::{SliceRange, TinyMap, TinyMapRef};
 
 /// Failure to represent an analyzed federation in bounded image coordinates.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
@@ -160,14 +160,14 @@ impl OwnedRtiImage {
         let transports = borrowed_identities::<TransportCapabilityIndex>(&transport_text);
         let codecs = borrowed_identities::<CodecCapabilityIndex>(&codec_text);
         f(RtiImage::new(
-            self.members.as_view(),
+            TinyMapRef::from_slice(self.members.as_view().as_slice()),
             &self.dependencies,
             &self.affected_downstream,
-            routes.as_view(),
-            flows.as_view(),
-            physical.as_view(),
-            transports.as_view(),
-            codecs.as_view(),
+            TinyMapRef::from_slice(routes.as_view().as_slice()),
+            TinyMapRef::from_slice(flows.as_view().as_slice()),
+            TinyMapRef::from_slice(physical.as_view().as_slice()),
+            TinyMapRef::from_slice(transports.as_view().as_slice()),
+            TinyMapRef::from_slice(codecs.as_view().as_slice()),
         ))
     }
 }

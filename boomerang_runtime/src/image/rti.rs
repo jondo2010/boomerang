@@ -38,7 +38,7 @@ use super::{
     BoundaryFailurePolicy, BoundaryId, CodecPolicy, FederateIndex, RecoveryPolicy, SecurityPolicy,
     TimingPolicy, TransportPolicy,
 };
-use tinymap::{SliceRange, TinyMapView};
+use tinymap::{SliceRange, TinyMapRef};
 
 tinymap::key_type!(
     /// Dense image-local index of one deployment-wide cross-Federate RTI route.
@@ -56,7 +56,7 @@ tinymap::key_type!(pub TransportCapabilityIndex);
 tinymap::key_type!(pub CodecCapabilityIndex);
 
 /// A dense typed-key table of borrowed stable identities.
-pub type IdentityTable<'a, K> = TinyMapView<'a, K, &'a str>;
+pub type IdentityTable<'a, K> = TinyMapRef<'a, K, &'a str>;
 
 /// One precomputed incoming dependency in dense Federate coordinates.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -285,7 +285,7 @@ impl RtiMemberImage {
 #[derive(Clone, Debug)]
 pub struct RtiImage<'a> {
     /// Per-Federate ranges in canonical dense-key order.
-    pub(super) members: TinyMapView<'a, FederateIndex, RtiMemberImage>,
+    pub(super) members: TinyMapRef<'a, FederateIndex, RtiMemberImage>,
     /// Packed range backing storage for members' direct and transitive dependencies.
     ///
     /// Entries have no independent identity: [`RtiMemberImage`] owns each relationship set through
@@ -297,7 +297,7 @@ pub struct RtiImage<'a> {
     /// its affected-downstream range rather than through a synthetic per-entry key.
     pub(super) affected_downstream: &'a [FederateIndex],
     /// Concrete directed boundary hops keyed in canonical deployment-wide RTI order.
-    pub(super) routes: TinyMapView<'a, RtiRouteIndex, RtiRouteImage<'a>>,
+    pub(super) routes: TinyMapRef<'a, RtiRouteIndex, RtiRouteImage<'a>>,
     /// Distinct end-to-end application identities shared by one or more routes.
     pub(super) flows: IdentityTable<'a, FlowIndex>,
     /// Canonically ordered stable physical input/output identities.
@@ -360,7 +360,7 @@ macro_rules! member_slice_accessor {
 impl<'a> RtiImage<'a> {
     /// Borrows the original members table for structural rendering.
     #[must_use]
-    pub const fn members(&self) -> &TinyMapView<'a, FederateIndex, RtiMemberImage> {
+    pub const fn members(&self) -> &TinyMapRef<'a, FederateIndex, RtiMemberImage> {
         &self.members
     }
 
@@ -404,10 +404,10 @@ impl<'a> RtiImage<'a> {
     #[must_use]
     #[allow(clippy::too_many_arguments, reason = "flat immutable image schema")]
     pub const fn new(
-        members: TinyMapView<'a, FederateIndex, RtiMemberImage>,
+        members: TinyMapRef<'a, FederateIndex, RtiMemberImage>,
         dependencies: &'a [RtiDependencyImage],
         affected_downstream: &'a [FederateIndex],
-        routes: TinyMapView<'a, RtiRouteIndex, RtiRouteImage<'a>>,
+        routes: TinyMapRef<'a, RtiRouteIndex, RtiRouteImage<'a>>,
         flows: IdentityTable<'a, FlowIndex>,
         physical_boundaries: IdentityTable<'a, PhysicalBoundaryIndex>,
         transport_capabilities: IdentityTable<'a, TransportCapabilityIndex>,
@@ -429,7 +429,7 @@ impl<'a> RtiImage<'a> {
     ///
     /// Multiple returned routes may belong to the same end-to-end flow.
     #[must_use]
-    pub const fn routes(&self) -> &TinyMapView<'a, RtiRouteIndex, RtiRouteImage<'a>> {
+    pub const fn routes(&self) -> &TinyMapRef<'a, RtiRouteIndex, RtiRouteImage<'a>> {
         &self.routes
     }
 

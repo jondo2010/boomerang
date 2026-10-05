@@ -50,7 +50,7 @@ fn server(timeout: Duration) -> (SocketAddr, JoinHandle<Result<(), CentralRtiErr
     use boomerang_runtime::image::{
         IdentityTable, RecoveryPolicy, RtiImage, RtiImageView, RtiMemberImage,
     };
-    use tinymap::{SliceRange, TinyMapView};
+    use tinymap::{SliceRange, TinyMapRef};
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let worker = thread::spawn(move || {
@@ -71,16 +71,17 @@ fn server(timeout: Duration) -> (SocketAddr, JoinHandle<Result<(), CentralRtiErr
             ),
         ];
         let image = RtiImage::new(
-            TinyMapView::new(&members),
+            TinyMapRef::from_slice(&members),
             &[],
             &[],
-            TinyMapView::new(&[]),
-            IdentityTable::new(&[]),
-            IdentityTable::new(&[]),
-            IdentityTable::new(&[]),
-            IdentityTable::new(&[]),
+            TinyMapRef::from_slice(&[]),
+            IdentityTable::from_slice(&[]),
+            IdentityTable::from_slice(&[]),
+            IdentityTable::from_slice(&[]),
+            IdentityTable::from_slice(&[]),
         );
-        let view = RtiImageView::new(image, IdentityTable::new(&["source", "target"])).unwrap();
+        let view =
+            RtiImageView::new(image, IdentityTable::from_slice(&["source", "target"])).unwrap();
         let rti = CompiledRti::from_image(view, CoordinationIdentity::new([1; 32])).unwrap();
         Server::new(listener, rti, test_contract(), timeout)?.serve()
     });
@@ -403,12 +404,12 @@ fn test_contract_routes(
     routes: &'static [boomerang_runtime::image::RtiRouteImage<'static>],
 ) -> WireContract<'static> {
     use boomerang_federated::wire::{Contract, CoordinationFingerprint};
-    use tinymap::TinyMapView;
+    use tinymap::TinyMapRef;
     Contract::new(
         CoordinationFingerprint::new([1; 32]),
         [3; 32],
-        TinyMapView::new(&["source", "target"]),
-        TinyMapView::new(routes),
+        TinyMapRef::from_slice(&["source", "target"]),
+        TinyMapRef::from_slice(routes),
         |route: &boomerang_runtime::image::RtiRouteImage<'_>| (route.source(), route.target()),
     )
 }

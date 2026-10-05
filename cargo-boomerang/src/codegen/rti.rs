@@ -26,7 +26,7 @@ pub(super) fn render_coordination(compiled: &OwnedCompiledDeployment) -> Result<
         let tables = render_image(&image);
         Ok(quote! {
             const COORDINATION_MEMBERS: IdentityTable<'static, FederateIndex> =
-                TinyMapView::new(&[#(#identities),*]);
+                TinyMapRef::from_slice(&[#(#identities),*]);
             #tables
         })
     })
@@ -81,14 +81,14 @@ fn render_image(image: &RtiImage<'_>) -> TokenStream {
     let codec = image.codec_capabilities().values();
     quote! {
         const COORDINATION_IMAGE: RtiImage<'static> = RtiImage::new(
-            TinyMapView::new(&[#(#members),*]),
+            TinyMapRef::from_slice(&[#(#members),*]),
             &[#(#dependencies),*],
             &[#(#downstream),*],
-            TinyMapView::new(&[#(#routes),*]),
-            TinyMapView::new(&[#(#flows),*]),
-            TinyMapView::new(&[#(#physical),*]),
-            TinyMapView::new(&[#(#transport),*]),
-            TinyMapView::new(&[#(#codec),*]),
+            TinyMapRef::from_slice(&[#(#routes),*]),
+            TinyMapRef::from_slice(&[#(#flows),*]),
+            TinyMapRef::from_slice(&[#(#physical),*]),
+            TinyMapRef::from_slice(&[#(#transport),*]),
+            TinyMapRef::from_slice(&[#(#codec),*]),
         );
     }
 }

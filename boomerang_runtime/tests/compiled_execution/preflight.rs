@@ -64,8 +64,8 @@ fn owned_federate_preflight_rejects_before_initializers() {
     let unpaired_enclaves = [ROUTED_SOURCE_IMAGE];
     let unpaired_federates = [fixture_federate("host", "target", "runtime", s!(0, 1))];
     let unpaired = CompiledDeploymentImage {
-        federates: TinyMapView::new(&unpaired_federates),
-        enclaves: TinyMapView::new(&unpaired_enclaves),
+        federates: TinyMapRef::from_slice(&unpaired_federates),
+        enclaves: TinyMapRef::from_slice(&unpaired_enclaves),
         ..ROUTED_DEPLOYMENT
     };
     let error = execute_owned_federate(
@@ -184,18 +184,18 @@ fn owned_federate_preflight_rejects_before_initializers() {
     )];
     let rti_identities = ["x"];
     let rti = RtiImage::new(
-        TinyMapView::new(&rti_members),
+        TinyMapRef::from_slice(&rti_members),
         &[],
         &[],
-        TinyMapView::new(&rti_routes),
-        IdentityTable::new(&rti_identities),
-        IdentityTable::new(&[]),
-        IdentityTable::new(&rti_identities),
-        IdentityTable::new(&rti_identities),
+        TinyMapRef::from_slice(&rti_routes),
+        IdentityTable::from_slice(&rti_identities),
+        IdentityTable::from_slice(&[]),
+        IdentityTable::from_slice(&rti_identities),
+        IdentityTable::from_slice(&rti_identities),
     );
     let cross = CompiledDeploymentImage {
         federation: GlobalFederationImage::new(&cross_members, &cross_edges),
-        federates: TinyMapView::new(&cross_federates),
+        federates: TinyMapRef::from_slice(&cross_federates),
         coordination: CoordinationProjection::CentralRti(rti),
         ..ROUTED_DEPLOYMENT
     };
@@ -217,12 +217,12 @@ fn owned_federate_preflight_rejects_before_initializers() {
 fn owned_federate_rejects_enclave_without_root_reactor() {
     let rootless_enclaves = [EnclaveImage {
         enclave_id: EnclaveId::new("rootless"),
-        reactors: TinyMapView::new(&[]),
-        actions: TinyMapView::new(&[]),
-        ports: TinyMapView::new(&[]),
-        reactions: TinyMapView::new(&[]),
-        modes: TinyMapView::new(&[]),
-        scopes: TinyMapView::new(&[]),
+        reactors: TinyMapRef::from_slice(&[]),
+        actions: TinyMapRef::from_slice(&[]),
+        ports: TinyMapRef::from_slice(&[]),
+        reactions: TinyMapRef::from_slice(&[]),
+        modes: TinyMapRef::from_slice(&[]),
+        scopes: TinyMapRef::from_slice(&[]),
         reaction_triggers: &[],
         reaction_use_ports: &[],
         reaction_effect_ports: &[],
@@ -238,16 +238,16 @@ fn owned_federate_rejects_enclave_without_root_reactor() {
         timer_startup_actions: &[],
         shutdown_reactions: &[],
         shutdown_actions: &[],
-        routes: TinyMapView::new(&[]),
-        required_bindings: TinyMapView::new(&[]),
+        routes: TinyMapRef::from_slice(&[]),
+        required_bindings: TinyMapRef::from_slice(&[]),
         storage_bounds: &StorageBounds::new(0, 0, 0, 0, 0, 0),
     }];
     let rootless_federates = [fixture_federate("host", "target", "runtime", s!(0, 1))];
     let members = [FederateIndex::new(0)];
     let deployment = CompiledDeploymentImage {
         federation: GlobalFederationImage::new(&members, &[]),
-        federates: TinyMapView::new(&rootless_federates),
-        enclaves: TinyMapView::new(&rootless_enclaves),
+        federates: TinyMapRef::from_slice(&rootless_federates),
+        enclaves: TinyMapRef::from_slice(&rootless_enclaves),
         coordination: CoordinationProjection::Local,
     };
 

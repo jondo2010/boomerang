@@ -1399,7 +1399,7 @@ mod tests {
             LevelReactionImage, ModeImage, PortImage, PortIndex, ReactionImage, ReactionIndex,
             ReactorImage, ReactorIndex, RequiredBindingImage, RouteDirection, RouteImage,
             ScopeImage, ScopeIndex, SliceRange, StateSlotIndex, StorageBounds, TimerStartupImage,
-            TimingDomain, TinyMapView,
+            TimingDomain, TinyMapRef,
         },
         AsyncEvent, CommonContext, CompiledModeEffectRef, Config, Context, Duration,
         EnclaveBindings, ModeTransitionRequest, OwnedStorage, OwnedStorageError, PayloadType,
@@ -1580,12 +1580,12 @@ mod tests {
     ];
     static IMAGE: EnclaveImage<'static> = EnclaveImage {
         enclave_id: crate::image::EnclaveId::new("enclave"),
-        reactors: TinyMapView::new(&REACTORS),
-        actions: TinyMapView::new(&ACTIONS),
-        ports: TinyMapView::new(&PORTS),
-        reactions: TinyMapView::new(&REACTIONS),
-        modes: TinyMapView::new(&MODES),
-        scopes: TinyMapView::new(&SCOPES),
+        reactors: TinyMapRef::from_slice(&REACTORS),
+        actions: TinyMapRef::from_slice(&ACTIONS),
+        ports: TinyMapRef::from_slice(&PORTS),
+        reactions: TinyMapRef::from_slice(&REACTIONS),
+        modes: TinyMapRef::from_slice(&MODES),
+        scopes: TinyMapRef::from_slice(&SCOPES),
         reaction_triggers: &[],
         reaction_use_ports: &[],
         reaction_effect_ports: &[PortIndex::new(0)],
@@ -1601,12 +1601,12 @@ mod tests {
         timer_startup_actions: &[],
         shutdown_reactions: &[],
         shutdown_actions: &[],
-        routes: TinyMapView::new(&[]),
-        required_bindings: TinyMapView::new(&REQUIRED_BINDINGS),
+        routes: TinyMapRef::from_slice(&[]),
+        required_bindings: TinyMapRef::from_slice(&REQUIRED_BINDINGS),
         storage_bounds: &StorageBounds::new(1, 1, 1, 0, 0, 0),
     };
     static UNREPRESENTABLE_ACTION_IMAGE: EnclaveImage<'static> = EnclaveImage {
-        actions: TinyMapView::new(&UNREPRESENTABLE_ACTIONS),
+        actions: TinyMapRef::from_slice(&UNREPRESENTABLE_ACTIONS),
         ..IMAGE
     };
     static UNREPRESENTABLE_STARTUP_IMAGE: EnclaveImage<'static> = EnclaveImage {
@@ -1614,7 +1614,7 @@ mod tests {
         ..IMAGE
     };
     static FILTERED_MODE_IMAGE: EnclaveImage<'static> = EnclaveImage {
-        reactions: TinyMapView::new(&FILTERED_REACTIONS),
+        reactions: TinyMapRef::from_slice(&FILTERED_REACTIONS),
         reaction_modes: &FILTERED_REACTION_MODES,
         ..IMAGE
     };
@@ -1635,7 +1635,7 @@ mod tests {
         ),
     ];
     static ROUTED_IMAGE: EnclaveImage<'static> = EnclaveImage {
-        routes: TinyMapView::new(&INBOUND_ROUTES),
+        routes: TinyMapRef::from_slice(&INBOUND_ROUTES),
         ..IMAGE
     };
 
@@ -1777,7 +1777,7 @@ mod tests {
             period_nanos: Some(0),
         })];
         let periodic_image = EnclaveImage {
-            actions: TinyMapView::new(&actions),
+            actions: TinyMapRef::from_slice(&actions),
             ..IMAGE
         };
         let image = EnclaveImageView::new(periodic_image).expect("periodic image is structural");
@@ -1800,7 +1800,7 @@ mod tests {
             period_nanos: Some(period_nanos),
         })];
         let periodic_image = EnclaveImage {
-            actions: TinyMapView::new(&actions),
+            actions: TinyMapRef::from_slice(&actions),
             ..IMAGE
         };
         let image = EnclaveImageView::new(periodic_image).expect("periodic image is structural");
@@ -1820,7 +1820,7 @@ mod tests {
     fn rejects_payload_factory_for_executor_owned_timer() {
         let actions = [action(ActionTiming::Timer { period_nanos: None })];
         let timer_image = EnclaveImage {
-            actions: TinyMapView::new(&actions),
+            actions: TinyMapRef::from_slice(&actions),
             ..IMAGE
         };
         let image = EnclaveImageView::new(timer_image).expect("timer image is structural");
@@ -1876,7 +1876,7 @@ mod tests {
             SliceRange::new(0, 0),
         )];
         let aliased_image = EnclaveImage {
-            reactions: TinyMapView::new(&reactions),
+            reactions: TinyMapRef::from_slice(&reactions),
             reaction_actions: &duplicate_actions,
             ..IMAGE
         };
@@ -2121,10 +2121,10 @@ mod tests {
             REQUIRED_BINDINGS[2],
         ];
         let image = EnclaveImage {
-            actions: TinyMapView::new(&actions),
+            actions: TinyMapRef::from_slice(&actions),
             reaction_triggers: &reaction_triggers,
             startup_actions: &startup_actions,
-            required_bindings: TinyMapView::new(&required_bindings),
+            required_bindings: TinyMapRef::from_slice(&required_bindings),
             ..IMAGE
         };
         let image = EnclaveImageView::new(image).unwrap();

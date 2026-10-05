@@ -31,12 +31,12 @@ static HORIZON_FEDERATES: [FederateImage; 1] =
 static HORIZON_FEDERATE_MEMBERS: [FederateIndex; 1] = [FederateIndex::new(0)];
 const HORIZON_DEPLOYMENT: CompiledDeploymentImage<'static> = CompiledDeploymentImage {
     federation: GlobalFederationImage::new(&HORIZON_FEDERATE_MEMBERS, &[]),
-    federates: TinyMapView::new(&HORIZON_FEDERATES),
-    enclaves: TinyMapView::new(&HORIZON_ENCLAVES),
+    federates: TinyMapRef::from_slice(&HORIZON_FEDERATES),
+    enclaves: TinyMapRef::from_slice(&HORIZON_ENCLAVES),
     coordination: CoordinationProjection::Local,
 };
 const QUIESCENT_HORIZON_DEPLOYMENT: CompiledDeploymentImage<'static> = CompiledDeploymentImage {
-    enclaves: TinyMapView::new(&QUIESCENT_HORIZON_ENCLAVES),
+    enclaves: TinyMapRef::from_slice(&QUIESCENT_HORIZON_ENCLAVES),
     ..HORIZON_DEPLOYMENT
 };
 #[derive(Debug)]
@@ -134,7 +134,7 @@ const fn multi_source_image(
 ) -> EnclaveImage<'static> {
     EnclaveImage {
         enclave_id: EnclaveId::new(enclave_id),
-        routes: TinyMapView::new(routes),
+        routes: TinyMapRef::from_slice(routes),
         ..ROUTED_SOURCE_IMAGE
     }
 }
@@ -174,12 +174,12 @@ static MULTI_SINK_BINDINGS: [RequiredBindingImage; 4] = [
 ];
 const MULTI_SINK_IMAGE: EnclaveImage<'static> = EnclaveImage {
     enclave_id: EnclaveId::new("sink"),
-    ports: TinyMapView::new(&MULTI_SINK_PORTS),
-    reactions: TinyMapView::new(&MULTI_SINK_REACTIONS),
+    ports: TinyMapRef::from_slice(&MULTI_SINK_PORTS),
+    reactions: TinyMapRef::from_slice(&MULTI_SINK_REACTIONS),
     reaction_triggers: &MULTI_SINK_TRIGGERS,
     reaction_use_ports: &MULTI_SINK_USE_PORTS,
-    routes: TinyMapView::new(&MULTI_SINK_ROUTES),
-    required_bindings: TinyMapView::new(&MULTI_SINK_BINDINGS),
+    routes: TinyMapRef::from_slice(&MULTI_SINK_ROUTES),
+    required_bindings: TinyMapRef::from_slice(&MULTI_SINK_BINDINGS),
     ..ROUTED_SINK_IMAGE
 };
 
@@ -192,8 +192,8 @@ static MULTI_FEDERATES: [FederateImage; 1] =
     [fixture_federate("host", "target", "runtime", s!(0, 3))];
 const MULTI_DEPLOYMENT: CompiledDeploymentImage<'static> = CompiledDeploymentImage {
     federation: GlobalFederationImage::new(&ROUTED_FEDERATE_MEMBERS, &[]),
-    federates: TinyMapView::new(&MULTI_FEDERATES),
-    enclaves: TinyMapView::new(&MULTI_ENCLAVES),
+    federates: TinyMapRef::from_slice(&MULTI_FEDERATES),
+    enclaves: TinyMapRef::from_slice(&MULTI_ENCLAVES),
     coordination: CoordinationProjection::Local,
 };
 
@@ -333,7 +333,7 @@ fn owned_federate_paced_origin_preserves_downstream_order() {
             ROUTED_SINK_IMAGE,
         ];
         let deployment = CompiledDeploymentImage {
-            enclaves: TinyMapView::new(&enclaves),
+            enclaves: TinyMapRef::from_slice(&enclaves),
             ..ROUTED_DEPLOYMENT
         };
         execute_owned_federate(
@@ -532,14 +532,14 @@ fn owned_federate_quiesces_a_positive_delay_route_cycle() {
             ),
         ];
         let enclaves = [EnclaveImage {
-            actions: TinyMapView::new(&actions),
-            routes: TinyMapView::new(&routes),
+            actions: TinyMapRef::from_slice(&actions),
+            routes: TinyMapRef::from_slice(&routes),
             ..ROUTED_SOURCE_IMAGE
         }];
         let federates = [fixture_federate("host", "target", "runtime", s!(0, 1))];
         let deployment = CompiledDeploymentImage {
-            federates: TinyMapView::new(&federates),
-            enclaves: TinyMapView::new(&enclaves),
+            federates: TinyMapRef::from_slice(&federates),
+            enclaves: TinyMapRef::from_slice(&enclaves),
             ..ROUTED_DEPLOYMENT
         };
         execute_owned_federate(

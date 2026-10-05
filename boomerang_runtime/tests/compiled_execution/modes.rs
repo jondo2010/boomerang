@@ -173,18 +173,18 @@ static MODAL_REQUIRED_BINDINGS: [RequiredBindingImage; 3] = [
 ];
 
 static MODAL_IMAGE: EnclaveImage<'static> = EnclaveImage {
-    reactors: TinyMapView::new(&MODAL_REACTORS),
-    actions: TinyMapView::new(&MODAL_ACTIONS),
-    reactions: TinyMapView::new(&MODAL_REACTIONS),
-    modes: TinyMapView::new(&MODAL_MODES),
-    scopes: TinyMapView::new(&MODAL_SCOPES),
+    reactors: TinyMapRef::from_slice(&MODAL_REACTORS),
+    actions: TinyMapRef::from_slice(&MODAL_ACTIONS),
+    reactions: TinyMapRef::from_slice(&MODAL_REACTIONS),
+    modes: TinyMapRef::from_slice(&MODAL_MODES),
+    scopes: TinyMapRef::from_slice(&MODAL_SCOPES),
     reaction_triggers: &MODAL_REACTION_TRIGGERS,
     reaction_modes: &MODAL_REACTION_MODES,
     scope_descendants: &MODAL_SCOPE_DESCENDANTS,
     scope_logical_actions: &[],
     scope_startup_reactions: &MODAL_SCOPE_STARTUPS,
     timer_startup_actions: &MODAL_TIMER_STARTUPS,
-    required_bindings: TinyMapView::new(&MODAL_REQUIRED_BINDINGS),
+    required_bindings: TinyMapRef::from_slice(&MODAL_REQUIRED_BINDINGS),
     storage_bounds: &StorageBounds::new(1, 1, 2, 0, 0, 0),
     ..IMAGE
 };
@@ -233,18 +233,18 @@ static PERIODIC_MODAL_BINDINGS: [RequiredBindingImage; 2] = [
     fixture_binding("b-transition", BindingKind::Reaction),
 ];
 static PERIODIC_MODAL_IMAGE: EnclaveImage<'static> = EnclaveImage {
-    reactors: TinyMapView::new(&MODAL_REACTORS),
-    actions: TinyMapView::new(&PERIODIC_MODAL_ACTIONS),
-    reactions: TinyMapView::new(&PERIODIC_MODAL_REACTIONS),
-    modes: TinyMapView::new(&MODAL_MODES),
-    scopes: TinyMapView::new(&PERIODIC_MODAL_SCOPES),
+    reactors: TinyMapRef::from_slice(&MODAL_REACTORS),
+    actions: TinyMapRef::from_slice(&PERIODIC_MODAL_ACTIONS),
+    reactions: TinyMapRef::from_slice(&PERIODIC_MODAL_REACTIONS),
+    modes: TinyMapRef::from_slice(&MODAL_MODES),
+    scopes: TinyMapRef::from_slice(&PERIODIC_MODAL_SCOPES),
     reaction_triggers: &[LevelReactionImage::new(0, ReactionIndex::new(0))],
     reaction_modes: &[ModeIndex::new(0)],
     scope_descendants: &MODAL_SCOPE_DESCENDANTS,
     scope_logical_actions: &[ActionIndex::new(0)],
     scope_timer_startups: &PERIODIC_MODAL_STARTUPS,
     timer_startup_actions: &PERIODIC_MODAL_STARTUPS,
-    required_bindings: TinyMapView::new(&PERIODIC_MODAL_BINDINGS),
+    required_bindings: TinyMapRef::from_slice(&PERIODIC_MODAL_BINDINGS),
     storage_bounds: &StorageBounds::new(1, 1, 1, 0, 0, 0),
     ..IMAGE
 };

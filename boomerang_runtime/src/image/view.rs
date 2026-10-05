@@ -1,6 +1,6 @@
 //! Checked views over immutable compiled runtime images.
 use super::*;
-use tinymap::{IndexSpan, Key, SliceRange, TinyMapView};
+use tinymap::{IndexSpan, Key, SliceRange, TinyMapRef};
 
 /// Validated coordination tables and stable members without scheduler payload images.
 ///
@@ -254,12 +254,12 @@ impl<'a> CompiledDeploymentView<'a> {
     }
 
     /// Returns the dense Federate table.
-    pub const fn federates(&self) -> TinyMapView<'a, FederateIndex, FederateImage<'a>> {
+    pub const fn federates(&self) -> TinyMapRef<'a, FederateIndex, FederateImage<'a>> {
         self.image.federates
     }
 
     /// Returns the complete Enclave table with its original deployment-wide keys.
-    pub const fn enclaves(&self) -> TinyMapView<'a, EnclaveIndex, EnclaveImage<'a>> {
+    pub const fn enclaves(&self) -> TinyMapRef<'a, EnclaveIndex, EnclaveImage<'a>> {
         self.image.enclaves
     }
 
@@ -269,7 +269,14 @@ impl<'a> CompiledDeploymentView<'a> {
         let enclaves = self
             .image
             .enclaves
-            .get_span(federate.enclaves())
+            .as_slice()
+            .get(
+                federate.enclaves().start()
+                    ..federate
+                        .enclaves()
+                        .checked_end()
+                        .expect("compiled deployment ranges are validated"),
+            )
             .expect("compiled deployment ranges are validated");
         FederateImageView { enclaves, federate }
     }
@@ -442,37 +449,37 @@ impl<'a> EnclaveImageView<'a> {
         self.image.enclave_id
     }
     /// Returns the dense reactor table.
-    pub const fn reactors(&self) -> TinyMapView<'a, ReactorIndex, ReactorImage> {
+    pub const fn reactors(&self) -> TinyMapRef<'a, ReactorIndex, ReactorImage> {
         self.image.reactors
     }
     /// Returns the dense action table.
-    pub const fn actions(&self) -> TinyMapView<'a, ActionIndex, ActionImage> {
+    pub const fn actions(&self) -> TinyMapRef<'a, ActionIndex, ActionImage> {
         self.image.actions
     }
     /// Returns the dense port table.
-    pub const fn ports(&self) -> TinyMapView<'a, PortIndex, PortImage> {
+    pub const fn ports(&self) -> TinyMapRef<'a, PortIndex, PortImage> {
         self.image.ports
     }
     /// Returns the dense reaction table.
-    pub const fn reactions(&self) -> TinyMapView<'a, ReactionIndex, ReactionImage> {
+    pub const fn reactions(&self) -> TinyMapRef<'a, ReactionIndex, ReactionImage> {
         self.image.reactions
     }
     /// Returns the dense mode table.
-    pub const fn modes(&self) -> TinyMapView<'a, ModeIndex, ModeImage> {
+    pub const fn modes(&self) -> TinyMapRef<'a, ModeIndex, ModeImage> {
         self.image.modes
     }
     /// Returns the dense scope table.
-    pub const fn scopes(&self) -> TinyMapView<'a, ScopeIndex, ScopeImage> {
+    pub const fn scopes(&self) -> TinyMapRef<'a, ScopeIndex, ScopeImage> {
         self.image.scopes
     }
     /// Returns the dense boundary-route table.
-    pub const fn routes(&self) -> TinyMapView<'a, RouteIndex, RouteImage<'a>> {
+    pub const fn routes(&self) -> TinyMapRef<'a, RouteIndex, RouteImage<'a>> {
         self.image.routes
     }
     /// Returns the dense required-binding table.
     pub const fn required_bindings(
         &self,
-    ) -> TinyMapView<'a, BindingSlotIndex, RequiredBindingImage<'a>> {
+    ) -> TinyMapRef<'a, BindingSlotIndex, RequiredBindingImage<'a>> {
         self.image.required_bindings
     }
     /// Resolves a route's stable boundary identity.
@@ -603,7 +610,7 @@ fn check_ref<'a, K: Key, V>(
     field: &'static str,
     target: &'static str,
     value: K,
-    values: TinyMapView<'_, K, V>,
+    values: TinyMapRef<'_, K, V>,
 ) -> Result<(), ImageValidationError<'a>> {
     if values.get(value).is_none() {
         Err(ImageValidationError::ReferenceOutOfBounds {
@@ -791,7 +798,7 @@ fn validate_rti_federate_refs<'a>(
     table: &'static str,
     offset: u32,
     values: impl Iterator<Item = FederateIndex>,
-    federates: TinyMapView<'_, FederateIndex, RtiMemberImage>,
+    federates: TinyMapRef<'_, FederateIndex, RtiMemberImage>,
 ) -> Result<(), ImageValidationError<'a>> {
     let mut previous = None;
     for (position, value) in values.enumerate() {
@@ -1214,7 +1221,7 @@ macro_rules! const_dense_ref_adapter {
             index: u32,
             field: &'static str,
             key: $key,
-            values: TinyMapView<'a, $key, $value>,
+            values: TinyMapRef<'a, $key, $value>,
         ) -> Result<&'a $value, ValidationFault<'a>> {
             let referenced = key.as_u32();
             let dense_index = referenced as usize;
@@ -3030,12 +3037,12 @@ mod tests {
 
     const IMAGE: EnclaveImage<'static> = EnclaveImage {
         enclave_id: EnclaveId::new("plant/control"),
-        reactors: TinyMapView::new(&REACTORS),
-        actions: TinyMapView::new(&ACTIONS),
-        ports: TinyMapView::new(&PORTS),
-        reactions: TinyMapView::new(&REACTIONS),
-        modes: TinyMapView::new(&MODES),
-        scopes: TinyMapView::new(&SCOPES),
+        reactors: TinyMapRef::from_slice(&REACTORS),
+        actions: TinyMapRef::from_slice(&ACTIONS),
+        ports: TinyMapRef::from_slice(&PORTS),
+        reactions: TinyMapRef::from_slice(&REACTIONS),
+        modes: TinyMapRef::from_slice(&MODES),
+        scopes: TinyMapRef::from_slice(&SCOPES),
         reaction_triggers: &REACTION_TRIGGERS,
         reaction_use_ports: &REACTION_USE_PORTS,
         reaction_effect_ports: &REACTION_EFFECT_PORTS,
@@ -3051,8 +3058,8 @@ mod tests {
         timer_startup_actions: &TIMER_STARTUP_ACTIONS,
         shutdown_reactions: &SHUTDOWN_REACTIONS,
         shutdown_actions: &SHUTDOWN_ACTIONS,
-        routes: TinyMapView::new(&ROUTES),
-        required_bindings: TinyMapView::new(&REQUIRED_BINDINGS),
+        routes: TinyMapRef::from_slice(&ROUTES),
+        required_bindings: TinyMapRef::from_slice(&REQUIRED_BINDINGS),
         storage_bounds: &StorageBounds::new(2, 1, 8, 0, 0, 4),
     };
 
@@ -3091,7 +3098,7 @@ mod tests {
 
     const SECOND_IMAGE: EnclaveImage<'static> = EnclaveImage {
         enclave_id: EnclaveId::new("plant/otherx"),
-        routes: TinyMapView::new(&OUTBOUND_ROUTES),
+        routes: TinyMapRef::from_slice(&OUTBOUND_ROUTES),
         ..IMAGE
     };
     static CHECKED_ENCLAVE_IMAGES: [EnclaveImage<'static>; 2] = [IMAGE, SECOND_IMAGE];
@@ -3108,7 +3115,7 @@ mod tests {
         IMAGE,
         EnclaveImage {
             enclave_id: EnclaveId::new("plant/otherx"),
-            routes: TinyMapView::new(&MISMATCHED_OUTBOUND_ROUTES),
+            routes: TinyMapRef::from_slice(&MISMATCHED_OUTBOUND_ROUTES),
             ..IMAGE
         },
     ];
@@ -3116,14 +3123,14 @@ mod tests {
         IMAGE,
         EnclaveImage {
             enclave_id: EnclaveId::new("plant/otherx"),
-            routes: TinyMapView::new(&MISMATCHED_DELAY_ROUTES),
+            routes: TinyMapRef::from_slice(&MISMATCHED_DELAY_ROUTES),
             ..IMAGE
         },
     ];
     static EMPTY_ENCLAVE_IMAGES: [EnclaveImage<'static>; 0] = [];
     static EMPTY_REACTOR_IMAGES: [ReactorImage; 0] = [];
     static STRUCTURALLY_INVALID_ENCLAVE_IMAGES: [EnclaveImage<'static>; 1] = [EnclaveImage {
-        reactors: TinyMapView::new(&EMPTY_REACTOR_IMAGES),
+        reactors: TinyMapRef::from_slice(&EMPTY_REACTOR_IMAGES),
         ..IMAGE
     }];
     const FEDERATES: [FederateImage; 1] = [federate_image(
@@ -3138,8 +3145,8 @@ mod tests {
         GlobalFederationImage::new(&FEDERATION_MEMBERS, &[]);
     const COMPILED: CompiledDeploymentImage<'static> = CompiledDeploymentImage {
         federation: FEDERATION,
-        federates: TinyMapView::new(&FEDERATES),
-        enclaves: TinyMapView::new(&ENCLAVES),
+        federates: TinyMapRef::from_slice(&FEDERATES),
+        enclaves: TinyMapRef::from_slice(&ENCLAVES),
         coordination: CoordinationProjection::Local,
     };
     static RTI_IDENTITIES: [&str; 1] = ["x"];
@@ -3151,14 +3158,14 @@ mod tests {
         flows: &'a [&'a str],
     ) -> RtiImage<'a> {
         RtiImage::new(
-            TinyMapView::new(members),
+            TinyMapRef::from_slice(members),
             dependencies,
             &[],
-            TinyMapView::new(routes),
-            IdentityTable::new(flows),
-            IdentityTable::new(&[]),
-            IdentityTable::new(&RTI_IDENTITIES),
-            IdentityTable::new(&RTI_IDENTITIES),
+            TinyMapRef::from_slice(routes),
+            IdentityTable::from_slice(flows),
+            IdentityTable::from_slice(&[]),
+            IdentityTable::from_slice(&RTI_IDENTITIES),
+            IdentityTable::from_slice(&RTI_IDENTITIES),
         )
     }
 
@@ -3300,7 +3307,7 @@ mod tests {
         let federation_members = [FederateIndex::new(0), FederateIndex::new(1)];
         let image = CompiledDeploymentImage {
             federation: GlobalFederationImage::new(&federation_members, &[]),
-            federates: TinyMapView::new(&federates),
+            federates: TinyMapRef::from_slice(&federates),
             coordination: CoordinationProjection::Local,
             ..COMPILED
         };
@@ -3376,7 +3383,7 @@ mod tests {
         )];
         let dependencies = [RtiDependencyImage::new(FederateIndex::new(0), 42)];
         let image = rti_fixture(&members, &dependencies, &[], &[]);
-        let identities = IdentityTable::new(&["standalone"]);
+        let identities = IdentityTable::from_slice(&["standalone"]);
         let view = RtiImageView::new(image.clone(), identities).unwrap();
         assert_eq!(
             view.member_identity(FederateIndex::new(0))
@@ -3390,8 +3397,8 @@ mod tests {
             42
         );
         assert_eq!(view.members().len(), 1);
-        assert!(RtiImageView::new(image.clone(), IdentityTable::new(&[])).is_err());
-        assert!(RtiImageView::new(image, IdentityTable::new(&[""])).is_err());
+        assert!(RtiImageView::new(image.clone(), IdentityTable::from_slice(&[])).is_err());
+        assert!(RtiImageView::new(image, IdentityTable::from_slice(&[""])).is_err());
 
         let missing_dependencies = rti_fixture(&members, &[], &[], &[]);
         assert!(RtiImageView::new(missing_dependencies, identities).is_err());
@@ -3534,12 +3541,12 @@ mod tests {
         let missing_enclaves = [
             IMAGE,
             EnclaveImage {
-                routes: TinyMapView::new(&EMPTY_ROUTES),
+                routes: TinyMapRef::from_slice(&EMPTY_ROUTES),
                 ..SECOND_IMAGE
             },
         ];
         let missing_image = CompiledDeploymentImage {
-            enclaves: TinyMapView::new(&missing_enclaves),
+            enclaves: TinyMapRef::from_slice(&missing_enclaves),
             ..COMPILED
         };
         assert!(matches!(
@@ -3560,12 +3567,12 @@ mod tests {
         let mismatched_enclaves = [
             IMAGE,
             EnclaveImage {
-                routes: TinyMapView::new(&wrong_domain),
+                routes: TinyMapRef::from_slice(&wrong_domain),
                 ..SECOND_IMAGE
             },
         ];
         let mismatched_image = CompiledDeploymentImage {
-            enclaves: TinyMapView::new(&mismatched_enclaves),
+            enclaves: TinyMapRef::from_slice(&mismatched_enclaves),
             ..COMPILED
         };
         assert!(matches!(
@@ -3586,12 +3593,12 @@ mod tests {
         let delayed_enclaves = [
             IMAGE,
             EnclaveImage {
-                routes: TinyMapView::new(&wrong_delay),
+                routes: TinyMapRef::from_slice(&wrong_delay),
                 ..SECOND_IMAGE
             },
         ];
         let delayed_image = CompiledDeploymentImage {
-            enclaves: TinyMapView::new(&delayed_enclaves),
+            enclaves: TinyMapRef::from_slice(&delayed_enclaves),
             ..COMPILED
         };
         assert!(matches!(
@@ -3617,8 +3624,8 @@ mod tests {
             SECOND_IMAGE,
         ];
         let duplicate_image = CompiledDeploymentImage {
-            federates: TinyMapView::new(&duplicate_federates),
-            enclaves: TinyMapView::new(&duplicate_enclaves),
+            federates: TinyMapRef::from_slice(&duplicate_federates),
+            enclaves: TinyMapRef::from_slice(&duplicate_enclaves),
             ..COMPILED
         };
         assert!(matches!(
@@ -3639,22 +3646,22 @@ mod tests {
         let enclaves = [
             EnclaveImage {
                 enclave_id: EnclaveId::new("zzzza/control"),
-                routes: TinyMapView::new(&EMPTY_ROUTES),
+                routes: TinyMapRef::from_slice(&EMPTY_ROUTES),
                 ..IMAGE
             },
             EnclaveImage {
                 enclave_id: EnclaveId::new("zzzzb/control"),
-                routes: TinyMapView::new(&EMPTY_ROUTES),
+                routes: TinyMapRef::from_slice(&EMPTY_ROUTES),
                 ..IMAGE
             },
             EnclaveImage {
                 enclave_id: EnclaveId::new("aaaaa/control"),
-                routes: TinyMapView::new(&EMPTY_ROUTES),
+                routes: TinyMapRef::from_slice(&EMPTY_ROUTES),
                 ..IMAGE
             },
             EnclaveImage {
                 enclave_id: EnclaveId::new("aaaab/control"),
-                routes: TinyMapView::new(&EMPTY_ROUTES),
+                routes: TinyMapRef::from_slice(&EMPTY_ROUTES),
                 ..IMAGE
             },
         ];
@@ -3669,8 +3676,8 @@ mod tests {
         let rti_members = [rti_member_image.clone(), rti_member_image];
         let image = CompiledDeploymentImage {
             federation: GlobalFederationImage::new(&members, &[]),
-            federates: TinyMapView::new(&federates),
-            enclaves: TinyMapView::new(&enclaves),
+            federates: TinyMapRef::from_slice(&federates),
+            enclaves: TinyMapRef::from_slice(&enclaves),
             coordination: CoordinationProjection::CentralRti(rti_fixture(
                 &rti_members,
                 &[],
@@ -3702,7 +3709,7 @@ mod tests {
             IndexSpan::new(0, 3),
         )];
         let image = CompiledDeploymentImage {
-            federates: TinyMapView::new(&federates),
+            federates: TinyMapRef::from_slice(&federates),
             ..COMPILED
         };
 
@@ -3741,7 +3748,7 @@ mod tests {
                 binding,
             )];
             let image = EnclaveImage {
-                actions: TinyMapView::new(&actions),
+                actions: TinyMapRef::from_slice(&actions),
                 ..IMAGE
             };
             let view = EnclaveImageView::new(image).unwrap();
@@ -3779,7 +3786,7 @@ mod tests {
             (
                 "primary cross-reference",
                 EnclaveImage {
-                    reactions: TinyMapView::new(&bad_reactions),
+                    reactions: TinyMapRef::from_slice(&bad_reactions),
                     ..IMAGE
                 },
                 ImageValidationError::ReferenceOutOfBounds {
@@ -3793,7 +3800,7 @@ mod tests {
             (
                 "flattened range",
                 EnclaveImage {
-                    actions: TinyMapView::new(&bad_actions),
+                    actions: TinyMapRef::from_slice(&bad_actions),
                     ..IMAGE
                 },
                 ImageValidationError::RangeOutOfBounds {
@@ -3835,7 +3842,7 @@ mod tests {
             last_scope,
         ];
         let image = EnclaveImage {
-            scopes: TinyMapView::new(&scopes),
+            scopes: TinyMapRef::from_slice(&scopes),
             ..IMAGE
         };
 
@@ -3948,7 +3955,7 @@ mod tests {
             (
                 "ownership",
                 EnclaveImage {
-                    modes: TinyMapView::new(&bad_modes),
+                    modes: TinyMapRef::from_slice(&bad_modes),
                     ..IMAGE
                 },
                 ImageValidationError::OwnershipMismatch {
@@ -3960,7 +3967,7 @@ mod tests {
             (
                 "mode effect ownership",
                 EnclaveImage {
-                    reactions: TinyMapView::new(&bad_mode_effect_reactions),
+                    reactions: TinyMapRef::from_slice(&bad_mode_effect_reactions),
                     ..IMAGE
                 },
                 ImageValidationError::OwnershipMismatch {
@@ -3972,7 +3979,7 @@ mod tests {
             (
                 "invalid boundary",
                 EnclaveImage {
-                    routes: TinyMapView::new(&invalid_routes),
+                    routes: TinyMapRef::from_slice(&invalid_routes),
                     ..IMAGE
                 },
                 ImageValidationError::InvalidStableId {
@@ -3984,7 +3991,7 @@ mod tests {
             (
                 "unsorted boundary",
                 EnclaveImage {
-                    routes: TinyMapView::new(&unsorted_routes),
+                    routes: TinyMapRef::from_slice(&unsorted_routes),
                     ..IMAGE
                 },
                 ImageValidationError::StableIdsNotSorted {
@@ -3996,7 +4003,7 @@ mod tests {
             (
                 "duplicate binding",
                 EnclaveImage {
-                    required_bindings: TinyMapView::new(&duplicate_bindings),
+                    required_bindings: TinyMapRef::from_slice(&duplicate_bindings),
                     ..IMAGE
                 },
                 ImageValidationError::DuplicateStableId {
@@ -4008,7 +4015,7 @@ mod tests {
             (
                 "invalid bank",
                 EnclaveImage {
-                    reactors: TinyMapView::new(&invalid_bank_reactors),
+                    reactors: TinyMapRef::from_slice(&invalid_bank_reactors),
                     ..IMAGE
                 },
                 ImageValidationError::InvalidBankInfo {
@@ -4046,12 +4053,12 @@ mod tests {
     fn enclave_image_requires_a_root_reactor() {
         let image = EnclaveImage {
             enclave_id: EnclaveId::new("rootless"),
-            reactors: TinyMapView::new(&[]),
-            actions: TinyMapView::new(&[]),
-            ports: TinyMapView::new(&[]),
-            reactions: TinyMapView::new(&[]),
-            modes: TinyMapView::new(&[]),
-            scopes: TinyMapView::new(&[]),
+            reactors: TinyMapRef::from_slice(&[]),
+            actions: TinyMapRef::from_slice(&[]),
+            ports: TinyMapRef::from_slice(&[]),
+            reactions: TinyMapRef::from_slice(&[]),
+            modes: TinyMapRef::from_slice(&[]),
+            scopes: TinyMapRef::from_slice(&[]),
             reaction_triggers: &[],
             reaction_use_ports: &[],
             reaction_effect_ports: &[],
@@ -4067,8 +4074,8 @@ mod tests {
             timer_startup_actions: &[],
             shutdown_reactions: &[],
             shutdown_actions: &[],
-            routes: TinyMapView::new(&[]),
-            required_bindings: TinyMapView::new(&[]),
+            routes: TinyMapRef::from_slice(&[]),
+            required_bindings: TinyMapRef::from_slice(&[]),
             storage_bounds: &StorageBounds::new(0, 0, 0, 0, 0, 0),
         };
 

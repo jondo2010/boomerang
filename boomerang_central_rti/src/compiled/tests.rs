@@ -1,7 +1,7 @@
 //! Scripted transport behavior for bounded client lifecycle checks; never a runtime transport.
 use super::*;
 use boomerang_runtime::{
-    image::{RecoveryPolicy, RtiImage, RtiMemberImage, SliceRange, TinyMapView},
+    image::{RecoveryPolicy, RtiImage, RtiMemberImage, SliceRange, TinyMapRef},
     CoordinationRevision, FederateCoordinationBackend, FederatePublication,
 };
 use std::{
@@ -31,7 +31,7 @@ impl RtiReplySource for Replies {
 /// Isolates client lifecycle tests with one route-less reference member.
 fn bindings() -> RtiClientBindings<'static> {
     const IMAGE: RtiImage<'static> = RtiImage::new(
-        TinyMapView::new(&[RtiMemberImage::new(
+        TinyMapRef::from_slice(&[RtiMemberImage::new(
             RecoveryPolicy::FailStop,
             SliceRange::new(0, 0),
             SliceRange::new(0, 0),
@@ -40,11 +40,11 @@ fn bindings() -> RtiClientBindings<'static> {
         )]),
         &[],
         &[],
-        TinyMapView::new(&[]),
-        TinyMapView::new(&[]),
-        TinyMapView::new(&[]),
-        TinyMapView::new(&[]),
-        TinyMapView::new(&[]),
+        TinyMapRef::from_slice(&[]),
+        TinyMapRef::from_slice(&[]),
+        TinyMapRef::from_slice(&[]),
+        TinyMapRef::from_slice(&[]),
+        TinyMapRef::from_slice(&[]),
     );
     RtiClientBindings {
         image: IMAGE,

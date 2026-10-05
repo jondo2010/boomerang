@@ -32,7 +32,7 @@ use crate::runtime::image::{
     ReactionImage, ReactionIndex, ReactorImage, ReactorIndex, RequiredBindingImage, RouteImage,
     RouteIndex, ScopeImage, ScopeIndex, StorageBounds, TimerStartupImage,
 };
-use tinymap::{IndexSpan, TinyMap, TinyMapView};
+use tinymap::{IndexSpan, TinyMap, TinyMapRef};
 
 /// Canonical required payload binding identities for one Enclave.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -303,12 +303,12 @@ impl OwnedEnclaveImage {
     ) -> EnclaveImage<'a> {
         EnclaveImage {
             enclave_id: runtime_image::EnclaveId::new(enclave_id),
-            reactors: self.reactors.as_view(),
-            actions: self.actions.as_view(),
-            ports: self.ports.as_view(),
-            reactions: self.reactions.as_view(),
-            modes: self.modes.as_view(),
-            scopes: self.scopes.as_view(),
+            reactors: TinyMapRef::from_slice(self.reactors.as_view().as_slice()),
+            actions: TinyMapRef::from_slice(self.actions.as_view().as_slice()),
+            ports: TinyMapRef::from_slice(self.ports.as_view().as_slice()),
+            reactions: TinyMapRef::from_slice(self.reactions.as_view().as_slice()),
+            modes: TinyMapRef::from_slice(self.modes.as_view().as_slice()),
+            scopes: TinyMapRef::from_slice(self.scopes.as_view().as_slice()),
             reaction_triggers: &self.reaction_triggers,
             reaction_use_ports: &self.reaction_use_ports,
             reaction_effect_ports: &self.reaction_effect_ports,
@@ -324,8 +324,8 @@ impl OwnedEnclaveImage {
             timer_startup_actions: &self.timer_startup_actions,
             shutdown_reactions: &self.shutdown_reactions,
             shutdown_actions: &self.shutdown_actions,
-            routes: routes.as_view(),
-            required_bindings: bindings.as_view(),
+            routes: TinyMapRef::from_slice(routes.as_view().as_slice()),
+            required_bindings: TinyMapRef::from_slice(bindings.as_view().as_slice()),
             storage_bounds: &self.storage_bounds,
         }
     }
@@ -650,8 +650,8 @@ impl OwnedCompiledDeployment {
         self.coordination.with_image(|coordination| {
             f(crate::runtime::image::CompiledDeploymentImage {
                 federation: runtime_image::GlobalFederationImage::new(&members, &edges),
-                federates: TinyMapView::new(&federates),
-                enclaves: TinyMapView::new(&enclaves),
+                federates: TinyMapRef::from_slice(&federates),
+                enclaves: TinyMapRef::from_slice(&enclaves),
                 coordination,
             })
         })

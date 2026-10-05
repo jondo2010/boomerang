@@ -154,6 +154,21 @@ impl Key for TwoKey {
 }
 
 #[test]
+fn borrowed_dense_slice_accepts_exact_key_domain_capacity_in_const_context() {
+    const VALUES: [u8; TwoKey::MAX_LEN] = [10, 20];
+    const VIEW: TinyMapRef<'static, TwoKey, u8> = TinyMapRef::from_slice(&VALUES);
+
+    assert_eq!(VIEW.as_slice(), &VALUES);
+}
+
+#[test]
+#[should_panic(expected = "dense view exceeds key domain")]
+fn borrowed_dense_slice_rejects_values_beyond_key_domain() {
+    let values = [10, 20, 30];
+    let _ = TinyMapRef::<TwoKey, _>::from_slice(&values);
+}
+
+#[test]
 fn key_domain_capacity_precedes_value_construction_and_preserves_shape() {
     let mut builder = TinyMapBuilder::<TwoKey, u8, InlineStorage<u8, 4>>::inline();
     builder.try_insert(1).unwrap();

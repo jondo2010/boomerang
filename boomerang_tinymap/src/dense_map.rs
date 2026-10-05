@@ -260,7 +260,12 @@ impl<'a, K: Key, V> TinyMapRef<'a, K, V> {
     ///
     /// The caller supplies values in the owning image's established key order;
     /// this adapter does not allocate runtime keys.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `values` exceeds the key type's supported table length.
     pub const fn from_slice(values: &'a [V]) -> Self {
+        assert!(values.len() <= K::MAX_LEN, "dense view exceeds key domain");
         Self {
             values: TinyVecRef::from_slice(values),
             marker: PhantomData,

@@ -24,6 +24,42 @@ use crate::{
     },
 };
 
+#[test]
+fn dense_table_errors_keep_legacy_capacity_wording_and_other_context() {
+    for (table, expected) in [
+        (
+            "Enclave",
+            "Enclave table dense collection length 3 exceeds key capacity 2",
+        ),
+        (
+            "Federate",
+            "Federate table dense collection length 3 exceeds key capacity 2",
+        ),
+    ] {
+        let CompileError::InvalidDeployment { message } = super::deployment_table_error(
+            table,
+            tinymap::TinyMapError::Capacity {
+                limit: 2,
+                requested: 3,
+            },
+        ) else {
+            panic!("dense table errors must remain invalid-deployment errors");
+        };
+        assert_eq!(message, expected);
+    }
+
+    let CompileError::InvalidDeployment { message } = super::deployment_table_error(
+        "Enclave",
+        tinymap::TinyMapError::ExactLength {
+            expected: 2,
+            actual: 1,
+        },
+    ) else {
+        panic!("dense table errors must remain invalid-deployment errors");
+    };
+    assert_eq!(message, "Enclave table expected exactly 2 values, got 1");
+}
+
 fn federate_enclaves(
     deployment: &OwnedCompiledDeployment,
     federate: FederateIndex,

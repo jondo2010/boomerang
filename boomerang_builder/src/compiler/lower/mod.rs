@@ -324,6 +324,19 @@ impl<'a> DescriptorSlots<'a> {
     }
 }
 
+/// Preserves the established dense-capacity diagnostic at deployment table boundaries.
+fn deployment_table_error(table: &'static str, error: tinymap::TinyMapError) -> CompileError {
+    let message = match error {
+        tinymap::TinyMapError::Capacity { limit, requested } => {
+            format!(
+                "{table} table dense collection length {requested} exceeds key capacity {limit}"
+            )
+        }
+        other => format!("{table} table {other}"),
+    };
+    CompileError::InvalidDeployment { message }
+}
+
 impl ResolvedDeployment {
     /// Lowers a resolved deployment into canonical immutable compiled images.
     pub fn lower(&self) -> Result<OwnedCompiledDeployment, CompileError> {
@@ -380,9 +393,7 @@ impl ResolvedDeployment {
             }
             let enclave_span = owned_enclaves
                 .try_extend_exact(enclaves.into_iter())
-                .map_err(|error| CompileError::InvalidDeployment {
-                    message: format!("Enclave table {error}"),
-                })?;
+                .map_err(|error| deployment_table_error("Enclave", error))?;
             owned_federates
                 .try_insert(OwnedFederateImage {
                     id: federate.id().clone(),
@@ -390,9 +401,7 @@ impl ResolvedDeployment {
                     runtime: federate.runtime().clone(),
                     enclaves: enclave_span,
                 })
-                .map_err(|error| CompileError::InvalidDeployment {
-                    message: format!("Federate table {error}"),
-                })?;
+                .map_err(|error| deployment_table_error("Federate", error))?;
         }
         let compiled = OwnedCompiledDeployment {
             federation: GlobalFederationImage {

@@ -1,6 +1,6 @@
 //! Compiled network route adapters reuse the owned execution fixture and scheduler.
 use super::*;
-use boomerang_runtime::image::EnclaveImageView;
+use boomerang_runtime::image::FederateImageView;
 use boomerang_runtime::{
     execute_owned_federate_with_backend, BoundaryAdmissionError, BoundarySubmissionError,
     CoordinationRevision, FederateAcquisition, FederateCompletion, FederateCoordinationBackend,
@@ -8,6 +8,35 @@ use boomerang_runtime::{
     TaggedPayload,
 };
 use std::sync::{Arc, Mutex};
+
+#[cfg(feature = "bounded-tracing")]
+static CHECKED_IMAGES: [boomerang_runtime::image::EnclaveImage<'static>; 1] = [IMAGE];
+#[cfg(feature = "bounded-tracing")]
+static CHECKED_FEDERATE: FederateImageView<'static> = match FederateImageView::new(
+    fixture_federate("host", "host", "std", IndexSpan::new(0, 1)),
+    &CHECKED_IMAGES,
+) {
+    Ok(view) => view,
+    Err(_) => panic!("invalid distributed Federate fixture"),
+};
+static CHECKED_SOURCE_IMAGES: [boomerang_runtime::image::EnclaveImage<'static>; 1] =
+    [ROUTED_SOURCE_IMAGE];
+static CHECKED_SOURCE_FEDERATE: FederateImageView<'static> = match FederateImageView::new(
+    fixture_federate("source", "host", "std", IndexSpan::new(5, 1)),
+    &CHECKED_SOURCE_IMAGES,
+) {
+    Ok(view) => view,
+    Err(_) => panic!("invalid distributed source Federate fixture"),
+};
+static CHECKED_SINK_IMAGES: [boomerang_runtime::image::EnclaveImage<'static>; 1] =
+    [ROUTED_SINK_IMAGE];
+static CHECKED_SINK_FEDERATE: FederateImageView<'static> = match FederateImageView::new(
+    fixture_federate("sink", "host", "std", IndexSpan::new(11, 1)),
+    &CHECKED_SINK_IMAGES,
+) {
+    Ok(view) => view,
+    Err(_) => panic!("invalid distributed sink Federate fixture"),
+};
 
 /// Immediate grants isolate executor wiring from the separately tested RTI algorithm.
 #[derive(Default)]
@@ -80,8 +109,7 @@ fn bounded_capture_prepares_coordinator_and_scheduler_workers() {
             });
         let execution = execute_owned_federate_with_backend(
             FederateIndex::new(0),
-            &fixture_federate("host", "host", "std", IndexSpan::new(0, 1)),
-            &[&EnclaveImageView::new(&IMAGE).unwrap()],
+            &CHECKED_FEDERATE,
             FederateBindings::new().bind_enclave(EnclaveIndex::new(0), bindings),
             Config::default().with_fast_forward(true),
             |_| Ok(GrantBackend::default()),
@@ -138,8 +166,7 @@ fn distributed_federate_trace_retains_validated_compiler_identity() {
     let (_, events) = capture_runtime(|| {
         execute_owned_federate_with_backend(
             FederateIndex::new(3),
-            &fixture_federate("source", "host", "std", IndexSpan::new(5, 1)),
-            &[&EnclaveImageView::new(&ROUTED_SOURCE_IMAGE).unwrap()],
+            &CHECKED_SOURCE_FEDERATE,
             FederateBindings::new()
                 .bind_enclave(EnclaveIndex::new(5), source_bindings())
                 .bind_outbound_route(
@@ -169,8 +196,7 @@ fn isolated_slices_execute_encoded_route_halves_at_canonical_enclave_keys() {
         let wire = Arc::new(CaptureSink::default());
         let source = execute_owned_federate_with_backend(
             FederateIndex::new(3),
-            &fixture_federate("source", "host", "std", IndexSpan::new(5, 1)),
-            &[&EnclaveImageView::new(&ROUTED_SOURCE_IMAGE).unwrap()],
+            &CHECKED_SOURCE_FEDERATE,
             FederateBindings::new()
                 .bind_enclave(EnclaveIndex::new(5), source_bindings())
                 .bind_outbound_route(
@@ -201,8 +227,7 @@ fn isolated_slices_execute_encoded_route_halves_at_canonical_enclave_keys() {
         );
         let sink = execute_owned_federate_with_backend(
             FederateIndex::new(9),
-            &fixture_federate("sink", "host", "std", IndexSpan::new(11, 1)),
-            &[&EnclaveImageView::new(&ROUTED_SINK_IMAGE).unwrap()],
+            &CHECKED_SINK_FEDERATE,
             FederateBindings::new()
                 .bind_enclave(EnclaveIndex::new(11), sink_bindings())
                 .bind_inbound_route(route_boundary(), PayloadType::<u32>::new(), decode_u32),
@@ -238,8 +263,7 @@ fn slice_backend_failure_wakes_and_joins_an_idle_scheduler() {
     bounded(|| {
         let error = execute_owned_federate_with_backend(
             FederateIndex::new(9),
-            &fixture_federate("sink", "host", "std", IndexSpan::new(11, 1)),
-            &[&EnclaveImageView::new(&ROUTED_SINK_IMAGE).unwrap()],
+            &CHECKED_SINK_FEDERATE,
             FederateBindings::new()
                 .bind_enclave(EnclaveIndex::new(11), sink_bindings())
                 .bind_inbound_route(route_boundary(), PayloadType::<u32>::new(), decode_u32),
@@ -276,8 +300,7 @@ fn slice_preserves_codec_and_submission_failures_through_scheduler_cleanup() {
         for reject_codec in [true, false] {
             let error = execute_owned_federate_with_backend(
                 FederateIndex::new(3),
-                &fixture_federate("source", "host", "std", IndexSpan::new(5, 1)),
-                &[&EnclaveImageView::new(&ROUTED_SOURCE_IMAGE).unwrap()],
+                &CHECKED_SOURCE_FEDERATE,
                 FederateBindings::new()
                     .bind_enclave(EnclaveIndex::new(5), source_bindings())
                     .bind_outbound_route(
@@ -337,7 +360,7 @@ fn counted_slice_sink() -> RoutedSinkState {
 #[test]
 fn slice_preflight_rejects_external_binding_errors_before_initialization_or_connect() {
     SLICE_INITIALIZATIONS.store(0, Ordering::SeqCst);
-    for case in 0..7 {
+    for case in 0..5 {
         let owned = EnclaveBindings::new()
             .bind_state(BindingSlotIndex::new(0), counted_slice_sink)
             .bind_port(BindingSlotIndex::new(2), PayloadType::<u32>::new())
@@ -371,15 +394,9 @@ fn slice_preflight_rejects_external_binding_errors_before_initialization_or_conn
                 decode_u32,
             );
         }
-        let span = match case {
-            5 => IndexSpan::new(11, 2),
-            6 => IndexSpan::new(usize::MAX, 1),
-            _ => IndexSpan::new(11, 1),
-        };
         let error = execute_owned_federate_with_backend(
             FederateIndex::new(9),
-            &fixture_federate("sink", "host", "std", span),
-            &[&EnclaveImageView::new(&ROUTED_SINK_IMAGE).unwrap()],
+            &CHECKED_SINK_FEDERATE,
             bindings,
             Config::default(),
             |_| -> Result<GrantBackend, FederateCoordinationError> {
@@ -389,7 +406,7 @@ fn slice_preflight_rejects_external_binding_errors_before_initialization_or_conn
         .unwrap_err();
         let expected = match case {
             0 => matches!(error, ExecuteOwnedFederateError::MissingRouteBinding { .. }),
-            1 | 5 | 6 => matches!(error, ExecuteOwnedFederateError::ImageValidation { .. }),
+            1 => matches!(error, ExecuteOwnedFederateError::ImageValidation { .. }),
             2 => matches!(
                 error,
                 ExecuteOwnedFederateError::RoutePayloadTypeMismatch { .. }

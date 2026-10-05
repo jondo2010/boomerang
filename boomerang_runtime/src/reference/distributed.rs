@@ -1,7 +1,7 @@
 //! External route binding and owned-slice entry point for compiled Federate execution.
 use super::*;
 use crate::{
-    image::{FederateImage, RouteImage, RouteIndex},
+    image::{FederateImageView, RouteImage, RouteIndex},
     InboundBoundaryAdapter, OutboundBoundarySink, PayloadDecoder, PayloadEncoder,
 };
 use std::sync::Arc;
@@ -161,10 +161,10 @@ impl<T: ReactorData, C: PayloadEncoder<T>> crate::storage::owned::OutboundRoute
 
 /// Executes a generated Federate's owned Enclave slice through an injected backend.
 ///
-/// `images` must contain checked views for exactly `image.enclaves()` in canonical order. Canonical
-/// keys are retained; peer scheduler images and payload bindings are unnecessary. This validates
-/// the owned slice and its bindings, not the absent global federation. The deployment compiler
-/// and backend handshake must establish that the peer slices share the same coordination image.
+/// `image` carries the checked Federate descriptor and exactly its canonical checked Enclave
+/// views. Canonical global keys are retained; peer scheduler images and payload bindings are
+/// unnecessary. The deployment compiler and backend handshake must establish that peer slices
+/// share the same coordination image.
 ///
 /// Every route must pair locally or have exactly one matching external binding. This baseline
 /// supports logical external routes only. Preflight completes before user initialization or
@@ -173,8 +173,7 @@ impl<T: ReactorData, C: PayloadEncoder<T>> crate::storage::owned::OutboundRoute
 /// by local execution. Idle termination additionally requires backend confirmation.
 pub fn execute_owned_federate_with_backend<'image, B: FederateCoordinationBackend>(
     federate: FederateIndex,
-    image: &FederateImage<'image>,
-    images: &[&EnclaveImageView<'image>],
+    image: &FederateImageView<'image>,
     bindings: FederateBindings<'_>,
     config: Config,
     connect: impl FnOnce(
@@ -184,7 +183,6 @@ pub fn execute_owned_federate_with_backend<'image, B: FederateCoordinationBacken
     execute_owned_federate_with_backend_and_observations(
         federate,
         image,
-        images,
         bindings,
         config,
         &[],
@@ -201,8 +199,7 @@ pub fn execute_owned_federate_with_backend_and_observations<
     B: FederateCoordinationBackend,
 >(
     federate: FederateIndex,
-    image: &FederateImage<'image>,
-    images: &[&EnclaveImageView<'image>],
+    image: &FederateImageView<'image>,
     mut bindings: FederateBindings<'_>,
     config: Config,
     observations: &[(EnclaveIndex, crate::ObservationHandle)],
@@ -213,7 +210,7 @@ pub fn execute_owned_federate_with_backend_and_observations<
     tracing::debug!(target: "boomerang::runtime",
         event = "runtime.preflight.started", owner = "federate", federate = federate.as_u32());
     let preflight = || {
-        let images = prepare_images(image, images)?;
+        let images = index_images(image);
         preflight_enclave_bindings(federate, &images, &bindings)?;
         let (endpoints, external) = resolve_routes(federate, &images, &bindings)?;
         preflight_local_bindings(federate, &images, &endpoints, &bindings)?;
@@ -227,7 +224,7 @@ pub fn execute_owned_federate_with_backend_and_observations<
             return Err(error);
         }
     };
-    let span = federate_span(federate, image, "distributed");
+    let span = federate_span(federate, image.descriptor(), "distributed");
     let _span = span.enter();
     tracing::debug!(target: "boomerang::runtime",
         event = "runtime.preflight.completed", owner = "federate", federate = federate.as_u32());
@@ -264,17 +261,16 @@ pub fn execute_owned_federate_with_backend_and_observations<
 
 /// Executes a generated Federate's checked Enclave views with local coordination.
 ///
-/// The views must match `image.enclaves()` in canonical order. Every route must pair within
-/// this slice. Binding, payload, storage, and timing checks still precede user initialization.
-/// Exogenous event sources require [`Config::keep_alive`] and explicit shutdown.
+/// Every route must pair within this already-checked slice. Binding, payload, storage, and timing
+/// checks still precede user initialization. Exogenous event sources require
+/// [`Config::keep_alive`] and explicit shutdown.
 pub fn execute_owned_federate_slice<'image>(
     federate: FederateIndex,
-    image: &FederateImage<'image>,
-    images: &[&EnclaveImageView<'image>],
+    image: &FederateImageView<'image>,
     bindings: FederateBindings<'_>,
     config: Config,
 ) -> Result<FederateExecution, ExecuteOwnedFederateError> {
-    execute_owned_federate_slice_with_observations(federate, image, images, bindings, config, &[])
+    execute_owned_federate_slice_with_observations(federate, image, bindings, config, &[])
 }
 
 /// Executes a generated Federate's checked Enclave views with local coordination and observations.
@@ -283,8 +279,7 @@ pub fn execute_owned_federate_slice<'image>(
 /// construction and are never stored in [`Config`].
 pub fn execute_owned_federate_slice_with_observations<'image>(
     federate: FederateIndex,
-    image: &FederateImage<'image>,
-    images: &[&EnclaveImageView<'image>],
+    image: &FederateImageView<'image>,
     bindings: FederateBindings<'_>,
     config: Config,
     observations: &[(EnclaveIndex, crate::ObservationHandle)],
@@ -292,7 +287,7 @@ pub fn execute_owned_federate_slice_with_observations<'image>(
     tracing::debug!(target: "boomerang::runtime",
         event = "runtime.preflight.started", owner = "federate", federate = federate.as_u32());
     let preflight = || {
-        let images = prepare_images(image, images)?;
+        let images = index_images(image);
         preflight_enclave_bindings(federate, &images, &bindings)?;
         if let Some(route) = bindings.external_routes.first() {
             return Err(ExecuteOwnedFederateError::UnexpectedRouteBinding {
@@ -312,7 +307,7 @@ pub fn execute_owned_federate_slice_with_observations<'image>(
             return Err(error);
         }
     };
-    let span = federate_span(federate, image, "local");
+    let span = federate_span(federate, image.descriptor(), "local");
     let _span = span.enter();
     tracing::debug!(target: "boomerang::runtime",
         event = "runtime.preflight.completed", owner = "federate", federate = federate.as_u32());
@@ -332,44 +327,18 @@ pub fn execute_owned_federate_slice_with_observations<'image>(
     )
 }
 
-/// Validates owned layout coordinates before materializing the sparse canonical lookup.
-fn prepare_images<'image>(
-    image: &FederateImage<'image>,
-    images: &[&EnclaveImageView<'image>],
-) -> Result<TinySecondaryMap<EnclaveIndex, EnclaveImageView<'image>>, ExecuteOwnedFederateError> {
-    let fail = |message: &str| ExecuteOwnedFederateError::ImageValidation {
-        message: message.into(),
-    };
+/// Materializes a sparse lookup from an already-checked Federate view without revalidation.
+fn index_images<'image>(
+    image: &FederateImageView<'image>,
+) -> TinySecondaryMap<EnclaveIndex, EnclaveImageView<'image>> {
     let span = image.enclaves();
-    let end = span
-        .checked_end()
-        .ok_or_else(|| fail("Federate Enclave span overflows"))?;
-    if images.len() != span.len() || end > <EnclaveIndex as tinymap::Key>::MAX_LEN {
-        return Err(fail(
-            "Federate Enclave slice does not match its canonical span",
-        ));
-    }
-    for id in [
-        image.id().as_str(),
-        image.target().as_str(),
-        image.runtime().as_str(),
-    ] {
-        if id.is_empty() || id.trim() != id || id.chars().any(char::is_control) {
-            return Err(fail("invalid Federate identity, target or runtime"));
-        }
-    }
-    if images
-        .windows(2)
-        .any(|pair| pair[0].enclave_id() >= pair[1].enclave_id())
-    {
-        return Err(fail(
-            "Federate Enclave identities must be unique and sorted",
-        ));
-    }
-    Ok((span.start()..end)
-        .zip(images)
-        .map(|(key, image)| (EnclaveIndex::from(key), image.reborrow()))
-        .collect())
+    (span.start()
+        ..span
+            .checked_end()
+            .expect("checked Federate span has an end"))
+        .zip(image.enclave_views())
+        .map(|(key, enclave)| (EnclaveIndex::from(key), enclave))
+        .collect()
 }
 
 /// Local route pairs plus external coordinates in caller binding order.

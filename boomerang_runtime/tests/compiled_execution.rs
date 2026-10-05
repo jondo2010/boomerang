@@ -320,7 +320,7 @@ const fn fixture_scope(
         r!(0, 0),
     )
 }
-static IMAGE: EnclaveImage<'static> = EnclaveImage {
+const IMAGE: EnclaveImage<'static> = EnclaveImage {
     enclave_id: EnclaveId::new("compiled/reference"),
     reactors: TinyMapView::new(&REACTORS),
     actions: TinyMapView::new(&ACTIONS),

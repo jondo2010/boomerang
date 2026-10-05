@@ -173,7 +173,7 @@ pub(super) fn render_launcher(
             let sink = connection.sink();
             let bindings = generated_bindings(&rti_bindings, sink.clone())?;
             let execution = boomerang_runtime::execute_owned_federate_with_backend_and_observations(
-                FEDERATE, &FEDERATE_IMAGE, &ENCLAVE_VIEWS, bindings, #config,
+                FEDERATE, &FEDERATE_VIEW, bindings, #config,
                 &telemetry_observations,
                 |inbound| CentralRtiClient::connect(sink, connection, rti_bindings, inbound, timeout),
             )?;
@@ -181,7 +181,7 @@ pub(super) fn render_launcher(
     } else {
         quote! {
             let execution = boomerang_runtime::execute_owned_federate_slice_with_observations(
-                FEDERATE, &FEDERATE_IMAGE, &ENCLAVE_VIEWS, generated_bindings(), #config,
+                FEDERATE, &FEDERATE_VIEW, generated_bindings(), #config,
                 &telemetry_observations,
             )?;
         }
@@ -376,8 +376,6 @@ fn render_enclave_image(index: usize, image: &EnclaveImage<'_>) -> TokenStream {
     tokens.extend(render_routes(&prefix, image));
     tokens.extend(render_required_bindings(&prefix, image));
     let image_name = format_ident!("{prefix}_IMAGE");
-    let view_name = format_ident!("{prefix}_VIEW");
-    let invalid_image = format!("invalid generated Enclave image {prefix}");
     let enclave_id = image.enclave_id.as_str();
     let bounds = storage_bounds(image.storage_bounds);
     let reactors = format_ident!("{prefix}_REACTORS");
@@ -431,26 +429,22 @@ fn render_enclave_image(index: usize, image: &EnclaveImage<'_>) -> TokenStream {
             required_bindings: TinyMapView::new(&#required_bindings),
             storage_bounds: &#bounds,
         };
-        static #view_name: EnclaveImageView<'static> = match EnclaveImageView::new(&#image_name) {
-            Ok(view) => view,
-            Err(_) => panic!(#invalid_image),
-        };
     });
     tokens
 }
 
-/// Emits the selected Federate descriptor and its checked Enclave execution views.
+/// Emits the selected Federate descriptor and its raw Enclave descriptor table.
 fn render_federate(slice: &FederateSlice<'_>) -> TokenStream {
     let enclave_count = slice.enclaves().len();
     let enclave_len = proc_macro2::Literal::usize_unsuffixed(enclave_count);
-    let enclave_views = (0..enclave_count).map(|index| format_ident!("E{index}_VIEW"));
+    let enclave_images = (0..enclave_count).map(|index| format_ident!("E{index}_IMAGE"));
     let federate = proc_macro2::Literal::u32_unsuffixed(slice.federate().as_u32());
     let id = slice.id().as_str();
     let target = slice.target().as_str();
     let runtime = slice.runtime().as_str();
     let enclave_range = index_span(slice.enclave_range());
     quote! {
-        static ENCLAVE_VIEWS: [&EnclaveImageView<'static>; #enclave_len] = [#(&#enclave_views),*];
+        static ENCLAVE_IMAGES: [EnclaveImage<'static>; #enclave_len] = [#(#enclave_images),*];
         static FEDERATE: FederateIndex = FederateIndex::new(#federate);
         const FEDERATE_IMAGE: FederateImage<'static> = FederateImage::new(
             FederateId::new(#id),
@@ -458,6 +452,11 @@ fn render_federate(slice: &FederateSlice<'_>) -> TokenStream {
             RuntimeBackendId::new(#runtime),
             #enclave_range,
         );
+        static FEDERATE_VIEW: FederateImageView<'static> =
+            match FederateImageView::new(FEDERATE_IMAGE, &ENCLAVE_IMAGES) {
+                Ok(view) => view,
+                Err(_) => panic!("invalid generated Federate image"),
+            };
     }
 }
 

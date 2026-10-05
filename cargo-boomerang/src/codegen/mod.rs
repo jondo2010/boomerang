@@ -515,6 +515,7 @@ fn prepare_launcher(
         &configuration,
         &configured_files,
         &cargo_program,
+        compiler_wrapper.identity(),
     )?;
     let request = GeneratedWorkspaceRequest {
         role: GeneratedRole::Launcher,
@@ -534,7 +535,7 @@ fn prepare_launcher(
                 &compile_inputs,
                 &application_workspace,
                 &cargo_program,
-                &compiler_wrapper,
+                compiler_wrapper.path(),
                 &compiler_wrappers,
                 output,
             )
@@ -546,7 +547,7 @@ fn prepare_launcher(
                 &compile_inputs,
                 &analyzed.resolved,
                 &cargo_program,
-                &compiler_wrapper,
+                compiler_wrapper.path(),
                 &compiler_wrappers,
                 output,
             )
@@ -560,7 +561,7 @@ fn prepare_launcher(
         workspace,
         application_workspace,
         cargo_program,
-        compiler_wrapper,
+        compiler_wrapper: compiler_wrapper.into_path(),
         compiler_wrappers,
         output: *output,
         package_id,
@@ -574,6 +575,7 @@ fn prepare_launcher(
 }
 
 /// Computes the canonical identity of one launcher request from all Cargo-relevant inputs.
+#[allow(clippy::too_many_arguments, reason = "one generated launcher request")]
 fn launcher_request_identity(
     manifest: &[u8],
     source: &[u8],
@@ -582,16 +584,14 @@ fn launcher_request_identity(
     federate: &ResolvedFederate,
     configured_files: &ConfiguredFiles,
     cargo_program: &OsStr,
+    wrapper_identity: &[u8],
 ) -> Result<RequestIdentity> {
     let mut inputs = compile_inputs.to_vec();
     inputs.sort();
 
     let mut identity = RequestIdentityBuilder::new(GeneratedRole::Launcher);
     identity.field("facet", Some(b"payload"));
-    identity.field(
-        "facet-wrapper",
-        Some(include_bytes!("../compiler_wrapper/utility.rs")),
-    );
+    identity.field("facet-wrapper", Some(wrapper_identity));
     identity.field("manifest", Some(manifest));
     identity.field("source", Some(source));
     identity.field("source-lock-digest", Some(source_lock_digest));
@@ -1294,7 +1294,7 @@ mod tests {
             std::fs::write(path, b"[net]\noffline = true\n").unwrap();
         }
         let inputs = vec![(String::from("COMPATIBILITY"), String::from("fixed"))];
-        let identity = |target_json: &Path, cargo_config: &Path, cargo| {
+        let identity = |target_json: &Path, cargo_config: &Path, cargo, wrapper_identity| {
             let federate = ResolvedFederate {
                 bounded_tracing: None,
                 groups: Vec::new(),
@@ -1315,19 +1315,38 @@ mod tests {
                 &federate,
                 &configured_files,
                 OsStr::new(cargo),
+                wrapper_identity,
             )
             .unwrap()
         };
-        let first = identity(target_a.path(), config_a.path(), "cargo");
+        let first = identity(target_a.path(), config_a.path(), "cargo", b"wrapper-v1");
 
         std::fs::write(config_a.path(), b"[net]\noffline = false\n").unwrap();
-        assert_ne!(first, identity(target_a.path(), config_a.path(), "cargo"));
-        std::fs::write(config_a.path(), b"[net]\noffline = true\n").unwrap();
-        assert_ne!(first, identity(target_b.path(), config_a.path(), "cargo"));
-        assert_ne!(first, identity(target_a.path(), config_b.path(), "cargo"));
         assert_ne!(
             first,
-            identity(target_a.path(), config_a.path(), "custom-cargo")
+            identity(target_a.path(), config_a.path(), "cargo", b"wrapper-v1")
+        );
+        std::fs::write(config_a.path(), b"[net]\noffline = true\n").unwrap();
+        assert_ne!(
+            first,
+            identity(target_b.path(), config_a.path(), "cargo", b"wrapper-v1")
+        );
+        assert_ne!(
+            first,
+            identity(target_a.path(), config_b.path(), "cargo", b"wrapper-v1")
+        );
+        assert_ne!(
+            first,
+            identity(
+                target_a.path(),
+                config_a.path(),
+                "custom-cargo",
+                b"wrapper-v1"
+            )
+        );
+        assert_ne!(
+            first,
+            identity(target_a.path(), config_a.path(), "cargo", b"wrapper-v2")
         );
     }
 
@@ -1354,6 +1373,7 @@ mod tests {
                 &federate,
                 &configured_files,
                 OsStr::new("cargo"),
+                b"wrapper-v1",
             )
             .unwrap()
         };

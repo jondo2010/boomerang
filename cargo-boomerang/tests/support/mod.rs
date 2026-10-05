@@ -300,6 +300,7 @@ pub fn assert_progress_phases(stderr: &str, expected: &[&str]) {
 struct ToolEnvironmentGuard {
     target_directory: Option<OsString>,
     compiler_wrapper: Option<OsString>,
+    search_path: Option<OsString>,
 }
 
 impl Drop for ToolEnvironmentGuard {
@@ -312,6 +313,10 @@ impl Drop for ToolEnvironmentGuard {
             Some(previous) => unsafe { std::env::set_var("BOOMERANG_COMPILER_WRAPPER", previous) },
             None => unsafe { std::env::remove_var("BOOMERANG_COMPILER_WRAPPER") },
         }
+        match &self.search_path {
+            Some(previous) => unsafe { std::env::set_var("PATH", previous) },
+            None => unsafe { std::env::remove_var("PATH") },
+        }
     }
 }
 
@@ -321,13 +326,21 @@ pub fn with_target_directory<T>(target: &Path, operation: impl FnOnce() -> T) ->
     let _guard = ToolEnvironmentGuard {
         target_directory: std::env::var_os("CARGO_TARGET_DIR"),
         compiler_wrapper: std::env::var_os("BOOMERANG_COMPILER_WRAPPER"),
+        search_path: std::env::var_os("PATH"),
     };
+    let wrapper_directory = Path::new(env!("CARGO_BIN_EXE_cargo-boomerang"))
+        .parent()
+        .expect("cargo-boomerang test binary has a parent directory");
+    let mut search_paths = vec![wrapper_directory.to_path_buf()];
+    if let Some(path) = std::env::var_os("PATH") {
+        search_paths.extend(std::env::split_paths(&path));
+    }
+    let search_path = std::env::join_paths(search_paths)
+        .expect("cargo-boomerang test search path is representable");
     unsafe {
         std::env::set_var("CARGO_TARGET_DIR", target);
-        std::env::set_var(
-            "BOOMERANG_COMPILER_WRAPPER",
-            env!("CARGO_BIN_EXE_cargo-boomerang"),
-        );
+        std::env::remove_var("BOOMERANG_COMPILER_WRAPPER");
+        std::env::set_var("PATH", search_path);
     }
     operation()
 }

@@ -112,6 +112,10 @@ enum BoomerangCommand {
 }
 
 fn main() -> Result<()> {
+    if cargo_boomerang::compiler_wrapper::is_identity_request() {
+        cargo_boomerang::compiler_wrapper::print_identity();
+        return Ok(());
+    }
     if cargo_boomerang::compiler_wrapper::is_invocation() {
         cargo_boomerang::compiler_wrapper::main();
     }

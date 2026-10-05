@@ -119,7 +119,7 @@ fn host_program_name(role: GeneratedRole) -> &'static str {
 fn run_host_stage(
     resolved: &ResolvedWorkspace,
     role: GeneratedRole,
-    wrapper: &Path,
+    wrapper: &compiler_wrapper::Executable,
     output: &crate::CommandOutput,
 ) -> Result<(Vec<u8>, String, usize)> {
     let topology = role == GeneratedRole::Topology;
@@ -142,7 +142,7 @@ fn build_and_run_host_stage(
     resolved: &ResolvedWorkspace,
     role: GeneratedRole,
     generated: GeneratedCrate,
-    wrapper: &Path,
+    wrapper: &compiler_wrapper::Executable,
     output: &crate::CommandOutput,
 ) -> Result<(Vec<u8>, String, usize)> {
     let label = if role == GeneratedRole::Topology {
@@ -151,7 +151,7 @@ fn build_and_run_host_stage(
         "descriptor driver"
     };
     let (executable, mut log, count, _execution) =
-        build_host_program(resolved, generated, role, Some(wrapper), output)?;
+        build_host_program(resolved, generated, role, wrapper, output)?;
     let result = Command::new(&executable)
         .output()
         .with_context(|| format!("failed to execute {label}"))?;
@@ -164,7 +164,7 @@ fn build_host_program(
     resolved: &ResolvedWorkspace,
     generated_source: GeneratedCrate,
     role: GeneratedRole,
-    wrapper: Option<&Path>,
+    wrapper: &compiler_wrapper::Executable,
     output: &crate::CommandOutput,
 ) -> Result<(PathBuf, String, usize, Option<tempfile::TempDir>)> {
     let cargo_program = generated_cargo_program();
@@ -177,7 +177,7 @@ fn build_host_program(
         &resolved.lockfile().digest,
         &roots,
         &cargo_program,
-        include_bytes!("compiler_wrapper/utility.rs"),
+        wrapper.identity(),
     );
     let request = GeneratedWorkspaceRequest {
         role,
@@ -214,7 +214,7 @@ fn build_host_program(
             &cargo_program,
             application_workspace,
             arguments,
-            wrapper.map(|path| (facet, path, &compiler_wrappers)),
+            Some((facet, wrapper.path(), &compiler_wrappers)),
             output,
         )
     };
@@ -250,7 +250,7 @@ fn build_host_program(
                 OsStr::new("--target"),
                 OsStr::new(&host),
             ],
-            wrapper.map(|path| (facet, path, &compiler_wrappers)),
+            Some((facet, wrapper.path(), &compiler_wrappers)),
             output,
         )?;
         let diagnostics = rendered_compiler_diagnostics(&build.stdout)?;

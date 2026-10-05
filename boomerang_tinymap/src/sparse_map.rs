@@ -40,16 +40,22 @@ pub struct TinySecondaryMapBuilder<K: Key, V, B: Storage<Option<V>>> {
 /// Sealing removes presence mutation from the public interface:
 ///
 /// ```compile_fail,E0599
-/// use boomerang_tinymap::{key_type, InlineSecondaryStorage, TinySecondaryMapBuilder};
+/// use boomerang_tinymap::{
+///     key_type, InlineSecondaryStorage, InlineStorage, TinyMapBuilder,
+///     TinySecondaryMapBuilder,
+/// };
 /// key_type!(EntryKey);
+/// let mut entries = TinyMapBuilder::<EntryKey, (), InlineStorage<(), 2>>::inline();
+/// let first = entries.try_insert(()).unwrap();
+/// let second = entries.try_insert(()).unwrap();
 /// let mut builder = TinySecondaryMapBuilder::<
 ///     EntryKey,
 ///     u8,
 ///     InlineSecondaryStorage<u8, 2>,
 /// >::inline();
-/// builder.try_insert(EntryKey::new(0), 1).unwrap();
+/// builder.try_insert(first, 1).unwrap();
 /// let mut sealed = builder.seal();
-/// sealed.try_insert(EntryKey::new(1), 2).unwrap();
+/// sealed.try_insert(second, 2).unwrap();
 /// ```
 #[allow(private_bounds)]
 pub struct SealedTinySecondaryMap<K: Key, V, B: Storage<Option<V>>> {

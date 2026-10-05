@@ -1617,12 +1617,12 @@ fn dense_cardinality_overflow_is_reported_before_conversion() {
     }
 
     let enclave = StableEnclaveId::new("vehicle/controller").unwrap();
-    let result =
-        tinymap::TinyMap::<SmallKey, _>::try_from_iter(["first", "second"]).map_err(|_| {
-            CompileError::ResourceOverflow {
-                enclave: enclave.clone(),
-                resource: "reactions",
-            }
+    let mut rows = tinymap::HeapTinyMapBuilder::<SmallKey, _>::heap();
+    let result = rows
+        .try_extend_exact(["first", "second"].into_iter())
+        .map_err(|_| CompileError::ResourceOverflow {
+            enclave: enclave.clone(),
+            resource: "reactions",
         });
     assert!(matches!(
         result,

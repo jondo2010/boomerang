@@ -1,9 +1,10 @@
 //! One-way materialization of resolved compiler semantics into owned runtime images.
 //!
 //! Lowering consumes [`ResolvedDeployment`], performs canonical stable-identity analysis and
-//! selection, and produces [`OwnedCompiledDeployment`]. The final runtime image tables are the
-//! authoritative dense-key owners: each `TinyMap` allocates its own keys, and temporary
-//! stable-identity-to-key registries only retain keys returned by those owners.
+//! selection, and produces [`OwnedCompiledDeployment`]. Builders issue each table's typed dense
+//! keys while its shape is constructed; temporary stable-identity-to-key registries retain only
+//! those owner-issued keys. Complete host tables seal before publication, and runtime image
+//! consumers receive storage-erased `TinyMapRef` views.
 //!
 //! ```text
 //! ResolvedDeployment

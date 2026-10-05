@@ -137,4 +137,7 @@ jobs:
       - name: Test with Miri
         env:
           MIRIFLAGS: -Zmiri-disable-isolation
-        run: cargo +nightly miri nextest run -p boomerang -p boomerang_runtime -E 'kind(test)'
+        run: >-
+          cargo +nightly miri nextest run
+          -p boomerang -p boomerang_runtime -p boomerang_tinymap
+          -E 'kind(test)'

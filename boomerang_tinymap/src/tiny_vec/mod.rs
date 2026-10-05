@@ -1,4 +1,4 @@
-mod storage;
+pub(crate) mod storage;
 
 use core::{marker::PhantomData, mem::ManuallyDrop};
 
@@ -34,10 +34,17 @@ pub struct SealedTinyVec<T, B: Storage<T>> {
 }
 
 /// A borrowed read-only view of the initialized values in a sealed TinyVec.
-#[derive(Clone, Copy)]
 pub struct TinyVecRef<'a, T> {
     values: &'a [T],
 }
+
+impl<T> Clone for TinyVecRef<'_, T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T> Copy for TinyVecRef<'_, T> {}
 
 /// A borrowed value-mutation view of a sealed TinyVec.
 ///
@@ -48,6 +55,11 @@ pub struct TinyVecMut<'a, T> {
 
 #[allow(private_bounds)]
 impl<T, B: Storage<T>> TinyVecBuilder<T, B> {
+    /// Returns the greatest number of values this backing can hold.
+    pub fn capacity(&self) -> usize {
+        self.backing.capacity()
+    }
+
     /// Returns the number of values currently initialized in the builder.
     pub const fn len(&self) -> usize {
         self.initialized
@@ -199,6 +211,11 @@ impl<T, B: Storage<T>> Drop for SealedTinyVec<T, B> {
 }
 
 impl<'a, T> TinyVecRef<'a, T> {
+    /// Returns the exact initialized backing slice.
+    pub const fn as_slice(&self) -> &'a [T] {
+        self.values
+    }
+
     /// Returns the number of values in this view.
     pub const fn len(&self) -> usize {
         self.values.len()
@@ -216,6 +233,16 @@ impl<'a, T> TinyVecRef<'a, T> {
 }
 
 impl<'a, T> TinyVecMut<'a, T> {
+    /// Returns the exact initialized backing slice.
+    pub fn as_slice(&self) -> &[T] {
+        self.values
+    }
+
+    /// Returns the exact initialized backing slice for value mutation.
+    pub fn as_mut_slice(&mut self) -> &mut [T] {
+        self.values
+    }
+
     /// Returns the number of values in this view.
     pub const fn len(&self) -> usize {
         self.values.len()

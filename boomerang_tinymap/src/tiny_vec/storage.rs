@@ -60,7 +60,7 @@ impl<T> Default for HeapStorage<T> {
 }
 
 /// Private access to the backing slots used by the builder.
-pub(super) trait Storage<T> {
+pub(crate) trait Storage<T> {
     fn capacity(&self) -> usize;
     fn write_slot(&mut self, index: usize, value: T);
     fn drop_slot(&mut self, index: usize);

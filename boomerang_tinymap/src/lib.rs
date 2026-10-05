@@ -10,6 +10,7 @@ pub extern crate alloc;
 #[cfg(any(feature = "std", test))]
 extern crate std;
 
+mod dense_map;
 mod error;
 #[cfg(feature = "alloc")]
 pub mod key_set;
@@ -20,6 +21,9 @@ mod range;
 pub mod secondary_map;
 pub mod tiny_vec;
 
+pub use dense_map::{
+    SealedTinyMap, TinyMapBuilder, TinyMapMut, TinyMapRef, TinyMapSpanMut, TinyMapSpanRef,
+};
 pub use error::TinyMapError;
 #[cfg(feature = "alloc")]
 pub use key_set::KeySet;

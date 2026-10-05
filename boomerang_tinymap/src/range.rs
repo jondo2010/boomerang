@@ -12,7 +12,8 @@ use core::marker::PhantomData;
 
 /// A contiguous span of keys allocated by a dense map owner.
 ///
-/// Production code should obtain spans from [`crate::TinyMap::try_extend_exact`].
+/// Production code should obtain spans from [`crate::TinyMapBuilder::try_extend_exact`]
+/// or the hosted compatibility `TinyMap::try_extend_exact`.
 /// [`IndexSpan::new`] exists for immutable generated images and test fixtures that
 /// reconstruct already-allocated metadata.
 #[derive(Debug, PartialEq, Eq)]

@@ -20,13 +20,23 @@ fn concrete_tinyvec_adapters_work_downstream_while_storage_operations_remain_pri
     let lifecycle = cargo_check(
         "lifecycle",
         r#"
-use boomerang_tinymap::tiny_vec::{InlineStorage, TinyVecBuilder};
+use boomerang_tinymap::{key_type, InlineStorage, TinyMapBuilder};
+use boomerang_tinymap::tiny_vec::TinyVecBuilder;
+
+key_type!(EntryKey);
 
 fn main() {
     let mut builder = TinyVecBuilder::<u16, InlineStorage<u16, 2>>::inline();
     builder.try_extend_exact([10, 20].into_iter()).unwrap();
     let sealed = builder.seal();
     assert_eq!(sealed.as_ref().iter().copied().collect::<Vec<_>>(), [10, 20]);
+
+    let mut map = TinyMapBuilder::<EntryKey, u16, InlineStorage<u16, 2>>::inline();
+    let first = map.try_insert(10).unwrap();
+    let second = map.try_insert(20).unwrap();
+    let sealed = map.seal();
+    assert_eq!(sealed.as_ref()[first], 10);
+    assert_eq!(sealed.as_ref()[second], 20);
 }
 "#,
     );

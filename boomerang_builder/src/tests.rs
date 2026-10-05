@@ -261,7 +261,7 @@ fn test_runtime_scope_metadata_for_mode_components() {
         .unwrap();
 
     let (enclave_key, runtime_reactor) = runtime_assembly.aliases.reactor_aliases[reactor_key];
-    let enclave = &runtime_assembly.enclaves[enclave_key];
+    let enclave = &runtime_assembly.enclaves()[enclave_key];
     let root_scope = enclave.graph.reactor_root_scopes[runtime_reactor];
     let runtime_idle = runtime_assembly.aliases.mode_aliases[idle].1;
     let idle_scope = enclave.graph.mode_scopes[runtime_idle];
@@ -328,7 +328,7 @@ fn test_child_and_connection_helper_reactors_inherit_mode_scope() {
         .unwrap();
 
     let (enclave_key, _runtime_reactor) = runtime_assembly.aliases.reactor_aliases[reactor_key];
-    let enclave = &runtime_assembly.enclaves[enclave_key];
+    let enclave = &runtime_assembly.enclaves()[enclave_key];
     let runtime_idle = runtime_assembly.aliases.mode_aliases[idle].1;
     let idle_scope = enclave.graph.mode_scopes[runtime_idle];
 
@@ -396,12 +396,11 @@ fn test_reactions_startup_shutdown() {
 
     assembly.validate_reactions().unwrap();
 
-    let RuntimeAssembly {
-        enclaves, aliases, ..
-    } = assembly
+    let runtime_assembly = assembly
         .into_runtime_assembly(&runtime::Config::default())
         .unwrap();
-    let (_enclave_key, enclave) = enclaves.into_iter().next().unwrap();
+    let aliases = &runtime_assembly.aliases;
+    let (_enclave_key, enclave) = runtime_assembly.enclaves().iter().next().unwrap();
     let r0_key = aliases.reaction_aliases[r0_key].1;
     let r1_key = aliases.reaction_aliases[r1_key].1;
 
@@ -454,12 +453,11 @@ fn test_actions1() {
         .unwrap();
 
     let _reactor_key = reactor_ctx.finish().unwrap();
-    let RuntimeAssembly {
-        enclaves, aliases, ..
-    } = assembly
+    let runtime_assembly = assembly
         .into_runtime_assembly(&runtime::Config::default())
         .unwrap();
-    let (_enclave_key, enclave) = enclaves.into_iter().next().unwrap();
+    let aliases = &runtime_assembly.aliases;
+    let (_enclave_key, enclave) = runtime_assembly.enclaves().iter().next().unwrap();
 
     let reaction_a = aliases.reaction_aliases[reaction_a].1;
     let reaction_b = aliases.reaction_aliases[reaction_b].1;
@@ -612,12 +610,11 @@ fn test_nested_reactor() {
         )
         .unwrap();
 
-    let RuntimeAssembly {
-        enclaves, aliases, ..
-    } = assembly
+    let runtime_assembly = assembly
         .into_runtime_assembly(&runtime::Config::default())
         .unwrap();
-    assert_eq!(enclaves.len(), 1);
+    let aliases = &runtime_assembly.aliases;
+    assert_eq!(runtime_assembly.enclaves().len(), 1);
 
     assert_eq!(
         aliases.port_aliases[outer_input.into()],
@@ -630,7 +627,7 @@ fn test_nested_reactor() {
         "inner and outer output ports should alias"
     );
 
-    let (_enclave_key, enclave) = enclaves.into_iter().next().unwrap();
+    let (_enclave_key, enclave) = runtime_assembly.enclaves().iter().next().unwrap();
 
     let inner_reactor_key = aliases.reactor_aliases[inner_reactor].1;
     assert_eq!(
@@ -676,13 +673,12 @@ fn test_reaction_ports() -> anyhow::Result<()> {
 
     let _reactor_a = reactor_ctx.finish()?;
 
-    let RuntimeAssembly {
-        enclaves, aliases, ..
-    } = assembly
+    let runtime_assembly = assembly
         .into_runtime_assembly(&runtime::Config::default())
         .unwrap();
-    assert_eq!(enclaves.len(), 1);
-    let (_enclave_key, enclave) = enclaves.into_iter().next().unwrap();
+    let aliases = &runtime_assembly.aliases;
+    assert_eq!(runtime_assembly.enclaves().len(), 1);
+    let (_enclave_key, enclave) = runtime_assembly.enclaves().iter().next().unwrap();
 
     let reaction_a = aliases.reaction_aliases[reaction_a].1;
     let port_a = aliases.port_aliases[port_a.into()].1;
@@ -803,11 +799,10 @@ fn test_dependency_use_on_logical_action() -> anyhow::Result<()> {
 
     reactor_ctx.finish()?;
 
-    let RuntimeAssembly {
-        enclaves, aliases, ..
-    } = assembly.into_runtime_assembly(&runtime::Config::default())?;
-    assert_eq!(enclaves.len(), 1);
-    let (enclave_key, enclave) = enclaves.into_iter().next().unwrap();
+    let runtime_assembly = assembly.into_runtime_assembly(&runtime::Config::default())?;
+    let aliases = &runtime_assembly.aliases;
+    assert_eq!(runtime_assembly.enclaves().len(), 1);
+    let (_enclave_key, enclave) = runtime_assembly.enclaves().iter().next().unwrap();
 
     // r_startup should be triggered by the startup action, but the startup action should not be in its list of actions (triggers only).
     let r_startup_runtime = aliases.reaction_aliases[_r_startup].1;
@@ -864,6 +859,7 @@ fn test_dependency_use_on_logical_action() -> anyhow::Result<()> {
     let config = runtime::Config::default()
         .with_fast_forward(true)
         .with_timeout(runtime::Duration::seconds(1));
+    let (enclave_key, enclave) = runtime_assembly.into_enclaves().next().unwrap();
     let mut sched = runtime::Scheduler::new(enclave_key, enclave, config, None);
     sched.try_event_loop()?;
 
@@ -1006,10 +1002,9 @@ fn test_dependency_use_accessible() -> anyhow::Result<()> {
     let _reaction_source_t2_key = assembly.find_reaction_by_name("reaction_t2", source_reactor)?;
     let reaction_sink_clock_key = assembly.find_reaction_by_name("reaction_clock", sink_reactor)?;
 
-    let RuntimeAssembly {
-        enclaves, aliases, ..
-    } = assembly.into_runtime_assembly(&runtime::Config::default())?;
-    let (enclave_key, enclave) = enclaves.into_iter().next().unwrap();
+    let runtime_assembly = assembly.into_runtime_assembly(&runtime::Config::default())?;
+    let aliases = &runtime_assembly.aliases;
+    let (_enclave_key, enclave) = runtime_assembly.enclaves().iter().next().unwrap();
 
     // the Source startup reaction should trigger on startup and effect the clock port
     let runtime_reaction_source_startup_key =
@@ -1063,6 +1058,7 @@ fn test_dependency_use_accessible() -> anyhow::Result<()> {
     );
 
     let config = runtime::Config::default().with_fast_forward(true);
+    let (enclave_key, enclave) = runtime_assembly.into_enclaves().next().unwrap();
     let mut sched = runtime::Scheduler::new(enclave_key, enclave, config, None);
     sched.try_event_loop()?;
 
@@ -1113,7 +1109,7 @@ fn test_enclave_partitioning() {
     let runtime_assembly = assembly
         .into_runtime_assembly(&runtime::Config::default())
         .unwrap();
-    assert_eq!(runtime_assembly.enclaves.len(), 2, "Expected 2 enclaves");
+    assert_eq!(runtime_assembly.enclaves().len(), 2, "Expected 2 enclaves");
 
     let (world_enclave, world_key) = runtime_assembly.aliases.reactor_aliases[world];
     let (hello1_enclave, hello1_key) = runtime_assembly.aliases.reactor_aliases[hello1];
@@ -1124,7 +1120,7 @@ fn test_enclave_partitioning() {
         "Expected world and hello1 in same enclave"
     );
     assert_eq!(
-        runtime_assembly.enclaves[world_enclave]
+        runtime_assembly.enclaves()[world_enclave]
             .env
             .reactors
             .keys()
@@ -1133,7 +1129,7 @@ fn test_enclave_partitioning() {
         "Expected only the world and hello1 reactors in the first enclave"
     );
     assert_eq!(
-        runtime_assembly.enclaves[hello2_enclave]
+        runtime_assembly.enclaves()[hello2_enclave]
             .env
             .reactors
             .keys()
@@ -1267,16 +1263,16 @@ fn test_enclave2() {
         pong_output: _,
     } = create_ping_pong();
 
-    let RuntimeAssembly { enclaves, .. } = assembly
+    let runtime_assembly = assembly
         .into_runtime_assembly(&runtime::Config::default())
         .unwrap();
-    assert_eq!(enclaves.len(), 3);
+    assert_eq!(runtime_assembly.enclaves().len(), 3);
 
     let config = runtime::Config::default()
         .with_fast_forward(true)
         .with_timeout(runtime::Duration::milliseconds(3));
 
-    let _envs = runtime::execute_enclaves(enclaves.into_iter(), config).unwrap();
+    let _envs = runtime::execute_enclaves(runtime_assembly.into_enclaves(), config).unwrap();
 }
 
 /// Test binding of ports between two child reactors
@@ -1366,13 +1362,12 @@ fn test_port_binding() {
         .add_port_connection::<(), _, _>(o1, i2b, None, false)
         .unwrap();
 
-    let RuntimeAssembly {
-        enclaves, aliases, ..
-    } = assembly
+    let runtime_assembly = assembly
         .into_runtime_assembly(&runtime::Config::default())
         .unwrap();
-    assert_eq!(enclaves.len(), 1);
-    let (_enclave_key, enclave) = enclaves.into_iter().next().unwrap();
+    let aliases = &runtime_assembly.aliases;
+    assert_eq!(runtime_assembly.enclaves().len(), 1);
+    let (_enclave_key, enclave) = runtime_assembly.enclaves().iter().next().unwrap();
     assert_eq!(enclave.env.reactors.len(), 4);
 
     let _i1 = aliases.port_aliases[i1.into()].1;

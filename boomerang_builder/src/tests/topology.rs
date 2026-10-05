@@ -795,7 +795,7 @@ fn application_topology_projection_preserves_component_metadata_without_consumin
     let lowered = assembly
         .into_runtime_assembly(&runtime::Config::default())
         .unwrap();
-    assert_eq!(lowered.enclaves.len(), 1);
+    assert_eq!(lowered.enclaves().len(), 1);
 }
 
 #[test]

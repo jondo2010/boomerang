@@ -73,7 +73,7 @@ fn test_local_cross_enclave_connection_accepts_non_serde_payload() {
     assert_eq!(boundary.source_port, source.into());
     assert_eq!(boundary.target_port, sink.into());
     assert!(!boundary.physical);
-    assert!(parts.enclaves.values().any(|enclave| {
+    assert!(parts.enclaves().values().any(|enclave| {
         !enclave.upstream_enclaves.is_empty() || !enclave.downstream_enclaves.is_empty()
     }));
 }

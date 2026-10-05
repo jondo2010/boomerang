@@ -56,10 +56,9 @@ pub struct RuntimeAliases {
 /// A map of partitions: each Reactor is mapped to one Enclave Reactor.
 pub type PartitionMap = SecondaryMap<AssemblyReactorKey, AssemblyReactorKey>;
 
-#[derive(Default)]
 pub struct RuntimeAssembly {
     /// Executable runtime enclaves keyed by their lowered enclave identities.
-    pub enclaves: tinymap::TinyMap<runtime::EnclaveKey, runtime::Enclave>,
+    enclaves: tinymap::HeapSealedTinyMap<runtime::EnclaveKey, runtime::Enclave>,
     /// Aliases from assembly keys to runtime keys.
     pub aliases: RuntimeAliases,
     /// Assembly-owned metadata for logical edges that cross runtime partitions.
@@ -70,6 +69,17 @@ pub struct RuntimeAssembly {
 }
 
 impl RuntimeAssembly {
+    pub fn enclaves(&self) -> tinymap::TinyMapRef<'_, runtime::EnclaveKey, runtime::Enclave> {
+        self.enclaves.as_ref()
+    }
+
+    pub fn into_enclaves(
+        self,
+    ) -> impl Iterator<Item = (runtime::EnclaveKey, runtime::Enclave)> + Send {
+        let keys: Vec<_> = self.enclaves.as_ref().keys().collect();
+        keys.into_iter().zip(self.enclaves.into_values())
+    }
+
     /// Create a new `RuntimeAssembly` from a `PartitionMap`.
     fn new(
         partition_map: &PartitionMap,
@@ -77,21 +87,50 @@ impl RuntimeAssembly {
         enclave_deps: Vec<EnclaveDep>,
         physical_event_q_size: usize,
     ) -> Result<Self, AssemblyError> {
-        let mut enclaves = tinymap::TinyMap::new();
+        let mut enclave_builder: tinymap::HeapTinyMapBuilder<
+            runtime::EnclaveKey,
+            runtime::Enclave,
+        > = tinymap::HeapTinyMapBuilder::heap();
         let mut aliases = RuntimeAliases::default();
         // Create all the unique enclaves
         for reactor_key in partition_map.values().unique() {
-            let enclave_key =
-                enclaves.insert(runtime::Enclave::with_event_q_size(physical_event_q_size));
-            aliases.enclave_aliases.insert(*reactor_key, enclave_key);
+            if partition_map.get(*reactor_key) != Some(reactor_key) {
+                return Err(AssemblyError::InconsistentAssemblyState {
+                    what: format!("partition representative {reactor_key:?} is not its own owner"),
+                });
+            }
+            let enclave_key = enclave_builder
+                .try_insert(runtime::Enclave::with_event_q_size(physical_event_q_size))
+                .map_err(|error| {
+                    AssemblyError::InternalError(format!("building runtime enclave table: {error}"))
+                })?;
+            if aliases
+                .enclave_aliases
+                .insert(*reactor_key, enclave_key)
+                .is_some()
+            {
+                return Err(AssemblyError::InconsistentAssemblyState {
+                    what: format!("duplicate partition representative {reactor_key:?}"),
+                });
+            }
         }
         // Add any missing aliases
         for (reactor_key, reactor_enclave_key) in partition_map {
-            if !aliases.enclave_aliases.contains_key(reactor_key) {
-                let enclave_key = aliases.enclave_aliases[*reactor_enclave_key];
+            let enclave_key = *aliases
+                .enclave_aliases
+                .get(*reactor_enclave_key)
+                .ok_or(AssemblyError::ReactorKeyNotFound(*reactor_enclave_key))?;
+            if let Some(existing) = aliases.enclave_aliases.get(reactor_key) {
+                if *existing != enclave_key {
+                    return Err(AssemblyError::InconsistentAssemblyState {
+                        what: format!("conflicting enclave alias for reactor {reactor_key:?}"),
+                    });
+                }
+            } else {
                 aliases.enclave_aliases.insert(reactor_key, enclave_key);
             }
         }
+        let mut enclaves = enclave_builder.seal();
         // Add any enclave dependencies
         for EnclaveDep {
             upstream,
@@ -103,7 +142,7 @@ impl RuntimeAssembly {
             let downstream_enclave_key = aliases.enclave_aliases[downstream];
 
             runtime::crosslink_enclaves(
-                &mut enclaves,
+                &mut enclaves.as_mut(),
                 upstream_enclave_key,
                 downstream_enclave_key,
                 delay,
@@ -113,6 +152,7 @@ impl RuntimeAssembly {
         {
             // Pre-fill the replayers map with empty maps
             let replayers = enclaves
+                .as_ref()
                 .keys()
                 .map(|enclave_key| {
                     let replayers = tinymap::TinySecondaryMap::new();
@@ -378,7 +418,8 @@ impl Assembly {
         for (assembly_reactor_key, reactor) in self.reactor_specs.drain() {
             let partition_key = partition_map[assembly_reactor_key];
             let enclave_key = runtime_assembly.aliases.enclave_aliases[partition_key];
-            let enclave = &mut runtime_assembly.enclaves[enclave_key];
+            let mut enclaves = runtime_assembly.enclaves.as_mut();
+            let enclave = &mut enclaves[enclave_key];
             let bank_info = reactor.bank_info.clone();
             let scope_mode = reactor.scope_mode;
             let reactor_fqn = &reactor_fqns[assembly_reactor_key];
@@ -409,7 +450,8 @@ impl Assembly {
             let (mode_enclave_key, runtime_mode_key) =
                 runtime_assembly.aliases.mode_aliases[*scope_mode];
             assert_eq!(enclave_key, mode_enclave_key, "Crosscheck");
-            let enclave = &mut runtime_assembly.enclaves[enclave_key];
+            let mut enclaves = runtime_assembly.enclaves.as_mut();
+            let enclave = &mut enclaves[enclave_key];
             let parent_scope = enclave.mode_scope(runtime_mode_key);
             enclave.set_reactor_scope_parent(runtime_reactor_key, parent_scope);
         }
@@ -423,7 +465,8 @@ impl Assembly {
         for (assembly_mode_key, mode) in self.mode_specs.drain() {
             let (enclave_key, reactor_key) =
                 runtime_assembly.aliases.reactor_aliases[mode.reactor_key];
-            let enclave = &mut runtime_assembly.enclaves[enclave_key];
+            let mut enclaves = runtime_assembly.enclaves.as_mut();
+            let enclave = &mut enclaves[enclave_key];
             let runtime_mode_key =
                 enclave.insert_mode(reactor_key, &mode.name, mode.kind.is_initial());
             runtime_assembly
@@ -447,7 +490,8 @@ impl Assembly {
         for (assembly_action_key, action) in &self.action_specs {
             let partition_key = partition_map[action.parent_reactor_key().unwrap()];
             let enclave_key = runtime_assembly.aliases.enclave_aliases[partition_key];
-            let enclave = &mut runtime_assembly.enclaves[enclave_key];
+            let mut enclaves = runtime_assembly.enclaves.as_mut();
+            let enclave = &mut enclaves[enclave_key];
 
             let action_referenced = self
                 .reaction_specs
@@ -538,7 +582,8 @@ impl Assembly {
                 Some(alias) => *alias,
                 None => continue,
             };
-            let enclave = &mut runtime_assembly.enclaves[enclave_key];
+            let mut enclaves = runtime_assembly.enclaves.as_mut();
+            let enclave = &mut enclaves[enclave_key];
             let scope = if let Some(mode_key) = action.scope_mode() {
                 let (mode_enclave_key, runtime_mode_key) =
                     runtime_assembly.aliases.mode_aliases[mode_key];
@@ -561,7 +606,8 @@ impl Assembly {
                 };
             let inward_port_key = port_bindings.follow_port_inward(assembly_port_key);
             let port = &self.port_specs[inward_port_key];
-            let enclave = &mut runtime_assembly.enclaves[enclave_key];
+            let mut enclaves = runtime_assembly.enclaves.as_mut();
+            let enclave = &mut enclaves[enclave_key];
             let (reactor_enclave_key, runtime_reactor_key) =
                 runtime_assembly.aliases.reactor_aliases[port.get_reactor_key()];
             assert_eq!(enclave_key, reactor_enclave_key, "Crosscheck");
@@ -589,7 +635,8 @@ impl Assembly {
             let port = &self.port_specs[inward_port_key];
             let partition_key = partition_map[port.parent_reactor_key().unwrap()];
             let enclave_key = runtime_assembly.aliases.enclave_aliases[partition_key];
-            let enclave = &mut runtime_assembly.enclaves[enclave_key];
+            let mut enclaves = runtime_assembly.enclaves.as_mut();
+            let enclave = &mut enclaves[enclave_key];
 
             let runtime_port_key = enclave.insert_port(|key| port.build_runtime_port(key));
 
@@ -621,7 +668,8 @@ impl Assembly {
 
             let partition_key = partition_map[reaction.reactor_key];
             let enclave_key = runtime_assembly.aliases.enclave_aliases[partition_key];
-            let enclave = &mut runtime_assembly.enclaves[enclave_key];
+            let mut enclaves = runtime_assembly.enclaves.as_mut();
+            let enclave = &mut enclaves[enclave_key];
             let runtime_reactor_key = {
                 let (alias_enclave_key, reactor_key) =
                     runtime_assembly.aliases.reactor_aliases[reaction.reactor_key];
@@ -813,7 +861,8 @@ impl Assembly {
         #[cfg(feature = "replay")]
         self.build_runtime_replayers(&mut runtime_assembly)?;
 
-        for enclave in runtime_assembly.enclaves.values_mut() {
+        let mut enclaves = runtime_assembly.enclaves.as_mut();
+        for enclave in enclaves.values_mut() {
             let modal_schedule_index = build_modal_schedule_index(&enclave.graph);
             enclave.graph.modal_schedule_index = modal_schedule_index;
         }

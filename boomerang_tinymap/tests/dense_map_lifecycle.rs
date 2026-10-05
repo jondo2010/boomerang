@@ -1,10 +1,65 @@
 use boomerang_tinymap::{
-    key_type, BorrowedStorage, IndexSpan, InlineStorage, Key, TinyMapBuilder, TinyMapError,
-    TinyMapMut, TinyMapRef,
+    key_type, BorrowedStorage, HeapSealedTinyMap, HeapTinyMapBuilder, IndexSpan, InlineStorage,
+    Key, TinyMapBuilder, TinyMapError, TinyMapMut, TinyMapRef,
 };
 use core::mem::MaybeUninit;
+use std::{cell::Cell, rc::Rc};
 
 key_type!(DenseKey);
+
+const VALUES: [u16; 2] = [10, 20];
+const VIEW: TinyMapRef<'static, DenseKey, u16> = TinyMapRef::from_slice(&VALUES);
+
+#[test]
+fn heap_builder_updates_owner_issued_keys_and_transfers_sealed_values() {
+    assert_eq!(VIEW.values().copied().collect::<Vec<_>>(), [10, 20]);
+
+    let mut builder = HeapTinyMapBuilder::<DenseKey, u16>::heap();
+    let first = builder.try_insert(10).unwrap();
+    let second = builder.try_insert(20).unwrap();
+    assert_eq!(builder.get(first), Some(&10));
+    *builder.get_mut(second).unwrap() = 21;
+
+    let sealed: HeapSealedTinyMap<DenseKey, u16> = builder.seal();
+    assert_eq!(
+        sealed
+            .as_ref()
+            .iter()
+            .map(|(_, value)| *value)
+            .collect::<Vec<_>>(),
+        [10, 21]
+    );
+    assert_eq!(sealed.into_values().collect::<Vec<_>>(), [10, 21]);
+}
+
+#[test]
+fn consuming_heap_sealed_map_drops_each_value_once() {
+    struct DropCounter(Rc<Cell<usize>>);
+
+    impl Drop for DropCounter {
+        fn drop(&mut self) {
+            self.0.set(self.0.get() + 1);
+        }
+    }
+
+    let first_drops = Rc::new(Cell::new(0));
+    let second_drops = Rc::new(Cell::new(0));
+    let mut builder = HeapTinyMapBuilder::<DenseKey, DropCounter>::heap();
+    let _first = builder
+        .try_insert(DropCounter(first_drops.clone()))
+        .unwrap();
+    let _second = builder
+        .try_insert(DropCounter(second_drops.clone()))
+        .unwrap();
+
+    let mut values = builder.seal().into_values();
+    let first = values.next().unwrap();
+    assert_eq!((first_drops.get(), second_drops.get()), (0, 0));
+    drop(values);
+    assert_eq!((first_drops.get(), second_drops.get()), (0, 1));
+    drop(first);
+    assert_eq!((first_drops.get(), second_drops.get()), (1, 1));
+}
 
 #[test]
 fn inline_dense_map_generates_keys_seals_moves_and_preserves_global_spans() {

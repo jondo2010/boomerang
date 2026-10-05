@@ -50,6 +50,10 @@ impl<T> HeapStorage<T> {
     pub fn new() -> Self {
         Self { values: Vec::new() }
     }
+
+    pub(crate) fn into_vec(self) -> Vec<T> {
+        self.values
+    }
 }
 
 #[cfg(feature = "alloc")]

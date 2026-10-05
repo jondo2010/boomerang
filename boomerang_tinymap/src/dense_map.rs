@@ -12,6 +12,11 @@
 //!
 //! [`IndexSpan`] values come only from the owning dense key domain. Span views
 //! retain global key coordinates rather than rebasing the selected values to zero.
+//! For hosted construction, [`HeapTinyMapBuilder`] and [`HeapSealedTinyMap`] name the concrete
+//! heap backing. A sealed heap map can consume its values exactly once with
+//! [`SealedTinyMap::into_values`]. [`TinyMapRef::from_slice`] provides a const borrowed view of
+//! static or code-generated arrays whose order is already the authoritative dense domain; it
+//! does not allocate keys at runtime.
 
 use core::{
     marker::PhantomData,
@@ -33,6 +38,10 @@ pub struct TinyMapBuilder<K: Key, V, B: Storage<V>> {
     marker: PhantomData<K>,
 }
 
+/// A heap-backed dense builder for hosted construction.
+#[cfg(feature = "alloc")]
+pub type HeapTinyMapBuilder<K, V> = TinyMapBuilder<K, V, HeapStorage<V>>;
+
 /// A fixed-shape dense table ready to provide borrowed runtime views.
 ///
 /// Sealing removes structural mutation from the public interface:
@@ -50,6 +59,10 @@ pub struct SealedTinyMap<K: Key, V, B: Storage<V>> {
     values: SealedTinyVec<V, B>,
     marker: PhantomData<K>,
 }
+
+/// A heap-backed fixed-shape dense table.
+#[cfg(feature = "alloc")]
+pub type HeapSealedTinyMap<K, V> = SealedTinyMap<K, V, HeapStorage<V>>;
 
 /// A borrowed read-only view of a sealed dense table.
 pub struct TinyMapRef<'a, K: Key, V> {
@@ -108,6 +121,16 @@ impl<K: Key, V, B: Storage<V>> TinyMapBuilder<K, V, B> {
     /// Returns the effective capacity shared by the key domain and backing.
     pub fn capacity(&self) -> usize {
         self.values.capacity().min(K::MAX_LEN)
+    }
+
+    /// Returns a value by a key issued by this builder.
+    pub fn get(&self, key: K) -> Option<&V> {
+        self.values.as_slice().get(key.index())
+    }
+
+    /// Returns a mutable value by a key issued by this builder.
+    pub fn get_mut(&mut self, key: K) -> Option<&mut V> {
+        self.values.as_mut_slice().get_mut(key.index())
     }
 
     /// Inserts one value and returns its owner-generated key.
@@ -215,7 +238,26 @@ impl<K: Key, V, B: Storage<V>> SealedTinyMap<K, V, B> {
     }
 }
 
+#[cfg(feature = "alloc")]
+impl<K: Key, V> SealedTinyMap<K, V, HeapStorage<V>> {
+    /// Consumes a heap-backed table and yields its values in dense order.
+    pub fn into_values(self) -> alloc::vec::IntoIter<V> {
+        self.values.into_vec().into_iter()
+    }
+}
+
 impl<'a, K: Key, V> TinyMapRef<'a, K, V> {
+    /// Borrows an authoritative static or code-generated dense value slice.
+    ///
+    /// The caller supplies values in the owning image's established key order;
+    /// this adapter does not allocate runtime keys.
+    pub const fn from_slice(values: &'a [V]) -> Self {
+        Self {
+            values: TinyVecRef::from_slice(values),
+            marker: PhantomData,
+        }
+    }
+
     /// Returns the number of values.
     pub const fn len(&self) -> usize {
         self.values.len()

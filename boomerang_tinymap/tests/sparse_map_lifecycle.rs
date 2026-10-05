@@ -2,11 +2,28 @@ use core::mem::MaybeUninit;
 use std::{cell::Cell, rc::Rc};
 
 use boomerang_tinymap::{
-    key_type, BorrowedSecondaryStorage, IndexSpan, InlineSecondaryStorage, InlineStorage,
-    TinyMapError, TinySecondaryMapBuilder, TinySecondaryMapRef,
+    key_type, BorrowedSecondaryStorage, HeapSealedTinySecondaryMap, HeapTinyMapBuilder,
+    HeapTinySecondaryMapBuilder, IndexSpan, InlineSecondaryStorage, InlineStorage, TinyMapError,
+    TinySecondaryMapBuilder, TinySecondaryMapRef,
 };
 
 key_type!(SlotKey);
+
+#[test]
+fn heap_sparse_alias_uses_owner_issued_dense_keys() {
+    let mut owner = HeapTinyMapBuilder::<SlotKey, ()>::heap();
+    let first = owner.try_insert(()).unwrap();
+    let second = owner.try_insert(()).unwrap();
+    let mut builder = HeapTinySecondaryMapBuilder::<SlotKey, u16>::try_heap(owner.len()).unwrap();
+    builder.try_insert(first, 10).unwrap();
+    builder.try_insert(second, 20).unwrap();
+
+    let sealed: HeapSealedTinySecondaryMap<SlotKey, u16> = builder.seal();
+    assert_eq!(
+        sealed.as_ref().values().copied().collect::<Vec<_>>(),
+        [10, 20]
+    );
+}
 
 #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
 struct TwoKey(usize);

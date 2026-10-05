@@ -53,6 +53,30 @@ assert_eq!(view.get_span(tail).unwrap().values(), [20, 30]);
 `IndexSpan` results preserve those global keys when resolved through a map view; they are distinct
 from `SliceRange`, which addresses anonymous values in a packed relationship slice.
 
+For hosted construction, the heap aliases make the concrete backing explicit. A sealed heap map
+may also consume its values in dense order when ownership must pass to execution:
+
+```rust
+use boomerang_tinymap::{key_type, HeapSealedTinyMap, HeapTinyMapBuilder};
+
+key_type!(EntryKey);
+
+let mut builder = HeapTinyMapBuilder::<EntryKey, u16>::heap();
+let first = builder.try_insert(10)?;
+let second = builder.try_insert(20)?;
+*builder.get_mut(second).unwrap() = 21;
+let sealed: HeapSealedTinyMap<EntryKey, u16> = builder.seal();
+let view = sealed.as_ref();
+assert_eq!(view.get(first), Some(&10));
+assert_eq!(view.get(second), Some(&21));
+assert_eq!(sealed.into_values().collect::<Vec<_>>(), [10, 21]);
+# Ok::<(), boomerang_tinymap::TinyMapError>(())
+```
+
+`TinyMapRef::from_slice` is a const adapter for static or code-generated images whose array order
+is already the authoritative dense key domain. It does not allocate runtime keys or establish a
+second runtime key domain.
+
 `TinySecondaryMapBuilder` owns a sparse subset of an existing dense key domain. Its capacity is the
 number of addressable parent-key slots, including absent slots, rather than the number of present
 values. Insertion and replacement happen only before sealing; runtime mutation can change a present
@@ -60,24 +84,31 @@ value but cannot add or remove one. Sparse span views preserve absent slots and 
 
 ```rust
 use boomerang_tinymap::{
-    key_type, IndexSpan, InlineSecondaryStorage, TinySecondaryMapBuilder,
+    key_type, IndexSpan, InlineSecondaryStorage, InlineStorage, TinyMapBuilder,
+    TinySecondaryMapBuilder,
 };
 
 key_type!(EntryKey);
+
+let mut owner = TinyMapBuilder::<EntryKey, (), InlineStorage<(), 4>>::inline();
+let _first = owner.try_insert(())?;
+let second = owner.try_insert(())?;
+let third = owner.try_insert(())?;
+let fourth = owner.try_insert(())?;
 
 let mut builder = TinySecondaryMapBuilder::<
     EntryKey,
     u16,
     InlineSecondaryStorage<u16, 4>,
 >::inline();
-builder.try_insert(EntryKey::new(1), 10)?;
-builder.try_insert(EntryKey::new(3), 30)?;
+builder.try_insert(second, 10)?;
+builder.try_insert(fourth, 30)?;
 
 let sealed = builder.seal();
 let view = sealed.as_ref();
 let span = view.get_span(IndexSpan::new(1, 3)).unwrap();
-assert_eq!(span.get(EntryKey::new(1)), Some(&10));
-assert_eq!(span.get(EntryKey::new(2)), None);
+assert_eq!(span.get(second), Some(&10));
+assert_eq!(span.get(third), None);
 # Ok::<(), boomerang_tinymap::TinyMapError>(())
 ```
 

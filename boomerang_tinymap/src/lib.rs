@@ -12,6 +12,7 @@ extern crate std;
 
 pub mod dense_map;
 mod error;
+pub mod handle;
 #[cfg(feature = "alloc")]
 pub mod key_set;
 #[cfg(feature = "alloc")]
@@ -26,6 +27,7 @@ pub use dense_map::{
     SealedTinyMap, TinyMapBuilder, TinyMapMut, TinyMapRef, TinyMapSpanMut, TinyMapSpanRef,
 };
 pub use error::TinyMapError;
+pub use handle::{Handle, HandleTable, LinkedHandleTable};
 #[cfg(feature = "alloc")]
 pub use key_set::KeySet;
 #[cfg(feature = "alloc")]

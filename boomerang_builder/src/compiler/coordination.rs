@@ -22,7 +22,7 @@ use crate::runtime::image::{
     PhysicalBoundaryIndex, RtiDependencyImage, RtiImage, RtiMemberImage, RtiRouteImage,
     RtiRouteIndex, TransportCapabilityIndex,
 };
-use tinymap::{SliceRange, TinyMap, TinyMapRef};
+use tinymap::{HeapSealedTinyMap, HeapTinyMapBuilder, SliceRange, TinyMapRef};
 
 /// Failure to represent an analyzed federation in bounded image coordinates.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
@@ -48,7 +48,7 @@ pub enum CoordinationProjectionError {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OwnedRtiImage {
     /// Per-Federate coordination ranges in canonical dense-key order.
-    members: TinyMap<FederateIndex, RtiMemberImage>,
+    members: HeapSealedTinyMap<FederateIndex, RtiMemberImage>,
     /// Packed range backing storage for members' direct and transitive dependencies.
     ///
     /// Entries have no independent identity: [`RtiMemberImage`] owns each relationship set through
@@ -60,15 +60,15 @@ pub struct OwnedRtiImage {
     /// its affected-downstream range rather than through a synthetic per-entry key.
     affected_downstream: Box<[FederateIndex]>,
     /// Complete deployment-wide RTI route hops keyed independently of local scheduler route halves.
-    routes: TinyMap<RtiRouteIndex, OwnedRtiRouteImage>,
+    routes: HeapSealedTinyMap<RtiRouteIndex, OwnedRtiRouteImage>,
     /// Distinct end-to-end flow identities shared by one or more routes.
-    flows: TinyMap<FlowIndex, FlowId>,
+    flows: HeapSealedTinyMap<FlowIndex, FlowId>,
     /// Canonically ordered stable physical input/output identities.
-    physical_boundaries: TinyMap<PhysicalBoundaryIndex, PhysicalBoundaryId>,
+    physical_boundaries: HeapSealedTinyMap<PhysicalBoundaryIndex, PhysicalBoundaryId>,
     /// Canonically ordered transport capability identities.
-    transport_capabilities: TinyMap<TransportCapabilityIndex, TransportCapabilityId>,
+    transport_capabilities: HeapSealedTinyMap<TransportCapabilityIndex, TransportCapabilityId>,
     /// Canonically ordered codec capability identities.
-    codec_capabilities: TinyMap<CodecCapabilityIndex, CodecCapabilityId>,
+    codec_capabilities: HeapSealedTinyMap<CodecCapabilityIndex, CodecCapabilityId>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -127,12 +127,14 @@ impl OwnedRtiRouteImage {
 }
 
 /// Materializes canonical identity text in a dense table's key order.
-fn identity_text<I: std::fmt::Display, K: tinymap::Key>(values: &TinyMap<K, I>) -> Vec<String> {
+fn identity_text<I: std::fmt::Display, K: tinymap::Key>(
+    values: TinyMapRef<'_, K, I>,
+) -> Vec<String> {
     values.values().map(canonical_identity_text).collect()
 }
 
-/// Rebuilds a typed borrowed identity table over temporary canonical text storage.
-fn borrowed_identities<K: tinymap::Key>(values: &[String]) -> TinyMap<K, &str> {
+/// Borrows canonical text for a temporary RTI identity table.
+fn borrowed_identities(values: &[String]) -> Vec<&str> {
     values.iter().map(String::as_str).collect()
 }
 
@@ -142,32 +144,34 @@ impl OwnedRtiImage {
     pub fn with_image<T>(&self, f: impl FnOnce(RtiImage<'_>) -> T) -> T {
         let route_text = self
             .routes
+            .as_ref()
             .values()
             .map(|route| route.boundary.to_canonical_string())
             .collect::<Vec<_>>();
         let routes = self
             .routes
+            .as_ref()
             .values()
             .zip(&route_text)
             .map(|(route, boundary)| route.image(boundary))
-            .collect::<TinyMap<RtiRouteIndex, _>>();
-        let flow_text = identity_text(&self.flows);
-        let physical_text = identity_text(&self.physical_boundaries);
-        let transport_text = identity_text(&self.transport_capabilities);
-        let codec_text = identity_text(&self.codec_capabilities);
-        let flows = borrowed_identities::<FlowIndex>(&flow_text);
-        let physical = borrowed_identities::<PhysicalBoundaryIndex>(&physical_text);
-        let transports = borrowed_identities::<TransportCapabilityIndex>(&transport_text);
-        let codecs = borrowed_identities::<CodecCapabilityIndex>(&codec_text);
+            .collect::<Vec<_>>();
+        let flow_text = identity_text(self.flows.as_ref());
+        let physical_text = identity_text(self.physical_boundaries.as_ref());
+        let transport_text = identity_text(self.transport_capabilities.as_ref());
+        let codec_text = identity_text(self.codec_capabilities.as_ref());
+        let flows = borrowed_identities(&flow_text);
+        let physical = borrowed_identities(&physical_text);
+        let transports = borrowed_identities(&transport_text);
+        let codecs = borrowed_identities(&codec_text);
         f(RtiImage::new(
-            TinyMapRef::from_slice(self.members.as_view().as_slice()),
+            self.members.as_ref(),
             &self.dependencies,
             &self.affected_downstream,
-            TinyMapRef::from_slice(routes.as_view().as_slice()),
-            TinyMapRef::from_slice(flows.as_view().as_slice()),
-            TinyMapRef::from_slice(physical.as_view().as_slice()),
-            TinyMapRef::from_slice(transports.as_view().as_slice()),
-            TinyMapRef::from_slice(codecs.as_view().as_slice()),
+            TinyMapRef::from_slice(&routes),
+            TinyMapRef::from_slice(&flows),
+            TinyMapRef::from_slice(&physical),
+            TinyMapRef::from_slice(&transports),
+            TinyMapRef::from_slice(&codecs),
         ))
     }
 }
@@ -200,7 +204,7 @@ pub(crate) fn project_central_rti(
     deployment: &ResolvedDeployment,
     in_transit_capacities: &BTreeMap<FederateId, u32>,
 ) -> Result<OwnedRtiImage, CoordinationProjectionError> {
-    let mut members = TinyMap::with_capacity(analysis.members().len());
+    let mut members: HeapTinyMapBuilder<FederateIndex, _> = HeapTinyMapBuilder::heap();
     let mut indices = BTreeMap::new();
     for member in analysis.members() {
         let index = members
@@ -255,12 +259,10 @@ pub(crate) fn project_central_rti(
         CodecCapabilityIndex,
         route_bindings.iter().map(|value| value.codec())
     );
-    let routes = TinyMap::<RtiRouteIndex, _>::try_from_iter(
-        analysis
-            .edges()
-            .iter()
-            .zip(route_bindings)
-            .map(|(edge, binding)| OwnedRtiRouteImage {
+    let mut routes: HeapTinyMapBuilder<RtiRouteIndex, _> = HeapTinyMapBuilder::heap();
+    for (edge, binding) in analysis.edges().iter().zip(route_bindings) {
+        routes
+            .try_insert(OwnedRtiRouteImage {
                 boundary: edge.id().clone(),
                 flow: flow_indices[binding.flow()],
                 physical_input: binding.physical().input().map(|id| physical_indices[id]),
@@ -275,9 +277,9 @@ pub(crate) fn project_central_rti(
                 source: indices[edge.source()],
                 target: indices[edge.target()],
                 delay_nanos: edge.delay().as_nanos(),
-            }),
-    )
-    .map_err(|_| CoordinationProjectionError::TableTooLarge { table: "routes" })?;
+            })
+            .map_err(|_| CoordinationProjectionError::TableTooLarge { table: "routes" })?;
+    }
     for member in analysis.members() {
         let dependency = |(source, delay): &(FederateId, super::federation::FederationDelay)| {
             RtiDependencyImage::new(indices[source], delay.as_nanos())
@@ -309,17 +311,23 @@ pub(crate) fn project_central_rti(
                     .map(|target| indices[target]),
             )
             .map_err(coordination_overflow)?;
-        members[indices[member]] = RtiMemberImage::new(
-            deployment
-                .federate(member)
-                .expect("analyzed member has a resolved Federate configuration")
-                .recovery(),
-            direct,
-            transitive,
-            downstream,
-            in_transit_capacities[member],
-        );
+        *members
+            .get_mut(indices[member])
+            .ok_or(CoordinationProjectionError::TableTooLarge { table: "members" })? =
+            RtiMemberImage::new(
+                deployment
+                    .federate(member)
+                    .expect("analyzed member has a resolved Federate configuration")
+                    .recovery(),
+                direct,
+                transitive,
+                downstream,
+                in_transit_capacities[member],
+            );
     }
+
+    let members = members.seal();
+    let routes = routes.seal();
 
     Ok(OwnedRtiImage {
         members,
@@ -334,7 +342,7 @@ pub(crate) fn project_central_rti(
 }
 
 /// Converts a canonical stable-identity set into a dense table and lookup map.
-type DenseIdentities<'a, I, K> = (TinyMap<K, I>, BTreeMap<&'a I, K>);
+type DenseIdentities<'a, I, K> = (HeapSealedTinyMap<K, I>, BTreeMap<&'a I, K>);
 
 /// Allocates canonical dense keys and records their stable-identity lookup.
 fn dense_identities<'a, I, K>(
@@ -345,7 +353,7 @@ where
     I: Clone + Ord + std::fmt::Display,
     K: tinymap::Key,
 {
-    let mut values = TinyMap::with_capacity(identities.len());
+    let mut values: HeapTinyMapBuilder<K, I> = HeapTinyMapBuilder::heap();
     let mut indices = BTreeMap::new();
     let mut identities = identities.into_iter().collect::<Vec<_>>();
     identities.sort_by_cached_key(|identity| canonical_identity_text(*identity));
@@ -355,7 +363,7 @@ where
             .map_err(|_| CoordinationProjectionError::TableTooLarge { table })?;
         indices.insert(identity, key);
     }
-    Ok((values, indices))
+    Ok((values.seal(), indices))
 }
 
 /// Converts packed relationship overflow into the coordination projection error domain.
@@ -370,7 +378,7 @@ mod tests {
     use super::*;
     use crate::compiler::packed::PackedSliceBuilder;
 
-    fn assert_tiny_map<K: tinymap::Key, V>(_: &tinymap::TinyMap<K, V>) {}
+    fn assert_heap_sealed<K: tinymap::Key, V>(_: &tinymap::HeapSealedTinyMap<K, V>) {}
 
     #[test]
     fn packed_relationship_owner_generates_contiguous_ranges() {
@@ -387,16 +395,18 @@ mod tests {
     #[test]
     fn owned_rti_image_keeps_every_dense_domain_typed() {
         fn assert_field_types(image: &OwnedRtiImage) {
-            assert_tiny_map::<FederateIndex, RtiMemberImage>(&image.members);
-            assert_tiny_map::<RtiRouteIndex, OwnedRtiRouteImage>(&image.routes);
-            assert_tiny_map::<FlowIndex, FlowId>(&image.flows);
-            assert_tiny_map::<PhysicalBoundaryIndex, PhysicalBoundaryId>(
+            assert_heap_sealed::<FederateIndex, RtiMemberImage>(&image.members);
+            assert_heap_sealed::<RtiRouteIndex, OwnedRtiRouteImage>(&image.routes);
+            assert_heap_sealed::<FlowIndex, FlowId>(&image.flows);
+            assert_heap_sealed::<PhysicalBoundaryIndex, PhysicalBoundaryId>(
                 &image.physical_boundaries,
             );
-            assert_tiny_map::<TransportCapabilityIndex, TransportCapabilityId>(
+            assert_heap_sealed::<TransportCapabilityIndex, TransportCapabilityId>(
                 &image.transport_capabilities,
             );
-            assert_tiny_map::<CodecCapabilityIndex, CodecCapabilityId>(&image.codec_capabilities);
+            assert_heap_sealed::<CodecCapabilityIndex, CodecCapabilityId>(
+                &image.codec_capabilities,
+            );
         }
 
         let _ = assert_field_types;

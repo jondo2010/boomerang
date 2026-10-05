@@ -502,7 +502,7 @@ fn prepare_launcher(
         .expect("canonical workspace lockfile has a parent")
         .to_path_buf();
     let cargo_program = generated_cargo_program();
-    let compiler_wrapper = crate::driver::prepare_compiler_wrapper(&analyzed.resolved, output)?;
+    let compiler_wrapper = crate::compiler_wrapper::executable().map_err(anyhow::Error::msg)?;
     let compiler_wrappers = crate::facet::CompilerWrappers::resolve(
         &application_workspace,
         configuration.cargo_config.as_deref(),
@@ -588,7 +588,10 @@ fn launcher_request_identity(
 
     let mut identity = RequestIdentityBuilder::new(GeneratedRole::Launcher);
     identity.field("facet", Some(b"payload"));
-    identity.field("facet-wrapper", Some(include_bytes!("../facet_rustc.rs")));
+    identity.field(
+        "facet-wrapper",
+        Some(include_bytes!("../compiler_wrapper/utility.rs")),
+    );
     identity.field("manifest", Some(manifest));
     identity.field("source", Some(source));
     identity.field("source-lock-digest", Some(source_lock_digest));

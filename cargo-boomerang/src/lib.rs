@@ -4,6 +4,8 @@ mod build;
 mod bundle;
 mod check;
 mod codegen;
+#[doc(hidden)]
+pub mod compiler_wrapper;
 mod driver;
 mod facet;
 mod generated;

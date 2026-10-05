@@ -11,6 +11,13 @@ fn repeated_descriptor_analysis_uses_workspace_configuration_and_cargo_freshness
         (run(), run())
     });
 
+    assert!(
+        !target
+            .path()
+            .join("boomerang/generated/v1/compiler-wrapper")
+            .exists(),
+        "the compiler wrapper must be the cargo-boomerang utility, not a generated workspace",
+    );
     assert!(first.compiled_artifacts() > 0);
     assert_eq!(second.compiled_artifacts(), 0);
     assert_eq!(

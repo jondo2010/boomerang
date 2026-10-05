@@ -83,6 +83,7 @@ impl Facet {
     ) {
         command
             .env("RUSTC_WRAPPER", wrapper)
+            .env(crate::compiler_wrapper::INVOCATION_ENV, "1")
             .env("BOOMERANG_COMPILE_FACET", self.name());
         if let Some(previous) = configured.rustc.as_deref() {
             command.env("BOOMERANG_USER_RUSTC_WRAPPER", previous);
@@ -225,7 +226,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("wrapper.rs");
         let executable = directory.path().join("wrapper");
-        std::fs::write(&source, include_str!("facet_rustc.rs")).unwrap();
+        std::fs::write(&source, include_str!("compiler_wrapper/utility.rs")).unwrap();
         assert!(Command::new("rustc")
             .arg("--edition=2021")
             .arg(&source)

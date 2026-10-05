@@ -64,6 +64,39 @@ pub struct SealedTinyMap<K: Key, V, B: Storage<V>> {
 #[cfg(feature = "alloc")]
 pub type HeapSealedTinyMap<K, V> = SealedTinyMap<K, V, HeapStorage<V>>;
 
+#[cfg(feature = "alloc")]
+impl<K: Key, V: Clone> Clone for HeapSealedTinyMap<K, V> {
+    fn clone(&self) -> Self {
+        let mut builder = HeapTinyMapBuilder::<K, V>::heap();
+        builder
+            .try_extend_exact(self.as_ref().values().cloned())
+            .unwrap_or_else(|_| {
+                unreachable!("cloning an existing sealed map preserves its length")
+            });
+        builder.seal()
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl<K: Key, V: core::fmt::Debug> core::fmt::Debug for HeapSealedTinyMap<K, V> {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_tuple("SealedTinyMap")
+            .field(&self.as_ref().as_slice())
+            .finish()
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl<K: Key, V: PartialEq> PartialEq for HeapSealedTinyMap<K, V> {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_ref().as_slice() == other.as_ref().as_slice()
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl<K: Key, V: Eq> Eq for HeapSealedTinyMap<K, V> {}
+
 /// A borrowed read-only view of a sealed dense table.
 pub struct TinyMapRef<'a, K: Key, V> {
     values: TinyVecRef<'a, V>,

@@ -32,6 +32,7 @@ fn federate_enclaves(
         .enclaves()
         .get_span(deployment.federates()[federate].enclaves())
         .expect("lowered Federate span belongs to the deployment Enclave table")
+        .values()
 }
 
 fn descriptor(contract: &str, bounds: DescriptorBounds) -> ComponentDescriptor {
@@ -898,7 +899,7 @@ fn federate_slice_from_lowered_deployment_preserves_selected_root_rows() {
     let slice = compiled.federate_slice(federate).unwrap();
     assert_eq!(slice.federate(), federate);
     assert_eq!(slice.enclave_range(), expected_range);
-    assert!(std::ptr::eq(slice.enclaves(), expected_enclaves));
+    assert!(std::ptr::eq(slice.enclaves(), expected_enclaves.values()));
     assert_eq!(slice.enclaves()[0].id().to_string(), "vehicle/controller");
     assert_eq!(
         slice

@@ -33,6 +33,24 @@ fn heap_builder_updates_owner_issued_keys_and_transfers_sealed_values() {
 }
 
 #[test]
+fn sealed_heap_maps_forward_value_traits() {
+    let mut builder = HeapTinyMapBuilder::<DenseKey, u16>::heap();
+    builder.try_insert(10).unwrap();
+    builder.try_insert(20).unwrap();
+    let original = builder.seal();
+    let mut copy = original.clone();
+
+    assert_eq!(original, copy);
+    assert_eq!(format!("{original:?}"), format!("{copy:?}"));
+    *copy.as_mut().get_mut(DenseKey::new(1)).unwrap() = 21;
+    assert_ne!(original, copy);
+    assert_eq!(
+        original.as_ref().values().copied().collect::<Vec<_>>(),
+        [10, 20]
+    );
+}
+
+#[test]
 fn consuming_heap_sealed_map_drops_each_value_once() {
     struct DropCounter(Rc<Cell<usize>>);
 

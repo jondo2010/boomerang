@@ -334,8 +334,10 @@ impl ResolvedDeployment {
         let members = analysis.federation.members().to_vec().into_boxed_slice();
         let federation_edges = analysis.federation.edges().to_vec().into_boxed_slice();
         let mut in_transit_capacities = BTreeMap::new();
-        let mut owned_federates: tinymap::TinyMap<FederateIndex, _> = tinymap::TinyMap::new();
-        let mut owned_enclaves: tinymap::TinyMap<EnclaveIndex, _> = tinymap::TinyMap::new();
+        let mut owned_federates: tinymap::HeapTinyMapBuilder<FederateIndex, _> =
+            tinymap::HeapTinyMapBuilder::heap();
+        let mut owned_enclaves: tinymap::HeapTinyMapBuilder<EnclaveIndex, _> =
+            tinymap::HeapTinyMapBuilder::heap();
         for federate in federates {
             let mut enclaves = self
                 .topology()
@@ -376,11 +378,11 @@ impl ResolvedDeployment {
                 })?;
                 in_transit_capacities.insert(federate.id().clone(), capacity);
             }
-            let enclave_span = owned_enclaves.try_extend_exact(enclaves).map_err(|error| {
-                CompileError::InvalidDeployment {
+            let enclave_span = owned_enclaves
+                .try_extend_exact(enclaves.into_iter())
+                .map_err(|error| CompileError::InvalidDeployment {
                     message: format!("Enclave table {error}"),
-                }
-            })?;
+                })?;
             owned_federates
                 .try_insert(OwnedFederateImage {
                     id: federate.id().clone(),
@@ -397,8 +399,8 @@ impl ResolvedDeployment {
                 members,
                 edges: federation_edges,
             },
-            federates: owned_federates,
-            enclaves: owned_enclaves,
+            federates: owned_federates.seal(),
+            enclaves: owned_enclaves.seal(),
             coordination: match self.coordination() {
                 super::CoordinationSelection::Local => OwnedCoordinationProjection::Local,
                 super::CoordinationSelection::Distributed {

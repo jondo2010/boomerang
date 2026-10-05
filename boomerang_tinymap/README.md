@@ -16,12 +16,12 @@ storage-agnostic code uses phase-specific types:
 build -> seal -> move to final location -> borrow views -> execute -> drop
 ```
 
-- `TinyVecBuilder` and `TinyMapBuilder` initialize the table and are the only phases that can
-  change its shape.
-- `SealedTinyVec` and `SealedTinyMap` own the initialized values with a fixed shape and can be
-  moved to their final owning location.
-- `TinyVecRef`/`TinyMapRef` expose shared runtime access. `TinyVecMut`/`TinyMapMut` permit value
-  mutation without insertion, removal, or replacement of the table shape.
+- `TinyVecBuilder`, `TinyMapBuilder`, and `TinySecondaryMapBuilder` initialize tables and are the
+  only phases that can change their shape or sparse presence.
+- Their sealed owners hold initialized values with a fixed shape and can move to their final owning
+  location.
+- Storage-erased `Ref` views expose shared runtime access. `Mut` views permit value mutation
+  without insertion, removal, or replacement of the table shape.
 - Whole-image pinning and linking, when stable non-owning handles are required, happen above these
   table types after the sealed ownership root reaches its final location.
 
@@ -50,6 +50,34 @@ assert_eq!(view.get_span(tail).unwrap().values(), [20, 30]);
 `TinyMapBuilder` owns a complete dense key domain and generates keys in insertion order. Its
 `IndexSpan` results preserve those global keys when resolved through a map view; they are distinct
 from `SliceRange`, which addresses anonymous values in a packed relationship slice.
+
+`TinySecondaryMapBuilder` owns a sparse subset of an existing dense key domain. Its capacity is the
+number of addressable parent-key slots, including absent slots, rather than the number of present
+values. Insertion and replacement happen only before sealing; runtime mutation can change a present
+value but cannot add or remove one. Sparse span views preserve absent slots and global keys.
+
+```rust
+use boomerang_tinymap::{
+    key_type, IndexSpan, InlineSecondaryStorage, TinySecondaryMapBuilder,
+};
+
+key_type!(EntryKey);
+
+let mut builder = TinySecondaryMapBuilder::<
+    EntryKey,
+    u16,
+    InlineSecondaryStorage<u16, 4>,
+>::inline();
+builder.try_insert(EntryKey::new(1), 10)?;
+builder.try_insert(EntryKey::new(3), 30)?;
+
+let sealed = builder.seal();
+let view = sealed.as_ref();
+let span = view.get_span(IndexSpan::new(1, 3)).unwrap();
+assert_eq!(span.get(EntryKey::new(1)), Some(&10));
+assert_eq!(span.get(EntryKey::new(2)), None);
+# Ok::<(), boomerang_tinymap::TinyMapError>(())
+```
 
 The older heap-backed [`TinyMap`](https://docs.rs/boomerang_tinymap/latest/boomerang_tinymap/struct.TinyMap.html),
 [`TinySecondaryMap`](https://docs.rs/boomerang_tinymap/latest/boomerang_tinymap/struct.TinySecondaryMap.html),

@@ -81,6 +81,10 @@ impl<T, B: Storage<T>> TinyVecBuilder<T, B> {
         self.initialized == 0
     }
 
+    pub(crate) fn as_mut_slice(&mut self) -> &mut [T] {
+        self.backing.values_mut(self.initialized)
+    }
+
     /// Transfers initialized values into a move-safe, fixed-shape sequence.
     pub fn seal(self) -> SealedTinyVec<T, B> {
         let builder = ManuallyDrop::new(self);

@@ -19,6 +19,7 @@ pub mod map;
 mod range;
 #[cfg(feature = "alloc")]
 pub mod secondary_map;
+pub mod sparse_map;
 pub mod tiny_vec;
 
 pub use dense_map::{
@@ -32,6 +33,11 @@ pub use map::{CapacityError, TinyMap, TinyMapView};
 pub use range::{IndexSpan, SliceRange};
 #[cfg(feature = "alloc")]
 pub use secondary_map::TinySecondaryMap;
+pub use sparse_map::{
+    BorrowedSecondaryStorage, InlineSecondaryStorage, SealedTinySecondaryMap,
+    TinySecondaryMapBuilder, TinySecondaryMapMut, TinySecondaryMapRef, TinySecondaryMapSpanMut,
+    TinySecondaryMapSpanRef,
+};
 pub use tiny_vec::{BorrowedStorage, InlineStorage, TinyVecBuilder};
 
 /// A key that identifies a value by its dense table index.

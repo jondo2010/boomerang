@@ -138,3 +138,7 @@ jobs:
         env:
           MIRIFLAGS: -Zmiri-disable-isolation
         run: cargo +nightly miri nextest run -p boomerang -p boomerang_runtime -E 'kind(test)'
+      - name: Test TinyMap lifecycles with Miri
+        run: >-
+          cargo +nightly miri test -p boomerang_tinymap
+          --test dense_map_lifecycle --test sparse_map_lifecycle

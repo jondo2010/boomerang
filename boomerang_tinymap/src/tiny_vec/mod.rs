@@ -1,3 +1,14 @@
+//! Fixed-shape sequence construction over supported storage adapters.
+//!
+//! A [`TinyVecBuilder`] initializes values in inline, caller-provided, or heap storage. Seal the
+//! builder after construction, move the resulting [`SealedTinyVec`] into its final owner, and then
+//! expose [`TinyVecRef`] or [`TinyVecMut`] during execution. Borrowed views contain no backing type;
+//! mutable views may change values but never the initialized length.
+//!
+//! The storage trait is private because it owns the unsafe initialized-prefix and destruction
+//! invariants. Downstream users choose the public [`InlineStorage`] or [`BorrowedStorage`] adapters,
+//! or use the `alloc`-gated heap constructor, rather than implementing that trait.
+
 pub(crate) mod storage;
 
 use core::{marker::PhantomData, mem::ManuallyDrop};

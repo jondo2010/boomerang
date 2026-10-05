@@ -10,7 +10,7 @@ pub extern crate alloc;
 #[cfg(any(feature = "std", test))]
 extern crate std;
 
-mod dense_map;
+pub mod dense_map;
 mod error;
 #[cfg(feature = "alloc")]
 pub mod key_set;

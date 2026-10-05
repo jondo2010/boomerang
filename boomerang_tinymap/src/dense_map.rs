@@ -1,3 +1,18 @@
+//! Dense owner-generated keys over storage-agnostic values.
+//!
+//! Use [`TinyMapBuilder`] while allocating keys and initializing values. Calling
+//! [`TinyMapBuilder::seal`] transfers the backing into a fixed-shape [`SealedTinyMap`], which may
+//! then move to its final owning location. Runtime code borrows [`TinyMapRef`] for shared access or
+//! [`TinyMapMut`] for value mutation that cannot change the key domain.
+//!
+//! Inline, borrowed, and heap-backed builders share these semantics. The backing type remains an
+//! owner/build concern and is erased from borrowed views. Sealing one table does not perform
+//! whole-image validation, pinning, or linking; an owning image must perform those later phases
+//! before publishing stable non-owning handles.
+//!
+//! [`IndexSpan`] values come only from the owning dense key domain. Span views
+//! retain global key coordinates rather than rebasing the selected values to zero.
+
 use core::{
     marker::PhantomData,
     ops::{Index, IndexMut},

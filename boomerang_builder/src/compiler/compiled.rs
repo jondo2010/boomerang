@@ -32,7 +32,7 @@ use crate::runtime::image::{
     ReactionImage, ReactionIndex, ReactorImage, ReactorIndex, RequiredBindingImage, RouteImage,
     RouteIndex, ScopeImage, ScopeIndex, StorageBounds, TimerStartupImage,
 };
-use tinymap::{HeapSealedTinyMap, IndexSpan, TinyMap, TinyMapRef};
+use tinymap::{HeapSealedTinyMap, HeapTinyMapBuilder, IndexSpan, TinyMapRef};
 
 /// Canonical required payload binding identities for one Enclave.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -309,12 +309,20 @@ impl OwnedEnclaveImage {
             .collect()
     }
 
-    fn route_images<'a>(&self, identities: &'a [String]) -> TinyMap<RouteIndex, RouteImage<'a>> {
-        self.routes()
+    fn route_images<'a>(
+        &self,
+        identities: &'a [String],
+    ) -> HeapSealedTinyMap<RouteIndex, RouteImage<'a>> {
+        let rows = self
+            .routes()
             .values()
             .zip(identities)
-            .map(|(route, boundary)| route.image(boundary))
-            .collect()
+            .map(|(route, boundary)| route.image(boundary));
+        let mut builder = HeapTinyMapBuilder::heap();
+        if let Err(error) = builder.try_extend_exact(rows) {
+            unreachable!("rendered routes are bounded by the sealed route table: {error}");
+        }
+        builder.seal()
     }
 
     fn binding_identity_text(&self) -> Vec<String> {
@@ -327,19 +335,24 @@ impl OwnedEnclaveImage {
     fn binding_rows<'a>(
         &self,
         identities: &'a [String],
-    ) -> TinyMap<BindingSlotIndex, RequiredBindingImage<'a>> {
-        self.binding_images()
+    ) -> HeapSealedTinyMap<BindingSlotIndex, RequiredBindingImage<'a>> {
+        let rows = self
+            .binding_images()
             .values()
             .zip(identities)
-            .map(|(binding, id)| binding.image(id))
-            .collect()
+            .map(|(binding, id)| binding.image(id));
+        let mut builder = HeapTinyMapBuilder::heap();
+        if let Err(error) = builder.try_extend_exact(rows) {
+            unreachable!("rendered bindings are bounded by the sealed binding table: {error}");
+        }
+        builder.seal()
     }
 
     fn image_with_rows<'a>(
         &'a self,
         enclave_id: &'a str,
-        routes: &'a TinyMap<RouteIndex, RouteImage<'a>>,
-        bindings: &'a TinyMap<BindingSlotIndex, RequiredBindingImage<'a>>,
+        routes: TinyMapRef<'a, RouteIndex, RouteImage<'a>>,
+        bindings: TinyMapRef<'a, BindingSlotIndex, RequiredBindingImage<'a>>,
     ) -> EnclaveImage<'a> {
         EnclaveImage {
             enclave_id: runtime_image::EnclaveId::new(enclave_id),
@@ -364,8 +377,8 @@ impl OwnedEnclaveImage {
             timer_startup_actions: &self.timer_startup_actions,
             shutdown_reactions: &self.shutdown_reactions,
             shutdown_actions: &self.shutdown_actions,
-            routes: TinyMapRef::from_slice(routes.as_view().as_slice()),
-            required_bindings: TinyMapRef::from_slice(bindings.as_view().as_slice()),
+            routes,
+            required_bindings: bindings,
             storage_bounds: &self.storage_bounds,
         }
     }
@@ -377,7 +390,7 @@ impl OwnedEnclaveImage {
         let routes = self.route_images(&route_identities);
         let binding_identities = self.binding_identity_text();
         let bindings = self.binding_rows(&binding_identities);
-        f(self.image_with_rows(&enclave_id, &routes, &bindings))
+        f(self.image_with_rows(&enclave_id, routes.as_ref(), bindings.as_ref()))
     }
 
     /// Validates and exposes the borrowed scheduler image view during `f`.
@@ -639,7 +652,7 @@ impl OwnedCompiledDeployment {
             .zip(&binding_rows)
             .zip(&enclave_ids)
             .map(|(((enclave, routes), bindings), id)| {
-                enclave.image_with_rows(id, routes, bindings)
+                enclave.image_with_rows(id, routes.as_ref(), bindings.as_ref())
             })
             .collect::<Vec<_>>();
         let federates = self
@@ -875,6 +888,20 @@ mod tests {
         let binding = &enclave.binding_images.as_ref()[BindingSlotIndex::new(0)];
 
         assert_eq!(binding.id.path().to_string(), "state/vehicle/main");
+    }
+
+    #[test]
+    fn rendered_route_and_binding_rows_are_sealed_before_projection() {
+        fn assert_heap_sealed<K: tinymap::Key, V>(_: &HeapSealedTinyMap<K, V>) {}
+
+        let enclave = empty_enclave();
+        let route_identities = enclave.route_identity_text();
+        let routes = enclave.route_images(&route_identities);
+        assert_heap_sealed(&routes);
+
+        let binding_identities = enclave.binding_identity_text();
+        let bindings = enclave.binding_rows(&binding_identities);
+        assert_heap_sealed(&bindings);
     }
 
     #[test]

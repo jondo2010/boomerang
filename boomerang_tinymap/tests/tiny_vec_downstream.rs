@@ -16,6 +16,7 @@ fn dependency_path_is_rendered_as_a_toml_string() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "Miri cannot launch the nested Cargo process")]
 fn concrete_tinyvec_adapters_work_downstream_while_storage_operations_remain_private() {
     let lifecycle = cargo_check(
         "lifecycle",

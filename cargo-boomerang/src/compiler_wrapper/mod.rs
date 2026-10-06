@@ -11,16 +11,14 @@ const EXECUTABLE_ENV: &str = "BOOMERANG_COMPILER_WRAPPER";
 /// Bump when wrapper behavior can change compiler output.
 pub(crate) const CACHE_SEMANTICS: &[u8] = b"compiler-wrapper-v1";
 
+/// Runs the Rust compiler wrapper and exits with the compiler status.
+#[doc(hidden)]
+pub use utility::main;
+
 /// Returns whether Cargo invoked this process as its Rust compiler wrapper.
 #[doc(hidden)]
 pub fn is_invocation() -> bool {
     env::var_os(INVOCATION_ENV).as_deref() == Some("1".as_ref())
-}
-
-/// Runs the Rust compiler wrapper and exits with the compiler status.
-#[doc(hidden)]
-pub fn main() -> ! {
-    utility::main()
 }
 
 /// Resolves the cargo-boomerang executable used as `RUSTC_WRAPPER`.

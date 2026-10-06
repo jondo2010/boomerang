@@ -83,6 +83,7 @@ impl Facet {
     ) {
         command
             .env("RUSTC_WRAPPER", wrapper)
+            .env(crate::compiler_wrapper::INVOCATION_ENV, "1")
             .env("BOOMERANG_COMPILE_FACET", self.name());
         if let Some(previous) = configured.rustc.as_deref() {
             command.env("BOOMERANG_USER_RUSTC_WRAPPER", previous);
@@ -223,17 +224,37 @@ mod tests {
     #[cfg(unix)]
     fn compiler_wrapper_scopes_flags_chains_user_wrapper_and_rejects_conflicts() {
         let directory = tempfile::tempdir().unwrap();
-        let source = directory.path().join("wrapper.rs");
-        let executable = directory.path().join("wrapper");
-        std::fs::write(&source, include_str!("facet_rustc.rs")).unwrap();
-        assert!(Command::new("rustc")
-            .arg("--edition=2021")
-            .arg(&source)
-            .arg("-o")
-            .arg(&executable)
-            .status()
-            .unwrap()
-            .success());
+        let source = include_str!("compiler_wrapper/utility.rs");
+        std::fs::write(directory.path().join("main.rs"), source).unwrap();
+        std::fs::write(
+            directory.path().join("Cargo.toml"),
+            r#"[package]
+name = "boomerang-compiler-wrapper-test"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+
+[[bin]]
+name = "wrapper"
+path = "main.rs"
+"#,
+        )
+        .unwrap();
+        let target = directory.path().join("target");
+        assert!(
+            Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+                .args(["build", "--quiet", "--offline", "--target-dir"])
+                .arg(&target)
+                .current_dir(directory.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let executable = target
+            .join("debug")
+            .join(format!("wrapper{}", std::env::consts::EXE_SUFFIX));
         let compiler = directory.path().join("compiler");
         std::fs::write(&compiler, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n").unwrap();
         std::fs::set_permissions(&compiler, std::fs::Permissions::from_mode(0o755)).unwrap();

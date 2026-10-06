@@ -20,6 +20,7 @@ use cargo_metadata::{Message, Metadata, PackageId};
 
 use crate::{
     codegen::rendered_compiler_diagnostics,
+    compiler_wrapper,
     facet::{CompilerWrappers, Facet},
     generated::{render_descriptor_driver, render_topology_driver, GeneratedCrate},
     generated_cache::{
@@ -81,7 +82,7 @@ pub(crate) fn run_resolved_descriptor_driver(
     output.status(crate::output::Phase::Generating, "topology driver")?;
     let topology_source = render_topology_driver(resolved)?;
     output.status(crate::output::Phase::Building, "topology driver")?;
-    let wrapper = prepare_compiler_wrapper(resolved, output)?;
+    let wrapper = compiler_wrapper::executable()?;
     let topology = build_and_run_host_stage(
         resolved,
         GeneratedRole::Topology,
@@ -107,38 +108,10 @@ pub(crate) fn run_resolved_descriptor_driver(
     })
 }
 
-/// Builds a small native compiler wrapper once per source/lock/compiler context.
-pub(crate) fn prepare_compiler_wrapper(
-    resolved: &ResolvedWorkspace,
-    output: &crate::CommandOutput,
-) -> Result<PathBuf> {
-    let package = toml::Table::from_iter([
-        ("name".into(), "boomerang-facet-rustc".into()),
-        ("version".into(), "0.0.0".into()),
-        ("edition".into(), "2021".into()),
-    ]);
-    let generated = GeneratedCrate {
-        manifest: toml::to_string(&toml::Table::from_iter([
-            ("package".into(), package.into()),
-            ("workspace".into(), toml::Table::new().into()),
-        ]))?,
-        main: include_str!("facet_rustc.rs").to_owned(),
-    };
-    let (executable, _, _, _) = build_host_program(
-        resolved,
-        generated,
-        GeneratedRole::CompilerWrapper,
-        None,
-        output,
-    )?;
-    Ok(executable)
-}
-
 fn host_program_name(role: GeneratedRole) -> &'static str {
     match role {
         GeneratedRole::Topology => "boomerang-topology-driver",
         GeneratedRole::Descriptor => "boomerang-descriptor-driver",
-        GeneratedRole::CompilerWrapper => "boomerang-facet-rustc",
         GeneratedRole::Launcher => unreachable!("target launchers use their own build path"),
     }
 }
@@ -178,7 +151,7 @@ fn build_and_run_host_stage(
         "descriptor driver"
     };
     let (executable, mut log, count, _execution) =
-        build_host_program(resolved, generated, role, Some(wrapper), output)?;
+        build_host_program(resolved, generated, role, wrapper, output)?;
     let result = Command::new(&executable)
         .output()
         .with_context(|| format!("failed to execute {label}"))?;
@@ -191,16 +164,12 @@ fn build_host_program(
     resolved: &ResolvedWorkspace,
     generated_source: GeneratedCrate,
     role: GeneratedRole,
-    wrapper: Option<&Path>,
+    wrapper: &Path,
     output: &crate::CommandOutput,
 ) -> Result<(PathBuf, String, usize, Option<tempfile::TempDir>)> {
     let cargo_program = generated_cargo_program();
     let application_workspace = resolved.lockfile().path.parent().expect("lockfile parent");
-    let roots = if role == GeneratedRole::CompilerWrapper {
-        BTreeSet::new()
-    } else {
-        resolved.host_stage_package_ids(role == GeneratedRole::Topology)
-    };
+    let roots = resolved.host_stage_package_ids(role == GeneratedRole::Topology);
     let identity = host_request_identity(
         role,
         generated_source.manifest.as_bytes(),
@@ -208,7 +177,7 @@ fn build_host_program(
         &resolved.lockfile().digest,
         &roots,
         &cargo_program,
-        include_bytes!("facet_rustc.rs"),
+        compiler_wrapper::CACHE_SEMANTICS,
     );
     let request = GeneratedWorkspaceRequest {
         role,
@@ -245,7 +214,7 @@ fn build_host_program(
             &cargo_program,
             application_workspace,
             arguments,
-            wrapper.map(|path| (facet, path, &compiler_wrappers)),
+            Some((facet, wrapper, &compiler_wrappers)),
             output,
         )
     };
@@ -281,7 +250,7 @@ fn build_host_program(
                 OsStr::new("--target"),
                 OsStr::new(&host),
             ],
-            wrapper.map(|path| (facet, path, &compiler_wrappers)),
+            Some((facet, wrapper, &compiler_wrappers)),
             output,
         )?;
         let diagnostics = rendered_compiler_diagnostics(&build.stdout)?;
@@ -293,12 +262,8 @@ fn build_host_program(
             &generated.manifest_path(),
             host_program_name(role),
         )?;
-        if role == GeneratedRole::CompilerWrapper {
-            Ok((executable, count, None))
-        } else {
-            let (private, executable) = copy_private_artifact(&executable, target)?;
-            Ok((executable, count, Some(private)))
-        }
+        let (private, executable) = copy_private_artifact(&executable, target)?;
+        Ok((executable, count, Some(private)))
     })?;
     Ok((executable, log.into_inner(), count, private))
 }
@@ -333,7 +298,7 @@ fn descriptor_request_identity(
         source_lock_digest,
         driver_package_ids,
         cargo_program,
-        include_bytes!("facet_rustc.rs"),
+        compiler_wrapper::CACHE_SEMANTICS,
     )
 }
 
@@ -504,7 +469,13 @@ mod tests {
     }
 
     #[test]
-    fn host_request_identity_tracks_compiler_wrapper_semantics() {
+    fn host_request_identity_tracks_versioned_compiler_wrapper_semantics() {
+        let _: fn() -> anyhow::Result<std::path::PathBuf> = crate::compiler_wrapper::executable;
+        assert_eq!(
+            crate::compiler_wrapper::CACHE_SEMANTICS,
+            b"compiler-wrapper-v1"
+        );
+
         let package_ids = BTreeSet::new();
         let identity = |wrapper| {
             host_request_identity(

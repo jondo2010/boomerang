@@ -1,9 +1,15 @@
 //! Manifest support for the `cargo boomerang` deployment tool.
+//!
+//! Library entry points that compile generated facets use the current `cargo-boomerang` process,
+//! resolve `cargo-boomerang` on `PATH`, or use the executable selected by
+//! `BOOMERANG_COMPILER_WRAPPER`.
 
 mod build;
 mod bundle;
 mod check;
 mod codegen;
+#[doc(hidden)]
+pub mod compiler_wrapper;
 mod driver;
 mod facet;
 mod generated;

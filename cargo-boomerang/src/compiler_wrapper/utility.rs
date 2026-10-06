@@ -1,8 +1,8 @@
-//! Dependency-free implementation of the compiler-wrapper process protocol.
+//! `RUSTC_WRAPPER` protocol for facet-specific compiler flags.
 
 use std::{env, ffi::OsString, process::Command};
 
-/// Runs the compiler-wrapper protocol and terminates with the wrapped compiler's status.
+/// Runs the configured compiler command and exits with its status.
 pub fn main() -> ! {
     let code = match run() {
         Ok(code) => code,

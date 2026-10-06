@@ -119,7 +119,7 @@ fn host_program_name(role: GeneratedRole) -> &'static str {
 fn run_host_stage(
     resolved: &ResolvedWorkspace,
     role: GeneratedRole,
-    wrapper: &compiler_wrapper::Executable,
+    wrapper: &Path,
     output: &crate::CommandOutput,
 ) -> Result<(Vec<u8>, String, usize)> {
     let topology = role == GeneratedRole::Topology;
@@ -142,7 +142,7 @@ fn build_and_run_host_stage(
     resolved: &ResolvedWorkspace,
     role: GeneratedRole,
     generated: GeneratedCrate,
-    wrapper: &compiler_wrapper::Executable,
+    wrapper: &Path,
     output: &crate::CommandOutput,
 ) -> Result<(Vec<u8>, String, usize)> {
     let label = if role == GeneratedRole::Topology {
@@ -164,7 +164,7 @@ fn build_host_program(
     resolved: &ResolvedWorkspace,
     generated_source: GeneratedCrate,
     role: GeneratedRole,
-    wrapper: &compiler_wrapper::Executable,
+    wrapper: &Path,
     output: &crate::CommandOutput,
 ) -> Result<(PathBuf, String, usize, Option<tempfile::TempDir>)> {
     let cargo_program = generated_cargo_program();
@@ -177,7 +177,7 @@ fn build_host_program(
         &resolved.lockfile().digest,
         &roots,
         &cargo_program,
-        wrapper.identity(),
+        compiler_wrapper::SEMANTICS,
     );
     let request = GeneratedWorkspaceRequest {
         role,
@@ -214,7 +214,7 @@ fn build_host_program(
             &cargo_program,
             application_workspace,
             arguments,
-            Some((facet, wrapper.path(), &compiler_wrappers)),
+            Some((facet, wrapper, &compiler_wrappers)),
             output,
         )
     };
@@ -250,7 +250,7 @@ fn build_host_program(
                 OsStr::new("--target"),
                 OsStr::new(&host),
             ],
-            Some((facet, wrapper.path(), &compiler_wrappers)),
+            Some((facet, wrapper, &compiler_wrappers)),
             output,
         )?;
         let diagnostics = rendered_compiler_diagnostics(&build.stdout)?;

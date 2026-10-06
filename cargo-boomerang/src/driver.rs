@@ -82,7 +82,7 @@ pub(crate) fn run_resolved_descriptor_driver(
     output.status(crate::output::Phase::Generating, "topology driver")?;
     let topology_source = render_topology_driver(resolved)?;
     output.status(crate::output::Phase::Building, "topology driver")?;
-    let wrapper = compiler_wrapper::executable().map_err(anyhow::Error::msg)?;
+    let wrapper = compiler_wrapper::executable()?;
     let topology = build_and_run_host_stage(
         resolved,
         GeneratedRole::Topology,
@@ -177,7 +177,7 @@ fn build_host_program(
         &resolved.lockfile().digest,
         &roots,
         &cargo_program,
-        compiler_wrapper::SEMANTICS,
+        compiler_wrapper::CACHE_SEMANTICS,
     );
     let request = GeneratedWorkspaceRequest {
         role,
@@ -298,7 +298,7 @@ fn descriptor_request_identity(
         source_lock_digest,
         driver_package_ids,
         cargo_program,
-        include_bytes!("compiler_wrapper/utility.rs"),
+        compiler_wrapper::CACHE_SEMANTICS,
     )
 }
 
@@ -469,7 +469,13 @@ mod tests {
     }
 
     #[test]
-    fn host_request_identity_tracks_compiler_wrapper_semantics() {
+    fn host_request_identity_tracks_versioned_compiler_wrapper_semantics() {
+        let _: fn() -> anyhow::Result<std::path::PathBuf> = crate::compiler_wrapper::executable;
+        assert_eq!(
+            crate::compiler_wrapper::CACHE_SEMANTICS,
+            b"compiler-wrapper-v1"
+        );
+
         let package_ids = BTreeSet::new();
         let identity = |wrapper| {
             host_request_identity(

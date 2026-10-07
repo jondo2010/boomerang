@@ -2,7 +2,7 @@
 use super::*;
 use boomerang_runtime::image::{
     BoundaryId, CodecCapabilityIndex, CodecPolicy, FlowIndex, IdentityTable, RtiDependencyImage,
-    RtiImage, RtiMemberImage, RtiRouteImage, SliceRange, TinyMapView, TransportCapabilityIndex,
+    RtiImage, RtiMemberImage, RtiRouteImage, SliceRange, TinyMapRef, TransportCapabilityIndex,
     TransportPolicy,
 };
 
@@ -37,7 +37,7 @@ const fn route(
 
 // A -> B -> C, with all direct and transitive bounds embedded in member ranges.
 static CHAIN: RtiImage<'static> = RtiImage::new(
-    TinyMapView::new(&[
+    TinyMapRef::from_slice(&[
         RtiMemberImage::new(
             RecoveryPolicy::FailStop,
             SliceRange::new(0, 0),
@@ -68,18 +68,18 @@ static CHAIN: RtiImage<'static> = RtiImage::new(
         RtiDependencyImage::new(B, 0),
     ],
     &[B, C, C],
-    TinyMapView::new(&[route("a-b", A, B, 0), route("b-c", B, C, 0)]),
-    IdentityTable::new(&["flow"]),
-    IdentityTable::new(&[]),
-    IdentityTable::new(&["ordered"]),
-    IdentityTable::new(&["bytes"]),
+    TinyMapRef::from_slice(&[route("a-b", A, B, 0), route("b-c", B, C, 0)]),
+    IdentityTable::from_slice(&["flow"]),
+    IdentityTable::from_slice(&[]),
+    IdentityTable::from_slice(&["ordered"]),
+    IdentityTable::from_slice(&["bytes"]),
 );
 
 fn admitted(
     image: &'static RtiImage<'static>,
     identities: &'static [&'static str],
 ) -> CompiledRti<'static> {
-    let view = RtiImageView::new(image.clone(), IdentityTable::new(identities)).unwrap();
+    let view = RtiImageView::new(image.clone(), IdentityTable::from_slice(identities)).unwrap();
     let mut rti = CompiledRti::from_image(view, IDENTITY).unwrap();
     for member in image.members().keys() {
         let replies = rti.handle(member, RtiRequest::Hello { identity: IDENTITY });
@@ -111,7 +111,7 @@ fn coordinator_outlives_local_image_descriptor() {
     let identities = names.each_ref().map(String::as_str);
     let mut rti = {
         let image = CHAIN.clone();
-        let view = RtiImageView::new(image, IdentityTable::new(&identities)).unwrap();
+        let view = RtiImageView::new(image, IdentityTable::from_slice(&identities)).unwrap();
         CompiledRti::from_image(view, IDENTITY).unwrap()
     };
 
@@ -225,7 +225,7 @@ fn completion_clears_in_transit_tag_and_reconsiders_downstream() {
 }
 
 static CYCLE: RtiImage<'static> = RtiImage::new(
-    TinyMapView::new(&[
+    TinyMapRef::from_slice(&[
         RtiMemberImage::new(
             RecoveryPolicy::FailStop,
             SliceRange::new(0, 1),
@@ -250,11 +250,11 @@ static CYCLE: RtiImage<'static> = RtiImage::new(
         RtiDependencyImage::new(B, 20),
     ],
     &[A, B, A, B],
-    TinyMapView::new(&[route("a-b", A, B, 10), route("b-a", B, A, 10)]),
-    IdentityTable::new(&["flow"]),
-    IdentityTable::new(&[]),
-    IdentityTable::new(&["ordered"]),
-    IdentityTable::new(&["bytes"]),
+    TinyMapRef::from_slice(&[route("a-b", A, B, 10), route("b-a", B, A, 10)]),
+    IdentityTable::from_slice(&["flow"]),
+    IdentityTable::from_slice(&[]),
+    IdentityTable::from_slice(&["ordered"]),
+    IdentityTable::from_slice(&["bytes"]),
 );
 
 #[test]

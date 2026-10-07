@@ -32,7 +32,7 @@ use crate::runtime::image::{
     ReactionImage, ReactionIndex, ReactorImage, ReactorIndex, RequiredBindingImage, RouteImage,
     RouteIndex, ScopeImage, ScopeIndex, StorageBounds, TimerStartupImage,
 };
-use tinymap::{IndexSpan, TinyMap, TinyMapView};
+use tinymap::{HeapSealedTinyMap, HeapTinyMapBuilder, IndexSpan, TinyMapRef};
 
 /// Canonical required payload binding identities for one Enclave.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -143,17 +143,17 @@ pub struct OwnedEnclaveImage {
     /// Stable Enclave identity.
     pub(crate) id: StableEnclaveId,
     /// Dense reactor rows.
-    pub(crate) reactors: TinyMap<ReactorIndex, ReactorImage>,
+    pub(crate) reactors: HeapSealedTinyMap<ReactorIndex, ReactorImage>,
     /// Dense action rows.
-    pub(crate) actions: TinyMap<ActionIndex, ActionImage>,
+    pub(crate) actions: HeapSealedTinyMap<ActionIndex, ActionImage>,
     /// Dense port rows.
-    pub(crate) ports: TinyMap<PortIndex, PortImage>,
+    pub(crate) ports: HeapSealedTinyMap<PortIndex, PortImage>,
     /// Dense reaction rows.
-    pub(crate) reactions: TinyMap<ReactionIndex, ReactionImage>,
+    pub(crate) reactions: HeapSealedTinyMap<ReactionIndex, ReactionImage>,
     /// Dense mode rows.
-    pub(crate) modes: TinyMap<ModeIndex, ModeImage>,
+    pub(crate) modes: HeapSealedTinyMap<ModeIndex, ModeImage>,
     /// Dense execution scopes.
-    pub(crate) scopes: TinyMap<ScopeIndex, ScopeImage>,
+    pub(crate) scopes: HeapSealedTinyMap<ScopeIndex, ScopeImage>,
     /// Flattened trigger entries.
     pub(crate) reaction_triggers: Box<[LevelReactionImage]>,
     /// Flattened reaction use ports.
@@ -185,9 +185,9 @@ pub struct OwnedEnclaveImage {
     /// Actions populated before shutdown.
     pub(crate) shutdown_actions: Box<[ActionIndex]>,
     /// Scheduler-boundary routes.
-    pub(crate) routes: TinyMap<RouteIndex, OwnedRouteImage>,
+    pub(crate) routes: HeapSealedTinyMap<RouteIndex, OwnedRouteImage>,
     /// Dense runtime binding rows.
-    pub(crate) binding_images: TinyMap<BindingSlotIndex, OwnedBindingImage>,
+    pub(crate) binding_images: HeapSealedTinyMap<BindingSlotIndex, OwnedBindingImage>,
     /// Stable required binding descriptions.
     pub(crate) required_bindings: RequiredBindings,
     /// Mutable storage and workspace bounds.
@@ -257,28 +257,76 @@ impl OwnedEnclaveImage {
         &self.id
     }
 
+    /// Returns the complete reactor table as a storage-erased reference.
+    pub fn reactors(&self) -> TinyMapRef<'_, ReactorIndex, ReactorImage> {
+        self.reactors.as_ref()
+    }
+
+    /// Returns the complete action table as a storage-erased reference.
+    pub fn actions(&self) -> TinyMapRef<'_, ActionIndex, ActionImage> {
+        self.actions.as_ref()
+    }
+
+    /// Returns the complete port table as a storage-erased reference.
+    pub fn ports(&self) -> TinyMapRef<'_, PortIndex, PortImage> {
+        self.ports.as_ref()
+    }
+
+    /// Returns the complete reaction table as a storage-erased reference.
+    pub fn reactions(&self) -> TinyMapRef<'_, ReactionIndex, ReactionImage> {
+        self.reactions.as_ref()
+    }
+
+    /// Returns the complete mode table as a storage-erased reference.
+    pub fn modes(&self) -> TinyMapRef<'_, ModeIndex, ModeImage> {
+        self.modes.as_ref()
+    }
+
+    /// Returns the complete scope table as a storage-erased reference.
+    pub fn scopes(&self) -> TinyMapRef<'_, ScopeIndex, ScopeImage> {
+        self.scopes.as_ref()
+    }
+
+    /// Returns the complete scheduler route table as a storage-erased reference.
+    pub(crate) fn routes(&self) -> TinyMapRef<'_, RouteIndex, OwnedRouteImage> {
+        self.routes.as_ref()
+    }
+
+    /// Returns the complete runtime binding table as a storage-erased reference.
+    pub(crate) fn binding_images(&self) -> TinyMapRef<'_, BindingSlotIndex, OwnedBindingImage> {
+        self.binding_images.as_ref()
+    }
+
     /// Returns the required payload bindings.
     pub fn required_bindings(&self) -> &RequiredBindings {
         &self.required_bindings
     }
 
     fn route_identity_text(&self) -> Vec<String> {
-        self.routes
+        self.routes()
             .values()
             .map(|route| route.boundary.to_canonical_string())
             .collect()
     }
 
-    fn route_images<'a>(&self, identities: &'a [String]) -> TinyMap<RouteIndex, RouteImage<'a>> {
-        self.routes
+    fn route_images<'a>(
+        &self,
+        identities: &'a [String],
+    ) -> HeapSealedTinyMap<RouteIndex, RouteImage<'a>> {
+        let rows = self
+            .routes()
             .values()
             .zip(identities)
-            .map(|(route, boundary)| route.image(boundary))
-            .collect()
+            .map(|(route, boundary)| route.image(boundary));
+        let mut builder = HeapTinyMapBuilder::heap();
+        if let Err(error) = builder.try_extend_exact(rows) {
+            unreachable!("rendered routes are bounded by the sealed route table: {error}");
+        }
+        builder.seal()
     }
 
     fn binding_identity_text(&self) -> Vec<String> {
-        self.binding_images
+        self.binding_images()
             .values()
             .map(|binding| binding.id.path().to_string())
             .collect()
@@ -287,28 +335,33 @@ impl OwnedEnclaveImage {
     fn binding_rows<'a>(
         &self,
         identities: &'a [String],
-    ) -> TinyMap<BindingSlotIndex, RequiredBindingImage<'a>> {
-        self.binding_images
+    ) -> HeapSealedTinyMap<BindingSlotIndex, RequiredBindingImage<'a>> {
+        let rows = self
+            .binding_images()
             .values()
             .zip(identities)
-            .map(|(binding, id)| binding.image(id))
-            .collect()
+            .map(|(binding, id)| binding.image(id));
+        let mut builder = HeapTinyMapBuilder::heap();
+        if let Err(error) = builder.try_extend_exact(rows) {
+            unreachable!("rendered bindings are bounded by the sealed binding table: {error}");
+        }
+        builder.seal()
     }
 
     fn image_with_rows<'a>(
         &'a self,
         enclave_id: &'a str,
-        routes: &'a TinyMap<RouteIndex, RouteImage<'a>>,
-        bindings: &'a TinyMap<BindingSlotIndex, RequiredBindingImage<'a>>,
+        routes: TinyMapRef<'a, RouteIndex, RouteImage<'a>>,
+        bindings: TinyMapRef<'a, BindingSlotIndex, RequiredBindingImage<'a>>,
     ) -> EnclaveImage<'a> {
         EnclaveImage {
             enclave_id: runtime_image::EnclaveId::new(enclave_id),
-            reactors: self.reactors.as_view(),
-            actions: self.actions.as_view(),
-            ports: self.ports.as_view(),
-            reactions: self.reactions.as_view(),
-            modes: self.modes.as_view(),
-            scopes: self.scopes.as_view(),
+            reactors: self.reactors.as_ref(),
+            actions: self.actions.as_ref(),
+            ports: self.ports.as_ref(),
+            reactions: self.reactions.as_ref(),
+            modes: self.modes.as_ref(),
+            scopes: self.scopes.as_ref(),
             reaction_triggers: &self.reaction_triggers,
             reaction_use_ports: &self.reaction_use_ports,
             reaction_effect_ports: &self.reaction_effect_ports,
@@ -324,8 +377,8 @@ impl OwnedEnclaveImage {
             timer_startup_actions: &self.timer_startup_actions,
             shutdown_reactions: &self.shutdown_reactions,
             shutdown_actions: &self.shutdown_actions,
-            routes: routes.as_view(),
-            required_bindings: bindings.as_view(),
+            routes,
+            required_bindings: bindings,
             storage_bounds: &self.storage_bounds,
         }
     }
@@ -337,7 +390,7 @@ impl OwnedEnclaveImage {
         let routes = self.route_images(&route_identities);
         let binding_identities = self.binding_identity_text();
         let bindings = self.binding_rows(&binding_identities);
-        f(self.image_with_rows(&enclave_id, &routes, &bindings))
+        f(self.image_with_rows(&enclave_id, routes.as_ref(), bindings.as_ref()))
     }
 
     /// Validates and exposes the borrowed scheduler image view during `f`.
@@ -420,9 +473,9 @@ pub struct OwnedCompiledDeployment {
     /// Backend-neutral global federation structure.
     pub(crate) federation: GlobalFederationImage,
     /// Complete compiled Federate table keyed by deployment-wide dense identity.
-    pub(crate) federates: TinyMap<FederateIndex, OwnedFederateImage>,
+    pub(crate) federates: HeapSealedTinyMap<FederateIndex, OwnedFederateImage>,
     /// Complete compiled Enclave table keyed by deployment-wide dense identity.
-    pub(crate) enclaves: TinyMap<EnclaveIndex, OwnedEnclaveImage>,
+    pub(crate) enclaves: HeapSealedTinyMap<EnclaveIndex, OwnedEnclaveImage>,
     /// Selected coordination projection.
     pub(crate) coordination: OwnedCoordinationProjection,
 }
@@ -517,13 +570,13 @@ impl OwnedCompiledDeployment {
     }
 
     /// Returns the complete Federate table in canonical dense-key order.
-    pub fn federates(&self) -> &TinyMap<FederateIndex, OwnedFederateImage> {
-        &self.federates
+    pub fn federates(&self) -> TinyMapRef<'_, FederateIndex, OwnedFederateImage> {
+        self.federates.as_ref()
     }
 
     /// Returns the complete Enclave table in canonical dense-key order.
-    pub fn enclaves(&self) -> &TinyMap<EnclaveIndex, OwnedEnclaveImage> {
-        &self.enclaves
+    pub fn enclaves(&self) -> TinyMapRef<'_, EnclaveIndex, OwnedEnclaveImage> {
+        self.enclaves.as_ref()
     }
 
     /// Returns the selected coordination projection.
@@ -544,10 +597,11 @@ impl OwnedCompiledDeployment {
     ) -> Result<FederateSlice<'_>, FederateSliceError> {
         let candidate = self
             .federates
+            .as_ref()
             .get(federate)
             .ok_or(FederateSliceError::FederateNotFound { federate })?;
 
-        let enclaves = self.enclaves.get_span(candidate.enclaves).ok_or(
+        let enclaves = self.enclaves.as_ref().get_span(candidate.enclaves).ok_or(
             ImageValidationError::OwnershipMismatch {
                 table: "federates",
                 index: federate.as_u32(),
@@ -557,7 +611,7 @@ impl OwnedCompiledDeployment {
         Ok(FederateSlice {
             federate,
             image: candidate,
-            enclaves,
+            enclaves: enclaves.values(),
         })
     }
 
@@ -569,7 +623,7 @@ impl OwnedCompiledDeployment {
         &self,
         f: impl FnOnce(crate::runtime::image::CompiledDeploymentImage<'_>) -> T,
     ) -> T {
-        let owned_enclaves = self.enclaves.values().collect::<Vec<_>>();
+        let owned_enclaves = self.enclaves.as_ref().values().collect::<Vec<_>>();
         let enclave_ids = owned_enclaves
             .iter()
             .map(|enclave| enclave.id.to_canonical_string())
@@ -598,11 +652,12 @@ impl OwnedCompiledDeployment {
             .zip(&binding_rows)
             .zip(&enclave_ids)
             .map(|(((enclave, routes), bindings), id)| {
-                enclave.image_with_rows(id, routes, bindings)
+                enclave.image_with_rows(id, routes.as_ref(), bindings.as_ref())
             })
             .collect::<Vec<_>>();
         let federates = self
             .federates
+            .as_ref()
             .values()
             .map(|federate| {
                 FederateImage::new(
@@ -616,6 +671,7 @@ impl OwnedCompiledDeployment {
         let invalid_federate = FederateIndex::new(u32::MAX);
         let federate_index = |id: &FederateId| {
             self.federates
+                .as_ref()
                 .iter()
                 .find_map(|(index, federate)| (federate.id == *id).then_some(index))
                 .unwrap_or(invalid_federate)
@@ -650,8 +706,8 @@ impl OwnedCompiledDeployment {
         self.coordination.with_image(|coordination| {
             f(crate::runtime::image::CompiledDeploymentImage {
                 federation: runtime_image::GlobalFederationImage::new(&members, &edges),
-                federates: TinyMapView::new(&federates),
-                enclaves: TinyMapView::new(&enclaves),
+                federates: TinyMapRef::from_slice(&federates),
+                enclaves: TinyMapRef::from_slice(&enclaves),
                 coordination,
             })
         })
@@ -673,6 +729,14 @@ mod tests {
     use crate::compiler::{ComponentInstanceId, ImplementationId, StablePath};
     use crate::descriptor::{ReactionSlotId, ReactorSlotId};
     use crate::runtime::image::{IndexSpan, SliceRange, StateSlotIndex};
+
+    fn sealed<K: tinymap::Key, V>(values: impl IntoIterator<Item = V>) -> HeapSealedTinyMap<K, V> {
+        let mut builder = tinymap::HeapTinyMapBuilder::heap();
+        for value in values {
+            builder.try_insert(value).unwrap();
+        }
+        builder.seal()
+    }
 
     #[test]
     fn direct_binding_symbols_reversibly_escape_descriptor_slots() {
@@ -764,21 +828,19 @@ mod tests {
     fn empty_enclave() -> OwnedEnclaveImage {
         OwnedEnclaveImage {
             id: StableEnclaveId::new("vehicle/main").unwrap(),
-            reactors: [ReactorImage::new(
+            reactors: sealed([ReactorImage::new(
                 BindingSlotIndex::new(0),
                 StateSlotIndex::new(0),
                 ScopeIndex::new(0),
                 IndexSpan::new(0, 0),
                 None,
                 None,
-            )]
-            .into_iter()
-            .collect(),
-            actions: TinyMap::default(),
-            ports: TinyMap::default(),
-            reactions: TinyMap::default(),
-            modes: TinyMap::default(),
-            scopes: [ScopeImage::new(
+            )]),
+            actions: sealed([]),
+            ports: sealed([]),
+            reactions: sealed([]),
+            modes: sealed([]),
+            scopes: sealed([ScopeImage::new(
                 None,
                 ReactorIndex::new(0),
                 None,
@@ -788,9 +850,7 @@ mod tests {
                 SliceRange::new(0, 0),
                 SliceRange::new(0, 0),
                 SliceRange::new(0, 0),
-            )]
-            .into_iter()
-            .collect(),
+            )]),
             reaction_triggers: Box::default(),
             reaction_use_ports: Box::default(),
             reaction_effect_ports: Box::default(),
@@ -806,13 +866,11 @@ mod tests {
             timer_startup_actions: Box::default(),
             shutdown_reactions: Box::default(),
             shutdown_actions: Box::default(),
-            routes: TinyMap::default(),
-            binding_images: [OwnedBindingImage::new(
+            routes: sealed([]),
+            binding_images: sealed([OwnedBindingImage::new(
                 "state/vehicle/main",
                 BindingKind::StateInitializer,
-            )]
-            .into_iter()
-            .collect(),
+            )]),
             required_bindings: RequiredBindings {
                 entries: Box::new([RequiredBinding::State {
                     component: ComponentInstanceId::new("vehicle/main").unwrap(),
@@ -827,27 +885,41 @@ mod tests {
     #[test]
     fn owned_binding_images_retain_typed_stable_paths() {
         let enclave = empty_enclave();
-        let binding = &enclave.binding_images[BindingSlotIndex::new(0)];
+        let binding = &enclave.binding_images.as_ref()[BindingSlotIndex::new(0)];
 
         assert_eq!(binding.id.path().to_string(), "state/vehicle/main");
     }
 
     #[test]
+    fn rendered_route_and_binding_rows_are_sealed_before_projection() {
+        fn assert_heap_sealed<K: tinymap::Key, V>(_: &HeapSealedTinyMap<K, V>) {}
+
+        let enclave = empty_enclave();
+        let route_identities = enclave.route_identity_text();
+        let routes = enclave.route_images(&route_identities);
+        assert_heap_sealed(&routes);
+
+        let binding_identities = enclave.binding_identity_text();
+        let bindings = enclave.binding_rows(&binding_identities);
+        assert_heap_sealed(&bindings);
+    }
+
+    #[test]
     fn owned_deployment_validates_the_complete_borrowed_hierarchy() {
+        fn assert_dense_ref<K: tinymap::Key, V>(_: TinyMapRef<'_, K, V>) {}
+
         let deployment = OwnedCompiledDeployment {
             federation: GlobalFederationImage {
                 members: vec![FederateId::new("host").unwrap()].into_boxed_slice(),
                 edges: Box::default(),
             },
-            federates: vec![OwnedFederateImage {
+            federates: sealed([OwnedFederateImage {
                 id: FederateId::new("host").unwrap(),
                 target: TargetTriple::new("x86_64-unknown-linux-gnu").unwrap(),
                 runtime: RuntimeBackendId::new("native").unwrap(),
                 enclaves: IndexSpan::new(0, 1),
-            }]
-            .into_iter()
-            .collect(),
-            enclaves: vec![empty_enclave()].into_iter().collect(),
+            }]),
+            enclaves: sealed([empty_enclave()]),
             coordination: OwnedCoordinationProjection::Local,
         };
 
@@ -866,13 +938,23 @@ mod tests {
             ..deployment.clone()
         };
         assert!(invalid.validate().is_err());
-        let federates: &TinyMap<FederateIndex, OwnedFederateImage> = deployment.federates();
+        assert_dense_ref(deployment.federates());
+        assert_dense_ref(deployment.enclaves());
+        let federates = deployment.federates();
         assert_eq!(
             federates.keys().collect::<Vec<_>>(),
             vec![FederateIndex::new(0)]
         );
         let enclave = &deployment.enclaves()[EnclaveIndex::new(0)];
-        let reactor = enclave.reactors.get(ReactorIndex::new(0)).unwrap();
+        assert_dense_ref(enclave.reactors());
+        assert_dense_ref(enclave.actions());
+        assert_dense_ref(enclave.ports());
+        assert_dense_ref(enclave.reactions());
+        assert_dense_ref(enclave.modes());
+        assert_dense_ref(enclave.scopes());
+        assert_dense_ref(enclave.routes());
+        assert_dense_ref(enclave.binding_images());
+        let reactor = enclave.reactors().get(ReactorIndex::new(0)).unwrap();
         assert_eq!(reactor.state_binding(), BindingSlotIndex::new(0));
         enclave
             .with_view(|view| {

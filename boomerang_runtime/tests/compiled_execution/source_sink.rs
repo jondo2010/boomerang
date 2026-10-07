@@ -159,12 +159,12 @@ pub(super) static ROUTED_SOURCE_BINDINGS: [RequiredBindingImage; 3] = [
 ];
 pub(super) const ROUTED_SOURCE_IMAGE: EnclaveImage<'static> = EnclaveImage {
     enclave_id: EnclaveId::new("alpha"),
-    reactors: TinyMapView::new(&ROUTED_SOURCE_REACTORS),
-    actions: TinyMapView::new(&ROUTED_SOURCE_ACTIONS),
-    ports: TinyMapView::new(&ROUTED_SOURCE_PORTS),
-    reactions: TinyMapView::new(&ROUTED_SOURCE_REACTIONS),
-    modes: TinyMapView::new(&[]),
-    scopes: TinyMapView::new(&ROUTED_SOURCE_SCOPES),
+    reactors: TinyMapRef::from_slice(&ROUTED_SOURCE_REACTORS),
+    actions: TinyMapRef::from_slice(&ROUTED_SOURCE_ACTIONS),
+    ports: TinyMapRef::from_slice(&ROUTED_SOURCE_PORTS),
+    reactions: TinyMapRef::from_slice(&ROUTED_SOURCE_REACTIONS),
+    modes: TinyMapRef::from_slice(&[]),
+    scopes: TinyMapRef::from_slice(&ROUTED_SOURCE_SCOPES),
     reaction_triggers: &ROUTED_SOURCE_TRIGGERS,
     reaction_use_ports: &[],
     reaction_effect_ports: &ROUTED_SOURCE_EFFECT_PORTS,
@@ -180,8 +180,8 @@ pub(super) const ROUTED_SOURCE_IMAGE: EnclaveImage<'static> = EnclaveImage {
     timer_startup_actions: &ROUTED_SOURCE_TIMER_STARTUPS,
     shutdown_reactions: &[],
     shutdown_actions: &[],
-    routes: TinyMapView::new(&ROUTED_SOURCE_ROUTES),
-    required_bindings: TinyMapView::new(&ROUTED_SOURCE_BINDINGS),
+    routes: TinyMapRef::from_slice(&ROUTED_SOURCE_ROUTES),
+    required_bindings: TinyMapRef::from_slice(&ROUTED_SOURCE_BINDINGS),
     storage_bounds: &StorageBounds::new(1, 1, 8, 0, 0, 0),
 };
 
@@ -219,12 +219,12 @@ pub(super) static ROUTED_SINK_BINDINGS: [RequiredBindingImage; 3] = [
 ];
 pub(super) const ROUTED_SINK_IMAGE: EnclaveImage<'static> = EnclaveImage {
     enclave_id: EnclaveId::new("beta"),
-    reactors: TinyMapView::new(ROUTED_SINK_REACTORS),
-    actions: TinyMapView::new(&[]),
-    ports: TinyMapView::new(&ROUTED_SINK_PORTS),
-    reactions: TinyMapView::new(&ROUTED_SINK_REACTIONS),
-    modes: TinyMapView::new(&[]),
-    scopes: TinyMapView::new(&ROUTED_SINK_SCOPES),
+    reactors: TinyMapRef::from_slice(ROUTED_SINK_REACTORS),
+    actions: TinyMapRef::from_slice(&[]),
+    ports: TinyMapRef::from_slice(&ROUTED_SINK_PORTS),
+    reactions: TinyMapRef::from_slice(&ROUTED_SINK_REACTIONS),
+    modes: TinyMapRef::from_slice(&[]),
+    scopes: TinyMapRef::from_slice(&ROUTED_SINK_SCOPES),
     reaction_triggers: &ROUTED_SINK_TRIGGERS,
     reaction_use_ports: &ROUTED_SINK_USE_PORTS,
     reaction_effect_ports: &[],
@@ -240,8 +240,8 @@ pub(super) const ROUTED_SINK_IMAGE: EnclaveImage<'static> = EnclaveImage {
     timer_startup_actions: &[],
     shutdown_reactions: &[],
     shutdown_actions: &[],
-    routes: TinyMapView::new(&ROUTED_SINK_ROUTES),
-    required_bindings: TinyMapView::new(&ROUTED_SINK_BINDINGS),
+    routes: TinyMapRef::from_slice(&ROUTED_SINK_ROUTES),
+    required_bindings: TinyMapRef::from_slice(&ROUTED_SINK_BINDINGS),
     storage_bounds: &StorageBounds::new(1, 0, 8, 0, 0, 0),
 };
 
@@ -252,8 +252,8 @@ pub(super) static ROUTED_ENCLAVES: [EnclaveImage<'static>; 2] =
 pub(super) static ROUTED_FEDERATE_MEMBERS: [FederateIndex; 1] = [FederateIndex::new(0)];
 pub(super) const ROUTED_DEPLOYMENT: CompiledDeploymentImage<'static> = CompiledDeploymentImage {
     federation: GlobalFederationImage::new(&ROUTED_FEDERATE_MEMBERS, &[]),
-    federates: TinyMapView::new(&ROUTED_FEDERATES),
-    enclaves: TinyMapView::new(&ROUTED_ENCLAVES),
+    federates: TinyMapRef::from_slice(&ROUTED_FEDERATES),
+    enclaves: TinyMapRef::from_slice(&ROUTED_ENCLAVES),
     coordination: CoordinationProjection::Local,
 };
 

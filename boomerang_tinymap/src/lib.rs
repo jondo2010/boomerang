@@ -23,6 +23,8 @@ pub mod secondary_map;
 pub mod sparse_map;
 pub mod tiny_vec;
 
+#[cfg(feature = "alloc")]
+pub use dense_map::{HeapSealedTinyMap, HeapTinyMapBuilder};
 pub use dense_map::{
     SealedTinyMap, TinyMapBuilder, TinyMapMut, TinyMapRef, TinyMapSpanMut, TinyMapSpanRef,
 };
@@ -40,6 +42,8 @@ pub use sparse_map::{
     TinySecondaryMapBuilder, TinySecondaryMapMut, TinySecondaryMapRef, TinySecondaryMapSpanMut,
     TinySecondaryMapSpanRef,
 };
+#[cfg(feature = "alloc")]
+pub use sparse_map::{HeapSealedTinySecondaryMap, HeapTinySecondaryMapBuilder};
 pub use tiny_vec::{BorrowedStorage, InlineStorage, TinyVecBuilder};
 
 /// A key that identifies a value by its dense table index.

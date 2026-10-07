@@ -1,5 +1,5 @@
 //! Immutable dense image records consumed by compiled runtime execution.
-pub use tinymap::{IndexSpan, SliceRange, TinyMapView};
+pub use tinymap::{IndexSpan, SliceRange, TinyMapRef};
 
 tinymap::key_type!(pub ReactorIndex);
 tinymap::key_type!(pub ActionIndex);
@@ -183,9 +183,9 @@ pub struct CompiledDeploymentImage<'a> {
     /// Backend-neutral global federation structure.
     pub federation: GlobalFederationImage<'a>,
     /// Dense Federate ownership records.
-    pub federates: TinyMapView<'a, FederateIndex, FederateImage<'a>>,
+    pub federates: TinyMapRef<'a, FederateIndex, FederateImage<'a>>,
     /// Federate-grouped Enclave scheduler images.
-    pub enclaves: TinyMapView<'a, EnclaveIndex, EnclaveImage<'a>>,
+    pub enclaves: TinyMapRef<'a, EnclaveIndex, EnclaveImage<'a>>,
     /// Selected backend-specific coordination projection.
     pub coordination: CoordinationProjection<'a>,
 }
@@ -890,17 +890,17 @@ pub struct EnclaveImage<'a> {
     /// Stable Enclave identity.
     pub enclave_id: EnclaveId<'a>,
     /// Dense reactor records.
-    pub reactors: TinyMapView<'a, ReactorIndex, ReactorImage>,
+    pub reactors: TinyMapRef<'a, ReactorIndex, ReactorImage>,
     /// Dense action records.
-    pub actions: TinyMapView<'a, ActionIndex, ActionImage>,
+    pub actions: TinyMapRef<'a, ActionIndex, ActionImage>,
     /// Dense port records; each key is also its storage identity.
-    pub ports: TinyMapView<'a, PortIndex, PortImage>,
+    pub ports: TinyMapRef<'a, PortIndex, PortImage>,
     /// Dense reaction records.
-    pub reactions: TinyMapView<'a, ReactionIndex, ReactionImage>,
+    pub reactions: TinyMapRef<'a, ReactionIndex, ReactionImage>,
     /// Dense mode records.
-    pub modes: TinyMapView<'a, ModeIndex, ModeImage>,
+    pub modes: TinyMapRef<'a, ModeIndex, ModeImage>,
     /// Dense execution-scope records.
-    pub scopes: TinyMapView<'a, ScopeIndex, ScopeImage>,
+    pub scopes: TinyMapRef<'a, ScopeIndex, ScopeImage>,
     /// Flattened action and port trigger entries.
     pub reaction_triggers: &'a [LevelReactionImage],
     /// Flattened ordered reaction use ports.
@@ -932,9 +932,9 @@ pub struct EnclaveImage<'a> {
     /// Unique actions populated before global shutdown reactions execute.
     pub shutdown_actions: &'a [ActionIndex],
     /// Dense scheduler-boundary routes.
-    pub routes: TinyMapView<'a, RouteIndex, RouteImage<'a>>,
+    pub routes: TinyMapRef<'a, RouteIndex, RouteImage<'a>>,
     /// Dense required implementation bindings.
-    pub required_bindings: TinyMapView<'a, BindingSlotIndex, RequiredBindingImage<'a>>,
+    pub required_bindings: TinyMapRef<'a, BindingSlotIndex, RequiredBindingImage<'a>>,
     /// Fixed mutable-storage and workspace bounds.
     pub storage_bounds: &'a StorageBounds,
 }

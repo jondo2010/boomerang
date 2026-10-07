@@ -78,24 +78,24 @@ static PERIODIC_STARTUP: [TimerStartupImage; 1] =
 static OVERFLOW_PERIOD_STARTUP: [TimerStartupImage; 1] =
     [TimerStartupImage::new(ActionIndex::new(0), i64::MAX as u64)];
 static PERIODIC_IMAGE: EnclaveImage<'static> = EnclaveImage {
-    actions: TinyMapView::new(&PERIODIC_ACTIONS),
+    actions: TinyMapRef::from_slice(&PERIODIC_ACTIONS),
     timer_startup_actions: &PERIODIC_STARTUP,
     ..IMAGE
 };
 static ZERO_PERIOD_IMAGE: EnclaveImage<'static> = EnclaveImage {
-    actions: TinyMapView::new(&ZERO_PERIOD_ACTIONS),
+    actions: TinyMapRef::from_slice(&ZERO_PERIOD_ACTIONS),
     timer_startup_actions: &PERIODIC_STARTUP,
     ..IMAGE
 };
 static OVERFLOW_PERIOD_IMAGE: EnclaveImage<'static> = EnclaveImage {
-    actions: TinyMapView::new(&OVERFLOW_PERIOD_ACTIONS),
+    actions: TinyMapRef::from_slice(&OVERFLOW_PERIOD_ACTIONS),
     timer_startup_actions: &OVERFLOW_PERIOD_STARTUP,
     ..IMAGE
 };
 static LATER_OVERFLOW_PERIOD_IMAGE: EnclaveImage<'static> = EnclaveImage {
-    actions: TinyMapView::new(&LATER_OVERFLOW_PERIOD_ACTIONS),
-    reactions: TinyMapView::new(&COTIMED_REACTIONS),
-    scopes: TinyMapView::new(&COTIMED_SCOPE),
+    actions: TinyMapRef::from_slice(&LATER_OVERFLOW_PERIOD_ACTIONS),
+    reactions: TinyMapRef::from_slice(&COTIMED_REACTIONS),
+    scopes: TinyMapRef::from_slice(&COTIMED_SCOPE),
     reaction_triggers: &COTIMED_TRIGGERS,
     reaction_actions: &[ActionIndex::new(0), ActionIndex::new(1)],
     scope_logical_actions: &COTIMED_LOGICAL_ACTIONS,
@@ -153,9 +153,9 @@ static COTIMED_STARTUPS: [TimerStartupImage; 2] = [
     TimerStartupImage::new(ActionIndex::new(1), 1_000_000),
 ];
 static COTIMED_IMAGE: EnclaveImage<'static> = EnclaveImage {
-    actions: TinyMapView::new(&COTIMED_ACTIONS),
-    reactions: TinyMapView::new(&COTIMED_REACTIONS),
-    scopes: TinyMapView::new(&COTIMED_SCOPE),
+    actions: TinyMapRef::from_slice(&COTIMED_ACTIONS),
+    reactions: TinyMapRef::from_slice(&COTIMED_REACTIONS),
+    scopes: TinyMapRef::from_slice(&COTIMED_SCOPE),
     reaction_triggers: &COTIMED_TRIGGERS,
     reaction_actions: &[ActionIndex::new(0), ActionIndex::new(1)],
     scope_logical_actions: &COTIMED_LOGICAL_ACTIONS,

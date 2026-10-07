@@ -81,6 +81,10 @@ impl<T, B: Storage<T>> TinyVecBuilder<T, B> {
         self.initialized == 0
     }
 
+    pub(crate) fn as_slice(&self) -> &[T] {
+        self.backing.values(self.initialized)
+    }
+
     pub(crate) fn as_mut_slice(&mut self) -> &mut [T] {
         self.backing.values_mut(self.initialized)
     }
@@ -225,7 +229,22 @@ impl<T, B: Storage<T>> Drop for SealedTinyVec<T, B> {
     }
 }
 
+#[cfg(feature = "alloc")]
+impl<T> SealedTinyVec<T, HeapStorage<T>> {
+    pub(crate) fn into_vec(self) -> alloc::vec::Vec<T> {
+        let sealed = ManuallyDrop::new(self);
+        // SAFETY: ManuallyDrop suppresses SealedTinyVec::drop. The backing is
+        // read exactly once, taking ownership of every initialized value; its
+        // Vec length equals the initialized prefix maintained by the builder.
+        unsafe { core::ptr::read(&sealed.backing).into_vec() }
+    }
+}
+
 impl<'a, T> TinyVecRef<'a, T> {
+    pub(crate) const fn from_slice(values: &'a [T]) -> Self {
+        Self { values }
+    }
+
     /// Returns the exact initialized backing slice.
     pub const fn as_slice(&self) -> &'a [T] {
         self.values

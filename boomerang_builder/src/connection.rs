@@ -380,7 +380,7 @@ fn build_enclave_connection_source<T: runtime::ReactorData + Clone>(
                 .action_aliases
                 .get(target_action_key)
                 .expect("Action key");
-            let enclave = &runtime_assembly.enclaves[*enclave_key];
+            let enclave = &runtime_assembly.enclaves()[*enclave_key];
 
             //TODO: Get rid of this and the target_partition argument once this works
             let enclave_key2 = runtime_assembly.aliases.enclave_aliases[target_partition];

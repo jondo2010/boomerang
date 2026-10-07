@@ -161,7 +161,7 @@ fn owned_federate_abort_stops_peer_with_recurring_internal_work_child() {
     let recurring_startup = [TimerStartupImage::new(ActionIndex::new(0), 0)];
     let recurring = EnclaveImage {
         enclave_id: EnclaveId::new("compiled/abortpeer"),
-        actions: TinyMapView::new(&PERIODIC_ACTIONS),
+        actions: TinyMapRef::from_slice(&PERIODIC_ACTIONS),
         timer_startup_actions: &recurring_startup,
         ..IMAGE
     };
@@ -175,8 +175,8 @@ fn owned_federate_abort_stops_peer_with_recurring_internal_work_child() {
     for keep_alive in [false, true] {
         let deployment = CompiledDeploymentImage {
             federation: GlobalFederationImage::new(&members, &[]),
-            federates: TinyMapView::new(&federates),
-            enclaves: TinyMapView::new(&enclaves),
+            federates: TinyMapRef::from_slice(&federates),
+            enclaves: TinyMapRef::from_slice(&enclaves),
             coordination: CoordinationProjection::Local,
         };
         RECURRING_ABORT_PEER_READY.store(false, Ordering::SeqCst);
@@ -218,18 +218,18 @@ fn owned_federate_retains_route_failure_before_competing_scheduler_panic() {
         0,
     )];
     let source = EnclaveImage {
-        routes: TinyMapView::new(&outbound),
+        routes: TinyMapRef::from_slice(&outbound),
         ..ROUTED_SOURCE_IMAGE
     };
     let destination = EnclaveImage {
         enclave_id: EnclaveId::new("delta"),
-        routes: TinyMapView::new(&inbound),
+        routes: TinyMapRef::from_slice(&inbound),
         storage_bounds: &StorageBounds::new(1, 1, 0, 0, 0, 0),
         ..ROUTED_SOURCE_IMAGE
     };
     let enclaves = [source, destination];
     let deployment = CompiledDeploymentImage {
-        enclaves: TinyMapView::new(&enclaves),
+        enclaves: TinyMapRef::from_slice(&enclaves),
         ..ROUTED_DEPLOYMENT
     };
     let started = Instant::now();

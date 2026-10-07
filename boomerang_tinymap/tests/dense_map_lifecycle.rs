@@ -1,10 +1,83 @@
 use boomerang_tinymap::{
-    key_type, BorrowedStorage, IndexSpan, InlineStorage, Key, TinyMapBuilder, TinyMapError,
-    TinyMapMut, TinyMapRef,
+    key_type, BorrowedStorage, HeapSealedTinyMap, HeapTinyMapBuilder, IndexSpan, InlineStorage,
+    Key, TinyMapBuilder, TinyMapError, TinyMapMut, TinyMapRef,
 };
 use core::mem::MaybeUninit;
+use std::{cell::Cell, rc::Rc};
 
 key_type!(DenseKey);
+
+const VALUES: [u16; 2] = [10, 20];
+const VIEW: TinyMapRef<'static, DenseKey, u16> = TinyMapRef::from_slice(&VALUES);
+
+#[test]
+fn heap_builder_updates_owner_issued_keys_and_transfers_sealed_values() {
+    assert_eq!(VIEW.values().copied().collect::<Vec<_>>(), [10, 20]);
+
+    let mut builder = HeapTinyMapBuilder::<DenseKey, u16>::heap();
+    let first = builder.try_insert(10).unwrap();
+    let second = builder.try_insert(20).unwrap();
+    assert_eq!(builder.get(first), Some(&10));
+    *builder.get_mut(second).unwrap() = 21;
+
+    let sealed: HeapSealedTinyMap<DenseKey, u16> = builder.seal();
+    assert_eq!(
+        sealed
+            .as_ref()
+            .iter()
+            .map(|(_, value)| *value)
+            .collect::<Vec<_>>(),
+        [10, 21]
+    );
+    assert_eq!(sealed.into_values().collect::<Vec<_>>(), [10, 21]);
+}
+
+#[test]
+fn sealed_heap_maps_forward_value_traits() {
+    let mut builder = HeapTinyMapBuilder::<DenseKey, u16>::heap();
+    builder.try_insert(10).unwrap();
+    builder.try_insert(20).unwrap();
+    let original = builder.seal();
+    let mut copy = original.clone();
+
+    assert_eq!(original, copy);
+    assert_eq!(format!("{original:?}"), format!("{copy:?}"));
+    *copy.as_mut().get_mut(DenseKey::new(1)).unwrap() = 21;
+    assert_ne!(original, copy);
+    assert_eq!(
+        original.as_ref().values().copied().collect::<Vec<_>>(),
+        [10, 20]
+    );
+}
+
+#[test]
+fn consuming_heap_sealed_map_drops_each_value_once() {
+    struct DropCounter(Rc<Cell<usize>>);
+
+    impl Drop for DropCounter {
+        fn drop(&mut self) {
+            self.0.set(self.0.get() + 1);
+        }
+    }
+
+    let first_drops = Rc::new(Cell::new(0));
+    let second_drops = Rc::new(Cell::new(0));
+    let mut builder = HeapTinyMapBuilder::<DenseKey, DropCounter>::heap();
+    let _first = builder
+        .try_insert(DropCounter(first_drops.clone()))
+        .unwrap();
+    let _second = builder
+        .try_insert(DropCounter(second_drops.clone()))
+        .unwrap();
+
+    let mut values = builder.seal().into_values();
+    let first = values.next().unwrap();
+    assert_eq!((first_drops.get(), second_drops.get()), (0, 0));
+    drop(values);
+    assert_eq!((first_drops.get(), second_drops.get()), (0, 1));
+    drop(first);
+    assert_eq!((first_drops.get(), second_drops.get()), (1, 1));
+}
 
 #[test]
 fn inline_dense_map_generates_keys_seals_moves_and_preserves_global_spans() {
@@ -96,6 +169,21 @@ impl Key for TwoKey {
     fn index(&self) -> usize {
         self.0
     }
+}
+
+#[test]
+fn borrowed_dense_slice_accepts_exact_key_domain_capacity_in_const_context() {
+    const VALUES: [u8; TwoKey::MAX_LEN] = [10, 20];
+    const VIEW: TinyMapRef<'static, TwoKey, u8> = TinyMapRef::from_slice(&VALUES);
+
+    assert_eq!(VIEW.as_slice(), &VALUES);
+}
+
+#[test]
+#[should_panic(expected = "dense view exceeds key domain")]
+fn borrowed_dense_slice_rejects_values_beyond_key_domain() {
+    let values = [10, 20, 30];
+    let _ = TinyMapRef::<TwoKey, _>::from_slice(&values);
 }
 
 #[test]

@@ -297,7 +297,7 @@ mod tests {
         collections::VecDeque,
         sync::{Arc, Mutex},
     };
-    use tinymap::TinyMapView;
+    use tinymap::TinyMapRef;
 
     use super::*;
     use crate::{
@@ -493,12 +493,12 @@ mod tests {
     /// Enclave image assembled from the compiled scheduler fixture tables.
     static IMAGE: EnclaveImage<'static> = EnclaveImage {
         enclave_id: crate::image::EnclaveId::new("enclave"),
-        reactors: TinyMapView::new(&REACTORS),
-        actions: TinyMapView::new(&ACTIONS),
-        ports: TinyMapView::new(&[]),
-        reactions: TinyMapView::new(&REACTIONS),
-        modes: TinyMapView::new(&[]),
-        scopes: TinyMapView::new(&SCOPES),
+        reactors: TinyMapRef::from_slice(&REACTORS),
+        actions: TinyMapRef::from_slice(&ACTIONS),
+        ports: TinyMapRef::from_slice(&[]),
+        reactions: TinyMapRef::from_slice(&REACTIONS),
+        modes: TinyMapRef::from_slice(&[]),
+        scopes: TinyMapRef::from_slice(&SCOPES),
         reaction_triggers: &TRIGGERS,
         reaction_use_ports: &[],
         reaction_effect_ports: &[],
@@ -514,8 +514,8 @@ mod tests {
         timer_startup_actions: &STARTUPS,
         shutdown_reactions: &[],
         shutdown_actions: &[],
-        routes: TinyMapView::new(&[]),
-        required_bindings: TinyMapView::new(&REQUIRED_BINDINGS),
+        routes: TinyMapRef::from_slice(&[]),
+        required_bindings: TinyMapRef::from_slice(&REQUIRED_BINDINGS),
         storage_bounds: &StorageBounds::new(1, 1, 1, 0, 0, 0),
     };
     /// Shutdown-reaction table for terminal local-barrier coverage.

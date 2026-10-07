@@ -3,9 +3,9 @@
 //! # Representation contract
 //!
 //! Runtime entities with independent identity live in complete dense tables addressed by distinct
-//! typed keys. The owning host representation uses `TinyMap<K, V>` to allocate those keys; this
-//! module exposes the resulting immutable tables through `TinyMapView<'a, K, V>`. One key type
-//! must never be reconstructed from another key type's ordinal.
+//! typed keys. Host builders issue those keys while constructing table shape, and complete host
+//! tables seal before publication. This module exposes immutable tables to runtime and schema
+//! consumers through `TinyMapRef<'a, K, V>`. Keys are never reconstructed across key domains.
 //!
 //! Contiguous ownership within a dense table is represented by `IndexSpan<K>`. Anonymous ordered
 //! relationships are instead stored in typed backing slices and addressed by `SliceRange<T>`.

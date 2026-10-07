@@ -32,6 +32,7 @@ fn federate_enclaves(
         .enclaves()
         .get_span(deployment.federates()[federate].enclaves())
         .expect("lowered Federate span belongs to the deployment Enclave table")
+        .values()
 }
 
 fn descriptor(contract: &str, bounds: DescriptorBounds) -> ComponentDescriptor {
@@ -898,7 +899,7 @@ fn federate_slice_from_lowered_deployment_preserves_selected_root_rows() {
     let slice = compiled.federate_slice(federate).unwrap();
     assert_eq!(slice.federate(), federate);
     assert_eq!(slice.enclave_range(), expected_range);
-    assert!(std::ptr::eq(slice.enclaves(), expected_enclaves));
+    assert!(std::ptr::eq(slice.enclaves(), expected_enclaves.values()));
     assert_eq!(slice.enclaves()[0].id().to_string(), "vehicle/controller");
     assert_eq!(
         slice
@@ -1580,12 +1581,12 @@ fn dense_cardinality_overflow_is_reported_before_conversion() {
     }
 
     let enclave = StableEnclaveId::new("vehicle/controller").unwrap();
-    let result =
-        tinymap::TinyMap::<SmallKey, _>::try_from_iter(["first", "second"]).map_err(|_| {
-            CompileError::ResourceOverflow {
-                enclave: enclave.clone(),
-                resource: "reactions",
-            }
+    let mut rows = tinymap::HeapTinyMapBuilder::<SmallKey, _>::heap();
+    let result = rows
+        .try_extend_exact(["first", "second"].into_iter())
+        .map_err(|_| CompileError::ResourceOverflow {
+            enclave: enclave.clone(),
+            resource: "reactions",
         });
     assert!(matches!(
         result,

@@ -85,24 +85,24 @@ static ENCLAVES: [EnclaveImage; 3] = [
     ROUTED_SINK_IMAGE,
     EnclaveImage {
         enclave_id: EnclaveId::new("idle"),
-        routes: TinyMapView::new(&[]),
+        routes: TinyMapRef::from_slice(&[]),
         ..ROUTED_SINK_IMAGE
     },
 ];
 /// Both executor slices and the RTI borrow this one validated deployment.
 const DEPLOYMENT: CompiledDeploymentImage = CompiledDeploymentImage {
     federation: GlobalFederationImage::new(&MEMBERS, &EDGES),
-    federates: TinyMapView::new(&FEDERATES),
-    enclaves: TinyMapView::new(&ENCLAVES),
+    federates: TinyMapRef::from_slice(&FEDERATES),
+    enclaves: TinyMapRef::from_slice(&ENCLAVES),
     coordination: CoordinationProjection::CentralRti(RtiImage::new(
-        TinyMapView::new(&RTI_MEMBERS),
+        TinyMapRef::from_slice(&RTI_MEMBERS),
         &DEPENDENCIES,
         &[FederateIndex::new(1)],
-        TinyMapView::new(&RTI_ROUTES),
-        TinyMapView::new(&["flow"]),
-        TinyMapView::new(&[]),
-        TinyMapView::new(&["test-ordered"]),
-        TinyMapView::new(&["u32-le"]),
+        TinyMapRef::from_slice(&RTI_ROUTES),
+        TinyMapRef::from_slice(&["flow"]),
+        TinyMapRef::from_slice(&[]),
+        TinyMapRef::from_slice(&["test-ordered"]),
+        TinyMapRef::from_slice(&["u32-le"]),
     )),
 };
 
@@ -111,7 +111,7 @@ fn rti_view(view: &CompiledDeploymentView<'static>) -> RtiImageView<'static> {
     let CoordinationProjection::CentralRti(image) = view.coordination() else {
         panic!("fixture must select central-rti")
     };
-    RtiImageView::new(image.clone(), IdentityTable::new(&MEMBER_NAMES)).unwrap()
+    RtiImageView::new(image.clone(), IdentityTable::from_slice(&MEMBER_NAMES)).unwrap()
 }
 
 /// Runs the real scheduler/backend/RTI path with transport confined to test support.
@@ -366,8 +366,8 @@ fn bounded_capture_prepares_hosted_transport_worker() {
         Contract::new(
             IDENTITY,
             [3; 32],
-            TinyMapView::new(&MEMBER_NAMES),
-            TinyMapView::new(&RTI_ROUTES),
+            TinyMapRef::from_slice(&MEMBER_NAMES),
+            TinyMapRef::from_slice(&RTI_ROUTES),
             |route: &RtiRouteImage<'_>| (route.source(), route.target()),
         )
     };

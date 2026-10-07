@@ -11,7 +11,7 @@
 
 use anyhow::Context;
 use boomerang::{
-    builder::{Assembly, Reactor, RuntimeAssembly},
+    builder::{Assembly, Reactor},
     runtime,
 };
 use clap::Parser;
@@ -101,11 +101,11 @@ pub fn build_and_test_reactor<S: runtime::ReactorData, R: Reactor<S>>(
         tracing::info!("Wrote plantuml graph to {}", path.display());
     }
 
-    let RuntimeAssembly { enclaves, .. } = assembly
+    let runtime_assembly = assembly
         .into_runtime_assembly(&config)
         .context("Error lowering assembly!")?;
 
-    let envs_out = runtime::execute_enclaves(enclaves.into_iter(), config)?;
+    let envs_out = runtime::execute_enclaves(runtime_assembly.into_enclaves(), config)?;
     let envs_out = envs_out.into_iter().map(|(_, env)| env).collect();
     Ok((reactor, envs_out))
 }
@@ -169,31 +169,32 @@ where
         ..Default::default()
     };
 
-    let RuntimeAssembly {
-        enclaves,
-        #[cfg(feature = "replay")]
-        replayers,
-        ..
-    } = assembly
+    let runtime_assembly = assembly
         .into_runtime_assembly(&config)
         .context("Error lowering assembly!")?;
 
+    #[cfg(feature = "replay")]
+    let mut runtime_assembly = runtime_assembly;
+
     if args.print_debug_info {
-        println!("{enclaves:#?}");
+        println!("{:#?}", runtime_assembly.enclaves());
     }
 
     #[cfg(feature = "replay")]
     let replay_handle = match args.replay_filename {
         Some(filename) => {
             tracing::info!("Reading replay from {}", filename.display());
+            let replayers = std::mem::take(&mut runtime_assembly.replayers);
             Some(runtime::replay::create_replayer(
-                filename, replayers, &enclaves,
+                filename,
+                replayers,
+                runtime_assembly.enclaves(),
             )?)
         }
         None => None,
     };
 
-    let execution_result = runtime::execute_enclaves(enclaves.into_iter(), config);
+    let execution_result = runtime::execute_enclaves(runtime_assembly.into_enclaves(), config);
 
     #[cfg(feature = "replay")]
     if let Some(handle) = replay_handle {

@@ -151,7 +151,7 @@ impl Debug for RuntimeAssembly {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let enclaves = fmt::from_fn(|f| {
             f.debug_map()
-                .entries(self.enclaves.iter().map(|(k, v)| (format!("{k:?}"), v)))
+                .entries(self.enclaves().iter().map(|(k, v)| (format!("{k:?}"), v)))
                 .finish()
         });
 

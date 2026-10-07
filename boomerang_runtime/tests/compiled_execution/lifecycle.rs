@@ -339,7 +339,7 @@ fn compiled_reference_returns_typed_image_validation_error() {
 #[test]
 fn compiled_reference_rejects_routes_until_route_execution_is_supported() {
     let route_free_image = EnclaveImage {
-        routes: TinyMapView::new(&ROUTES),
+        routes: TinyMapRef::from_slice(&ROUTES),
         ..ROUTED_IMAGE
     };
     execute_owned(
@@ -358,7 +358,7 @@ fn compiled_reference_rejects_routes_until_route_execution_is_supported() {
             0,
         )];
         let routed = EnclaveImage {
-            routes: TinyMapView::new(&routes),
+            routes: TinyMapRef::from_slice(&routes),
             ..ROUTED_IMAGE
         };
         match execute_owned(

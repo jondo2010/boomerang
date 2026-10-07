@@ -20,7 +20,7 @@ use std::{
     time::Instant,
 };
 
-use tinymap::{TinyMap, TinyMapView, TinySecondaryMap};
+use tinymap::{TinyMap, TinyMapRef, TinySecondaryMap};
 
 use crate::{
     image::{
@@ -729,7 +729,7 @@ fn federate_shutdown_unblocks_a_full_mailbox_and_blocked_sender() {
 
 /// Resolves every outbound route to its unique inbound half after root validation.
 fn local_route_endpoints<'image>(
-    enclaves: TinyMapView<'image, EnclaveIndex, EnclaveImage<'image>>,
+    enclaves: TinyMapRef<'image, EnclaveIndex, EnclaveImage<'image>>,
     selected_federate: FederateIndex,
     selected: &crate::image::FederateImage<'_>,
 ) -> Result<Vec<ResolvedLocalRoute<'image>>, ExecuteOwnedFederateError> {
@@ -1451,7 +1451,7 @@ mod scoped_spawn_tests {
         time::Duration,
     };
 
-    use tinymap::TinyMapView;
+    use tinymap::TinyMapRef;
 
     use super::*;
     use crate::{
@@ -1548,12 +1548,12 @@ mod scoped_spawn_tests {
     const fn state_only_image(enclave_id: &'static str) -> EnclaveImage<'static> {
         EnclaveImage {
             enclave_id: EnclaveId::new(enclave_id),
-            reactors: TinyMapView::new(&REACTORS),
-            actions: TinyMapView::new(&[]),
-            ports: TinyMapView::new(&[]),
-            reactions: TinyMapView::new(&[]),
-            modes: TinyMapView::new(&[]),
-            scopes: TinyMapView::new(&SCOPES),
+            reactors: TinyMapRef::from_slice(&REACTORS),
+            actions: TinyMapRef::from_slice(&[]),
+            ports: TinyMapRef::from_slice(&[]),
+            reactions: TinyMapRef::from_slice(&[]),
+            modes: TinyMapRef::from_slice(&[]),
+            scopes: TinyMapRef::from_slice(&SCOPES),
             reaction_triggers: &[],
             reaction_use_ports: &[],
             reaction_effect_ports: &[],
@@ -1569,8 +1569,8 @@ mod scoped_spawn_tests {
             timer_startup_actions: &[],
             shutdown_reactions: &[],
             shutdown_actions: &[],
-            routes: TinyMapView::new(&[]),
-            required_bindings: TinyMapView::new(&REQUIRED_BINDINGS),
+            routes: TinyMapRef::from_slice(&[]),
+            required_bindings: TinyMapRef::from_slice(&REQUIRED_BINDINGS),
             storage_bounds: &const { StorageBounds::new(1, 0, 1, 0, 0, 0) },
         }
     }
@@ -1582,11 +1582,11 @@ mod scoped_spawn_tests {
     ];
     /// Compiled scheduler fixture with one finite nonterminal candidate.
     static BARRIER_IMAGE: EnclaveImage<'static> = EnclaveImage {
-        actions: TinyMapView::new(&BARRIER_ACTIONS),
-        reactions: TinyMapView::new(&BARRIER_REACTIONS),
+        actions: TinyMapRef::from_slice(&BARRIER_ACTIONS),
+        reactions: TinyMapRef::from_slice(&BARRIER_REACTIONS),
         reaction_triggers: &BARRIER_TRIGGERS,
         timer_startup_actions: &BARRIER_STARTUPS,
-        required_bindings: TinyMapView::new(&BARRIER_REQUIRED_BINDINGS),
+        required_bindings: TinyMapRef::from_slice(&BARRIER_REQUIRED_BINDINGS),
         storage_bounds: &StorageBounds::new(1, 1, 1, 0, 0, 0),
         ..state_only_image("alpha")
     };
@@ -1599,8 +1599,8 @@ mod scoped_spawn_tests {
     static MEMBERS: [FederateIndex; 1] = [FederateIndex::new(0)];
     const DEPLOYMENT: CompiledDeploymentImage<'static> = CompiledDeploymentImage {
         federation: GlobalFederationImage::new(&MEMBERS, &[]),
-        federates: TinyMapView::new(&FEDERATES),
-        enclaves: TinyMapView::new(&ENCLAVES),
+        federates: TinyMapRef::from_slice(&FEDERATES),
+        enclaves: TinyMapRef::from_slice(&ENCLAVES),
         coordination: CoordinationProjection::Local,
     };
 
@@ -1633,17 +1633,17 @@ mod scoped_spawn_tests {
     /// Complete deployment fixture used to prove global Enclave indices are never rebased.
     static OFFSET_DEPLOYMENT: CompiledDeploymentImage<'static> = CompiledDeploymentImage {
         federation: GlobalFederationImage::new(&OFFSET_MEMBERS, &[]),
-        federates: TinyMapView::new(&OFFSET_FEDERATES),
-        enclaves: TinyMapView::new(&ENCLAVES),
+        federates: TinyMapRef::from_slice(&OFFSET_FEDERATES),
+        enclaves: TinyMapRef::from_slice(&ENCLAVES),
         coordination: CoordinationProjection::CentralRti(RtiImage::new(
-            TinyMapView::new(&OFFSET_RTI_MEMBERS),
+            TinyMapRef::from_slice(&OFFSET_RTI_MEMBERS),
             &[],
             &[],
-            TinyMapView::new(&[]),
-            TinyMapView::new(&[]),
-            TinyMapView::new(&[]),
-            TinyMapView::new(&[]),
-            TinyMapView::new(&[]),
+            TinyMapRef::from_slice(&[]),
+            TinyMapRef::from_slice(&[]),
+            TinyMapRef::from_slice(&[]),
+            TinyMapRef::from_slice(&[]),
+            TinyMapRef::from_slice(&[]),
         )),
     };
 

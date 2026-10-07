@@ -10,6 +10,8 @@
 //! only `&mut V`, never `&mut Option<V>`, so they cannot change sparse presence. Checked
 //! [`IndexSpan`] views retain global parent keys and preserve absent slots. The backing type is an
 //! owner/build concern and does not appear in borrowed runtime interfaces.
+//! The alloc-gated [`HeapTinySecondaryMapBuilder`] and [`HeapSealedTinySecondaryMap`] aliases
+//! name the heap-backed forms; keys still come from the owning dense builder.
 
 use core::marker::PhantomData;
 
@@ -20,6 +22,14 @@ use crate::{
 
 #[cfg(feature = "alloc")]
 use crate::tiny_vec::HeapStorage;
+
+/// A heap-backed sparse builder over an existing dense key domain.
+#[cfg(feature = "alloc")]
+pub type HeapTinySecondaryMapBuilder<K, V> = TinySecondaryMapBuilder<K, V, HeapStorage<Option<V>>>;
+
+/// A heap-backed fixed-shape sparse secondary map.
+#[cfg(feature = "alloc")]
+pub type HeapSealedTinySecondaryMap<K, V> = SealedTinySecondaryMap<K, V, HeapStorage<Option<V>>>;
 
 /// Inline slot backing for a sparse secondary-map builder.
 pub type InlineSecondaryStorage<V, const N: usize> = InlineStorage<Option<V>, N>;

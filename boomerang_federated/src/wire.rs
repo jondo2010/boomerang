@@ -21,7 +21,7 @@
 //! enforces upstream/downstream message direction before dispatch.
 use crate::WireTag;
 use serde::{Deserialize, Serialize};
-use tinymap::{Key, TinyMapView};
+use tinymap::{Key, TinyMapRef};
 
 /// Exact supported coordination protocol revision.
 pub const PROTOCOL_VERSION: u16 = 1;
@@ -438,9 +438,9 @@ pub struct Contract<'a, M: Key, R: Key, V> {
     /// Digest of these exact canonical dense domains.
     mapping: [u8; 32],
     /// Stable roster identities in the validated member domain.
-    members: TinyMapView<'a, M, &'a str>,
+    members: TinyMapRef<'a, M, &'a str>,
     /// Borrowed records in the validated route domain.
-    routes: TinyMapView<'a, R, V>,
+    routes: TinyMapRef<'a, R, V>,
     /// Projects each route's source and destination without changing key domains.
     endpoints: fn(&V) -> (M, M),
 }
@@ -465,8 +465,8 @@ impl<'a, M: Key, R: Key, V> Contract<'a, M, R, V> {
     pub const fn new(
         coordination: CoordinationFingerprint,
         mapping: [u8; 32],
-        members: TinyMapView<'a, M, &'a str>,
-        routes: TinyMapView<'a, R, V>,
+        members: TinyMapRef<'a, M, &'a str>,
+        routes: TinyMapRef<'a, R, V>,
         endpoints: fn(&V) -> (M, M),
     ) -> Self {
         Self {

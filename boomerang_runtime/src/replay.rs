@@ -196,7 +196,7 @@ pub type ReplayersMap =
 pub fn create_replayer<P>(
     path: P,
     replayers: ReplayersMap,
-    enclaves: &tinymap::TinyMap<EnclaveKey, Enclave>,
+    enclaves: tinymap::TinyMapRef<'_, EnclaveKey, Enclave>,
 ) -> Result<ReplayHandle, ReplayError>
 where
     P: AsRef<Path>,

@@ -53,11 +53,10 @@ fn bench(c: &mut Criterion) {
                         .with_fast_forward(false)
                         .with_keep_alive(true)
                         .with_queue_size(65_536);
-                    let RuntimeAssembly {
-                        enclaves, aliases, ..
-                    } = assembly.into_runtime_assembly(&config).unwrap();
-                    let (enclave_key, enclave) = enclaves.into_iter().next().unwrap();
-                    let (action_enclave_key, action_key) = aliases.action_aliases[action_key];
+                    let runtime_assembly = assembly.into_runtime_assembly(&config).unwrap();
+                    let (action_enclave_key, action_key) =
+                        runtime_assembly.aliases.action_aliases[action_key];
+                    let (enclave_key, enclave) = runtime_assembly.into_enclaves().next().unwrap();
                     assert_eq!(
                         action_enclave_key, enclave_key,
                         "physical action enclave mismatch"

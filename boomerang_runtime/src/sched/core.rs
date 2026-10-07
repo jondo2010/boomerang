@@ -182,6 +182,8 @@ where
     pub(super) key: EnclaveKey,
     #[cfg(feature = "external-clock")]
     pub(super) physical_clock: Option<crate::physical_clock::ClockContext>,
+    #[cfg(feature = "external-clock")]
+    pub(super) physical_inputs: Option<(crate::physical_input::InputAdmission, usize)>,
     /// Existing live scheduler configuration.
     pub(super) config: &'a Config,
     /// Optional snapshot-only scheduler observation state.
@@ -319,6 +321,15 @@ where
         }
         let origin = event.kind_str();
         match event {
+            #[cfg(feature = "external-clock")]
+            AsyncEvent::PhysicalBatch(batch) => {
+                for (tag, target, value) in batch.values {
+                    self.admit_value(tag, target, value, origin)?;
+                }
+                if let Some((inputs, slot)) = &self.physical_inputs {
+                    inputs.received(*slot);
+                }
+            }
             AsyncEvent::FederateResume => {}
             AsyncEvent::TagRelease { enclave, tag } => {
                 self.upstream_enclaves
@@ -639,12 +650,7 @@ where
     /// Drains pending scheduler events without blocking.
     fn pump_pending_async_events(&mut self) -> Result<(), SchedulerError<E::Error>> {
         while let Ok(Some(async_event)) = self.event_rx.try_recv() {
-            if matches!(
-                &async_event,
-                AsyncEvent::Logical { .. }
-                    | AsyncEvent::Physical { .. }
-                    | AsyncEvent::Shutdown { .. }
-            ) {
+            if async_event.revises_candidate() {
                 if let Some(coordination) = self.federate_coordination.as_deref_mut() {
                     coordination.active();
                 }
@@ -663,8 +669,15 @@ where
         logical_horizon: Option<Tag>,
     ) -> Result<Option<bool>, SchedulerError<E::Error>> {
         let observation = self.observation;
+        #[cfg(feature = "external-clock")]
+        let input_bound = self.physical_inputs.is_some();
+        #[cfg(not(feature = "external-clock"))]
+        let input_bound = false;
         if let Some(coordination) = self.federate_coordination.as_deref_mut() {
-            if logical_horizon == Some(next_tag) && !self.events.has_nonterminal_work() {
+            if !input_bound
+                && logical_horizon == Some(next_tag)
+                && !self.events.has_nonterminal_work()
+            {
                 match observe_coordination_wait(observation, || coordination.wait())
                     .map_err(SchedulerError::FederateCoordination)
                 {
@@ -770,12 +783,7 @@ where
                     }
                 };
                 if let Some(async_event) = async_event {
-                    if matches!(
-                        &async_event,
-                        AsyncEvent::Logical { .. }
-                            | AsyncEvent::Physical { .. }
-                            | AsyncEvent::Shutdown { .. }
-                    ) {
+                    if async_event.revises_candidate() {
                         if let Some(coordination) = self.federate_coordination.as_deref_mut() {
                             coordination.active();
                         }
@@ -810,12 +818,7 @@ where
             match received {
                 WallClockReceive::DeadlineReached => {}
                 WallClockReceive::Interrupted(event) => {
-                    if matches!(
-                        &event,
-                        AsyncEvent::Logical { .. }
-                            | AsyncEvent::Physical { .. }
-                            | AsyncEvent::Shutdown { .. }
-                    ) {
+                    if event.revises_candidate() {
                         if let Some(coordination) = self.federate_coordination.as_deref_mut() {
                             coordination.active();
                         }
@@ -1008,7 +1011,19 @@ where
             if self.abort_if_physical_clock_failed() {
                 return Ok(false);
             }
+            #[cfg(feature = "external-clock")]
+            if self.federate_shutdown_tag != Some(next_tag) {
+                if let Some((inputs, slot)) = &self.physical_inputs {
+                    if !inputs.reserve(*slot, next_tag) {
+                        return Ok(true);
+                    }
+                }
+            }
             let result = self.process_next_event(logical_horizon);
+            #[cfg(feature = "external-clock")]
+            if let Some((inputs, slot)) = &self.physical_inputs {
+                inputs.complete(*slot, next_tag);
+            }
             self.observe_event_queue();
             result
         } else {

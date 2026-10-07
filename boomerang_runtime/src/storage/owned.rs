@@ -114,6 +114,13 @@ impl EnclaveBindings {
     }
 
     /// Returns the concrete payload type bound to one compiled port slot.
+    #[cfg(feature = "external-clock")]
+    pub(crate) fn action_payload_type(&self, slot: BindingSlotIndex) -> Option<TypeId> {
+        match self.bindings.get(slot) {
+            Some(Binding::Action(factory)) => Some(factory.payload_type()),
+            _ => None,
+        }
+    }
     pub(crate) fn port_payload_type(
         &self,
         slot: BindingSlotIndex,
@@ -183,6 +190,8 @@ impl<T: ReactorData> StateInitializer for TypedStateInitializer<T> {
 
 /// Object-safe action construction behind the public generic binding method.
 trait ActionFactory: Send + Sync {
+    #[cfg(feature = "external-clock")]
+    fn payload_type(&self) -> TypeId;
     /// Builds a standard action for the supplied slot and timing domain.
     fn create(
         &self,
@@ -199,6 +208,10 @@ struct TypedActionFactory<T: ReactorData> {
 }
 
 impl<T: ReactorData> ActionFactory for TypedActionFactory<T> {
+    #[cfg(feature = "external-clock")]
+    fn payload_type(&self) -> TypeId {
+        TypeId::of::<T>()
+    }
     /// Builds a typed standard action using validated compiled timing.
     fn create(
         &self,
@@ -645,6 +658,8 @@ pub enum OwnedStorageError {
 
 /// Mutable, heap-backed storage for one validated compiled enclave image.
 pub struct OwnedStorage<'image> {
+    #[cfg(feature = "external-clock")]
+    pub(crate) physical_inputs: Option<(crate::physical_input::InputAdmission, usize)>,
     /// The validated immutable image that defines every dense storage domain.
     image: EnclaveImageView<'image>,
     /// Concrete reactor payloads keyed by exact image state slots.
@@ -772,6 +787,8 @@ impl<'image> OwnedStorage<'image> {
             .map(|route| (route.local_port(), ()))
             .collect();
         Ok(Self {
+            #[cfg(feature = "external-clock")]
+            physical_inputs: None,
             image,
             states,
             actions,

@@ -229,7 +229,7 @@ impl ClockContext {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 pub(crate) struct ClockRun(pub(crate) Option<ManualClock>);
 impl ClockRun {

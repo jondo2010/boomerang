@@ -213,6 +213,13 @@ fn generated_launcher_rejects_unsupported_coordination_before_publication() {
 
 #[test]
 fn generated_external_clock_launcher_calls_selected_driver_and_executes() {
+    generated_clock_fixture(false);
+}
+#[test]
+fn generated_physical_inputs_resolve_declared_targets_and_execute() {
+    generated_clock_fixture(true);
+}
+fn generated_clock_fixture(with_inputs: bool) {
     let _guard = support::toolchain_lock();
     let workspace = support::copied_fixture_workspace();
     let target = tempfile::tempdir().unwrap();
@@ -223,7 +230,9 @@ fn generated_external_clock_launcher_calls_selected_driver_and_executes() {
             .insert(
                 "physical-clock".into(),
                 toml::Value::try_from(
-                    serde_json::json!({"domain": 7, "binding": "sensor", "entry": "drive_clock"}),
+                    if with_inputs {
+                        serde_json::json!({"domain": 7, "binding": "sensor", "entry": "drive_clock", "inputs": {"max_batch_values": 2, "max_staged_batches": 2, "sources": {"plant": {"required": false, "targets": {"sample": {"enclave": "sensor", "binding": "action/sensor/external"}}}}}})
+                    } else { serde_json::json!({"domain": 7, "binding": "sensor", "entry": "drive_clock"}) },
                 )
                 .unwrap(),
             );
@@ -240,13 +249,28 @@ fn generated_external_clock_launcher_calls_selected_driver_and_executes() {
     std::fs::write(path, toml::to_string(&manifest).unwrap()).unwrap();
     let path = workspace.path().join("sensor-host/src/lib.rs");
     let mut source = std::fs::read_to_string(&path).unwrap();
-    source.push_str(r#"
+    if with_inputs {
+        source = source.replace("Sensor(#[input] command: u32)", "Sensor(#[input] command: u32, #[physical_action] external: u32)").replace("            reaction! {", "            reaction! { observe (external) { assert_eq!(ctx.get_action_value(&mut external), Some(&99)); } }\n            reaction! {");
+        source.push_str(r#"
+#[cfg(boomerang_facet = "payload")]
+pub fn drive_clock(clock: boomerang_runtime::physical_clock::ManualClock, inputs: boomerang_runtime::physical_input::InputAdmission) -> Result<(), boomerang_runtime::physical_input::InputError> {
+    use boomerang_runtime::{physical_input::*, physical_time::*};
+    let source = inputs.source("plant").unwrap();
+    let target = inputs.target(source, "sample").unwrap();
+    inputs.submit(vec![InputObservation { source, sequence: 1, acquired: PhysicalTimeNanos(0), domain: clock.domain(), epoch: clock.epoch(), values: vec![InputValue::new(target, 99u32)] }], &[])?;
+    clock.advance_to(PhysicalTimeNanos(100)).unwrap();
+    Ok(())
+}
+"#);
+    } else {
+        source.push_str(r#"
 #[cfg(boomerang_facet = "payload")]
 pub fn drive_clock(clock: boomerang_runtime::physical_clock::ManualClock) -> Result<(), boomerang_runtime::physical_time::PhysicalClockError> {
     assert_eq!(clock.domain(), boomerang_runtime::physical_time::PhysicalClockDomainId(7));
     clock.advance_to(boomerang_runtime::physical_time::PhysicalTimeNanos(100))
 }
 "#);
+    }
     std::fs::write(path, source).unwrap();
     assert!(std::process::Command::new("cargo")
         .args(["generate-lockfile", "--offline"])

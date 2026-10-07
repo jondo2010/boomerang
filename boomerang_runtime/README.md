@@ -58,3 +58,43 @@ do not. Non-host targets, custom target JSON, non-`std` runtimes, and distribute
 clock configuration are rejected. Feature-off builds contain no hosted clock
 state or scheduler branches. The future Pico scheduler is not a prerequisite;
 its own scheduler exclusion proof remains deferred.
+
+## Hosted physical inputs
+
+With `external-clock`, `FederateBindings::with_physical_inputs` adds an `InputConfig`
+sidecar. Declare stable source names, required/optional status, and typed physical
+**action** targets using Enclave and payload-binding identities. Targets are owned
+exclusively by the adapter: ordinary reaction/driver publication must use separate
+actions. Resolution validates types and reads minimum delays before any initializer
+or driver starts. The startup callback receives this execution's `InputAdmission`;
+it must return promptly and can pass cloned handles to the application's drivers.
+Required sources keep an idle Federate alive; shutdown and configured logical
+horizons still use the existing coordinator and selected physical clock.
+
+Resolve `source(name)` and `target(source, name)` once. Submit owned decoded
+`InputObservation` values with source sequence, clock domain, epoch, and acquisition
+time. `submit(batch, progress)` validates the entire batch, publishes at most one
+envelope per destination Enclave, then commits exclusive progress. Receipts retain
+host arrival separately from mapped tags, which use checked acquisition time plus compiled minimum delay. Diagnostic host arrival
+times never affect mapping. Targets cannot silently replace a pending value at the
+same tag, even across batches; batch and retained-batch bounds return explicit
+overflow. Retention is released when destination tags complete.
+
+`advance(source, F)` promises that future acquisition times are **not less than F**.
+An observation at F remains admissible. Required sources gate all finite tags until
+they publish a frontier; the minimum predecessor of `F + delay` caps existing
+Federate grants. Optional sources never gate progress. Periodic and idle sources
+must publish explicitly. Frontiers may exceed clock time; observations may not.
+`InputErrorKind` distinguishes malformed, future, late (including in-flight),
+duplicate, out-of-order, protocol, overflow, and disconnected outcomes. Required
+protocol failures, overflow, or disconnection abort; optional disconnection retains
+committed observations. Partial fan-out aborts before a batch can execute.
+
+Generated launchers accept `physical-clock.inputs` with `max_batch_values`,
+`max_staged_batches`, and `sources.<name>` containing `required` and
+`targets.<name> = { enclave = "sensor", binding = "action/sensor/sample" }`.
+The configured driver then takes `(ManualClock, InputAdmission)` and returns
+`Result<(), InputError>`. Declarations affect fingerprints and inherit the hosted,
+local, host-target restriction. All admission state and grant checks compile out
+when `external-clock` is disabled. Transport, device decoding, simulator stepping,
+and constrained scheduler integration remain separate capabilities.

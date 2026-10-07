@@ -22,10 +22,7 @@ use crate::{image::EnclaveIndex, AsyncEvent, Tag};
 
 /// Returns whether one asynchronous event introduces executable or terminal scheduler work.
 fn revises_candidate(event: &AsyncEvent) -> bool {
-    matches!(
-        event,
-        AsyncEvent::Logical { .. } | AsyncEvent::Physical { .. } | AsyncEvent::Shutdown { .. }
-    )
+    event.revises_candidate()
 }
 
 /// Terminal coordinator reason consumed by a scheduler wake path.
@@ -227,7 +224,7 @@ pub(crate) struct FederateCoordinator<B: FederateCoordinationBackend> {
     /// Per-participant scheduler wake senders closed only after a terminal command is queued.
     events: TinySecondaryMap<EnclaveIndex, crate::Sender<AsyncEvent>>,
     /// Authoritative candidate, phase, completion, and terminal state.
-    state: FederateCoordinationState,
+    pub(crate) state: FederateCoordinationState,
     /// Publication awaiting a fresh mailbox observation from every participant.
     pending_publication: Option<FederatePublication>,
     /// Independent monotonic publication-fence generation.

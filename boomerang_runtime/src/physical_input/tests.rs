@@ -1,0 +1,447 @@
+use super::*;
+#[test]
+fn required_without_frontier_blocks_all_finite_tags() {
+    assert_eq!(aggregate([None].into_iter()), Tag::NEVER);
+    assert_eq!(aggregate([Some(Tag::ZERO), None].into_iter()), Tag::NEVER);
+    assert_eq!(aggregate([Some(Tag::ZERO)].into_iter()), Tag::ZERO);
+    assert_eq!(aggregate([].into_iter()), Tag::FOREVER);
+}
+use crate::sched::federate::{
+    FederateCoordinationParts, LifecyclePolicy, LocalFederateCoordinationBackend,
+};
+struct Harness {
+    inputs: InputAdmission,
+    rx: Vec<crate::Receiver<AsyncEvent>>,
+    _coordination: FederateCoordinationParts<LocalFederateCoordinationBackend>,
+}
+fn harness(required: &[bool], enclaves: usize, delay: i64, capacity: usize) -> Harness {
+    let channels: Vec<_> = (0..enclaves).map(|_| kanal::bounded(capacity)).collect();
+    let coordination = FederateCoordinationParts::new(
+        channels
+            .iter()
+            .enumerate()
+            .map(|(i, (tx, rx))| (EnclaveIndex::new(i as u32), tx.clone(), rx.clone())),
+        LifecyclePolicy::KeepAlive,
+        LocalFederateCoordinationBackend::default(),
+    )
+    .unwrap();
+    let sources = required
+        .iter()
+        .enumerate()
+        .map(|(i, required)| InputSource {
+            id: format!("s{i}"),
+            required: *required,
+            targets: vec![],
+        })
+        .collect();
+    let targets = required
+        .iter()
+        .enumerate()
+        .flat_map(|(i, _)| {
+            (0..enclaves).map(move |enclave| Target {
+                id: format!("t{enclave}"),
+                source: SourceKey(i),
+                enclave,
+                action: crate::ActionKey::from(i),
+                delay: Duration::nanoseconds(delay),
+                payload: TypeId::of::<u32>(),
+            })
+        })
+        .collect();
+    let inputs = InputAdmission::new(
+        InputConfig {
+            max_batch_values: enclaves * 2,
+            max_staged_batches: 2,
+            sources,
+        },
+        targets,
+        ManualClock::new(PhysicalClockDomainId(7)).unwrap(),
+        &channels
+            .iter()
+            .map(|(tx, _)| tx.clone())
+            .collect::<Vec<_>>(),
+        coordination.abort_handle.clone(),
+    );
+    for slot in 0..enclaves {
+        inputs.authorize(slot, Tag::FOREVER, 0);
+    }
+    Harness {
+        inputs,
+        rx: channels.into_iter().map(|(_, rx)| rx).collect(),
+        _coordination: coordination,
+    }
+}
+fn sample(h: &Harness, source: usize, sequence: u64, time: u64) -> InputObservation {
+    InputObservation {
+        source: SourceKey(source),
+        sequence,
+        acquired: PhysicalTimeNanos(time),
+        domain: h.inputs.0.clock.domain(),
+        epoch: h.inputs.0.clock.epoch(),
+        values: vec![InputValue::new(TargetKey(source * h.rx.len()), 42u32)],
+    }
+}
+fn authorize(h: &Harness) {
+    let (cap, generation) = h.inputs.grant_constraint();
+    for slot in 0..h.rx.len() {
+        h.inputs.authorize(slot, cap, generation);
+    }
+}
+fn drain(h: &Harness) {
+    for (slot, rx) in h.rx.iter().enumerate() {
+        while let Ok(Some(event)) = rx.try_recv() {
+            if matches!(event, AsyncEvent::PhysicalBatch(_)) {
+                h.inputs.received(slot);
+            }
+        }
+    }
+}
+#[test]
+fn exclusive_frontiers_zero_delay_independence_and_optional_idle_sources() {
+    let h = harness(&[true, true, false], 2, 3, 8);
+    assert_eq!(h.inputs.horizon(), Tag::NEVER);
+    h.inputs
+        .advance(SourceKey(0), PhysicalTimeNanos(0))
+        .unwrap();
+    assert_eq!(h.inputs.horizon(), Tag::NEVER);
+    h.inputs
+        .advance(SourceKey(1), PhysicalTimeNanos(0))
+        .unwrap();
+    assert_eq!(
+        h.inputs.horizon(),
+        Tag::new(Duration::nanoseconds(2), usize::MAX)
+    );
+    h.inputs
+        .advance(SourceKey(0), PhysicalTimeNanos(100))
+        .unwrap();
+    h.inputs
+        .advance(SourceKey(1), PhysicalTimeNanos(10))
+        .unwrap();
+    assert_eq!(h.inputs.0.clock.now().unwrap(), PhysicalTimeNanos(0));
+    assert_eq!(
+        h.inputs.horizon(),
+        Tag::new(Duration::nanoseconds(12), usize::MAX)
+    );
+    drain(&h);
+    h.inputs
+        .advance(SourceKey(1), PhysicalTimeNanos(10))
+        .unwrap();
+    assert!(h.rx[0].try_recv().unwrap().is_none());
+    h.inputs.disconnect(SourceKey(2));
+    assert_eq!(
+        h.inputs.horizon(),
+        Tag::new(Duration::nanoseconds(12), usize::MAX)
+    );
+    assert_eq!(
+        h.inputs
+            .advance(SourceKey(1), PhysicalTimeNanos(9))
+            .unwrap_err()
+            .kind,
+        InputErrorKind::Protocol
+    );
+    assert_eq!(h.inputs.horizon(), Tag::NEVER);
+}
+#[test]
+fn admission_rejections_preserve_sequence_and_exact_frontier_is_admissible() {
+    let h = harness(&[true], 2, 0, 8);
+    let start = Instant::now();
+    assert_eq!(
+        h.inputs.disconnect(SourceKey(usize::MAX)).kind,
+        InputErrorKind::Malformed
+    );
+    assert_eq!(
+        h.inputs
+            .advance(SourceKey(usize::MAX), PhysicalTimeNanos(1))
+            .unwrap_err()
+            .kind,
+        InputErrorKind::Malformed
+    );
+    let mut invalid = sample(&h, 0, 1, 0);
+    invalid.epoch = ExecutionEpoch(0);
+    assert_eq!(
+        h.inputs.submit(vec![invalid], &[]).unwrap_err().kind,
+        InputErrorKind::Malformed
+    );
+    let mut invalid = sample(&h, 0, 1, 0);
+    invalid.values = vec![InputValue::new(TargetKey(0), "wrong")];
+    assert_eq!(
+        h.inputs.submit(vec![invalid], &[]).unwrap_err().kind,
+        InputErrorKind::Malformed
+    );
+    assert_eq!(
+        h.inputs
+            .submit(vec![sample(&h, 0, 1, 10)], &[])
+            .unwrap_err()
+            .kind,
+        InputErrorKind::Future
+    );
+    h.inputs.0.clock.advance_to(PhysicalTimeNanos(20)).unwrap();
+    h.inputs
+        .advance(SourceKey(0), PhysicalTimeNanos(10))
+        .unwrap();
+    let receipt = h.inputs.submit(vec![sample(&h, 0, 2, 10)], &[]).unwrap();
+    assert!(receipt.arrival >= start);
+    assert_eq!(receipt.tags, [Tag::new(Duration::nanoseconds(10), 0)]);
+    for (sequence, time, kind) in [
+        (2, 10, InputErrorKind::Duplicate),
+        (1, 10, InputErrorKind::OutOfOrder),
+        (3, 9, InputErrorKind::Protocol),
+    ] {
+        let failure = h
+            .inputs
+            .submit(vec![sample(&h, 0, sequence, time)], &[])
+            .unwrap_err();
+        assert_eq!(failure.kind, kind);
+        assert_eq!(failure.source_id.as_deref(), Some("s0"));
+        assert!(failure.arrival >= start);
+    }
+    assert_eq!(h.inputs.horizon(), Tag::NEVER);
+}
+#[test]
+fn retained_bounds_same_tag_conflicts_and_inflight_lateness() {
+    let h = harness(&[false], 2, 0, 8);
+    h.inputs.0.clock.advance_to(PhysicalTimeNanos(30)).unwrap();
+    h.inputs.submit(vec![sample(&h, 0, 1, 10)], &[]).unwrap();
+    assert!(!h.inputs.reserve(0, Tag::new(Duration::nanoseconds(10), 0)));
+    assert_eq!(
+        h.inputs
+            .submit(vec![sample(&h, 0, 2, 10)], &[])
+            .unwrap_err()
+            .kind,
+        InputErrorKind::Overflow
+    );
+    assert_eq!(
+        h.inputs
+            .submit(vec![sample(&h, 0, 2, 9)], &[])
+            .unwrap_err()
+            .kind,
+        InputErrorKind::OutOfOrder
+    );
+    h.inputs.submit(vec![sample(&h, 0, 2, 11)], &[]).unwrap();
+    assert_eq!(
+        h.inputs
+            .submit(vec![sample(&h, 0, 3, 12)], &[])
+            .unwrap_err()
+            .kind,
+        InputErrorKind::Overflow
+    );
+    drain(&h);
+    authorize(&h);
+    assert!(h.inputs.reserve(0, Tag::new(Duration::nanoseconds(12), 0)));
+    assert_eq!(
+        h.inputs
+            .submit(vec![sample(&h, 0, 3, 12)], &[])
+            .unwrap_err()
+            .kind,
+        InputErrorKind::Late
+    );
+    h.inputs.complete(0, Tag::new(Duration::nanoseconds(12), 0));
+    h.inputs.submit(vec![sample(&h, 0, 3, 13)], &[]).unwrap();
+    h.inputs.disconnect(SourceKey(0));
+    drain(&h);
+    authorize(&h);
+    assert!(h.inputs.reserve(0, Tag::new(Duration::nanoseconds(13), 0)));
+    assert_eq!(h.inputs.0.state.lock().unwrap().retained.len(), 1);
+}
+#[test]
+fn entire_batch_rejects_before_commit_and_partial_fanout_aborts() {
+    let h = harness(&[false], 2, 0, 1);
+    let mut malformed = sample(&h, 0, 1, 0);
+    malformed.values.push(InputValue::new(TargetKey(1), false));
+    assert_eq!(
+        h.inputs.submit(vec![malformed], &[]).unwrap_err().kind,
+        InputErrorKind::Malformed
+    );
+    assert!(h.rx.iter().all(|rx| rx.try_recv().unwrap().is_none()));
+    h.inputs.0.state.lock().unwrap().participants[1]
+        .tx
+        .try_send(AsyncEvent::FederateResume)
+        .unwrap();
+    let mut batch = sample(&h, 0, 1, 0);
+    batch.values.push(InputValue::new(TargetKey(1), 7u32));
+    assert_eq!(
+        h.inputs
+            .submit(vec![batch], &[(SourceKey(0), PhysicalTimeNanos(1))])
+            .unwrap_err()
+            .kind,
+        InputErrorKind::Overflow
+    );
+    assert!(matches!(
+        h.rx[0].try_recv().unwrap(),
+        Some(AsyncEvent::PhysicalBatch(_))
+    ));
+    assert!(!h.inputs.reserve(0, Tag::ZERO));
+    assert!(h.inputs.0.state.lock().unwrap().sources[0]
+        .frontier
+        .is_none());
+}
+#[test]
+fn required_overflow_disconnect_and_checked_mapping_are_terminal_or_rejected() {
+    for required in [false, true] {
+        let h = harness(&[required], 2, 0, 1);
+        h.inputs.0.state.lock().unwrap().participants[0]
+            .tx
+            .try_send(AsyncEvent::FederateResume)
+            .unwrap();
+        assert_eq!(
+            h.inputs
+                .submit(vec![sample(&h, 0, 1, 0)], &[])
+                .unwrap_err()
+                .kind,
+            InputErrorKind::Overflow
+        );
+        assert_eq!(h.inputs.0.state.lock().unwrap().failure.is_some(), required);
+        h.inputs.disconnect(SourceKey(0));
+        assert_eq!(h.inputs.0.state.lock().unwrap().failure.is_some(), required);
+    }
+    let h = harness(&[true], 2, 1, 8);
+    h.inputs
+        .0
+        .clock
+        .advance_to(PhysicalTimeNanos(u64::MAX))
+        .unwrap();
+    assert_eq!(
+        h.inputs
+            .submit(vec![sample(&h, 0, 1, u64::MAX)], &[])
+            .unwrap_err()
+            .kind,
+        InputErrorKind::Malformed
+    );
+    assert_eq!(
+        h.inputs
+            .advance(SourceKey(0), PhysicalTimeNanos(u64::MAX))
+            .unwrap_err()
+            .kind,
+        InputErrorKind::Malformed
+    );
+    assert!(h.inputs.0.state.lock().unwrap().sources[0].last.is_none());
+}
+#[test]
+fn admission_and_final_reservation_race_cannot_both_win() {
+    for _ in 0..64 {
+        let h = harness(&[false], 2, 0, 8);
+        let barrier = std::sync::Barrier::new(2);
+        let observation = sample(&h, 0, 1, 0);
+        let inputs = &h.inputs;
+        std::thread::scope(|scope| {
+            let admitted = scope.spawn(|| {
+                barrier.wait();
+                inputs.submit(vec![observation], &[])
+            });
+            barrier.wait();
+            let reserved = h.inputs.reserve(0, Tag::ZERO);
+            match admitted.join().unwrap() {
+                Ok(_) => assert!(!reserved),
+                Err(error) => {
+                    assert!(reserved);
+                    assert_eq!(error.kind, InputErrorKind::Late);
+                }
+            }
+        });
+    }
+}
+
+#[test]
+fn cached_horizon_and_reservations_allocate_nothing_with_maximum_batches() {
+    use crate::physical_clock::tests::ALLOCATIONS;
+    for enclaves in [2, 16] {
+        for count in [1, 16, 64] {
+            let h = harness(&vec![true; count], enclaves, 0, 8);
+            h.inputs.0.clock.advance_to(PhysicalTimeNanos(4)).unwrap();
+            for start in [0, 2] {
+                let batch = (start..start + 2)
+                    .map(|time| {
+                        let mut observation = sample(&h, 0, time, time);
+                        observation.values = (0..enclaves)
+                            .map(|slot| InputValue::new(TargetKey(slot), 1u32))
+                            .collect();
+                        observation
+                    })
+                    .collect();
+                assert_eq!(
+                    h.inputs.submit(batch, &[]).unwrap().tags.len(),
+                    enclaves * 2
+                );
+            }
+            for source in 0..count {
+                h.inputs
+                    .advance(SourceKey(source), PhysicalTimeNanos(5))
+                    .unwrap();
+            }
+            drain(&h);
+            authorize(&h);
+            let start = Instant::now();
+            ALLOCATIONS.with(|n| n.set(Some(0)));
+            for _ in 0..100_000 {
+                std::hint::black_box(h.inputs.horizon());
+                assert!(h.inputs.reserve(0, Tag::ZERO));
+            }
+            let allocations = ALLOCATIONS.with(|n| n.replace(None).unwrap());
+            assert_eq!(allocations, 0);
+            eprintln!("input measurement: enclaves={enclaves} sources={count} max_values={} retained=2 checks=100000 allocations={allocations} elapsed={:?}", enclaves * 2, start.elapsed());
+            for slot in 0..enclaves {
+                h.inputs
+                    .complete(slot, Tag::new(Duration::nanoseconds(3), 0));
+            }
+            assert!(h.inputs.0.state.lock().unwrap().retained.is_empty());
+        }
+    }
+}
+
+#[test]
+fn consumed_batch_invalidates_queued_grant_until_coordinator_reauthorizes() {
+    use crate::sched::federate::{state::SchedulerMessage, FederateAcquisition};
+    let mut h = harness(&[false], 2, 0, 8);
+    h.inputs.0.clock.advance_to(PhysicalTimeNanos(10)).unwrap();
+    h._coordination.coordinator.state.physical_inputs = Some(h.inputs.clone());
+    let tag = Tag::new(Duration::nanoseconds(10), 0);
+    for index in 0..2 {
+        h._coordination
+            .coordinator
+            .state
+            .handle_scheduler(SchedulerMessage::Publish {
+                enclave: EnclaveIndex::new(index),
+                next_event: Some(tag),
+            })
+            .unwrap();
+    }
+    let revision = h._coordination.coordinator.state.revision();
+    h._coordination
+        .coordinator
+        .state
+        .handle_acquisition(FederateAcquisition::new(revision, tag))
+        .unwrap();
+    h.inputs.submit(vec![sample(&h, 0, 1, 10)], &[]).unwrap();
+    drain(&h);
+    // A backend extension computed for the old publication must not bless the new generation.
+    h._coordination
+        .coordinator
+        .state
+        .handle_acquisition(FederateAcquisition::new(revision, Tag::FOREVER))
+        .unwrap();
+    assert!(!h.inputs.reserve(0, tag), "a queued grant from before batch admission must be stale even after its envelope was consumed");
+    for index in 0..2 {
+        h._coordination
+            .coordinator
+            .state
+            .handle_scheduler(SchedulerMessage::Active {
+                enclave: EnclaveIndex::new(index),
+            })
+            .unwrap();
+        h._coordination
+            .coordinator
+            .state
+            .handle_scheduler(SchedulerMessage::Publish {
+                enclave: EnclaveIndex::new(index),
+                next_event: Some(tag),
+            })
+            .unwrap();
+    }
+    let revision = h._coordination.coordinator.state.revision();
+    h._coordination
+        .coordinator
+        .state
+        .handle_acquisition(FederateAcquisition::new(revision, tag))
+        .unwrap();
+    assert!(h.inputs.reserve(0, tag));
+}

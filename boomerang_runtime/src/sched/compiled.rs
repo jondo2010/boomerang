@@ -266,6 +266,8 @@ pub(crate) fn run_owned_scheduler_with_coordination_and_observation(
     SchedulerCore {
         #[cfg(feature = "external-clock")]
         physical_clock,
+        #[cfg(feature = "external-clock")]
+        physical_inputs: storage.physical_inputs.clone(),
         key,
         config,
         observation,

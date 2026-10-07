@@ -203,6 +203,10 @@ struct ParticipantState {
 /// Pure coordination state for every compiled participant in one Federate.
 #[derive(Debug)]
 pub(crate) struct FederateCoordinationState {
+    #[cfg(feature = "external-clock")]
+    pub(crate) physical_inputs: Option<crate::physical_input::InputAdmission>,
+    #[cfg(feature = "external-clock")]
+    input_generation: u64,
     /// Sparse participant state keyed by original compiled identity.
     participants: TinySecondaryMap<EnclaveIndex, ParticipantState>,
     /// Version of the current aggregate candidate.
@@ -249,6 +253,10 @@ impl FederateCoordinationState {
         }
 
         Ok(Self {
+            #[cfg(feature = "external-clock")]
+            physical_inputs: None,
+            #[cfg(feature = "external-clock")]
+            input_generation: 0,
             participants,
             revision: CoordinationRevision::new(0),
             pending_publication: None,
@@ -350,6 +358,22 @@ impl FederateCoordinationState {
         }
 
         let granted = acquisition.granted();
+        #[cfg(feature = "external-clock")]
+        let input_grant = self
+            .physical_inputs
+            .as_ref()
+            .map(|inputs| (inputs, inputs.grant_constraint()));
+        #[cfg(feature = "external-clock")]
+        if input_grant
+            .as_ref()
+            .is_some_and(|(_, (_, generation))| *generation != self.input_generation)
+        {
+            return Ok(Vec::new());
+        }
+        #[cfg(feature = "external-clock")]
+        let granted = input_grant
+            .as_ref()
+            .map_or(granted, |(_, (cap, _))| granted.min(*cap));
         if self.pending_publication.is_none()
             && self.grant_horizon.is_none_or(|horizon| granted <= horizon)
         {
@@ -359,6 +383,12 @@ impl FederateCoordinationState {
             .grant_horizon
             .map_or(granted, |existing| existing.max(granted));
         self.grant_horizon = Some(horizon);
+        #[cfg(feature = "external-clock")]
+        if let Some((inputs, (_, generation))) = input_grant {
+            for slot in 0..self.participants.len() {
+                inputs.authorize(slot, granted, generation);
+            }
+        }
         let mut actions = vec![CoordinationAction::AdvanceHorizon { tag: horizon }];
         actions.extend(
             self.participants
@@ -753,6 +783,10 @@ impl FederateCoordinationState {
             .min();
         let publication = FederatePublication::new(self.revision, next_event)
             .with_grant_horizon(self.grant_horizon);
+        #[cfg(feature = "external-clock")]
+        if let Some(inputs) = &self.physical_inputs {
+            self.input_generation = inputs.grant_constraint().1;
+        }
         self.pending_publication = Some(publication);
         let mut actions = vec![CoordinationAction::Publish(publication)];
         if resume {

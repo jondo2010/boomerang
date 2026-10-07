@@ -617,6 +617,8 @@ impl Scheduler {
         } = self;
 
         SchedulerCore {
+            #[cfg(feature = "external-clock")]
+            physical_clock: None,
             key: *key,
             config,
             observation: self.observation.as_ref(),

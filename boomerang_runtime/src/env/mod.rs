@@ -565,6 +565,8 @@ impl Enclave {
     /// Create a [`SendContext`] for sending events into the scheduler.
     pub fn create_send_context(&self, key: EnclaveKey) -> SendContext {
         SendContext {
+            #[cfg(feature = "external-clock")]
+            physical_clock: None,
             enclave_key: key,
             async_tx: self.event_tx.clone(),
             shutdown_rx: self.shutdown_rx.clone(),

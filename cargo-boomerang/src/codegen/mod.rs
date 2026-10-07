@@ -449,7 +449,24 @@ pub(crate) fn generate_analyzed_launcher(
     let slice = analyzed.compiled.federate_slice(federate_index)?;
     let distributed = coordination.is_some();
     let aliases = payload_aliases(&analyzed.resolved, &analyzed.driver, slice.enclaves())?;
-    let manifest = render_manifest(&analyzed.resolved, &aliases, distributed, capabilities)?;
+    let manifest = render_manifest(
+        &analyzed.resolved,
+        &aliases,
+        distributed,
+        capabilities,
+        configuration.physical_clock.is_some(),
+    )?;
+    let physical_clock = configuration
+        .physical_clock
+        .as_ref()
+        .map(|clock| {
+            let binding = &analyzed.resolved.deployment().bindings[&clock.binding];
+            let alias = aliases.get(&binding.implementation_id()).ok_or_else(|| {
+                anyhow!("physical clock driver binding is not selected by this Federate")
+            })?;
+            Ok::<_, anyhow::Error>((clock.clone(), alias.clone()))
+        })
+        .transpose()?;
     let execution = analyzed
         .resolved
         .deployment()
@@ -462,6 +479,7 @@ pub(crate) fn generate_analyzed_launcher(
         &aliases,
         &execution,
         rust::LauncherInstrumentation {
+            physical_clock,
             tracing: rust::render_tracing_init(
                 analyzed.resolved.deployment().tracing,
                 configuration.bounded_tracing.as_ref(),
@@ -834,11 +852,20 @@ fn render_manifest(
     aliases: &BTreeMap<String, String>,
     distributed: bool,
     capabilities: LauncherCapabilities,
+    external_clock: bool,
 ) -> Result<String> {
     let mut dependencies = BTreeMap::new();
     dependencies.insert(
         String::from("boomerang_runtime"),
-        dependency(resolved.runtime(), false, Vec::new())?,
+        dependency(
+            resolved.runtime(),
+            false,
+            if external_clock {
+                vec!["external-clock".into()]
+            } else {
+                Vec::new()
+            },
+        )?,
     );
     dependencies.insert(
         String::from("boomerang_federated"),
@@ -1062,9 +1089,12 @@ pub(crate) fn federate_image_fingerprint(
     analyzed: &AnalyzedDeployment,
     federate: boomerang_runtime::image::FederateIndex,
 ) -> Result<blake3::Hash> {
-    fingerprints::federate_image(
-        &analyzed.compiled.federate_slice(federate)?,
-        analyzed.driver.bindings(),
+    let slice = analyzed.compiled.federate_slice(federate)?;
+    fingerprints::with_physical_clock(
+        fingerprints::federate_image(&slice, analyzed.driver.bindings())?,
+        analyzed.resolved.deployment().federates[slice.id().as_str()]
+            .physical_clock
+            .as_ref(),
     )
 }
 
@@ -1134,6 +1164,7 @@ pub(crate) fn generate_analyzed_rti(
     };
     let selected = analyzed.resolved.deployment().rti.as_ref();
     let configuration = ResolvedFederate {
+        physical_clock: None,
         bounded_tracing: analyzed
             .resolved
             .deployment()
@@ -1153,6 +1184,7 @@ pub(crate) fn generate_analyzed_rti(
         &aliases,
         true,
         LauncherCapabilities { hosted: true },
+        false,
     )?;
     let init_tracing = rust::render_tracing_init(
         analyzed.resolved.deployment().tracing,
@@ -1241,6 +1273,7 @@ mod tests {
     #[test]
     fn metadata_reconciliation_preserves_federate_toolchain_and_cargo_config() {
         let federate = ResolvedFederate {
+            physical_clock: None,
             bounded_tracing: None,
             groups: Vec::new(),
             target: None,
@@ -1296,6 +1329,7 @@ mod tests {
         let inputs = vec![(String::from("COMPATIBILITY"), String::from("fixed"))];
         let identity = |target_json: &Path, cargo_config: &Path, cargo| {
             let federate = ResolvedFederate {
+                physical_clock: None,
                 bounded_tracing: None,
                 groups: Vec::new(),
                 target: None,
@@ -1335,6 +1369,7 @@ mod tests {
     fn launcher_request_identity_normalizes_an_implicit_host_target() {
         let identity = |target: Option<String>| {
             let federate = ResolvedFederate {
+                physical_clock: None,
                 bounded_tracing: None,
                 groups: Vec::new(),
                 target,

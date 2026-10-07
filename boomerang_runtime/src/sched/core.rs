@@ -170,6 +170,8 @@ where
 {
     /// Enclave whose logical time this invocation advances.
     pub(super) key: EnclaveKey,
+    #[cfg(feature = "external-clock")]
+    pub(super) physical_clock: Option<crate::physical_clock::ClockContext>,
     /// Existing live scheduler configuration.
     pub(super) config: &'a Config,
     /// Optional snapshot-only scheduler observation state.
@@ -770,8 +772,18 @@ where
         next_tag: Tag,
     ) -> Result<Option<bool>, SchedulerError<E::Error>> {
         if !self.config.fast_forward {
-            let target = next_tag.to_logical_time(*self.start_time);
-            match self.synchronize_wall_clock(target)? {
+            #[cfg(feature = "external-clock")]
+            let external = self.physical_clock.clone();
+            #[cfg(feature = "external-clock")]
+            let received = if let Some(clock) = external {
+                self.synchronize_external_clock(&clock, next_tag)?
+            } else {
+                self.synchronize_wall_clock(next_tag.to_logical_time(*self.start_time))?
+            };
+            #[cfg(not(feature = "external-clock"))]
+            let received =
+                self.synchronize_wall_clock(next_tag.to_logical_time(*self.start_time))?;
+            match received {
                 WallClockReceive::DeadlineReached => {}
                 WallClockReceive::Interrupted(event) => {
                     if matches!(
@@ -931,6 +943,15 @@ where
 
     /// Process one scheduler step, returning coordination failures to the caller.
     pub(super) fn try_next(&mut self) -> Result<bool, SchedulerError<E::Error>> {
+        #[cfg(feature = "external-clock")]
+        if self
+            .physical_clock
+            .as_ref()
+            .is_some_and(|ctx| ctx.clock.now().is_err())
+        {
+            self.abort_for_federate_termination();
+            return Ok(false);
+        }
         self.pump_pending_async_events()?;
         self.observe_event_queue();
 
@@ -991,6 +1012,47 @@ where
 
         self.shutdown();
         Ok(())
+    }
+
+    #[cfg(feature = "external-clock")]
+    fn synchronize_external_clock(
+        &mut self,
+        clock: &crate::physical_clock::ClockContext,
+        tag: Tag,
+    ) -> Result<WallClockReceive, SchedulerError<E::Error>> {
+        let registered = crate::physical_time::PhysicalTimeNanos::from_tag(tag)
+            .and_then(|deadline| clock.clock.register(clock.slot, deadline));
+        match registered {
+            Ok(true) => Ok(WallClockReceive::DeadlineReached),
+            Err(error) => {
+                clock.clock.latch(error);
+                Ok(WallClockReceive::FederateTerminated(
+                    FederateTermination::Abort,
+                ))
+            }
+            Ok(false) => {
+                self.observe(SchedulerPhase::PhysicalWait);
+                let event = self.event_rx.recv();
+                self.observe(SchedulerPhase::Framework);
+                clock.clock.cancel(clock.slot);
+                match event {
+                    Ok(event) => Ok(WallClockReceive::Interrupted(event)),
+                    Err(_) => {
+                        let terminal = self
+                            .federate_coordination
+                            .as_deref_mut()
+                            .map_or(
+                                Ok(None),
+                                FederateSchedulerCoordination::terminal_after_event_channel_closed,
+                            )
+                            .map_err(SchedulerError::FederateCoordination)?;
+                        Ok(WallClockReceive::FederateTerminated(
+                            terminal.unwrap_or(FederateTermination::Abort),
+                        ))
+                    }
+                }
+            }
+        }
     }
 
     // Wait until the wall-clock time is reached

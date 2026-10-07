@@ -87,6 +87,9 @@ jobs:
       - name: test workspace except cargo-boomerang
         run: cargo test --workspace --exclude cargo-boomerang --verbose
 
+      - name: test hosted external physical clock
+        run: cargo test -p boomerang_runtime --features external-clock
+
       - name: test cargo-boomerang fast targets
         run: >-
           cargo test -p cargo-boomerang --lib --bin cargo-boomerang
@@ -132,6 +135,17 @@ jobs:
         run: >-
           cargo check -p boomerang_tinymap --no-default-features --examples
           --target aarch64-unknown-none-softfloat
+
+      - name: Check target-neutral physical clock contract
+        run: |
+          cat > "$RUNNER_TEMP/clock-types.rs" <<EOF
+          #![no_std]
+          #[path = "$GITHUB_WORKSPACE/boomerang_runtime/src/physical_time.rs"]
+          pub mod physical_time;
+          EOF
+          rustc --edition=2021 --crate-name clock_types --crate-type rlib \
+            --target aarch64-unknown-none-softfloat --out-dir "$RUNNER_TEMP" \
+            "$RUNNER_TEMP/clock-types.rs"
 
   miri:
     runs-on: ubuntu-latest

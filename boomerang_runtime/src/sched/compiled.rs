@@ -252,7 +252,11 @@ pub(crate) fn run_owned_scheduler_with_coordination_and_observation(
     let mut transition_buffer = Vec::with_capacity(reaction_capacity);
     let mut outcomes = (0..reaction_capacity).map(|_| Default::default()).collect();
 
+    #[cfg(feature = "external-clock")]
+    let physical_clock = storage.scheduler_send_context().physical_clock;
     SchedulerCore {
+        #[cfg(feature = "external-clock")]
+        physical_clock,
         key,
         config,
         observation,
@@ -590,6 +594,8 @@ mod tests {
         dependencies.add_upstream(
             upstream,
             SendContext {
+                #[cfg(feature = "external-clock")]
+                physical_clock: None,
                 enclave_key: upstream,
                 async_tx: upstream_tx,
                 shutdown_rx: upstream_shutdown_rx,
@@ -667,6 +673,8 @@ mod tests {
         dependencies.add_upstream(
             upstream,
             SendContext {
+                #[cfg(feature = "external-clock")]
+                physical_clock: None,
                 enclave_key: upstream,
                 async_tx: upstream_tx,
                 shutdown_rx: upstream_shutdown_rx,
@@ -751,6 +759,8 @@ mod tests {
         dependencies.add_upstream(
             upstream,
             SendContext {
+                #[cfg(feature = "external-clock")]
+                physical_clock: None,
                 enclave_key: upstream,
                 async_tx: upstream_tx,
                 shutdown_rx: upstream_shutdown_rx,
@@ -800,6 +810,8 @@ mod tests {
         dependencies.add_upstream(
             upstream,
             SendContext {
+                #[cfg(feature = "external-clock")]
+                physical_clock: None,
                 enclave_key: upstream,
                 async_tx: upstream_tx,
                 shutdown_rx: upstream_shutdown_rx,
@@ -857,6 +869,8 @@ mod tests {
         dependencies.add_upstream(
             upstream,
             SendContext {
+                #[cfg(feature = "external-clock")]
+                physical_clock: None,
                 enclave_key: upstream,
                 async_tx: upstream_tx,
                 shutdown_rx: upstream_shutdown_rx,

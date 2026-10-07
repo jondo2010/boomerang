@@ -780,6 +780,13 @@ impl<'image> OwnedStorage<'image> {
             .for_each(|context| context.start_time = origin);
     }
 
+    #[cfg(feature = "external-clock")]
+    pub(crate) fn set_physical_clock(&mut self, clock: crate::physical_clock::ClockContext) {
+        for context in self.contexts.values_mut() {
+            context.physical_clock = Some(clock.clone());
+        }
+    }
+
     /// Returns a thread-safe context for local logical-time coordination with this scheduler.
     pub(crate) fn scheduler_send_context(&self) -> crate::SendContext {
         self.contexts[ReactorIndex::new(0)].make_send_context()

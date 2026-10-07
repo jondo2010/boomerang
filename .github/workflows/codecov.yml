@@ -45,24 +45,24 @@ jobs:
 
       - name: Collect cargo-boomerang fast coverage
         run: >-
-          cargo llvm-cov --no-clean --no-report -p cargo-boomerang --all-features
+          cargo llvm-cov --no-report -p cargo-boomerang --all-features
           --lib --bin cargo-boomerang --test manifest --test workspace
 
       - name: Collect cargo-boomerang toolchain coverage
         run: >-
-          cargo llvm-cov --no-clean --no-report -p cargo-boomerang --all-features
+          cargo llvm-cov --no-report -p cargo-boomerang --all-features
           --test toolchain
 
       # Exercise the tool-owned facet cfg values independently of Cargo features.
       - name: Collect payload facet coverage
         run: >-
           RUSTFLAGS='--cfg boomerang_facet="payload"'
-          cargo llvm-cov --no-clean --no-report -p boomerang --lib --no-default-features
+          cargo llvm-cov --no-report -p boomerang --lib --no-default-features
 
       - name: Collect descriptor facet coverage
         run: >-
           RUSTFLAGS='--cfg boomerang_facet="descriptor"'
-          cargo llvm-cov --no-clean --no-report -p boomerang --lib --no-default-features
+          cargo llvm-cov --no-report -p boomerang --lib --no-default-features
           --features hosted
 
       - name: Generate LCOV report

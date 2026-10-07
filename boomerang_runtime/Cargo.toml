@@ -14,6 +14,9 @@ exclude.workspace = true
 [features]
 default = []
 
+## Hosted externally advanced Federate physical clock
+external-clock = ["dep:getrandom"]
+
 ## Prepare runtime-owned workers for an installed native bounded subscriber
 bounded-tracing = ["dep:tracing-bounded"]
 
@@ -35,6 +38,7 @@ replay = [
 
 [dependencies]
 kanal = "0.1"
+getrandom = { version = "0.3", optional = true }
 document-features = { workspace = true }
 downcast-rs = "1.2"
 itertools.workspace = true

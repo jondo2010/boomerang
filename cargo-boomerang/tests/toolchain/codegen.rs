@@ -210,3 +210,60 @@ fn generated_launcher_rejects_unsupported_coordination_before_publication() {
         );
     }
 }
+
+#[test]
+fn generated_external_clock_launcher_calls_selected_driver_and_executes() {
+    let _guard = support::toolchain_lock();
+    let workspace = support::copied_fixture_workspace();
+    let target = tempfile::tempdir().unwrap();
+    let _manifest = support::edit_manifest(workspace.path(), |manifest| {
+        manifest["deployments"]["production"]["federates"]["host"]
+            .as_table_mut()
+            .unwrap()
+            .insert(
+                "physical-clock".into(),
+                toml::Value::try_from(
+                    serde_json::json!({"domain": 7, "binding": "sensor", "entry": "drive_clock"}),
+                )
+                .unwrap(),
+            );
+    });
+    let path = workspace.path().join("sensor-host/Cargo.toml");
+    let mut manifest: toml::Value =
+        toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let runtime = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../boomerang_runtime");
+    manifest["dependencies"].as_table_mut().unwrap().insert(
+        "boomerang_runtime".into(),
+        toml::Value::try_from(serde_json::json!({"path": runtime, "features": ["external-clock"]}))
+            .unwrap(),
+    );
+    std::fs::write(path, toml::to_string(&manifest).unwrap()).unwrap();
+    let path = workspace.path().join("sensor-host/src/lib.rs");
+    let mut source = std::fs::read_to_string(&path).unwrap();
+    source.push_str(r#"
+#[cfg(boomerang_facet = "payload")]
+pub fn drive_clock(clock: boomerang_runtime::physical_clock::ManualClock) -> Result<(), boomerang_runtime::physical_time::PhysicalClockError> {
+    assert_eq!(clock.domain(), boomerang_runtime::physical_time::PhysicalClockDomainId(7));
+    clock.advance_to(boomerang_runtime::physical_time::PhysicalTimeNanos(100))
+}
+"#);
+    std::fs::write(path, source).unwrap();
+    assert!(std::process::Command::new("cargo")
+        .args(["generate-lockfile", "--offline"])
+        .current_dir(workspace.path())
+        .status()
+        .unwrap()
+        .success());
+    let launcher = support::with_target_directory(target.path(), || {
+        cargo_boomerang::generate_launcher(workspace.path(), "production", "host").unwrap()
+    });
+    let source = std::fs::read_to_string(launcher.source_path()).unwrap();
+    assert!(
+        source.contains("::drive_clock(") && source.contains("physical_clock.clone()"),
+        "{source}"
+    );
+    assert!(std::fs::read_to_string(launcher.manifest_path())
+        .unwrap()
+        .contains("external-clock"));
+    launcher.run_locked_offline().unwrap();
+}

@@ -63,6 +63,8 @@ pub(crate) struct TriggerRes {
 /// Scheduler context passed into reactor functions.
 #[derive(Debug)]
 pub struct Context {
+    #[cfg(feature = "external-clock")]
+    pub(crate) physical_clock: Option<crate::physical_clock::ClockContext>,
     /// The EnclaveId of this context
     enclave_key: EnclaveKey,
     /// Physical time the Scheduler was started
@@ -88,7 +90,26 @@ pub trait CommonContext {
 
     /// Get the current physical time
     fn get_physical_time(&self) -> std::time::Instant {
-        std::time::Instant::now()
+        self.try_get_physical_time()
+            .expect("selected physical clock failed")
+    }
+
+    /// Reads selected time in the legacy Instant representation, checking conversion and closure.
+    fn try_get_physical_time(
+        &self,
+    ) -> Result<std::time::Instant, crate::physical_time::PhysicalClockError> {
+        Ok(std::time::Instant::now())
+    }
+
+    /// Reads the external clock's integer epoch offset; `None` denotes the default host clock.
+    #[cfg(feature = "external-clock")]
+    fn physical_time(
+        &self,
+    ) -> Result<
+        Option<crate::physical_time::PhysicalTimeNanos>,
+        crate::physical_time::PhysicalClockError,
+    > {
+        Ok(None)
     }
 
     /// Has the scheduler already been shutdown?
@@ -119,19 +140,60 @@ pub trait CommonContext {
         value: T,
         delay: Option<Duration>,
     ) -> bool {
-        let tag_delay = action.min_delay() + delay.unwrap_or_default();
-        let value = Box::new(value) as Box<dyn ReactorData>;
+        #[cfg(feature = "external-clock")]
+        {
+            self.try_schedule_action_async(action, value, delay)
+                .unwrap_or(false)
+        }
+        #[cfg(not(feature = "external-clock"))]
+        {
+            let tag_delay = action.min_delay() + delay.unwrap_or_default();
+            let value = Box::new(value) as Box<dyn ReactorData>;
 
-        let event = if action.is_logical() {
-            // Logical actions are scheduled at the current logical time + tag_delay
-            todo!("Logical actions are not supported here");
-        } else {
-            // Physical actions are scheduled at the current physical time + tag_delay
-            let time = self.get_physical_time() + tag_delay;
-            AsyncEvent::physical(action.key(), time, value)
-        };
+            let event = if action.is_logical() {
+                // Logical actions are scheduled at the current logical time + tag_delay
+                todo!("Logical actions are not supported here");
+            } else {
+                // Physical actions are scheduled at the current physical time + tag_delay
+                let time = self.get_physical_time() + tag_delay;
+                AsyncEvent::physical(action.key(), time, value)
+            };
 
-        self.schedule_external(event)
+            self.schedule_external(event)
+        }
+    }
+
+    /// Converts a delayed selected-clock timestamp without wrapping the epoch offset.
+    #[cfg(feature = "external-clock")]
+    fn try_get_physical_time_after(
+        &self,
+        delay: std::time::Duration,
+    ) -> Result<std::time::Instant, crate::physical_time::PhysicalClockError> {
+        self.try_get_physical_time()?
+            .checked_add(delay)
+            .ok_or(crate::physical_time::PhysicalClockError::Overflow)
+    }
+
+    /// Schedules a physical action with checked delay and selected-clock conversion.
+    #[cfg(feature = "external-clock")]
+    fn try_schedule_action_async<T: ReactorData>(
+        &self,
+        action: &impl ActionCommon<T>,
+        value: T,
+        delay: Option<Duration>,
+    ) -> Result<bool, crate::physical_time::PhysicalClockError> {
+        use crate::physical_time::PhysicalClockError::Overflow;
+        assert!(
+            !action.is_logical(),
+            "logical actions are not supported asynchronously"
+        );
+        let delay = action
+            .min_delay()
+            .checked_add(delay.unwrap_or_default())
+            .ok_or(Overflow)?;
+        let delay = std::time::Duration::try_from(delay).map_err(|_| Overflow)?;
+        let time = self.try_get_physical_time_after(delay)?;
+        Ok(self.schedule_external(AsyncEvent::physical(action.key(), time, Box::new(value))))
     }
 
     fn release_provisional(&self, enclave: EnclaveKey, tag: Tag) -> bool {
@@ -148,6 +210,8 @@ impl Context {
         shutdown_rx: keepalive::Receiver,
     ) -> Self {
         Self {
+            #[cfg(feature = "external-clock")]
+            physical_clock: None,
             enclave_key,
             start_time,
             tag: Tag::NEVER,
@@ -208,6 +272,8 @@ impl Context {
     /// This is used to schedule asynchronous events.
     pub fn make_send_context(&self) -> SendContext {
         SendContext {
+            #[cfg(feature = "external-clock")]
+            physical_clock: self.physical_clock.clone(),
             enclave_key: self.enclave_key,
             async_tx: self.async_tx.clone(),
             shutdown_rx: self.shutdown_rx.clone(),
@@ -229,6 +295,12 @@ impl Context {
         value: T,
         delay: Option<Duration>,
     ) {
+        #[cfg(feature = "external-clock")]
+        if self.physical_clock.is_some() && !action.is_logical() {
+            self.try_schedule_action(action, value, delay)
+                .expect("selected physical action time is invalid");
+            return;
+        }
         let tag_delay = action.min_delay() + delay.unwrap_or_default();
 
         // Compute the base tag for this scheduling request using the existing
@@ -254,6 +326,37 @@ impl Context {
             .push((action.key(), new_tag));
     }
 
+    /// Schedules using checked physical-time mapping, leaving action state unchanged on error.
+    #[cfg(feature = "external-clock")]
+    pub fn try_schedule_action<T: ReactorData>(
+        &mut self,
+        action: &mut ActionRef<T>,
+        value: T,
+        delay: Option<Duration>,
+    ) -> Result<(), crate::physical_time::PhysicalClockError> {
+        if !action.is_logical() {
+            if let Some(clock) = &self.physical_clock {
+                let delay = action
+                    .min_delay()
+                    .checked_add(delay.unwrap_or_default())
+                    .ok_or(crate::physical_time::PhysicalClockError::Overflow)?;
+                let tag = clock.clock.now()?.to_tag(delay)?;
+                let tag = if delay.is_zero() {
+                    Tag::new(tag.offset(), 1)
+                } else {
+                    tag
+                };
+                let tag = crate::physical_clock::after_current_tag(tag, self.tag)?;
+                let tag = action.next_physical_tag(tag)?;
+                action.set_value(tag, value);
+                self.trigger_res.scheduled_actions.push((action.key(), tag));
+                return Ok(());
+            }
+        }
+        self.schedule_action(action, value, delay);
+        Ok(())
+    }
+
     pub(crate) fn set_mode_transition(&mut self, request: ModeTransitionRequest) {
         self.trigger_res.scheduled_mode = Some(request);
     }
@@ -265,6 +368,44 @@ impl Context {
 }
 
 impl CommonContext for Context {
+    #[cfg(feature = "external-clock")]
+    fn try_get_physical_time_after(
+        &self,
+        delay: std::time::Duration,
+    ) -> Result<std::time::Instant, crate::physical_time::PhysicalClockError> {
+        use crate::physical_time::{PhysicalClockError::Overflow, PhysicalTimeNanos};
+        if let Some(ctx) = &self.physical_clock {
+            ctx.clock
+                .now()?
+                .checked_add(PhysicalTimeNanos::from_duration(delay)?)?
+                .to_instant(ctx.origin)
+        } else {
+            std::time::Instant::now().checked_add(delay).ok_or(Overflow)
+        }
+    }
+
+    #[cfg(feature = "external-clock")]
+    fn try_get_physical_time(
+        &self,
+    ) -> Result<std::time::Instant, crate::physical_time::PhysicalClockError> {
+        self.physical_clock.as_ref().map_or_else(
+            || Ok(std::time::Instant::now()),
+            crate::physical_clock::ClockContext::instant,
+        )
+    }
+    #[cfg(feature = "external-clock")]
+    fn physical_time(
+        &self,
+    ) -> Result<
+        Option<crate::physical_time::PhysicalTimeNanos>,
+        crate::physical_time::PhysicalClockError,
+    > {
+        self.physical_clock
+            .as_ref()
+            .map(|ctx| ctx.clock.now())
+            .transpose()
+    }
+
     fn enclave_id(&self) -> EnclaveKey {
         self.enclave_key
     }
@@ -308,6 +449,8 @@ impl CommonContext for Context {
 /// SendContext can be shared across threads and allows asynchronous events to be scheduled.
 #[derive(Debug, Clone)]
 pub struct SendContext {
+    #[cfg(feature = "external-clock")]
+    pub(crate) physical_clock: Option<crate::physical_clock::ClockContext>,
     /// Enclave ID for this context
     pub(crate) enclave_key: EnclaveKey,
     /// Channel for asynchronous events
@@ -317,6 +460,44 @@ pub struct SendContext {
 }
 
 impl CommonContext for SendContext {
+    #[cfg(feature = "external-clock")]
+    fn try_get_physical_time_after(
+        &self,
+        delay: std::time::Duration,
+    ) -> Result<std::time::Instant, crate::physical_time::PhysicalClockError> {
+        use crate::physical_time::{PhysicalClockError::Overflow, PhysicalTimeNanos};
+        if let Some(ctx) = &self.physical_clock {
+            ctx.clock
+                .now()?
+                .checked_add(PhysicalTimeNanos::from_duration(delay)?)?
+                .to_instant(ctx.origin)
+        } else {
+            std::time::Instant::now().checked_add(delay).ok_or(Overflow)
+        }
+    }
+
+    #[cfg(feature = "external-clock")]
+    fn try_get_physical_time(
+        &self,
+    ) -> Result<std::time::Instant, crate::physical_time::PhysicalClockError> {
+        self.physical_clock.as_ref().map_or_else(
+            || Ok(std::time::Instant::now()),
+            crate::physical_clock::ClockContext::instant,
+        )
+    }
+    #[cfg(feature = "external-clock")]
+    fn physical_time(
+        &self,
+    ) -> Result<
+        Option<crate::physical_time::PhysicalTimeNanos>,
+        crate::physical_time::PhysicalClockError,
+    > {
+        self.physical_clock
+            .as_ref()
+            .map(|ctx| ctx.clock.now())
+            .transpose()
+    }
+
     fn enclave_id(&self) -> EnclaveKey {
         self.enclave_key
     }
@@ -455,6 +636,8 @@ mod tests {
         drop(async_rx);
         let (_shutdown_tx, shutdown_rx) = keepalive::channel();
         let mut ctx = SendContext {
+            #[cfg(feature = "external-clock")]
+            physical_clock: None,
             enclave_key: EnclaveKey::from(0),
             async_tx,
             shutdown_rx,

@@ -214,3 +214,13 @@ pub(super) fn federate_image(
 
 #[cfg(test)]
 mod tests;
+
+pub(super) fn with_physical_clock(
+    image: blake3::Hash,
+    clock: Option<&crate::manifest::ExternalClock>,
+) -> Result<blake3::Hash> {
+    match clock {
+        None => Ok(image),
+        Some(clock) => hash("boomerang.physical-clock.v1", &(image.as_bytes(), clock)),
+    }
+}

@@ -133,6 +133,16 @@ pub(crate) trait ExecutionStorage<S: Schedule> {
     fn action_from_runtime(&self, key: ActionKey) -> S::Action;
     /// Retain an action value until its scheduled tag is processed.
     fn push_action_value(&mut self, action: S::Action, tag: Tag, value: Box<dyn ReactorData>);
+    /// Reserves separate microsteps for queued physical values in selected-clock storage.
+    #[cfg(feature = "external-clock")]
+    fn physical_event_tag(
+        &self,
+        _target: &AsyncEventTarget,
+        tag: Tag,
+    ) -> Result<Tag, crate::physical_time::PhysicalClockError> {
+        // Live storage cannot select an external clock.
+        Ok(tag)
+    }
     /// Stages one inbound scheduler-boundary value until its logical tag is processed.
     fn stage_inbound_boundary_value(
         &mut self,
@@ -170,6 +180,8 @@ where
 {
     /// Enclave whose logical time this invocation advances.
     pub(super) key: EnclaveKey,
+    #[cfg(feature = "external-clock")]
+    pub(super) physical_clock: Option<crate::physical_clock::ClockContext>,
     /// Existing live scheduler configuration.
     pub(super) config: &'a Config,
     /// Optional snapshot-only scheduler observation state.
@@ -353,6 +365,20 @@ where
                 value,
             } => {
                 let tag = Tag::from_physical_time(*self.start_time, time);
+                #[cfg(feature = "external-clock")]
+                let tag = if let Some(clock) = &self.physical_clock {
+                    match crate::physical_clock::after_current_tag(tag, *self.current_tag)
+                        .and_then(|tag| self.storage.physical_event_tag(&target, tag))
+                    {
+                        Ok(tag) => tag,
+                        Err(error) => {
+                            clock.clock.latch(error);
+                            return Ok(());
+                        }
+                    }
+                } else {
+                    tag
+                };
                 self.admit_value(tag, target, value, origin)?;
             }
             AsyncEvent::Shutdown { delay } => {
@@ -770,8 +796,18 @@ where
         next_tag: Tag,
     ) -> Result<Option<bool>, SchedulerError<E::Error>> {
         if !self.config.fast_forward {
-            let target = next_tag.to_logical_time(*self.start_time);
-            match self.synchronize_wall_clock(target)? {
+            #[cfg(feature = "external-clock")]
+            let external = self.physical_clock.clone();
+            #[cfg(feature = "external-clock")]
+            let received = if let Some(clock) = external {
+                self.synchronize_external_clock(&clock, next_tag)?
+            } else {
+                self.synchronize_wall_clock(next_tag.to_logical_time(*self.start_time))?
+            };
+            #[cfg(not(feature = "external-clock"))]
+            let received =
+                self.synchronize_wall_clock(next_tag.to_logical_time(*self.start_time))?;
+            match received {
                 WallClockReceive::DeadlineReached => {}
                 WallClockReceive::Interrupted(event) => {
                     if matches!(
@@ -931,7 +967,15 @@ where
 
     /// Process one scheduler step, returning coordination failures to the caller.
     pub(super) fn try_next(&mut self) -> Result<bool, SchedulerError<E::Error>> {
+        #[cfg(feature = "external-clock")]
+        if self.abort_if_physical_clock_failed() {
+            return Ok(false);
+        }
         self.pump_pending_async_events()?;
+        #[cfg(feature = "external-clock")]
+        if self.abort_if_physical_clock_failed() {
+            return Ok(false);
+        }
         self.observe_event_queue();
 
         if self.event_rx.is_closed() {
@@ -960,6 +1004,10 @@ where
                 return Ok(keep_running);
             }
 
+            #[cfg(feature = "external-clock")]
+            if self.abort_if_physical_clock_failed() {
+                return Ok(false);
+            }
             let result = self.process_next_event(logical_horizon);
             self.observe_event_queue();
             result
@@ -991,6 +1039,59 @@ where
 
         self.shutdown();
         Ok(())
+    }
+
+    #[cfg(feature = "external-clock")]
+    fn abort_if_physical_clock_failed(&mut self) -> bool {
+        let failed = self
+            .physical_clock
+            .as_ref()
+            .is_some_and(|ctx| ctx.clock.now().is_err());
+        if failed {
+            self.abort_for_federate_termination();
+        }
+        failed
+    }
+
+    #[cfg(feature = "external-clock")]
+    fn synchronize_external_clock(
+        &mut self,
+        clock: &crate::physical_clock::ClockContext,
+        tag: Tag,
+    ) -> Result<WallClockReceive, SchedulerError<E::Error>> {
+        let registered = crate::physical_time::PhysicalTimeNanos::from_tag(tag)
+            .and_then(|deadline| clock.clock.register(clock.slot, deadline));
+        match registered {
+            Ok(true) => Ok(WallClockReceive::DeadlineReached),
+            Err(error) => {
+                clock.clock.latch(error);
+                Ok(WallClockReceive::FederateTerminated(
+                    FederateTermination::Abort,
+                ))
+            }
+            Ok(false) => {
+                self.observe(SchedulerPhase::PhysicalWait);
+                let event = self.event_rx.recv();
+                self.observe(SchedulerPhase::Framework);
+                clock.clock.cancel(clock.slot);
+                match event {
+                    Ok(event) => Ok(WallClockReceive::Interrupted(event)),
+                    Err(_) => {
+                        let terminal = self
+                            .federate_coordination
+                            .as_deref_mut()
+                            .map_or(
+                                Ok(None),
+                                FederateSchedulerCoordination::terminal_after_event_channel_closed,
+                            )
+                            .map_err(SchedulerError::FederateCoordination)?;
+                        Ok(WallClockReceive::FederateTerminated(
+                            terminal.unwrap_or(FederateTermination::Abort),
+                        ))
+                    }
+                }
+            }
+        }
     }
 
     // Wait until the wall-clock time is reached

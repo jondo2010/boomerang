@@ -31,6 +31,8 @@ pub struct CargoPackage {
 /// Resolved target and runtime configuration for one Federate.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedFederate {
+    /// Hosted clock selection and explicit driver, absent on ordinary profiles.
+    pub physical_clock: Option<crate::manifest::ExternalClock>,
     /// Validated, fully inherited bounded capture limits, absent for other backends.
     pub bounded_tracing: Option<crate::BoundedTracingLimits>,
     /// Stable placement groups assigned to this Federate.
@@ -442,6 +444,7 @@ fn workspace_member<'a>(metadata: &'a Metadata, name: &str) -> Result<&'a Packag
 /// Resolves workspace-relative Federate configuration paths.
 fn resolve_federate(workspace_root: &Path, federate: &Federate) -> ResolvedFederate {
     ResolvedFederate {
+        physical_clock: federate.physical_clock.clone(),
         bounded_tracing: None,
         groups: federate.groups.clone(),
         target: federate.target.clone(),

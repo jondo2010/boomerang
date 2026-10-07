@@ -66,6 +66,18 @@ pub struct Topology {
     pub entry: String,
 }
 
+/// Hosted clock sidecar; the driver entry receives a clone of the run's selected ManualClock.
+#[derive(Clone, Debug, Deserialize, serde::Serialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalClock {
+    /// Stable domain included in artifact fingerprints.
+    pub domain: u64,
+    /// Existing component-instance binding whose selected payload exports the driver.
+    pub binding: String,
+    /// Driver function relative to that payload's crate root.
+    pub entry: String,
+}
+
 /// One named deployment variant, parameterized by its Federate representation.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -141,6 +153,28 @@ impl Deployment<Federate> {
         };
         validate("bounded-tracing", self.bounded_tracing.as_ref())?;
         for (id, federate) in &self.federates {
+            if let Some(clock) = &federate.physical_clock {
+                if federate.runtime != "std"
+                    || self.federates.len() != 1
+                    || federate.target_json.is_some()
+                    || federate
+                        .target
+                        .as_ref()
+                        .is_some_and(|target| target != &target_lexicon::HOST.to_string())
+                {
+                    return Err(invalid_deployment(
+                        name,
+                        "physical-clock requires one local hosted std Federate on the host target",
+                    ));
+                }
+                if !self.bindings.contains_key(&clock.binding) {
+                    return Err(invalid_deployment(
+                        name,
+                        "physical-clock.binding must name a declared payload binding",
+                    ));
+                }
+                validate_component_path(&clock.entry)?;
+            }
             validate(
                 &format!("federates.{id}.bounded-tracing"),
                 federate.bounded_tracing.as_ref(),
@@ -312,6 +346,8 @@ fn validate_component_path(value: &str) -> Result<()> {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct Federate {
+    /// Optional hosted external clock and its explicitly selected payload driver.
+    pub physical_clock: Option<ExternalClock>,
     /// Per-field overrides of deployment bounded capture defaults.
     pub bounded_tracing: Option<BoundedTracingSettings>,
     /// Stable placement groups assigned to the Federate.
@@ -435,4 +471,27 @@ fn diagnostic_path(path: &str, message: &str) -> String {
 fn unknown_field(message: &str) -> Option<&str> {
     let field = message.split_once("unknown field `")?.1;
     field.split_once('`').map(|(field, _)| field)
+}
+
+#[cfg(test)]
+mod clock_tests {
+    use super::*;
+    #[test]
+    fn physical_clock_configuration_requires_a_local_hosted_driver() {
+        let source = include_str!("../tests/fixtures/workspace/Boomerang.toml");
+        let source = format!("{source}\n[deployments.production.federates.host.physical-clock]\ndomain = 7\nbinding = 'sensor'\nentry = 'drive_clock'\n");
+        let parsed = parse_manifest(&source).unwrap();
+        let selected = parsed.deployments["production"].federates["host"]
+            .physical_clock
+            .as_ref()
+            .unwrap();
+        assert_eq!(selected.domain, 7);
+        assert!(
+            parse_manifest(&source.replace("runtime = \"std\"", "runtime = \"pico\"")).is_err()
+        );
+        assert!(
+            parse_manifest(&source.replace("entry = 'drive_clock'", "entry = 'not valid'"))
+                .is_err()
+        );
+    }
 }

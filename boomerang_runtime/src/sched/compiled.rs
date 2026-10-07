@@ -575,6 +575,60 @@ mod tests {
         OwnedStorage::new(EnclaveImageView::new(image.clone()).unwrap(), bindings).unwrap()
     }
 
+    #[cfg(feature = "external-clock")]
+    #[test]
+    fn physical_failure_during_pump_stops_before_fast_forward_grant() {
+        use crate::physical_clock::{ClockContext, ManualClock};
+        use crate::physical_time::{PhysicalClockDomainId, PhysicalClockError};
+        #[derive(Debug)]
+        struct FailOnDrop(ManualClock);
+        impl Drop for FailOnDrop {
+            fn drop(&mut self) {
+                self.0.latch(PhysicalClockError::Overflow);
+            }
+        }
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut storage = build_storage(Arc::clone(&calls), false);
+        let origin = std::time::Instant::now();
+        let clock = ManualClock::new(PhysicalClockDomainId(7)).unwrap();
+        storage.set_physical_clock(ClockContext {
+            clock: clock.clone(),
+            slot: 0,
+            origin,
+        });
+        assert!(storage
+            .scheduler_event_tx()
+            .try_send(AsyncEvent::Logical {
+                tag: Tag::NEVER, // Rejected and dropped inside the event pump.
+                target: crate::event::AsyncEventTarget::Action(ActionKey::from(0)),
+                value: Box::new(FailOnDrop(clock.clone())),
+            })
+            .unwrap());
+        let mut port = coordination(
+            Arc::clone(&calls),
+            [FederateTagAcquisition::Granted],
+            [],
+            [],
+        );
+        run_owned_scheduler_with_coordination(
+            &mut storage,
+            &Config::default().with_fast_forward(true),
+            origin,
+            EnclaveDependencies::new(EnclaveKey::default()),
+            Some(&mut port),
+        )
+        .unwrap();
+        assert_eq!(clock.now(), Err(PhysicalClockError::Overflow));
+        let calls = calls.lock().unwrap();
+        assert!(
+            !calls.iter().any(|call| matches!(
+                call,
+                Call::Acquire(_) | Call::Reaction(..) | Call::Complete(_)
+            )),
+            "work after failure: {calls:?}"
+        );
+    }
+
     /// Builds a scripted coordination port over one shared call log.
     fn coordination(
         calls: Arc<Mutex<Vec<Call>>>,

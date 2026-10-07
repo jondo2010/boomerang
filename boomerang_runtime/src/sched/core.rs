@@ -968,15 +968,14 @@ where
     /// Process one scheduler step, returning coordination failures to the caller.
     pub(super) fn try_next(&mut self) -> Result<bool, SchedulerError<E::Error>> {
         #[cfg(feature = "external-clock")]
-        if self
-            .physical_clock
-            .as_ref()
-            .is_some_and(|ctx| ctx.clock.now().is_err())
-        {
-            self.abort_for_federate_termination();
+        if self.abort_if_physical_clock_failed() {
             return Ok(false);
         }
         self.pump_pending_async_events()?;
+        #[cfg(feature = "external-clock")]
+        if self.abort_if_physical_clock_failed() {
+            return Ok(false);
+        }
         self.observe_event_queue();
 
         if self.event_rx.is_closed() {
@@ -1005,6 +1004,10 @@ where
                 return Ok(keep_running);
             }
 
+            #[cfg(feature = "external-clock")]
+            if self.abort_if_physical_clock_failed() {
+                return Ok(false);
+            }
             let result = self.process_next_event(logical_horizon);
             self.observe_event_queue();
             result
@@ -1036,6 +1039,18 @@ where
 
         self.shutdown();
         Ok(())
+    }
+
+    #[cfg(feature = "external-clock")]
+    fn abort_if_physical_clock_failed(&mut self) -> bool {
+        let failed = self
+            .physical_clock
+            .as_ref()
+            .is_some_and(|ctx| ctx.clock.now().is_err());
+        if failed {
+            self.abort_for_federate_termination();
+        }
+        failed
     }
 
     #[cfg(feature = "external-clock")]

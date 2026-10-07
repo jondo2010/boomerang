@@ -13,7 +13,8 @@ pub struct ExecutionEpoch(pub u128);
 pub struct PhysicalTimeNanos(pub u64);
 
 /// Checked physical-time and clock protocol failures.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("physical clock: {self:?}")]
 pub enum PhysicalClockError {
     /// The driver moved time backwards.
     Regression,
@@ -34,13 +35,6 @@ pub enum PhysicalClockError {
     /// A selected scheduler mailbox cannot retain even one wake notification.
     WakeCapacity,
 }
-
-impl core::fmt::Display for PhysicalClockError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "physical clock: {self:?}")
-    }
-}
-impl core::error::Error for PhysicalClockError {}
 
 impl PhysicalTimeNanos {
     /// Converts an epoch offset to a platform-independent duration.

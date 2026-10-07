@@ -43,6 +43,9 @@ fn closure_and_failure_are_terminal_and_epochs_are_fresh() {
     first.close();
     first.fail();
     assert_eq!(first.now(), Err(PhysicalClockError::Closed));
+    let error: &dyn core::error::Error = &PhysicalClockError::Closed;
+    assert_eq!(error.to_string(), "physical clock: Closed");
+    assert!(error.source().is_none());
     second.fail();
     assert_eq!(second.now(), Err(PhysicalClockError::Failed));
 }

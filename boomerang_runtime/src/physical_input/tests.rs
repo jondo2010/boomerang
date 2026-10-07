@@ -279,11 +279,12 @@ fn entire_batch_rejects_before_commit_and_partial_fanout_aborts() {
 }
 #[test]
 fn required_overflow_disconnect_and_checked_mapping_are_terminal_or_rejected() {
+    use InputErrorKind::{Disconnected, Overflow};
     for (sources, mode) in [[false, false], [false, true], [true, false]]
         .into_iter()
         .flat_map(|sources| [0, 1, 2].map(|mode| (sources, mode)))
     {
-        let mut h = harness(&sources, 1, 0, 1);
+        let mut h = harness(&sources, 1 + usize::from(mode == 1), 0, 1);
         if mode == 2 {
             Arc::get_mut(&mut h.inputs.0).unwrap().max_values = 1;
         }
@@ -295,21 +296,23 @@ fn required_overflow_disconnect_and_checked_mapping_are_terminal_or_rejected() {
         if mode == 1 {
             h.rx[0].close().unwrap();
         }
+        let mut first = sample(&h, 0, 1, 0);
+        first.values[0].target = TargetKey(h.rx.len() - 1); // Last Enclave first.
         let generation = h.inputs.grant_constraint().1;
         let failure = h
             .inputs
-            .submit(vec![sample(&h, 0, 1, 0), sample(&h, 1, 1, 0)], &[])
+            .submit(vec![first, sample(&h, 1, 1, 0)], &[])
             .unwrap_err();
         assert_eq!(
             failure.kind,
-            if mode == 1 {
-                InputErrorKind::Disconnected
-            } else {
-                InputErrorKind::Overflow
-            }
+            if mode == 1 { Disconnected } else { Overflow }
         );
         let state = h.inputs.0.state.lock().unwrap();
         assert_eq!(state.failure.is_some(), required);
+        if !required && mode == 1 {
+            assert_eq!(failure.source_id.as_deref(), Some("s1"));
+            assert!(state.sources[0].enabled && !state.sources[1].enabled);
+        }
         assert!(
             state.retained.is_empty() && state.sources.iter().all(|source| source.last.is_none())
         );

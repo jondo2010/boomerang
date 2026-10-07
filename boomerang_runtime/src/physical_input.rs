@@ -559,7 +559,8 @@ impl InputAdmission {
             // A rejected atomic batch loses every value, including required sources elsewhere.
             let source = required.or_else(|| {
                 reservations
-                    .first()
+                    .iter()
+                    .find(|(enclave, _, _)| *enclave == slot)
                     .map(|(_, target, _)| self.0.targets[target.0].source)
             });
             match state.participants[slot]

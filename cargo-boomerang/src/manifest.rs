@@ -487,6 +487,9 @@ mod clock_tests {
             .unwrap();
         assert_eq!(selected.domain, 7);
         assert!(
+            parse_manifest(&source.replace("binding = 'sensor'", "binding = 'missing'")).is_err()
+        );
+        assert!(
             parse_manifest(&source.replace("runtime = \"std\"", "runtime = \"pico\"")).is_err()
         );
         assert!(

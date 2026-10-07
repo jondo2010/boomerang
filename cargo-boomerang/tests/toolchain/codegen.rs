@@ -215,7 +215,7 @@ fn generated_launcher_rejects_unsupported_coordination_before_publication() {
 fn generated_external_clock_launcher_calls_selected_driver_and_executes() {
     let _guard = support::toolchain_lock();
     let workspace = support::copied_fixture_workspace();
-    let target = tempfile::tempdir().unwrap();
+    let target = support::toolchain_target();
     let _manifest = support::edit_manifest(workspace.path(), |manifest| {
         manifest["deployments"]["production"]["federates"]["host"]
             .as_table_mut()
@@ -254,7 +254,7 @@ pub fn drive_clock(clock: boomerang_runtime::physical_clock::ManualClock) -> Res
         .status()
         .unwrap()
         .success());
-    let launcher = support::with_target_directory(target.path(), || {
+    let launcher = support::with_target_directory(&target, || {
         cargo_boomerang::generate_launcher(workspace.path(), "production", "host").unwrap()
     });
     let source = std::fs::read_to_string(launcher.source_path()).unwrap();

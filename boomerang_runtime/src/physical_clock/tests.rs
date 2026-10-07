@@ -7,7 +7,10 @@ fn clock() -> ManualClock {
 #[test]
 fn repeats_jumps_and_regression_are_retained() {
     let clock = clock();
-    assert_eq!(clock.now(), Ok(PhysicalTimeNanos(0)));
+    let capability: &dyn PhysicalClock = &clock;
+    assert_eq!(capability.domain(), clock.domain());
+    assert_eq!(capability.epoch(), clock.epoch());
+    assert_eq!(capability.now(), Ok(PhysicalTimeNanos(0)));
     clock.advance_to(PhysicalTimeNanos(10)).unwrap();
     clock.advance_to(PhysicalTimeNanos(10)).unwrap();
     assert_eq!(clock.now(), Ok(PhysicalTimeNanos(10)));
@@ -124,16 +127,14 @@ fn checked_conversions_and_physical_actions_use_selected_time() {
         action.next_physical_tag(Tag::new(Duration::ZERO, usize::MAX)),
         Err(PhysicalClockError::Overflow)
     );
-    ctx.try_schedule_action(&mut action, 1, Some(Duration::nanoseconds(3)))
-        .unwrap();
+    ctx.schedule_action(&mut action, 1, Some(Duration::nanoseconds(3)));
     assert_eq!(
         ctx.trigger_res.scheduled_actions[0].1,
         Tag::new(Duration::nanoseconds(47), 0)
     );
     let sender = ctx.make_send_context();
     assert_eq!(sender.physical_time().unwrap(), Some(PhysicalTimeNanos(42)));
-    sender
-        .try_schedule_action_async(&action, 2, Some(Duration::nanoseconds(3)))
+    ctx.try_schedule_action_async(&action, 2, Some(Duration::nanoseconds(3)))
         .unwrap();
     assert!(
         matches!(rx.recv().unwrap(), AsyncEvent::Physical { time, .. } if time == origin + std::time::Duration::from_nanos(47))
@@ -156,6 +157,11 @@ fn checked_conversions_and_physical_actions_use_selected_time() {
         ctx.try_schedule_action(&mut action, 4, None),
         Err(PhysicalClockError::Closed)
     );
+    ctx.physical_clock = None;
+    ctx.try_schedule_action(&mut action, 5, None).unwrap();
+    let tag = ctx.trigger_res.scheduled_actions.last().unwrap().1;
+    assert_eq!(action.get_value_at(tag), Some(&5));
+    assert!(ctx.make_send_context().try_get_physical_time().unwrap() >= origin);
 }
 
 struct CountingAllocator;

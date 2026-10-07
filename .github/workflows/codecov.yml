@@ -52,7 +52,8 @@ jobs:
         run: >-
           cargo llvm-cov --no-clean -p cargo-boomerang --all-features
           --test toolchain --
-          run::generated_monolith_cli_matches_owned_execution --exact
+          run::generated_monolith_cli_matches_owned_execution
+          codegen::generated_external_clock_launcher_calls_selected_driver_and_executes --exact
 
       # Exercise the tool-owned facet cfg values independently of Cargo features.
       - name: Collect payload facet coverage

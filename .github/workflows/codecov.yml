@@ -17,7 +17,7 @@ concurrency:
 jobs:
   coverage:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     env:
       CARGO_TERM_COLOR: always
@@ -48,13 +48,10 @@ jobs:
           cargo llvm-cov --no-clean -p cargo-boomerang --all-features
           --lib --bin cargo-boomerang --test manifest --test workspace
 
-      - name: Collect generated-launcher smoke coverage
+      - name: Collect cargo-boomerang toolchain coverage
         run: >-
           cargo llvm-cov --no-clean -p cargo-boomerang --all-features
-          --test toolchain --
-          run::generated_monolith_cli_matches_owned_execution
-          codegen::generated_external_clock_launcher_calls_selected_driver_and_executes
-          codegen::generated_physical_inputs_resolve_declared_targets_and_execute --exact
+          --test toolchain
 
       # Exercise the tool-owned facet cfg values independently of Cargo features.
       - name: Collect payload facet coverage

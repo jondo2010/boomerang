@@ -207,6 +207,9 @@ pub(crate) struct FederateCoordinationState {
     pub(crate) physical_inputs: Option<crate::physical_input::InputAdmission>,
     #[cfg(feature = "external-clock")]
     input_generation: u64,
+    /// Uncapped authority retained only until the next publication.
+    #[cfg(feature = "external-clock")]
+    input_acquisition: Option<FederateAcquisition>,
     /// Sparse participant state keyed by original compiled identity.
     participants: TinySecondaryMap<EnclaveIndex, ParticipantState>,
     /// Version of the current aggregate candidate.
@@ -257,6 +260,8 @@ impl FederateCoordinationState {
             physical_inputs: None,
             #[cfg(feature = "external-clock")]
             input_generation: 0,
+            #[cfg(feature = "external-clock")]
+            input_acquisition: None,
             participants,
             revision: CoordinationRevision::new(0),
             pending_publication: None,
@@ -371,6 +376,14 @@ impl FederateCoordinationState {
             return Ok(Vec::new());
         }
         #[cfg(feature = "external-clock")]
+        if input_grant.is_some()
+            && self.input_acquisition.is_none_or(|old| {
+                old.revision() != acquisition.revision() || old.granted() < granted
+            })
+        {
+            self.input_acquisition = Some(acquisition);
+        }
+        #[cfg(feature = "external-clock")]
         let granted = input_grant
             .as_ref()
             .map_or(granted, |(_, (cap, _))| granted.min(*cap));
@@ -415,6 +428,15 @@ impl FederateCoordinationState {
         self.pending_publication = None;
 
         Ok(actions)
+    }
+
+    /// Reapplies retained backend authority when only the input cap advances.
+    #[cfg(feature = "external-clock")]
+    pub(crate) fn input_progress(
+        &mut self,
+    ) -> Result<Vec<CoordinationAction>, CoordinationStateError> {
+        self.input_acquisition
+            .map_or_else(|| Ok(Vec::new()), |grant| self.handle_acquisition(grant))
     }
 
     /// Reuses accepted authority only after the publication crossed the backend fence.
@@ -785,6 +807,7 @@ impl FederateCoordinationState {
             .with_grant_horizon(self.grant_horizon);
         #[cfg(feature = "external-clock")]
         if let Some(inputs) = &self.physical_inputs {
+            self.input_acquisition = None;
             self.input_generation = inputs.grant_constraint().1;
         }
         self.pending_publication = Some(publication);

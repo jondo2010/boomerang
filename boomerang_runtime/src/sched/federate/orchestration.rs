@@ -127,6 +127,9 @@ pub(crate) trait FederateSchedulerCoordination {
 
 /// Participant-to-coordinator messages that retain only typed state inputs and legacy requests.
 enum CoordinatorReport {
+    /// A changed cached input frontier can release retained backend authority.
+    #[cfg(feature = "external-clock")]
+    InputProgress,
     /// One scheduler-originated pure-state message.
     Scheduler(
         /// Typed scheduler message stamped by the participant.
@@ -202,6 +205,11 @@ pub(crate) struct FederateAbortHandle {
 }
 
 impl FederateAbortHandle {
+    /// Makes an input-cap increase actionable on the existing coordinator.
+    #[cfg(feature = "external-clock")]
+    pub(crate) fn input_progress(&self) {
+        let _ = self.report_tx.send(CoordinatorReport::InputProgress);
+    }
     /// Requests idempotent Federate-wide abortion without blocking the supervising thread.
     pub(crate) fn abort(&self) {
         let _ = self
@@ -296,6 +304,11 @@ impl<B: FederateCoordinationBackend> FederateCoordinator<B> {
         report: CoordinatorReport,
     ) -> Result<bool, FederateCoordinationError> {
         match report {
+            #[cfg(feature = "external-clock")]
+            CoordinatorReport::InputProgress => {
+                let actions = self.state.input_progress()?;
+                self.execute_actions(actions)
+            }
             CoordinatorReport::PublicationObserved {
                 enclave,
                 generation,

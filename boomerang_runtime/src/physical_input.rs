@@ -436,6 +436,12 @@ impl InputAdmission {
         let mut frontiers: Vec<_> = state.sources.iter().map(|s| s.frontier).collect();
         let mut reservations = Vec::new();
         let mut mapped = Vec::new();
+        let required = observations.iter().map(|o| o.source).find(|key| {
+            state
+                .sources
+                .get(key.0)
+                .is_some_and(|source| source.required)
+        });
         for observation in &observations {
             let key = observation.source;
             let validation = (|| {
@@ -498,6 +504,9 @@ impl InputAdmission {
                 Ok(())
             })();
             if let Err(kind) = validation {
+                let key = required
+                    .filter(|_| kind == InputErrorKind::Overflow)
+                    .unwrap_or(key);
                 return Err(self.reject(&mut state, Some(key), kind, arrival));
             }
         }
@@ -547,10 +556,12 @@ impl InputAdmission {
             .enumerate()
             .filter(|(_, values)| !values.is_empty())
         {
-            let source = reservations
-                .iter()
-                .find(|(enclave, _, _)| *enclave == slot)
-                .map(|(_, target, _)| self.0.targets[target.0].source);
+            // A rejected atomic batch loses every value, including required sources elsewhere.
+            let source = required.or_else(|| {
+                reservations
+                    .first()
+                    .map(|(_, target, _)| self.0.targets[target.0].source)
+            });
             match state.participants[slot]
                 .tx
                 .try_send(AsyncEvent::PhysicalBatch(InputBatchEvent { values }))
@@ -569,6 +580,9 @@ impl InputAdmission {
                     if sent {
                         state.failure.get_or_insert_with(|| diagnostic.clone());
                         self.0.abort.abort();
+                    } else {
+                        // Nothing was published; retain existing grants under this same lock.
+                        state.generation -= 1;
                     }
                     return Err(diagnostic);
                 }
@@ -594,6 +608,7 @@ impl InputAdmission {
                     .filter(|s| s.required)
                     .map(|s| s.frontier.map(|f| f.to_tag(s.delay).unwrap().decrement())),
             );
+            self.0.abort.input_progress();
         }
         if sent || changed {
             for participant in &state.participants {

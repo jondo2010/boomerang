@@ -7,7 +7,8 @@ fn required_without_frontier_blocks_all_finite_tags() {
     assert_eq!(aggregate([].into_iter()), Tag::FOREVER);
 }
 use crate::sched::federate::{
-    FederateCoordinationParts, LifecyclePolicy, LocalFederateCoordinationBackend,
+    state::SchedulerMessage, FederateCoordinationParts, LifecyclePolicy,
+    LocalFederateCoordinationBackend,
 };
 struct Harness {
     inputs: InputAdmission,
@@ -271,26 +272,50 @@ fn entire_batch_rejects_before_commit_and_partial_fanout_aborts() {
         Some(AsyncEvent::PhysicalBatch(_))
     ));
     assert!(!h.inputs.reserve(0, Tag::ZERO));
+    assert_eq!(h.inputs.grant_constraint().1, 1);
     assert!(h.inputs.0.state.lock().unwrap().sources[0]
         .frontier
         .is_none());
 }
 #[test]
 fn required_overflow_disconnect_and_checked_mapping_are_terminal_or_rejected() {
-    for required in [false, true] {
-        let h = harness(&[required], 2, 0, 1);
+    for (sources, mode) in [[false, false], [false, true], [true, false]]
+        .into_iter()
+        .flat_map(|sources| [0, 1, 2].map(|mode| (sources, mode)))
+    {
+        let mut h = harness(&sources, 1, 0, 1);
+        if mode == 2 {
+            Arc::get_mut(&mut h.inputs.0).unwrap().max_values = 1;
+        }
+        let required = sources.contains(&true);
         h.inputs.0.state.lock().unwrap().participants[0]
             .tx
             .try_send(AsyncEvent::FederateResume)
             .unwrap();
+        if mode == 1 {
+            h.rx[0].close().unwrap();
+        }
+        let generation = h.inputs.grant_constraint().1;
+        let failure = h
+            .inputs
+            .submit(vec![sample(&h, 0, 1, 0), sample(&h, 1, 1, 0)], &[])
+            .unwrap_err();
         assert_eq!(
-            h.inputs
-                .submit(vec![sample(&h, 0, 1, 0)], &[])
-                .unwrap_err()
-                .kind,
-            InputErrorKind::Overflow
+            failure.kind,
+            if mode == 1 {
+                InputErrorKind::Disconnected
+            } else {
+                InputErrorKind::Overflow
+            }
         );
-        assert_eq!(h.inputs.0.state.lock().unwrap().failure.is_some(), required);
+        let state = h.inputs.0.state.lock().unwrap();
+        assert_eq!(state.failure.is_some(), required);
+        assert!(
+            state.retained.is_empty() && state.sources.iter().all(|source| source.last.is_none())
+        );
+        assert_eq!(state.generation, generation);
+        drop(state);
+        assert_eq!(h.inputs.reserve(0, Tag::ZERO), !required);
         h.inputs.disconnect(SourceKey(0));
         assert_eq!(h.inputs.0.state.lock().unwrap().failure.is_some(), required);
     }
@@ -388,23 +413,29 @@ fn cached_horizon_and_reservations_allocate_nothing_with_maximum_batches() {
     }
 }
 
-#[test]
-fn consumed_batch_invalidates_queued_grant_until_coordinator_reauthorizes() {
-    use crate::sched::federate::{state::SchedulerMessage, FederateAcquisition};
-    let mut h = harness(&[false], 2, 0, 8);
-    h.inputs.0.clock.advance_to(PhysicalTimeNanos(10)).unwrap();
-    h._coordination.coordinator.state.physical_inputs = Some(h.inputs.clone());
-    let tag = Tag::new(Duration::nanoseconds(10), 0);
-    for index in 0..2 {
-        h._coordination
-            .coordinator
-            .state
+fn republish(h: &mut Harness, tag: Tag) {
+    let state = &mut h._coordination.coordinator.state;
+    for slot in 0..h.rx.len() {
+        let enclave = EnclaveIndex::new(slot as u32);
+        state
+            .handle_scheduler(SchedulerMessage::Active { enclave })
+            .unwrap();
+        state
             .handle_scheduler(SchedulerMessage::Publish {
-                enclave: EnclaveIndex::new(index),
+                enclave,
                 next_event: Some(tag),
             })
             .unwrap();
     }
+}
+#[test]
+fn consumed_batch_invalidates_queued_grant_until_coordinator_reauthorizes() {
+    use crate::sched::federate::FederateAcquisition;
+    let mut h = harness(&[false], 2, 0, 8);
+    h.inputs.0.clock.advance_to(PhysicalTimeNanos(10)).unwrap();
+    h._coordination.coordinator.state.physical_inputs = Some(h.inputs.clone());
+    let tag = Tag::new(Duration::nanoseconds(10), 0);
+    republish(&mut h, tag);
     let revision = h._coordination.coordinator.state.revision();
     h._coordination
         .coordinator
@@ -419,24 +450,9 @@ fn consumed_batch_invalidates_queued_grant_until_coordinator_reauthorizes() {
         .state
         .handle_acquisition(FederateAcquisition::new(revision, Tag::FOREVER))
         .unwrap();
+    h._coordination.coordinator.state.input_progress().unwrap();
     assert!(!h.inputs.reserve(0, tag), "a queued grant from before batch admission must be stale even after its envelope was consumed");
-    for index in 0..2 {
-        h._coordination
-            .coordinator
-            .state
-            .handle_scheduler(SchedulerMessage::Active {
-                enclave: EnclaveIndex::new(index),
-            })
-            .unwrap();
-        h._coordination
-            .coordinator
-            .state
-            .handle_scheduler(SchedulerMessage::Publish {
-                enclave: EnclaveIndex::new(index),
-                next_event: Some(tag),
-            })
-            .unwrap();
-    }
+    republish(&mut h, tag);
     let revision = h._coordination.coordinator.state.revision();
     h._coordination
         .coordinator
@@ -444,4 +460,47 @@ fn consumed_batch_invalidates_queued_grant_until_coordinator_reauthorizes() {
         .handle_acquisition(FederateAcquisition::new(revision, tag))
         .unwrap();
     assert!(h.inputs.reserve(0, tag));
+}
+
+#[test]
+fn settled_acquisition_releases_successive_frontiers_through_coordinator() {
+    use crate::sched::federate::{
+        FederateAcquisition, FederateSchedulerCoordination, FederateTagAcquisition,
+    };
+    let mut h = harness(&[true], 2, 0, 8);
+    let inputs = h.inputs.clone();
+    let tag = Tag::new(Duration::nanoseconds(2), 0);
+    h._coordination.coordinator.state.physical_inputs = Some(inputs.clone());
+    republish(&mut h, tag);
+    let state = &mut h._coordination.coordinator.state;
+    // The backend's acquisition has been consumed and capped before the workers wait.
+    state
+        .handle_acquisition(FederateAcquisition::new(state.revision(), tag))
+        .unwrap();
+    assert_eq!(state.grant_horizon(), Some(Tag::NEVER));
+    for frontier in [1, 2] {
+        inputs
+            .advance(SourceKey(0), PhysicalTimeNanos(frontier))
+            .unwrap();
+        state.input_progress().unwrap();
+        assert_eq!(state.grant_horizon(), Some(inputs.horizon()));
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    let parts = h._coordination;
+    let results = std::thread::scope(|scope| {
+        scope.spawn(move || parts.coordinator.run());
+        for (_, mut port) in parts.participants {
+            let tx = tx.clone();
+            scope.spawn(move || tx.send(port.acquire_tag(tag)).unwrap());
+        }
+        inputs.advance(SourceKey(0), PhysicalTimeNanos(3)).unwrap();
+        let results: Vec<_> = (0..2)
+            .map(|_| rx.recv_timeout(std::time::Duration::from_secs(2)))
+            .collect();
+        parts.abort_handle.abort();
+        results
+    });
+    assert!(results
+        .into_iter()
+        .all(|result| matches!(result.unwrap().unwrap(), FederateTagAcquisition::Granted)));
 }

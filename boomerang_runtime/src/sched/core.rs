@@ -133,6 +133,16 @@ pub(crate) trait ExecutionStorage<S: Schedule> {
     fn action_from_runtime(&self, key: ActionKey) -> S::Action;
     /// Retain an action value until its scheduled tag is processed.
     fn push_action_value(&mut self, action: S::Action, tag: Tag, value: Box<dyn ReactorData>);
+    /// Reserves separate microsteps for queued physical values in selected-clock storage.
+    #[cfg(feature = "external-clock")]
+    fn physical_event_tag(
+        &self,
+        _target: &AsyncEventTarget,
+        tag: Tag,
+    ) -> Result<Tag, crate::physical_time::PhysicalClockError> {
+        // Live storage cannot select an external clock.
+        Ok(tag)
+    }
     /// Stages one inbound scheduler-boundary value until its logical tag is processed.
     fn stage_inbound_boundary_value(
         &mut self,
@@ -355,6 +365,20 @@ where
                 value,
             } => {
                 let tag = Tag::from_physical_time(*self.start_time, time);
+                #[cfg(feature = "external-clock")]
+                let tag = if let Some(clock) = &self.physical_clock {
+                    match crate::physical_clock::after_current_tag(tag, *self.current_tag)
+                        .and_then(|tag| self.storage.physical_event_tag(&target, tag))
+                    {
+                        Ok(tag) => tag,
+                        Err(error) => {
+                            clock.clock.latch(error);
+                            return Ok(());
+                        }
+                    }
+                } else {
+                    tag
+                };
                 self.admit_value(tag, target, value, origin)?;
             }
             AsyncEvent::Shutdown { delay } => {

@@ -65,6 +65,15 @@ impl<T: ReactorData> ActionRef<'_, T> {
         Tag::new(offset, microstep)
     }
 
+    /// Finds a checked free tag for a selected-clock physical value.
+    #[cfg(feature = "external-clock")]
+    pub(crate) fn next_physical_tag(
+        &self,
+        base: Tag,
+    ) -> Result<Tag, crate::physical_time::PhysicalClockError> {
+        self.0.next_physical_tag(base)
+    }
+
     /// Convert this [`ActionRef`] to an [`AsyncActionRef`]
     pub fn to_async(self) -> AsyncActionRef<T> {
         AsyncActionRef::try_from(DynActionRef(self.0 as &dyn BaseAction))

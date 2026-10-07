@@ -253,6 +253,8 @@ impl<T: ReactorData> PortFactory for TypedPortFactory<T> {
 pub(crate) trait OutboundRoute: Send {
     /// Clones and admits one present source value at its destination timing boundary.
     fn emit(&mut self, source: &dyn BasePort, tag: Tag) -> Result<(), OwnedStorageError>;
+    #[cfg(feature = "external-clock")]
+    fn set_physical_clock(&mut self, _clock: crate::physical_clock::ClockContext) {}
 }
 
 /// Direct typed outbound route whose generic parameter is unified by `bind_route`.
@@ -269,11 +271,18 @@ struct TypedOutboundRoute<'image, T: ReactorData + Clone> {
     delay_nanos: u64,
     /// Destination scheduler event channel.
     destination_tx: crate::Sender<crate::event::AsyncEvent>,
+    #[cfg(feature = "external-clock")]
+    physical_clock: Option<crate::physical_clock::ClockContext>,
     /// Retains the statically unified endpoint payload type.
     marker: PhantomData<fn() -> T>,
 }
 
 impl<T: ReactorData + Clone> OutboundRoute for TypedOutboundRoute<'_, T> {
+    #[cfg(feature = "external-clock")]
+    fn set_physical_clock(&mut self, clock: crate::physical_clock::ClockContext) {
+        self.physical_clock = Some(clock);
+    }
+
     fn emit(&mut self, source: &dyn BasePort, tag: Tag) -> Result<(), OwnedStorageError> {
         let typed = source.downcast_ref::<Port<T>>().ok_or_else(|| {
             OwnedStorageError::OutboundRoutePayloadTypeMismatch {
@@ -306,12 +315,26 @@ impl<T: ReactorData + Clone> OutboundRoute for TypedOutboundRoute<'_, T> {
                 }
             }
             TimingDomain::Physical => {
-                let time = Instant::now()
-                    .checked_add(std::time::Duration::from_nanos(self.delay_nanos))
-                    .ok_or_else(|| OwnedStorageError::OutboundRouteTimeOverflow {
-                        boundary: self.boundary.as_str().to_owned(),
-                        delay_nanos: self.delay_nanos,
-                    })?;
+                let host_time = || {
+                    Instant::now()
+                        .checked_add(std::time::Duration::from_nanos(self.delay_nanos))
+                        .ok_or_else(|| OwnedStorageError::OutboundRouteTimeOverflow {
+                            boundary: self.boundary.as_str().to_owned(),
+                            delay_nanos: self.delay_nanos,
+                        })
+                };
+                #[cfg(feature = "external-clock")]
+                let time = if let Some(clock) = &self.physical_clock {
+                    clock
+                        .clock
+                        .now()?
+                        .checked_add(crate::physical_time::PhysicalTimeNanos(self.delay_nanos))?
+                        .to_instant(clock.origin)?
+                } else {
+                    host_time()?
+                };
+                #[cfg(not(feature = "external-clock"))]
+                let time = host_time()?;
                 crate::event::AsyncEvent::Physical {
                     time,
                     target,
@@ -375,6 +398,10 @@ where
 /// Errors building or accessing heap-backed compiled-image storage.
 #[derive(thiserror::Error, Debug, Clone, PartialEq, Eq)]
 pub enum OwnedStorageError {
+    /// The selected physical clock could not timestamp an outbound value.
+    #[cfg(feature = "external-clock")]
+    #[error(transparent)]
+    PhysicalClock(#[from] crate::physical_time::PhysicalClockError),
     /// An external route's selected codec could not encode its value.
     #[error("external route '{boundary}' encoding failed: {source}")]
     ExternalRouteEncoding {
@@ -785,6 +812,36 @@ impl<'image> OwnedStorage<'image> {
         for context in self.contexts.values_mut() {
             context.physical_clock = Some(clock.clone());
         }
+        for route in self
+            .outbound_routes
+            .iter_mut()
+            .flat_map(|(_, routes)| routes)
+        {
+            route.set_physical_clock(clock.clone());
+        }
+    }
+
+    #[cfg(feature = "external-clock")]
+    pub(crate) fn scheduler_physical_tag(
+        &self,
+        target: &crate::event::AsyncEventTarget,
+        mut tag: Tag,
+    ) -> Result<Tag, crate::physical_time::PhysicalClockError> {
+        use crate::event::AsyncEventTarget;
+        match *target {
+            AsyncEventTarget::Action(key) => {
+                let action = self.scheduler_action(key);
+                self.actions[self.image.actions()[action].storage_slot()].next_physical_tag(tag)
+            }
+            AsyncEventTarget::BoundaryPort(port) | AsyncEventTarget::NetworkBoundaryPort(port) => {
+                for (pending, target, _) in &self.pending_boundary_values {
+                    if *target == port && pending.offset() == tag.offset() {
+                        tag = crate::physical_clock::after_current_tag(tag, *pending)?;
+                    }
+                }
+                Ok(tag)
+            }
+        }
     }
 
     /// Returns a thread-safe context for local logical-time coordination with this scheduler.
@@ -818,6 +875,8 @@ impl<'image> OwnedStorage<'image> {
             timing_domain,
             delay_nanos,
             destination_tx,
+            #[cfg(feature = "external-clock")]
+            physical_clock: None,
             marker: PhantomData,
         });
         if let Some(routes) = self.outbound_routes.get_mut(source_port) {

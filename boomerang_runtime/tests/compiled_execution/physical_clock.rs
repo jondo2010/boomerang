@@ -252,3 +252,237 @@ fn physical_clock_rejects_mailboxes_without_a_retained_wake_slot() {
         ))
     ));
 }
+
+#[test]
+fn physical_route_uses_selected_clock() {
+    use super::source_sink::*;
+    for count in [1, 3] {
+        let outbound = [fixture_route(
+            "pipe",
+            PortIndex::new(0),
+            RouteDirection::Outbound,
+            TimingDomain::Physical,
+            0,
+        )];
+        let inbound = [fixture_route(
+            "pipe",
+            PortIndex::new(0),
+            RouteDirection::Inbound,
+            TimingDomain::Physical,
+            0,
+        )];
+        let actions = (0..count)
+            .map(|slot| {
+                ActionImage::new(
+                    ScopeIndex::new(0),
+                    ActionSlotIndex::new(slot),
+                    ActionTiming::Timer { period_nanos: None },
+                    r!(slot, 1),
+                    None,
+                )
+            })
+            .collect::<Vec<_>>();
+        let triggers = vec![LevelReactionImage::new(0, ReactionIndex::new(0)); count as usize];
+        let startups = (0..count)
+            .map(|slot| TimerStartupImage::new(ActionIndex::new(slot), slot as u64))
+            .collect::<Vec<_>>();
+        let scopes = [fixture_scope(
+            None,
+            None,
+            r!(0, 1),
+            r!(0, 0),
+            r!(0, count),
+            r!(0, 0),
+        )];
+        let enclaves = [
+            EnclaveImage {
+                routes: TinyMapRef::from_slice(&outbound),
+                actions: TinyMapRef::from_slice(&actions),
+                reaction_triggers: &triggers,
+                scopes: TinyMapRef::from_slice(&scopes),
+                scope_timer_startups: &startups,
+                timer_startup_actions: &startups,
+                storage_bounds: &StorageBounds::new(1, count, 8, 0, 0, 0),
+                ..ROUTED_SOURCE_IMAGE
+            },
+            EnclaveImage {
+                routes: TinyMapRef::from_slice(&inbound),
+                ..ROUTED_SINK_IMAGE
+            },
+        ];
+        let clock = ManualClock::new(PhysicalClockDomainId(7)).unwrap();
+        clock.advance_to(PhysicalTimeNanos(1_000_000_000)).unwrap();
+        let source = EnclaveBindings::new()
+            .bind_state(BindingSlotIndex::new(0), initialize_counter)
+            .bind_port(BindingSlotIndex::new(2), PayloadType::<u32>::new())
+            .bind_reaction(
+                BindingSlotIndex::new(1),
+                move |_: &mut Context,
+                      state: &mut dyn ReactorData,
+                      refs: ReactionRefs<'_>,
+                      _: Option<CompiledModeEffectRef>| {
+                    let state = state.downcast_mut::<CounterState>().unwrap();
+                    state.count += 1;
+                    let mut output: OutputRef<u32> = refs.ports_mut.partition_mut()?;
+                    *output = Some(state.count as u32);
+                    Ok(())
+                },
+            );
+        let execution = execute_owned_federate(
+            CompiledDeploymentImage {
+                enclaves: TinyMapRef::from_slice(&enclaves),
+                ..ROUTED_DEPLOYMENT
+            },
+            FederateIndex::new(0),
+            FederateBindings::new()
+                .with_physical_clock(clock.domain(), clock)
+                .bind_enclave(EnclaveIndex::new(0), source)
+                .bind_enclave(EnclaveIndex::new(1), sink_bindings())
+                .bind_route(
+                    route_boundary(),
+                    PayloadType::<u32>::new(),
+                    PayloadType::<u32>::new(),
+                ),
+            Config::default(),
+        )
+        .unwrap();
+        let sink = execution
+            .enclave(EnclaveIndex::new(1))
+            .unwrap()
+            .state::<RoutedSinkState>(StateSlotIndex::new(0))
+            .unwrap();
+        assert_eq!(sink.values, (1..=count).collect::<Vec<_>>());
+        assert_eq!(
+            execution
+                .enclave(EnclaveIndex::new(1))
+                .unwrap()
+                .final_tag()
+                .offset(),
+            Duration::seconds(1)
+        );
+        assert_eq!(
+            execution
+                .enclave(EnclaveIndex::new(1))
+                .unwrap()
+                .final_tag()
+                .microstep(),
+            count as usize - 1
+        );
+    }
+}
+
+#[test]
+fn physical_actions_at_frozen_time_preserve_microsteps_and_every_value() {
+    for asynchronous in [true, false] {
+        let physical = |slot, binding| {
+            ActionImage::new(
+                ScopeIndex::new(0),
+                ActionSlotIndex::new(slot),
+                ActionTiming::Standard {
+                    domain: TimingDomain::Physical,
+                    min_delay_nanos: 0,
+                },
+                r!(slot, 1),
+                Some(BindingSlotIndex::new(binding)),
+            )
+        };
+        let actions = [ACTIONS[0].clone(), physical(1, 2), physical(2, 3)];
+        let required = [
+            REQUIRED_BINDINGS[0],
+            REQUIRED_BINDINGS[1],
+            fixture_binding("physical-a", BindingKind::Action),
+            fixture_binding("physical-b", BindingKind::Action),
+        ];
+        let reactions = [ReactionImage::new(
+            ReactorIndex::new(0),
+            ScopeIndex::new(0),
+            0,
+            BindingSlotIndex::new(1),
+            r!(0, 0),
+            r!(0, 0),
+            r!(0, 2),
+            r!(0, 0),
+        )];
+        let enclaves = [EnclaveImage {
+            actions: TinyMapRef::from_slice(&actions),
+            reactions: TinyMapRef::from_slice(&reactions),
+            reaction_triggers: &[LevelReactionImage::new(0, ReactionIndex::new(0)); 3],
+            reaction_actions: &[ActionIndex::new(1), ActionIndex::new(2)],
+            required_bindings: TinyMapRef::from_slice(&required),
+            storage_bounds: &StorageBounds::new(1, 3, 4, 0, 0, 0),
+            ..IMAGE
+        }];
+        let federates = [fixture_federate("clock", "host", "std", s!(0, 1))];
+        let clock = ManualClock::new(PhysicalClockDomainId(7)).unwrap();
+        clock.advance_to(PhysicalTimeNanos(5)).unwrap();
+        let bindings = EnclaveBindings::new()
+            .bind_state(BindingSlotIndex::new(0), initialize_counter)
+            .bind_action(BindingSlotIndex::new(2), PayloadType::<u32>::new())
+            .bind_action(BindingSlotIndex::new(3), PayloadType::<u32>::new())
+            .bind_reaction(
+                BindingSlotIndex::new(1),
+                move |ctx: &mut Context,
+                      state: &mut dyn ReactorData,
+                      refs: ReactionRefs<'_>,
+                      _: Option<CompiledModeEffectRef>| {
+                    let state = state.downcast_mut::<CounterState>().unwrap();
+                    state.tags.push(ctx.get_tag());
+                    let (mut a, mut b): (ActionRef<u32>, ActionRef<u32>) =
+                        refs.actions.partition_mut()?;
+                    state.count += (ctx.get_action_value(&mut a).copied().unwrap_or(0)
+                        + ctx.get_action_value(&mut b).copied().unwrap_or(0))
+                        as usize;
+                    let mut send = |action: &mut ActionRef<u32>, value| {
+                        if asynchronous {
+                            assert!(ctx
+                                .make_send_context()
+                                .try_schedule_action_async(action, value, None)
+                                .unwrap());
+                        } else {
+                            ctx.try_schedule_action(action, value, None).unwrap();
+                        }
+                    };
+                    match state.tags.len() {
+                        1 => {
+                            send(&mut a, 1);
+                            send(&mut a, 2);
+                        }
+                        2 => send(&mut b, 3), // a distinct action first scheduled at nonzero microstep
+                        3 => send(&mut b, 4),
+                        _ => {}
+                    }
+                    Ok(())
+                },
+            );
+        let result = execute_owned_federate(
+            CompiledDeploymentImage {
+                federation: GlobalFederationImage::new(&[FederateIndex::new(0)], &[]),
+                federates: TinyMapRef::from_slice(&federates),
+                enclaves: TinyMapRef::from_slice(&enclaves),
+                coordination: CoordinationProjection::Local,
+            },
+            FederateIndex::new(0),
+            FederateBindings::new()
+                .with_physical_clock(clock.domain(), clock)
+                .bind_enclave(EnclaveIndex::new(0), bindings),
+            Config::default(),
+        )
+        .unwrap();
+        let state = result
+            .enclave(EnclaveIndex::new(0))
+            .unwrap()
+            .state::<CounterState>(StateSlotIndex::new(0))
+            .unwrap();
+        assert_eq!(
+            state.tags,
+            (0..4)
+                .map(|microstep| Tag::new(Duration::nanoseconds(5), microstep))
+                .collect::<Vec<_>>(),
+            "asynchronous={asynchronous}"
+        );
+        assert_eq!(
+            state.count, 10,
+            "every accepted physical payload must be observed"
+        );
+    }
+}

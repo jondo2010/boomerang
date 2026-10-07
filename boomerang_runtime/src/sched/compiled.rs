@@ -92,6 +92,15 @@ impl ExecutionStorage<EnclaveImageView<'_>> for OwnedStorage<'_> {
         self.scheduler_push_action(action, tag, value);
     }
 
+    #[cfg(feature = "external-clock")]
+    fn physical_event_tag(
+        &self,
+        target: &crate::event::AsyncEventTarget,
+        tag: Tag,
+    ) -> Result<Tag, crate::physical_time::PhysicalClockError> {
+        self.scheduler_physical_tag(target, tag)
+    }
+
     fn stage_inbound_boundary_value(
         &mut self,
         port: PortIndex,

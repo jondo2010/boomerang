@@ -82,6 +82,10 @@ fn registration_racing_advance_retains_one_wake_and_reuses_slot() {
 
 #[test]
 fn checked_conversions_and_physical_actions_use_selected_time() {
+    assert_eq!(
+        after_current_tag(Tag::ZERO, Tag::new(Duration::ZERO, usize::MAX)),
+        Err(PhysicalClockError::Overflow)
+    );
     use crate::{
         Action, ActionKey, ActionRef, BaseAction, CommonContext, Context, DynActionRefMut,
     };
@@ -116,6 +120,10 @@ fn checked_conversions_and_physical_actions_use_selected_time() {
     );
     let mut action =
         ActionRef::<u32>::try_from(DynActionRefMut(&mut action as &mut dyn BaseAction)).unwrap();
+    assert_eq!(
+        action.next_physical_tag(Tag::new(Duration::ZERO, usize::MAX)),
+        Err(PhysicalClockError::Overflow)
+    );
     ctx.try_schedule_action(&mut action, 1, Some(Duration::nanoseconds(3)))
         .unwrap();
     assert_eq!(

@@ -44,6 +44,11 @@ pub trait BaseAction: Debug + Downcast + Send + Sync {
     /// Push a new value onto the action store. If the underlying types are not the same, this will panic.
     fn push_value(&mut self, tag: Tag, value: Box<dyn ReactorData>);
 
+    /// Finds a free microstep for a selected-clock physical value.
+    #[cfg(feature = "external-clock")]
+    fn next_physical_tag(&self, base: Tag)
+        -> Result<Tag, crate::physical_time::PhysicalClockError>;
+
     /// Move a stored value from one tag to another.
     fn reschedule_value(&mut self, from: Tag, to: Tag);
 
@@ -110,6 +115,21 @@ impl<T: ReactorData> BaseAction for Action<T> {
 
     fn reschedule_value(&mut self, from: Tag, to: Tag) {
         self.store.move_value(from, to);
+    }
+
+    #[cfg(feature = "external-clock")]
+    fn next_physical_tag(
+        &self,
+        base: Tag,
+    ) -> Result<Tag, crate::physical_time::PhysicalClockError> {
+        let microstep = self
+            .store
+            .next_microstep_for_offset(base.offset(), base.microstep());
+        // The legacy store saturates its next-microstep cursor at MAX.
+        if microstep == usize::MAX {
+            return Err(crate::physical_time::PhysicalClockError::Overflow);
+        }
+        Ok(Tag::new(base.offset(), microstep))
     }
 
     fn clear_values(&mut self) {

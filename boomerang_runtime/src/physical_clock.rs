@@ -196,6 +196,21 @@ impl PhysicalTimeNanos {
     }
 }
 
+/// Keeps acquisition time separate from the next executable logical tag.
+pub(crate) fn after_current_tag(mapped: Tag, current: Tag) -> Result<Tag, PhysicalClockError> {
+    if mapped > current {
+        Ok(mapped)
+    } else {
+        Ok(Tag::new(
+            current.offset(),
+            current
+                .microstep()
+                .checked_add(1)
+                .ok_or(PhysicalClockError::Overflow)?,
+        ))
+    }
+}
+
 /// Participant-local slot and compatibility origin; absent entirely when the feature is disabled.
 #[derive(Clone, Debug)]
 pub(crate) struct ClockContext {

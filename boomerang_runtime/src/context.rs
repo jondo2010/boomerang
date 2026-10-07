@@ -346,7 +346,8 @@ impl Context {
                 } else {
                     tag
                 };
-                let tag = action.next_tag_for_offset(tag);
+                let tag = crate::physical_clock::after_current_tag(tag, self.tag)?;
+                let tag = action.next_physical_tag(tag)?;
                 action.set_value(tag, value);
                 self.trigger_res.scheduled_actions.push((action.key(), tag));
                 return Ok(());

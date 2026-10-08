@@ -618,8 +618,7 @@ impl Scheduler {
         } = self;
 
         SchedulerCore {
-            #[cfg(feature = "external-clock")]
-            physical_clock: &crate::physical_clock::NativeClock,
+            clock: Default::default(),
             key: *key,
             config,
             observation: self.observation.as_ref(),

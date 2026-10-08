@@ -262,10 +262,11 @@ pub(crate) fn run_owned_scheduler_with_coordination_and_observation(
     let mut outcomes = (0..reaction_capacity).map(|_| Default::default()).collect();
 
     #[cfg(feature = "external-clock")]
-    let physical_clock = storage.scheduler_send_context().physical_clock;
+    let clock = storage.scheduler_send_context().physical_clock;
+    #[cfg(not(feature = "external-clock"))]
+    let clock = super::clock::RuntimeClock::default();
     SchedulerCore {
-        #[cfg(feature = "external-clock")]
-        physical_clock: &*physical_clock,
+        clock,
         key,
         config,
         observation,
@@ -579,8 +580,9 @@ mod tests {
     #[cfg(feature = "external-clock")]
     #[test]
     fn physical_failure_during_pump_stops_before_fast_forward_grant() {
-        use crate::physical_clock::{ClockContext, ManualClock};
+        use crate::physical_clock::ManualClock;
         use crate::physical_time::{PhysicalClockDomainId, PhysicalClockError};
+        use crate::sched::clock::RuntimeClock;
         /// Latches clock overflow when a queued test payload is discarded.
         #[derive(Debug)]
         struct FailOnDrop(ManualClock);
@@ -593,7 +595,7 @@ mod tests {
         let mut storage = build_storage(Arc::clone(&calls), false);
         let origin = std::time::Instant::now();
         let clock = ManualClock::new(PhysicalClockDomainId(7)).unwrap();
-        storage.set_physical_clock(ClockContext::manual(clock.clone(), 0, origin));
+        storage.set_physical_clock(RuntimeClock::manual(clock.clone(), 0, origin));
         assert!(storage
             .scheduler_event_tx()
             .try_send(AsyncEvent::Logical {

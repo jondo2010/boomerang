@@ -2,7 +2,7 @@
 
 use super::{
     barrier::LogicalTimeBarrier,
-    clock::{WaitContext, WallClockReceive},
+    clock::{mapping, ClockWaitResult, RuntimeClock, WaitContext},
     federate::{
         FederateControlAuthorization, FederateCoordinationError, FederateIdleWait,
         FederateSchedulerCoordination, FederateTagAcquisition, FederateTermination,
@@ -133,7 +133,6 @@ pub(crate) trait ExecutionStorage<S: Schedule> {
     /// Retain an action value until its scheduled tag is processed.
     fn push_action_value(&mut self, action: S::Action, tag: Tag, value: Box<dyn ReactorData>);
     /// Reserves separate microsteps for queued physical values in selected-clock storage.
-    #[cfg(feature = "external-clock")]
     fn physical_event_tag(
         &self,
         _target: &AsyncEventTarget,
@@ -179,8 +178,8 @@ where
 {
     /// Enclave whose logical time this invocation advances.
     pub(super) key: EnclaveKey,
-    #[cfg(feature = "external-clock")]
-    pub(super) physical_clock: &'a dyn crate::physical_clock::ExecutionClock,
+    /// Selected clock; native-only builds carry no clock state.
+    pub(super) clock: RuntimeClock,
     /// Existing live scheduler configuration.
     pub(super) config: &'a Config,
     /// Optional snapshot-only scheduler observation state.
@@ -329,12 +328,9 @@ where
                 value,
             } => {
                 let tag = Tag::from_physical_time(*self.start_time, time);
-                #[cfg(feature = "external-clock")]
-                let tag = match self
-                    .physical_clock
-                    .event_tag(tag, *self.current_tag, &|tag| {
-                        self.storage.physical_event_tag(&target, tag)
-                    }) {
+                let tag = match mapping::event_tag(&self.clock, tag, *self.current_tag, |tag| {
+                    self.storage.physical_event_tag(&target, tag)
+                }) {
                     Ok(tag) => tag,
                     Err(_) => return Ok(()),
                 };
@@ -762,19 +758,13 @@ where
                 observation: self.observation,
                 coordination: &mut self.federate_coordination,
             };
-            #[cfg(feature = "external-clock")]
-            let clock = self.physical_clock;
-            #[cfg(feature = "external-clock")]
-            let received = clock
-                .wait(next_tag, &mut wait)
-                .map_err(SchedulerError::FederateCoordination)?;
-            #[cfg(not(feature = "external-clock"))]
-            let received = super::clock::NativeClock
-                .wait(next_tag, &mut wait)
+            let received = self
+                .clock
+                .wait_until(next_tag, &mut wait)
                 .map_err(SchedulerError::FederateCoordination)?;
             match received {
-                WallClockReceive::DeadlineReached => {}
-                WallClockReceive::Interrupted(event) => {
+                ClockWaitResult::DeadlineReached => {}
+                ClockWaitResult::Interrupted(event) => {
                     if matches!(
                         &event,
                         AsyncEvent::Logical { .. }
@@ -789,12 +779,12 @@ where
                         .map_err(SchedulerError::Execution)?;
                     return Ok(Some(true));
                 }
-                WallClockReceive::FederateTerminated(FederateTermination::Graceful { tag }) => {
+                ClockWaitResult::FederateTerminated(FederateTermination::Graceful { tag }) => {
                     let tag = tag.unwrap_or_else(|| self.next_shutdown_tag());
                     self.stop_for_federate_termination(tag);
                     return Ok(Some(true));
                 }
-                WallClockReceive::FederateTerminated(FederateTermination::Abort) => {
+                ClockWaitResult::FederateTerminated(FederateTermination::Abort) => {
                     self.abort_for_federate_termination();
                     return Ok(Some(false));
                 }
@@ -932,13 +922,11 @@ where
 
     /// Process one scheduler step, returning coordination failures to the caller.
     pub(super) fn try_next(&mut self) -> Result<bool, SchedulerError<E::Error>> {
-        #[cfg(feature = "external-clock")]
-        if self.abort_if_physical_clock_failed() {
+        if self.abort_if_clock_failed() {
             return Ok(false);
         }
         self.pump_pending_async_events()?;
-        #[cfg(feature = "external-clock")]
-        if self.abort_if_physical_clock_failed() {
+        if self.abort_if_clock_failed() {
             return Ok(false);
         }
         self.observe_event_queue();
@@ -969,8 +957,7 @@ where
                 return Ok(keep_running);
             }
 
-            #[cfg(feature = "external-clock")]
-            if self.abort_if_physical_clock_failed() {
+            if self.abort_if_clock_failed() {
                 return Ok(false);
             }
             let result = self.process_next_event(logical_horizon);
@@ -1007,9 +994,8 @@ where
     }
 
     /// Aborts this participant at an execution checkpoint if its clock has failed.
-    #[cfg(feature = "external-clock")]
-    fn abort_if_physical_clock_failed(&mut self) -> bool {
-        let failed = self.physical_clock.failed();
+    fn abort_if_clock_failed(&mut self) -> bool {
+        let failed = self.clock.failed();
         if failed {
             self.abort_for_federate_termination();
         }

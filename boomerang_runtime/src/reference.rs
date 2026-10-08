@@ -1263,7 +1263,7 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
     if let Some(clock) = &clock_run.0 {
         clock.attach(&event_senders, abort_handle.clone())?;
         for (slot, (_, storage)) in storages.iter_mut().enumerate() {
-            storage.set_physical_clock(crate::physical_clock::ClockContext::manual(
+            storage.set_physical_clock(crate::sched::clock::RuntimeClock::manual(
                 clock.clone(),
                 slot,
                 origin,

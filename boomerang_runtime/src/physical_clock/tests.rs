@@ -1,6 +1,7 @@
 //! Manual-clock protocol, conversion, and allocation regression tests.
 
 use super::*;
+use crate::sched::clock::RuntimeClock;
 
 /// Creates an independent manual clock in the shared test domain.
 fn clock() -> ManualClock {
@@ -61,7 +62,7 @@ fn registration_racing_advance_retains_one_wake_and_reuses_slot() {
     for _ in 0..200 {
         let clock = clock();
         let (tx, rx) = kanal::bounded(1);
-        clock.0.state.lock().unwrap().slots.push(Slot {
+        clock.0.state.lock().unwrap().slots.push(DeadlineSlot {
             deadline: None,
             wake: tx,
         });
@@ -120,7 +121,7 @@ fn checked_conversions_and_physical_actions_use_selected_time() {
     let (tx, rx) = kanal::bounded(4);
     let (_shutdown, shutdown_rx) = crate::keepalive::channel();
     let mut ctx = Context::new(crate::EnclaveKey::from(0), origin, None, tx, shutdown_rx);
-    ctx.physical_clock = ClockContext::manual(clock.clone(), 0, origin);
+    ctx.physical_clock = RuntimeClock::manual(clock.clone(), 0, origin);
     let mut action = Action::<u32>::new(
         "physical",
         ActionKey::from(0),
@@ -130,8 +131,10 @@ fn checked_conversions_and_physical_actions_use_selected_time() {
     let mut action =
         ActionRef::<u32>::try_from(DynActionRefMut(&mut action as &mut dyn BaseAction)).unwrap();
     assert_eq!(
-        ctx.physical_clock
-            .check_action_tag(Tag::new(Duration::ZERO, usize::MAX)),
+        crate::sched::clock::mapping::check_action_tag(
+            &ctx.physical_clock,
+            Tag::new(Duration::ZERO, usize::MAX)
+        ),
         Err(PhysicalClockError::Overflow)
     );
     ctx.schedule_action(&mut action, 1, Some(Duration::nanoseconds(3)));
@@ -164,7 +167,7 @@ fn checked_conversions_and_physical_actions_use_selected_time() {
         ctx.try_schedule_action(&mut action, 4, None),
         Err(PhysicalClockError::Closed)
     );
-    ctx.physical_clock = ClockContext::default();
+    ctx.physical_clock = RuntimeClock::default();
     ctx.try_schedule_action(&mut action, 5, None).unwrap();
     let tag = ctx.trigger_res.scheduled_actions.last().unwrap().1;
     assert_eq!(action.get_value_at(tag), Some(&5));
@@ -198,22 +201,26 @@ fn clock_steady_state_allocates_nothing_at_two_and_sixteen_enclaves() {
         let channels: Vec<_> = (0..count).map(|_| kanal::bounded(1)).collect();
         clock.0.state.lock().unwrap().slots = channels
             .iter()
-            .map(|(tx, _)| Slot {
+            .map(|(tx, _)| DeadlineSlot {
                 deadline: None,
                 wake: tx.clone(),
             })
             .collect();
         let adapters: Vec<_> = (0..count)
-            .map(|slot| ClockContext::manual(clock.clone(), slot, std::time::Instant::now()))
+            .map(|slot| RuntimeClock::manual(clock.clone(), slot, std::time::Instant::now()))
             .collect();
-        let _host = ClockContext::default(); // initialize the shared native adapter before measurement
         let capacity = clock.0.state.lock().unwrap().slots.capacity();
         let start = std::time::Instant::now();
         ALLOCATIONS.with(|n| n.set(Some(0)));
         for step in 0..10_000 {
-            std::hint::black_box(ClockContext::default())
+            std::hint::black_box(RuntimeClock::default())
                 .instant_after(std::time::Duration::ZERO)
                 .unwrap();
+            std::hint::black_box(RuntimeClock::manual(
+                clock.clone(),
+                0,
+                std::time::Instant::now(),
+            ));
             for adapter in &adapters {
                 assert!(!adapter.failed());
                 adapter.clone().instant().unwrap();

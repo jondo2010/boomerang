@@ -64,7 +64,7 @@ pub(crate) struct TriggerRes {
 #[derive(Debug)]
 pub struct Context {
     #[cfg(feature = "external-clock")]
-    pub(crate) physical_clock: crate::physical_clock::ClockContext,
+    pub(crate) physical_clock: crate::sched::clock::RuntimeClock,
     /// The EnclaveId of this context
     enclave_key: EnclaveKey,
     /// Physical time the Scheduler was started
@@ -335,15 +335,17 @@ impl Context {
         delay: Option<Duration>,
     ) -> Result<(), crate::physical_time::PhysicalClockError> {
         if !action.is_logical() {
-            let tag = self.physical_clock.action_tag(
+            let tag = crate::sched::clock::mapping::action_tag(
+                &self.physical_clock,
                 self.start_time,
                 self.tag,
                 action.min_delay(),
                 delay.unwrap_or_default(),
             )?;
-            let tag = self
-                .physical_clock
-                .check_action_tag(action.next_tag_for_offset(tag))?;
+            let tag = crate::sched::clock::mapping::check_action_tag(
+                &self.physical_clock,
+                action.next_tag_for_offset(tag),
+            )?;
             action.set_value(tag, value);
             self.trigger_res.scheduled_actions.push((action.key(), tag));
             return Ok(());
@@ -429,7 +431,7 @@ impl CommonContext for Context {
 #[derive(Debug, Clone)]
 pub struct SendContext {
     #[cfg(feature = "external-clock")]
-    pub(crate) physical_clock: crate::physical_clock::ClockContext,
+    pub(crate) physical_clock: crate::sched::clock::RuntimeClock,
     /// Enclave ID for this context
     pub(crate) enclave_key: EnclaveKey,
     /// Channel for asynchronous events

@@ -269,7 +269,7 @@ pub(crate) trait OutboundRoute: Send {
     fn emit(&mut self, source: &dyn BasePort, tag: Tag) -> Result<(), OwnedStorageError>;
     /// Installs the Enclave execution policy on a route before execution begins.
     #[cfg(feature = "external-clock")]
-    fn set_physical_clock(&mut self, _clock: crate::physical_clock::ClockContext) {}
+    fn set_physical_clock(&mut self, _clock: crate::sched::clock::RuntimeClock) {}
 }
 
 /// Direct typed outbound route whose generic parameter is unified by `bind_route`.
@@ -287,14 +287,14 @@ struct TypedOutboundRoute<'image, T: ReactorData + Clone> {
     /// Destination scheduler event channel.
     destination_tx: crate::Sender<crate::event::AsyncEvent>,
     #[cfg(feature = "external-clock")]
-    physical_clock: crate::physical_clock::ClockContext,
+    physical_clock: crate::sched::clock::RuntimeClock,
     /// Retains the statically unified endpoint payload type.
     marker: PhantomData<fn() -> T>,
 }
 
 impl<T: ReactorData + Clone> OutboundRoute for TypedOutboundRoute<'_, T> {
     #[cfg(feature = "external-clock")]
-    fn set_physical_clock(&mut self, clock: crate::physical_clock::ClockContext) {
+    fn set_physical_clock(&mut self, clock: crate::sched::clock::RuntimeClock) {
         self.physical_clock = clock;
     }
 
@@ -339,9 +339,10 @@ impl<T: ReactorData + Clone> OutboundRoute for TypedOutboundRoute<'_, T> {
                         })
                 };
                 #[cfg(feature = "external-clock")]
-                let time = self.physical_clock.route_time(
+                let time = crate::sched::clock::mapping::route_time(
+                    &self.physical_clock,
                     std::time::Duration::from_nanos(self.delay_nanos),
-                    &host_time,
+                    host_time,
                 )?;
                 #[cfg(not(feature = "external-clock"))]
                 let time = host_time()?;
@@ -823,7 +824,7 @@ impl<'image> OwnedStorage<'image> {
 
     #[cfg(feature = "external-clock")]
     /// Shares the Enclave clock policy with all reaction contexts and outbound routes.
-    pub(crate) fn set_physical_clock(&mut self, clock: crate::physical_clock::ClockContext) {
+    pub(crate) fn set_physical_clock(&mut self, clock: crate::sched::clock::RuntimeClock) {
         for context in self.contexts.values_mut() {
             context.physical_clock = clock.clone();
         }

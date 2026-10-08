@@ -1,42 +1,37 @@
-//! Hosted physical clocks and the execution policies used by reactions and schedulers.
+//! Shared hosted clocks and their domain/epoch read capabilities.
 //!
 //! A manual clock is claimed once per Federate and shared by its Enclaves. Its
 //! single mutex orders deadline registration, advancement, and terminal failure.
-//! Native execution keeps the existing host-monotonic pacing behavior. The entire
-//! module is gated by `external-clock`; target-neutral contracts live in
+//! Scheduler pacing and participant binding live in the private scheduler clock
+//! module. This module is gated by `external-clock`; target-neutral contracts live in
 //! [`crate::physical_time`].
-pub(crate) use crate::sched::clock::NativeClock;
-use crate::sched::{
-    clock::{WaitContext, WallClockReceive},
-    federate::{FederateCoordinationError, FederateTermination},
-};
 use crate::{physical_time::*, AsyncEvent, Duration, Tag};
 use std::{
     sync::{Arc, Mutex},
-    time::{Duration as StdDuration, Instant},
+    time::Instant,
 };
 
 /// Cloneable driver and observation handle for one execution's physical clock.
 #[derive(Clone)]
-pub struct ManualClock(Arc<Clock>);
+pub struct ManualClock(Arc<ManualClockInner>);
 /// Shared identity and synchronized state for a single manual-clock execution.
-struct Clock {
+struct ManualClockInner {
     domain: PhysicalClockDomainId,
     epoch: ExecutionEpoch,
-    state: Mutex<State>,
+    state: Mutex<ManualClockState>,
 }
-/// Clock time, first terminal failure, and deadline slots protected by one mutex.
+/// Manual-clock time, first terminal failure, and deadline slots protected by one mutex.
 /// Registration and advancement use this same lock to avoid lost wakes.
 #[derive(Default)]
-struct State {
+struct ManualClockState {
     now: PhysicalTimeNanos,
     failure: Option<PhysicalClockError>,
     used: bool,
-    slots: Vec<Slot>,
+    slots: Vec<DeadlineSlot>,
     abort: Option<crate::sched::federate::FederateAbortHandle>,
 }
 /// One reusable deadline and scheduler wake sender for an attached Enclave.
-struct Slot {
+struct DeadlineSlot {
     deadline: Option<PhysicalTimeNanos>,
     wake: crate::Sender<AsyncEvent>,
 }
@@ -54,10 +49,10 @@ impl ManualClock {
         let mut bytes = [0; 16];
         getrandom::fill(&mut bytes).map_err(|_| PhysicalClockError::EntropyUnavailable)?;
         let epoch = u128::from_ne_bytes(bytes);
-        Ok(Self(Arc::new(Clock {
+        Ok(Self(Arc::new(ManualClockInner {
             domain,
             epoch: ExecutionEpoch(epoch),
-            state: Mutex::new(State::default()),
+            state: Mutex::new(ManualClockState::default()),
         })))
     }
     /// Configured domain shared by every participant and adapter.
@@ -123,7 +118,7 @@ impl ManualClock {
         Self::terminate(&mut self.0.state.lock().unwrap(), error);
     }
     /// Records the first failure while holding the state lock and wakes all participants.
-    fn terminate(state: &mut State, error: PhysicalClockError) {
+    fn terminate(state: &mut ManualClockState, error: PhysicalClockError) {
         if state.failure.is_some() {
             return;
         }
@@ -162,7 +157,7 @@ impl ManualClock {
         }
         state.slots = senders
             .iter()
-            .map(|wake| Slot {
+            .map(|wake| DeadlineSlot {
                 deadline: None,
                 wake: wake.clone(),
             })
@@ -233,193 +228,6 @@ pub(crate) fn after_current_tag(mapped: Tag, current: Tag) -> Result<Tag, Physic
                 .checked_add(1)
                 .ok_or(PhysicalClockError::Overflow)?,
         ))
-    }
-}
-
-/// Hosted execution policy. The native implementation preserves legacy host semantics.
-pub(crate) trait ExecutionClock: std::fmt::Debug + Send + Sync {
-    /// Reads the selected integer clock, or returns None for legacy host execution.
-    fn physical_time(&self) -> Result<Option<PhysicalTimeNanos>, PhysicalClockError> {
-        Ok(None)
-    }
-    /// Reads physical time in the scheduler Instant representation.
-    fn instant(&self) -> Result<Instant, PhysicalClockError> {
-        Ok(Instant::now())
-    }
-    /// Adds a nonnegative delay to the selected clock with checked conversion.
-    fn instant_after(&self, delay: StdDuration) -> Result<Instant, PhysicalClockError> {
-        Instant::now()
-            .checked_add(delay)
-            .ok_or(PhysicalClockError::Overflow)
-    }
-    /// Computes route arrival time while preserving each policy's error taxonomy.
-    /// Native execution delegates to the existing host calculation.
-    fn route_time(
-        &self,
-        _delay: StdDuration,
-        host: &dyn Fn() -> Result<Instant, crate::OwnedStorageError>,
-    ) -> Result<Instant, crate::OwnedStorageError> {
-        host()
-    }
-    /// Maps a physical action delay to a tag under this clock's ordering policy.
-    fn action_tag(
-        &self,
-        origin: Instant,
-        _current: Tag,
-        minimum: Duration,
-        delay: Duration,
-    ) -> Result<Tag, PhysicalClockError> {
-        Ok(Tag::from_physical_time(origin, Instant::now()).delay(minimum + delay))
-    }
-    /// Validates a reserved action cursor; native execution retains legacy saturation.
-    fn check_action_tag(&self, tag: Tag) -> Result<Tag, PhysicalClockError> {
-        Ok(tag)
-    }
-    /// Applies incoming-event ordering and reserves a cursor when the policy requires it.
-    /// Manual execution latches mapping or reservation failure before discarding an event.
-    fn event_tag(
-        &self,
-        tag: Tag,
-        _current: Tag,
-        _reserve: &dyn Fn(Tag) -> Result<Tag, PhysicalClockError>,
-    ) -> Result<Tag, PhysicalClockError> {
-        Ok(tag)
-    }
-    /// Reports whether execution must stop because the selected clock has failed.
-    fn failed(&self) -> bool {
-        false
-    }
-    /// Paces a logical tag through the scheduler's interruptible waiting capability.
-    fn wait(
-        &self,
-        tag: Tag,
-        wait: &mut WaitContext<'_, '_>,
-    ) -> Result<WallClockReceive, FederateCoordinationError> {
-        NativeClock.wait(tag, wait)
-    }
-}
-impl ExecutionClock for NativeClock {}
-
-/// Cloneable participant policy; the manual adapter is allocated once per Enclave.
-#[derive(Clone, Debug)]
-pub(crate) struct ClockContext(Arc<dyn ExecutionClock>);
-impl Default for ClockContext {
-    fn default() -> Self {
-        static HOST: std::sync::LazyLock<Arc<dyn ExecutionClock>> =
-            std::sync::LazyLock::new(|| Arc::new(NativeClock));
-        Self(Arc::clone(&HOST))
-    }
-}
-impl std::ops::Deref for ClockContext {
-    type Target = dyn ExecutionClock;
-    fn deref(&self) -> &Self::Target {
-        &*self.0
-    }
-}
-impl ClockContext {
-    /// Binds a shared manual clock to one attached Enclave slot and the run origin.
-    pub(crate) fn manual(clock: ManualClock, slot: usize, origin: Instant) -> Self {
-        Self(Arc::new(ManualExecutionClock {
-            clock,
-            slot,
-            origin,
-        }))
-    }
-}
-/// Per-Enclave execution policy sharing one Federate clock and common origin.
-#[derive(Debug)]
-struct ManualExecutionClock {
-    clock: ManualClock,
-    slot: usize,
-    origin: Instant,
-}
-impl ExecutionClock for ManualExecutionClock {
-    fn physical_time(&self) -> Result<Option<PhysicalTimeNanos>, PhysicalClockError> {
-        self.clock.now().map(Some)
-    }
-    fn instant(&self) -> Result<Instant, PhysicalClockError> {
-        let result = self.clock.now().and_then(|now| now.to_instant(self.origin));
-        if let Err(error) = result {
-            self.clock.latch(error);
-        }
-        result
-    }
-    fn instant_after(&self, delay: StdDuration) -> Result<Instant, PhysicalClockError> {
-        self.clock
-            .now()?
-            .checked_add(PhysicalTimeNanos::from_duration(delay)?)?
-            .to_instant(self.origin)
-    }
-    fn route_time(
-        &self,
-        delay: StdDuration,
-        _host: &dyn Fn() -> Result<Instant, crate::OwnedStorageError>,
-    ) -> Result<Instant, crate::OwnedStorageError> {
-        self.instant_after(delay).map_err(Into::into)
-    }
-    fn action_tag(
-        &self,
-        _origin: Instant,
-        current: Tag,
-        minimum: Duration,
-        delay: Duration,
-    ) -> Result<Tag, PhysicalClockError> {
-        let delay = minimum
-            .checked_add(delay)
-            .ok_or(PhysicalClockError::Overflow)?;
-        let tag = self.clock.now()?.to_tag(delay)?;
-        after_current_tag(
-            if delay.is_zero() {
-                Tag::new(tag.offset(), 1)
-            } else {
-                tag
-            },
-            current,
-        )
-    }
-    fn check_action_tag(&self, tag: Tag) -> Result<Tag, PhysicalClockError> {
-        if tag.microstep() == usize::MAX {
-            Err(PhysicalClockError::Overflow)
-        } else {
-            Ok(tag)
-        }
-    }
-    fn event_tag(
-        &self,
-        tag: Tag,
-        current: Tag,
-        reserve: &dyn Fn(Tag) -> Result<Tag, PhysicalClockError>,
-    ) -> Result<Tag, PhysicalClockError> {
-        let result = after_current_tag(tag, current).and_then(reserve);
-        if let Err(error) = result {
-            self.clock.latch(error);
-        }
-        result
-    }
-    fn failed(&self) -> bool {
-        self.clock.now().is_err()
-    }
-    fn wait(
-        &self,
-        tag: Tag,
-        wait: &mut WaitContext<'_, '_>,
-    ) -> Result<WallClockReceive, FederateCoordinationError> {
-        match PhysicalTimeNanos::from_tag(tag)
-            .and_then(|deadline| self.clock.register(self.slot, deadline))
-        {
-            Ok(true) => Ok(WallClockReceive::DeadlineReached),
-            Err(error) => {
-                self.clock.latch(error);
-                Ok(WallClockReceive::FederateTerminated(
-                    FederateTermination::Abort,
-                ))
-            }
-            Ok(false) => {
-                let result = wait.receive();
-                self.clock.cancel(self.slot);
-                result
-            }
-        }
     }
 }
 

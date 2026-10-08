@@ -1,4 +1,7 @@
+//! Admission, exclusive progress, generation fencing, and bounded retention tests.
+
 use super::*;
+/// Checks that unknown required frontiers block finite tags and no required sources leaves no cap.
 #[test]
 fn required_without_frontier_blocks_all_finite_tags() {
     assert_eq!(aggregate([None].into_iter()), Tag::NEVER);
@@ -10,11 +13,13 @@ use crate::sched::federate::{
     state::SchedulerMessage, FederateCoordinationParts, LifecyclePolicy,
     LocalFederateCoordinationBackend,
 };
+/// Admission service, participant receivers, and retained local coordinator fixture.
 struct Harness {
     inputs: InputAdmission,
     rx: Vec<crate::Receiver<AsyncEvent>>,
     _coordination: FederateCoordinationParts<LocalFederateCoordinationBackend>,
 }
+/// Constructs bounded participants and resolved sources with initial grant authorization.
 fn harness(required: &[bool], enclaves: usize, delay: i64, capacity: usize) -> Harness {
     let channels: Vec<_> = (0..enclaves).map(|_| kanal::bounded(capacity)).collect();
     let coordination = FederateCoordinationParts::new(
@@ -72,6 +77,7 @@ fn harness(required: &[bool], enclaves: usize, delay: i64, capacity: usize) -> H
         _coordination: coordination,
     }
 }
+/// Creates a u32 observation for a source's first target using the fixture clock identity.
 fn sample(h: &Harness, source: usize, sequence: u64, time: u64) -> InputObservation {
     InputObservation {
         source: SourceKey(source),
@@ -82,12 +88,14 @@ fn sample(h: &Harness, source: usize, sequence: u64, time: u64) -> InputObservat
         values: vec![InputValue::new(TargetKey(source * h.rx.len()), 42u32)],
     }
 }
+/// Authorizes all participants at the current cached horizon and generation.
 fn authorize(h: &Harness) {
     let (cap, generation) = h.inputs.grant_constraint();
     for slot in 0..h.rx.len() {
         h.inputs.authorize(slot, cap, generation);
     }
 }
+/// Drains wake and batch events and acknowledges consumed batch envelopes.
 fn drain(h: &Harness) {
     for (slot, rx) in h.rx.iter().enumerate() {
         while let Ok(Some(event)) = rx.try_recv() {
@@ -97,6 +105,7 @@ fn drain(h: &Harness) {
         }
     }
 }
+/// Checks exclusive frontiers, zero-delay mapping, clock independence, and optional sources.
 #[test]
 fn exclusive_frontiers_zero_delay_independence_and_optional_idle_sources() {
     let h = harness(&[true, true, false], 2, 3, 8);
@@ -142,6 +151,7 @@ fn exclusive_frontiers_zero_delay_independence_and_optional_idle_sources() {
     );
     assert_eq!(h.inputs.horizon(), Tag::NEVER);
 }
+/// Checks rejected observations preserve sequence state and frontier equality is admissible.
 #[test]
 fn admission_rejections_preserve_sequence_and_exact_frontier_is_admissible() {
     let h = harness(&[true], 2, 0, 8);
@@ -198,6 +208,7 @@ fn admission_rejections_preserve_sequence_and_exact_frontier_is_admissible() {
     }
     assert_eq!(h.inputs.horizon(), Tag::NEVER);
 }
+/// Checks retained-batch limits, target/tag conflicts, and lateness against reserved execution.
 #[test]
 fn retained_bounds_same_tag_conflicts_and_inflight_lateness() {
     let h = harness(&[false], 2, 0, 8);
@@ -244,6 +255,7 @@ fn retained_bounds_same_tag_conflicts_and_inflight_lateness() {
     assert!(h.inputs.reserve(0, Tag::new(Duration::nanoseconds(13), 0)));
     assert_eq!(h.inputs.0.state.lock().unwrap().retained.len(), 1);
 }
+/// Checks whole-batch rejection before commit and execution abortion on partial publication.
 #[test]
 fn entire_batch_rejects_before_commit_and_partial_fanout_aborts() {
     let h = harness(&[false], 2, 0, 1);
@@ -277,6 +289,7 @@ fn entire_batch_rejects_before_commit_and_partial_fanout_aborts() {
         .frontier
         .is_none());
 }
+/// Checks terminal required-source failures and rejection of invalid time mappings.
 #[test]
 fn required_overflow_disconnect_and_checked_mapping_are_terminal_or_rejected() {
     use InputErrorKind::{Disconnected, Overflow};
@@ -344,6 +357,7 @@ fn required_overflow_disconnect_and_checked_mapping_are_terminal_or_rejected() {
     );
     assert!(h.inputs.0.state.lock().unwrap().sources[0].last.is_none());
 }
+/// Checks admission and final execution reservation cannot both win for conflicting work.
 #[test]
 fn admission_and_final_reservation_race_cannot_both_win() {
     for _ in 0..64 {
@@ -369,6 +383,7 @@ fn admission_and_final_reservation_race_cannot_both_win() {
     }
 }
 
+/// Measures allocation-free horizon reads and reservations with maximum retained batches.
 #[test]
 fn cached_horizon_and_reservations_allocate_nothing_with_maximum_batches() {
     use crate::physical_clock::tests::ALLOCATIONS;
@@ -416,6 +431,7 @@ fn cached_horizon_and_reservations_allocate_nothing_with_maximum_batches() {
     }
 }
 
+/// Marks fixture participants active and publishes the next tag.
 fn republish(h: &mut Harness, tag: Tag) {
     let state = &mut h._coordination.coordinator.state;
     for slot in 0..h.rx.len() {
@@ -431,6 +447,7 @@ fn republish(h: &mut Harness, tag: Tag) {
             .unwrap();
     }
 }
+/// Checks consumed batches invalidate queued grants until coordinator reauthorization.
 #[test]
 fn consumed_batch_invalidates_queued_grant_until_coordinator_reauthorizes() {
     use crate::sched::federate::FederateAcquisition;
@@ -465,6 +482,7 @@ fn consumed_batch_invalidates_queued_grant_until_coordinator_reauthorizes() {
     assert!(h.inputs.reserve(0, tag));
 }
 
+/// Checks retained backend authority releases successive input frontiers.
 #[test]
 fn settled_acquisition_releases_successive_frontiers_through_coordinator() {
     use crate::sched::federate::{

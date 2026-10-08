@@ -113,7 +113,7 @@ impl EnclaveBindings {
         }
     }
 
-    /// Returns the concrete payload type bound to one compiled port slot.
+    /// Returns the concrete payload type bound to one compiled action slot.
     #[cfg(feature = "external-clock")]
     pub(crate) fn action_payload_type(&self, slot: BindingSlotIndex) -> Option<TypeId> {
         match self.bindings.get(slot) {
@@ -121,6 +121,7 @@ impl EnclaveBindings {
             _ => None,
         }
     }
+    /// Returns the type ID and diagnostic type name bound to a compiled port slot.
     pub(crate) fn port_payload_type(
         &self,
         slot: BindingSlotIndex,

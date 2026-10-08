@@ -1,3 +1,5 @@
+//! Compiled two-Enclave physical-input integration and preflight tests.
+
 use super::*;
 use boomerang_runtime::{physical_clock::ManualClock, physical_input::*, physical_time::*};
 const PHYSICAL: ActionImage = ActionImage::new(
@@ -46,6 +48,7 @@ const DEPLOYMENT: CompiledDeploymentImage<'static> = CompiledDeploymentImage {
     enclaves: TinyMapRef::from_slice(&ENCLAVES),
     coordination: CoordinationProjection::Local,
 };
+/// Declares two required u32 action sources with two-value and two-batch bounds.
 fn config() -> InputConfig {
     InputConfig {
         max_batch_values: 2,
@@ -60,6 +63,7 @@ fn config() -> InputConfig {
             .collect(),
     }
 }
+/// Binds Enclaves, selected clock, admission handoff, and reactions with source requiredness.
 fn bindings(
     clock: &ManualClock,
     ready: std::sync::mpsc::Sender<InputAdmission>,
@@ -107,6 +111,7 @@ fn bindings(
     }
     bindings
 }
+/// Checks coherent input precedes timers and clock advance cannot bypass required progress.
 #[test]
 fn physical_input_two_enclave_batch_precedes_timers_and_clock_cannot_outrun_progress() {
     bounded(|| {
@@ -185,6 +190,7 @@ fn physical_input_two_enclave_batch_precedes_timers_and_clock_cannot_outrun_prog
         );
     });
 }
+/// Checks input and clock failures release participants blocked before their first grant.
 #[test]
 fn physical_input_failure_releases_enclaves_blocked_before_first_grant() {
     bounded(|| {
@@ -253,6 +259,7 @@ fn physical_input_failure_releases_enclaves_blocked_before_first_grant() {
     });
 }
 
+/// Checks optional input interrupts stale grants waiting for clock advancement.
 #[test]
 fn physical_input_optional_batch_interrupts_old_grants_waiting_on_clock() {
     bounded(|| {
@@ -318,6 +325,7 @@ fn physical_input_optional_batch_interrupts_old_grants_waiting_on_clock() {
     });
 }
 
+/// Rejects invalid input declarations before the driver starts.
 #[test]
 fn physical_input_preflight_rejects_invalid_declarations_before_driver_start() {
     for case in 0..8 {

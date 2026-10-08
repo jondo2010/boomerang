@@ -215,10 +215,12 @@ fn generated_launcher_rejects_unsupported_coordination_before_publication() {
 fn generated_external_clock_launcher_calls_selected_driver_and_executes() {
     generated_clock_fixture(false);
 }
+/// Checks generated input declarations resolve and deliver an admitted value.
 #[test]
 fn generated_physical_inputs_resolve_declared_targets_and_execute() {
     generated_clock_fixture(true);
 }
+/// Builds and runs a launcher with a selected clock and optional declared input source.
 fn generated_clock_fixture(with_inputs: bool) {
     let _guard = support::toolchain_lock();
     let workspace = support::copied_fixture_workspace();
@@ -252,6 +254,7 @@ fn generated_clock_fixture(with_inputs: bool) {
     if with_inputs {
         source = source.replace("Sensor(#[input] command: u32)", "Sensor(#[input] command: u32, #[physical_action] external: u32)").replace("            reaction! {", "            reaction! { observe (external) { assert_eq!(ctx.get_action_value(&mut external), Some(&99)); } }\n            reaction! {");
         source.push_str(r#"
+/// Submits the fixture physical sample and advances its selected clock.
 #[cfg(boomerang_facet = "payload")]
 pub fn drive_clock(clock: boomerang_runtime::physical_clock::ManualClock, inputs: boomerang_runtime::physical_input::InputAdmission) -> Result<(), boomerang_runtime::physical_input::InputError> {
     use boomerang_runtime::{physical_input::*, physical_time::*};

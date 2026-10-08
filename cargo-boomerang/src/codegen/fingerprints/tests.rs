@@ -287,6 +287,7 @@ fn physical_clock_selection_and_domain_change_image_fingerprint() {
     assert_ne!(first, with_physical_clock(base, Some(&clock)).unwrap());
 }
 
+/// Checks source requiredness and input bounds affect the generated artifact fingerprint.
 #[test]
 fn physical_source_declarations_change_fingerprint() {
     let base = blake3::hash(b"image");

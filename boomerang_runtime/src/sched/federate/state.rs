@@ -1,9 +1,10 @@
-//! Pure lifecycle and logical-time coordination for one compiled Federate.
+//! Federate lifecycle and logical-time coordination with an optional hosted input-progress gate.
 //!
 //! The state machine aggregates scheduler candidates and completions by compiled [`EnclaveIndex`],
-//! advances revision-bound fixed-point phases, and latches terminal stop or failure without owning
-//! channels, clocks, scheduler storage, or a concrete coordination backend. A later adapter maps
-//! these semantic [`CoordinationAction`] values onto runtime operations.
+//! advances revision-bound fixed-point phases, and latches terminal stop or failure.
+//! With `external-clock`, a shared admission handle caps and authorizes grants against
+//! required-source progress. The orchestration adapter maps [`CoordinationAction`]
+//! values onto runtime operations; scheduler storage and the backend remain external.
 
 use tinymap::TinySecondaryMap;
 
@@ -200,7 +201,7 @@ struct ParticipantState {
     observation: Option<Observation>,
 }
 
-/// Pure coordination state for every compiled participant in one Federate.
+/// Participant coordination state with optional hosted input grant authorization.
 #[derive(Debug)]
 pub(crate) struct FederateCoordinationState {
     #[cfg(feature = "external-clock")]

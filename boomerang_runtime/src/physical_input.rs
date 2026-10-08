@@ -1,4 +1,10 @@
-//! Bounded hosted physical-input admission. Adapters decode payloads before submission.
+//! Bounded hosted physical-input admission and exclusive source progress.
+//!
+//! Adapters decode payloads before submission. Admission resolves declared source
+//! and target names once, validates coherent batches before fan-out, and publishes
+//! values before progress. The coordinator uses a cached required-source horizon
+//! and generation-bound authorization to fence execution against concurrent input.
+//! This module is available only with `external-clock`.
 use crate::{
     image::*, physical_clock::ManualClock, physical_time::*, AsyncEvent, AsyncEventTarget,
     Duration, ReactorData, Tag,
@@ -55,7 +61,7 @@ impl InputTarget {
 pub struct InputSource {
     /// Stable diagnostic and configuration identity.
     pub id: String,
-    /// Required sources gate execution and fail the Federate on overflow or disconnection.
+    /// Required sources gate execution; protocol violations, overflow, or disconnection fail the Federate.
     pub required: bool,
     /// Declared typed destinations, each owned exclusively by this admission service.
     pub targets: Vec<InputTarget>,
@@ -115,7 +121,7 @@ pub enum InputErrorKind {
     Future,
     /// A destination already completed or reserved the mapped tag for execution.
     Late,
-    /// Sequence equals the accepted high-water mark.
+    /// Sequence matches the accepted high-water mark or an earlier observation in this batch.
     Duplicate,
     /// Older sequence or acquisition time; no unbounded duplicate history is retained.
     OutOfOrder,
@@ -134,12 +140,14 @@ pub struct InputError {
     pub source_id: Option<String>,
     /// Closed error category.
     pub kind: InputErrorKind,
-    /// Host arrival for diagnostics only; never used to construct logical tags.
+    /// Host-monotonic diagnostic timestamp; never used for logical mapping.
     pub arrival: Instant,
 }
+/// Creates a malformed-configuration diagnostic without a resolved source.
 pub(crate) fn configuration_error() -> InputError {
     error(InputErrorKind::Malformed)
 }
+/// Creates a source-independent diagnostic with the current host timestamp.
 fn error(kind: InputErrorKind) -> InputError {
     InputError {
         source_id: None,
@@ -147,6 +155,7 @@ fn error(kind: InputErrorKind) -> InputError {
         arrival: Instant::now(),
     }
 }
+/// Resolved physical-action destination, payload type, source owner, and compiled delay.
 pub(crate) struct Target {
     id: String,
     source: SourceKey,
@@ -155,6 +164,7 @@ pub(crate) struct Target {
     delay: Duration,
     payload: TypeId,
 }
+/// Per-source sequence, acquisition time, exclusive frontier, and minimum target delay.
 struct Source {
     id: String,
     required: bool,
@@ -163,12 +173,14 @@ struct Source {
     frontier: Option<PhysicalTimeNanos>,
     delay: Duration,
 }
+/// Per-Enclave mailbox count, execution reservation, and generation-bound authorization.
 struct Participant {
     tx: crate::Sender<AsyncEvent>,
     reserved: Tag,
     mailbox: usize,
     authorized: Option<(Tag, u64)>,
 }
+/// Synchronized admission, progress publication, and execution reservation state.
 struct State {
     generation: u64,
     sources: Vec<Source>,
@@ -178,6 +190,7 @@ struct State {
     failure: Option<InputError>,
     closed: bool,
 }
+/// Execution-scoped clock, resolved targets, bounds, and abort handle shared by admission.
 struct Service {
     clock: ManualClock,
     targets: Vec<Target>,
@@ -205,6 +218,8 @@ impl std::fmt::Debug for InputBatchEvent {
             .finish()
     }
 }
+/// Returns the minimum required-source cap; unknown frontiers block all finite tags.
+/// An empty required-source set leaves execution unbounded.
 fn aggregate(frontiers: impl Iterator<Item = Option<Tag>>) -> Tag {
     frontiers
         .map(|frontier| frontier.unwrap_or(Tag::NEVER))
@@ -212,6 +227,7 @@ fn aggregate(frontiers: impl Iterator<Item = Option<Tag>>) -> Tag {
         .unwrap_or(Tag::FOREVER)
 }
 impl InputConfig {
+    /// Validates bounded declarations and resolves stable names to typed compiled targets.
     pub(crate) fn resolve(
         &self,
         images: &tinymap::TinySecondaryMap<EnclaveIndex, EnclaveImageView<'_>>,
@@ -288,6 +304,7 @@ impl InputConfig {
     }
 }
 impl InputAdmission {
+    /// Allocates bounded source and participant state before starting the input driver.
     pub(crate) fn new(
         config: InputConfig,
         targets: Vec<Target>,
@@ -358,6 +375,7 @@ impl InputAdmission {
             .position(|t| t.source == source && t.id == id)
             .map(TargetKey)
     }
+    /// Builds a diagnostic and applies source disabling or terminal required-source failure.
     fn reject(
         &self,
         state: &mut State,
@@ -405,7 +423,9 @@ impl InputAdmission {
             Instant::now(),
         )
     }
-    /// Publishes an exclusive acquisition frontier, including an explicit idle-through frontier.
+    /// Publishes an exclusive acquisition frontier, including explicit idle progress.
+    /// Future acquisitions must be greater than or equal to the frontier. Progress
+    /// may exceed the current clock time; it does not advance that clock.
     pub fn advance(
         &self,
         source: SourceKey,
@@ -413,7 +433,9 @@ impl InputAdmission {
     ) -> Result<(), InputError> {
         self.submit(Vec::new(), &[(source, frontier)]).map(|_| ())
     }
-    /// Validates the whole batch, commits owned values, then publishes progress. Returns mapped tags and diagnostic arrival.
+    /// Validates the whole batch before fan-out, then publishes values before progress.
+    /// Returns mapped tags and host diagnostic arrival. Partial publication aborts
+    /// execution; rejection may disable a source or latch failure without committing values.
     pub fn submit(
         &self,
         observations: Vec<InputObservation>,
@@ -621,6 +643,7 @@ impl InputAdmission {
             tags: mapped,
         })
     }
+    /// Reads the cached input horizon and its generation together for grant acquisition.
     pub(crate) fn grant_constraint(&self) -> (Tag, u64) {
         let state = self.0.state.lock().unwrap();
         (
@@ -632,12 +655,14 @@ impl InputAdmission {
             state.generation,
         )
     }
+    /// Authorizes one participant only if the acquired input generation is still current.
     pub(crate) fn authorize(&self, slot: usize, tag: Tag, generation: u64) {
         let mut state = self.0.state.lock().unwrap();
         if generation == state.generation {
             state.participants[slot].authorized = Some((tag, generation));
         }
     }
+    /// Reads the cached horizon for tests, blocking execution after closure or failure.
     #[cfg(test)]
     pub(crate) fn horizon(&self) -> Tag {
         let state = self.0.state.lock().unwrap();
@@ -647,9 +672,12 @@ impl InputAdmission {
             state.horizon
         }
     }
+    /// Acknowledges one consumed batch envelope without releasing retained target values.
     pub(crate) fn received(&self, slot: usize) {
         self.0.state.lock().unwrap().participants[slot].mailbox -= 1;
     }
+    /// Atomically reserves an authorized tag after pending input envelopes are consumed.
+    /// The cached horizon check is constant-time and fences concurrent late admission.
     pub(crate) fn reserve(&self, slot: usize, tag: Tag) -> bool {
         let mut state = self.0.state.lock().unwrap();
         if state.failure.is_some()
@@ -667,6 +695,7 @@ impl InputAdmission {
         state.participants[slot].reserved = tag;
         true
     }
+    /// Releases retained destinations completed by this participant through the given tag.
     pub(crate) fn complete(&self, slot: usize, tag: Tag) {
         let mut state = self.0.state.lock().unwrap();
         for batch in &mut state.retained {
@@ -674,6 +703,7 @@ impl InputAdmission {
         }
         state.retained.retain(|batch| !batch.is_empty());
     }
+    /// Closes admission at run exit and returns the first retained terminal input error.
     pub(crate) fn finish(&self) -> Result<(), InputError> {
         let mut state = self.0.state.lock().unwrap();
         state.closed = true;
@@ -684,6 +714,7 @@ impl InputAdmission {
 #[cfg(test)]
 mod tests;
 
+/// Closes the execution admission handle when its run scope exits.
 pub(crate) struct InputRun(pub(crate) Option<InputAdmission>);
 impl Drop for InputRun {
     fn drop(&mut self) {
@@ -693,6 +724,7 @@ impl Drop for InputRun {
     }
 }
 
+/// Input declarations paired with the startup callback receiving resolved admission.
 pub(crate) type InputSetup<'a> = (
     InputConfig,
     Box<dyn FnOnce(InputAdmission) -> Result<(), InputError> + Send + 'a>,

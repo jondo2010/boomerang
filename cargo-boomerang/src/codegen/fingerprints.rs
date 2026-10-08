@@ -215,6 +215,8 @@ pub(super) fn federate_image(
 #[cfg(test)]
 mod tests;
 
+/// Includes the selected clock domain and driver in image identity.
+/// Without an external clock, preserves the original image fingerprint.
 pub(super) fn with_physical_clock(
     image: blake3::Hash,
     clock: Option<&crate::manifest::ExternalClock>,

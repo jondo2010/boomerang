@@ -64,7 +64,7 @@ pub(crate) struct TriggerRes {
 #[derive(Debug)]
 pub struct Context {
     #[cfg(feature = "external-clock")]
-    pub(crate) physical_clock: Option<crate::physical_clock::ClockContext>,
+    pub(crate) physical_clock: crate::physical_clock::ClockContext,
     /// The EnclaveId of this context
     enclave_key: EnclaveKey,
     /// Physical time the Scheduler was started
@@ -211,7 +211,7 @@ impl Context {
     ) -> Self {
         Self {
             #[cfg(feature = "external-clock")]
-            physical_clock: None,
+            physical_clock: Default::default(),
             enclave_key,
             start_time,
             tag: Tag::NEVER,
@@ -296,7 +296,7 @@ impl Context {
         delay: Option<Duration>,
     ) {
         #[cfg(feature = "external-clock")]
-        if self.physical_clock.is_some() && !action.is_logical() {
+        if !action.is_logical() {
             self.try_schedule_action(action, value, delay)
                 .expect("selected physical action time is invalid");
             return;
@@ -335,23 +335,18 @@ impl Context {
         delay: Option<Duration>,
     ) -> Result<(), crate::physical_time::PhysicalClockError> {
         if !action.is_logical() {
-            if let Some(clock) = &self.physical_clock {
-                let delay = action
-                    .min_delay()
-                    .checked_add(delay.unwrap_or_default())
-                    .ok_or(crate::physical_time::PhysicalClockError::Overflow)?;
-                let tag = clock.clock.now()?.to_tag(delay)?;
-                let tag = if delay.is_zero() {
-                    Tag::new(tag.offset(), 1)
-                } else {
-                    tag
-                };
-                let tag = crate::physical_clock::after_current_tag(tag, self.tag)?;
-                let tag = action.next_physical_tag(tag)?;
-                action.set_value(tag, value);
-                self.trigger_res.scheduled_actions.push((action.key(), tag));
-                return Ok(());
-            }
+            let tag = self.physical_clock.action_tag(
+                self.start_time,
+                self.tag,
+                action.min_delay(),
+                delay.unwrap_or_default(),
+            )?;
+            let tag = self
+                .physical_clock
+                .check_action_tag(action.next_tag_for_offset(tag))?;
+            action.set_value(tag, value);
+            self.trigger_res.scheduled_actions.push((action.key(), tag));
+            return Ok(());
         }
         self.schedule_action(action, value, delay);
         Ok(())
@@ -373,25 +368,13 @@ impl CommonContext for Context {
         &self,
         delay: std::time::Duration,
     ) -> Result<std::time::Instant, crate::physical_time::PhysicalClockError> {
-        use crate::physical_time::{PhysicalClockError::Overflow, PhysicalTimeNanos};
-        if let Some(ctx) = &self.physical_clock {
-            ctx.clock
-                .now()?
-                .checked_add(PhysicalTimeNanos::from_duration(delay)?)?
-                .to_instant(ctx.origin)
-        } else {
-            std::time::Instant::now().checked_add(delay).ok_or(Overflow)
-        }
+        self.physical_clock.instant_after(delay)
     }
-
     #[cfg(feature = "external-clock")]
     fn try_get_physical_time(
         &self,
     ) -> Result<std::time::Instant, crate::physical_time::PhysicalClockError> {
-        self.physical_clock.as_ref().map_or_else(
-            || Ok(std::time::Instant::now()),
-            crate::physical_clock::ClockContext::instant,
-        )
+        self.physical_clock.instant()
     }
     #[cfg(feature = "external-clock")]
     fn physical_time(
@@ -400,12 +383,8 @@ impl CommonContext for Context {
         Option<crate::physical_time::PhysicalTimeNanos>,
         crate::physical_time::PhysicalClockError,
     > {
-        self.physical_clock
-            .as_ref()
-            .map(|ctx| ctx.clock.now())
-            .transpose()
+        self.physical_clock.physical_time()
     }
-
     fn enclave_id(&self) -> EnclaveKey {
         self.enclave_key
     }
@@ -450,7 +429,7 @@ impl CommonContext for Context {
 #[derive(Debug, Clone)]
 pub struct SendContext {
     #[cfg(feature = "external-clock")]
-    pub(crate) physical_clock: Option<crate::physical_clock::ClockContext>,
+    pub(crate) physical_clock: crate::physical_clock::ClockContext,
     /// Enclave ID for this context
     pub(crate) enclave_key: EnclaveKey,
     /// Channel for asynchronous events
@@ -465,25 +444,13 @@ impl CommonContext for SendContext {
         &self,
         delay: std::time::Duration,
     ) -> Result<std::time::Instant, crate::physical_time::PhysicalClockError> {
-        use crate::physical_time::{PhysicalClockError::Overflow, PhysicalTimeNanos};
-        if let Some(ctx) = &self.physical_clock {
-            ctx.clock
-                .now()?
-                .checked_add(PhysicalTimeNanos::from_duration(delay)?)?
-                .to_instant(ctx.origin)
-        } else {
-            std::time::Instant::now().checked_add(delay).ok_or(Overflow)
-        }
+        self.physical_clock.instant_after(delay)
     }
-
     #[cfg(feature = "external-clock")]
     fn try_get_physical_time(
         &self,
     ) -> Result<std::time::Instant, crate::physical_time::PhysicalClockError> {
-        self.physical_clock.as_ref().map_or_else(
-            || Ok(std::time::Instant::now()),
-            crate::physical_clock::ClockContext::instant,
-        )
+        self.physical_clock.instant()
     }
     #[cfg(feature = "external-clock")]
     fn physical_time(
@@ -492,12 +459,8 @@ impl CommonContext for SendContext {
         Option<crate::physical_time::PhysicalTimeNanos>,
         crate::physical_time::PhysicalClockError,
     > {
-        self.physical_clock
-            .as_ref()
-            .map(|ctx| ctx.clock.now())
-            .transpose()
+        self.physical_clock.physical_time()
     }
-
     fn enclave_id(&self) -> EnclaveKey {
         self.enclave_key
     }
@@ -637,7 +600,7 @@ mod tests {
         let (_shutdown_tx, shutdown_rx) = keepalive::channel();
         let mut ctx = SendContext {
             #[cfg(feature = "external-clock")]
-            physical_clock: None,
+            physical_clock: Default::default(),
             enclave_key: EnclaveKey::from(0),
             async_tx,
             shutdown_rx,

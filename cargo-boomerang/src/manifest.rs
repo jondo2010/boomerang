@@ -475,7 +475,9 @@ fn unknown_field(message: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod clock_tests {
+    //! Manifest validation for hosted physical-clock selection.
     use super::*;
+    /// Checks hosted clock selection and rejects unsupported profiles or invalid drivers.
     #[test]
     fn physical_clock_configuration_requires_a_local_hosted_driver() {
         let source = include_str!("../tests/fixtures/workspace/Boomerang.toml");

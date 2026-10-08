@@ -1,9 +1,13 @@
+//! Manual-clock protocol, conversion, and allocation regression tests.
+
 use super::*;
 
+/// Creates an independent manual clock in the shared test domain.
 fn clock() -> ManualClock {
     ManualClock::new(PhysicalClockDomainId(7)).unwrap()
 }
 
+/// Checks idempotent repeats, forward jumps, and retention of the first regression.
 #[test]
 fn repeats_jumps_and_regression_are_retained() {
     let clock = clock();
@@ -27,6 +31,7 @@ fn repeats_jumps_and_regression_are_retained() {
     assert_eq!(clock.now(), Err(PhysicalClockError::Regression));
 }
 
+/// Checks fresh run identity and terminal closure, failure, and identity rejection.
 #[test]
 fn closure_and_failure_are_terminal_and_epochs_are_fresh() {
     let first = clock();
@@ -50,6 +55,7 @@ fn closure_and_failure_are_terminal_and_epochs_are_fresh() {
     assert_eq!(second.now(), Err(PhysicalClockError::Failed));
 }
 
+/// Exercises registration versus advancement without lost or duplicated due wakes.
 #[test]
 fn registration_racing_advance_retains_one_wake_and_reuses_slot() {
     for _ in 0..200 {
@@ -86,6 +92,7 @@ fn registration_racing_advance_retains_one_wake_and_reuses_slot() {
     }
 }
 
+/// Checks conversion bounds, selected-clock action ordering, and native policy fallback.
 #[test]
 fn checked_conversions_and_physical_actions_use_selected_time() {
     assert_eq!(
@@ -113,11 +120,7 @@ fn checked_conversions_and_physical_actions_use_selected_time() {
     let (tx, rx) = kanal::bounded(4);
     let (_shutdown, shutdown_rx) = crate::keepalive::channel();
     let mut ctx = Context::new(crate::EnclaveKey::from(0), origin, None, tx, shutdown_rx);
-    ctx.physical_clock = Some(ClockContext {
-        clock: clock.clone(),
-        slot: 0,
-        origin,
-    });
+    ctx.physical_clock = ClockContext::manual(clock.clone(), 0, origin);
     let mut action = Action::<u32>::new(
         "physical",
         ActionKey::from(0),
@@ -127,7 +130,8 @@ fn checked_conversions_and_physical_actions_use_selected_time() {
     let mut action =
         ActionRef::<u32>::try_from(DynActionRefMut(&mut action as &mut dyn BaseAction)).unwrap();
     assert_eq!(
-        action.next_physical_tag(Tag::new(Duration::ZERO, usize::MAX)),
+        ctx.physical_clock
+            .check_action_tag(Tag::new(Duration::ZERO, usize::MAX)),
         Err(PhysicalClockError::Overflow)
     );
     ctx.schedule_action(&mut action, 1, Some(Duration::nanoseconds(3)));
@@ -160,13 +164,14 @@ fn checked_conversions_and_physical_actions_use_selected_time() {
         ctx.try_schedule_action(&mut action, 4, None),
         Err(PhysicalClockError::Closed)
     );
-    ctx.physical_clock = None;
+    ctx.physical_clock = ClockContext::default();
     ctx.try_schedule_action(&mut action, 5, None).unwrap();
     let tag = ctx.trigger_res.scheduled_actions.last().unwrap().1;
     assert_eq!(action.get_value_at(tag), Some(&5));
     assert!(ctx.make_send_context().try_get_physical_time().unwrap() >= origin);
 }
 
+/// Counts allocations on the measuring test thread while delegating to System.
 struct CountingAllocator;
 thread_local! { static ALLOCATIONS: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) }; }
 #[global_allocator]
@@ -185,6 +190,7 @@ unsafe impl std::alloc::GlobalAlloc for CountingAllocator {
     }
 }
 
+/// Measures allocation-free clock policies and deadline reuse at two participant scales.
 #[test]
 fn clock_steady_state_allocates_nothing_at_two_and_sixteen_enclaves() {
     for count in [2, 16] {
@@ -197,10 +203,21 @@ fn clock_steady_state_allocates_nothing_at_two_and_sixteen_enclaves() {
                 wake: tx.clone(),
             })
             .collect();
+        let adapters: Vec<_> = (0..count)
+            .map(|slot| ClockContext::manual(clock.clone(), slot, std::time::Instant::now()))
+            .collect();
+        let _host = ClockContext::default(); // initialize the shared native adapter before measurement
         let capacity = clock.0.state.lock().unwrap().slots.capacity();
         let start = std::time::Instant::now();
         ALLOCATIONS.with(|n| n.set(Some(0)));
         for step in 0..10_000 {
+            std::hint::black_box(ClockContext::default())
+                .instant_after(std::time::Duration::ZERO)
+                .unwrap();
+            for adapter in &adapters {
+                assert!(!adapter.failed());
+                adapter.clone().instant().unwrap();
+            }
             for slot in 0..count {
                 assert!(!clock
                     .register(slot, PhysicalTimeNanos(step * 100 + 1))
@@ -227,6 +244,7 @@ fn clock_steady_state_allocates_nothing_at_two_and_sixteen_enclaves() {
     }
 }
 
+/// Checks host reads and preservation of terminal failure after run cleanup.
 #[test]
 fn host_clock_uses_shared_integer_contract_and_run_cleanup_retains_failure() {
     let origin = std::time::Instant::now();

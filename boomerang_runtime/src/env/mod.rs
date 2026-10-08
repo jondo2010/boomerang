@@ -566,7 +566,7 @@ impl Enclave {
     pub fn create_send_context(&self, key: EnclaveKey) -> SendContext {
         SendContext {
             #[cfg(feature = "external-clock")]
-            physical_clock: None,
+            physical_clock: Default::default(),
             enclave_key: key,
             async_tx: self.event_tx.clone(),
             shutdown_rx: self.shutdown_rx.clone(),

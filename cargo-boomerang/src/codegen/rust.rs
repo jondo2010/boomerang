@@ -65,6 +65,7 @@ pub(super) fn render_tracing_init(
     }
 }
 
+/// Renders clock creation, the selected payload driver call, and Federate clock binding.
 fn render_physical_clock(
     clock: &crate::manifest::ExternalClock,
     alias: &str,

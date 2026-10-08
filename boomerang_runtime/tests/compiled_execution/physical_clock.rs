@@ -1,3 +1,5 @@
+//! Compiled Federate execution with shared manual clocks, actions, and physical routes.
+
 use super::*;
 use boomerang_runtime::{physical_clock::ManualClock, physical_time::*};
 
@@ -31,6 +33,7 @@ const CLOCK_DEPLOYMENT: CompiledDeploymentImage<'static> = CompiledDeploymentIma
     coordination: CoordinationProjection::Local,
 };
 
+/// Checks logical timer order across two periods when physical time jumps forward.
 #[test]
 fn physical_clock_two_enclaves_preserve_all_timer_tags_across_jumps() {
     bounded(|| {
@@ -101,6 +104,7 @@ fn physical_clock_two_enclaves_preserve_all_timer_tags_across_jumps() {
     });
 }
 
+/// Checks bounded release of pacing and idle participants after clock termination.
 #[test]
 fn physical_clock_failure_releases_physical_and_idle_coordination_waits() {
     bounded(|| {
@@ -183,6 +187,7 @@ fn physical_clock_failure_releases_physical_and_idle_coordination_waits() {
     });
 }
 
+/// Rejects mismatched domains, closed clocks, and reused execution claims at startup.
 #[test]
 fn physical_clock_preflight_rejects_domain_closed_and_reuse() {
     let clock = ManualClock::new(PhysicalClockDomainId(7)).unwrap();
@@ -222,6 +227,7 @@ fn physical_clock_preflight_rejects_domain_closed_and_reuse() {
     ));
 }
 
+/// Rejects a mailbox configuration that cannot retain a clock wake.
 #[test]
 fn physical_clock_rejects_mailboxes_without_a_retained_wake_slot() {
     let clock = ManualClock::new(PhysicalClockDomainId(7)).unwrap();
@@ -253,6 +259,7 @@ fn physical_clock_rejects_mailboxes_without_a_retained_wake_slot() {
     ));
 }
 
+/// Checks that physical route timestamps follow the manual clock and minimum delay.
 #[test]
 fn physical_route_uses_selected_clock() {
     use super::source_sink::*;
@@ -371,6 +378,7 @@ fn physical_route_uses_selected_clock() {
     }
 }
 
+/// Checks distinct action microsteps and retained values while physical time is frozen.
 #[test]
 fn physical_actions_at_frozen_time_preserve_microsteps_and_every_value() {
     for asynchronous in [true, false] {

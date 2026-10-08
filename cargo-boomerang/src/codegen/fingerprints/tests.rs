@@ -268,6 +268,7 @@ fn coordination_tracks_compiled_in_transit_capacity() {
     assert_ne!(base, coordination(&changed, &topology).unwrap());
 }
 
+/// Checks that clock selection, domain, and driver participate in image identity.
 #[test]
 fn physical_clock_selection_and_domain_change_image_fingerprint() {
     let base = blake3::hash(b"image");

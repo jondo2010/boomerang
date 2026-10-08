@@ -211,6 +211,7 @@ fn generated_launcher_rejects_unsupported_coordination_before_publication() {
     }
 }
 
+/// Builds and runs a generated launcher with its explicitly selected clock driver.
 #[test]
 fn generated_external_clock_launcher_calls_selected_driver_and_executes() {
     generated_clock_fixture(false);
@@ -267,6 +268,7 @@ pub fn drive_clock(clock: boomerang_runtime::physical_clock::ManualClock, inputs
 "#);
     } else {
         source.push_str(r#"
+/// Advances the fixture clock before the generated Federate starts.
 #[cfg(boomerang_facet = "payload")]
 pub fn drive_clock(clock: boomerang_runtime::physical_clock::ManualClock) -> Result<(), boomerang_runtime::physical_time::PhysicalClockError> {
     assert_eq!(clock.domain(), boomerang_runtime::physical_time::PhysicalClockDomainId(7));

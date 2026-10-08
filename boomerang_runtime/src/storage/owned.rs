@@ -267,6 +267,7 @@ impl<T: ReactorData> PortFactory for TypedPortFactory<T> {
 pub(crate) trait OutboundRoute: Send {
     /// Clones and admits one present source value at its destination timing boundary.
     fn emit(&mut self, source: &dyn BasePort, tag: Tag) -> Result<(), OwnedStorageError>;
+    /// Installs the Enclave execution policy on a route before execution begins.
     #[cfg(feature = "external-clock")]
     fn set_physical_clock(&mut self, _clock: crate::physical_clock::ClockContext) {}
 }
@@ -286,7 +287,7 @@ struct TypedOutboundRoute<'image, T: ReactorData + Clone> {
     /// Destination scheduler event channel.
     destination_tx: crate::Sender<crate::event::AsyncEvent>,
     #[cfg(feature = "external-clock")]
-    physical_clock: Option<crate::physical_clock::ClockContext>,
+    physical_clock: crate::physical_clock::ClockContext,
     /// Retains the statically unified endpoint payload type.
     marker: PhantomData<fn() -> T>,
 }
@@ -294,7 +295,7 @@ struct TypedOutboundRoute<'image, T: ReactorData + Clone> {
 impl<T: ReactorData + Clone> OutboundRoute for TypedOutboundRoute<'_, T> {
     #[cfg(feature = "external-clock")]
     fn set_physical_clock(&mut self, clock: crate::physical_clock::ClockContext) {
-        self.physical_clock = Some(clock);
+        self.physical_clock = clock;
     }
 
     fn emit(&mut self, source: &dyn BasePort, tag: Tag) -> Result<(), OwnedStorageError> {
@@ -338,15 +339,10 @@ impl<T: ReactorData + Clone> OutboundRoute for TypedOutboundRoute<'_, T> {
                         })
                 };
                 #[cfg(feature = "external-clock")]
-                let time = if let Some(clock) = &self.physical_clock {
-                    clock
-                        .clock
-                        .now()?
-                        .checked_add(crate::physical_time::PhysicalTimeNanos(self.delay_nanos))?
-                        .to_instant(clock.origin)?
-                } else {
-                    host_time()?
-                };
+                let time = self.physical_clock.route_time(
+                    std::time::Duration::from_nanos(self.delay_nanos),
+                    &host_time,
+                )?;
                 #[cfg(not(feature = "external-clock"))]
                 let time = host_time()?;
                 crate::event::AsyncEvent::Physical {
@@ -826,9 +822,10 @@ impl<'image> OwnedStorage<'image> {
     }
 
     #[cfg(feature = "external-clock")]
+    /// Shares the Enclave clock policy with all reaction contexts and outbound routes.
     pub(crate) fn set_physical_clock(&mut self, clock: crate::physical_clock::ClockContext) {
         for context in self.contexts.values_mut() {
-            context.physical_clock = Some(clock.clone());
+            context.physical_clock = clock.clone();
         }
         for route in self
             .outbound_routes
@@ -839,6 +836,7 @@ impl<'image> OwnedStorage<'image> {
         }
     }
 
+    /// Reserves a distinct physical-event tag for an action or pending boundary value.
     #[cfg(feature = "external-clock")]
     pub(crate) fn scheduler_physical_tag(
         &self,
@@ -894,7 +892,7 @@ impl<'image> OwnedStorage<'image> {
             delay_nanos,
             destination_tx,
             #[cfg(feature = "external-clock")]
-            physical_clock: None,
+            physical_clock: Default::default(),
             marker: PhantomData,
         });
         if let Some(routes) = self.outbound_routes.get_mut(source_port) {

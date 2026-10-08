@@ -265,7 +265,7 @@ pub(crate) fn run_owned_scheduler_with_coordination_and_observation(
     let physical_clock = storage.scheduler_send_context().physical_clock;
     SchedulerCore {
         #[cfg(feature = "external-clock")]
-        physical_clock,
+        physical_clock: &*physical_clock,
         #[cfg(feature = "external-clock")]
         physical_inputs: storage.physical_inputs.clone(),
         key,
@@ -577,11 +577,13 @@ mod tests {
         OwnedStorage::new(EnclaveImageView::new(image.clone()).unwrap(), bindings).unwrap()
     }
 
+    /// Checks that failure during event pumping prevents a subsequent execution grant.
     #[cfg(feature = "external-clock")]
     #[test]
     fn physical_failure_during_pump_stops_before_fast_forward_grant() {
         use crate::physical_clock::{ClockContext, ManualClock};
         use crate::physical_time::{PhysicalClockDomainId, PhysicalClockError};
+        /// Latches clock overflow when a queued test payload is discarded.
         #[derive(Debug)]
         struct FailOnDrop(ManualClock);
         impl Drop for FailOnDrop {
@@ -593,11 +595,7 @@ mod tests {
         let mut storage = build_storage(Arc::clone(&calls), false);
         let origin = std::time::Instant::now();
         let clock = ManualClock::new(PhysicalClockDomainId(7)).unwrap();
-        storage.set_physical_clock(ClockContext {
-            clock: clock.clone(),
-            slot: 0,
-            origin,
-        });
+        storage.set_physical_clock(ClockContext::manual(clock.clone(), 0, origin));
         assert!(storage
             .scheduler_event_tx()
             .try_send(AsyncEvent::Logical {
@@ -660,7 +658,7 @@ mod tests {
             upstream,
             SendContext {
                 #[cfg(feature = "external-clock")]
-                physical_clock: None,
+                physical_clock: Default::default(),
                 enclave_key: upstream,
                 async_tx: upstream_tx,
                 shutdown_rx: upstream_shutdown_rx,
@@ -739,7 +737,7 @@ mod tests {
             upstream,
             SendContext {
                 #[cfg(feature = "external-clock")]
-                physical_clock: None,
+                physical_clock: Default::default(),
                 enclave_key: upstream,
                 async_tx: upstream_tx,
                 shutdown_rx: upstream_shutdown_rx,
@@ -825,7 +823,7 @@ mod tests {
             upstream,
             SendContext {
                 #[cfg(feature = "external-clock")]
-                physical_clock: None,
+                physical_clock: Default::default(),
                 enclave_key: upstream,
                 async_tx: upstream_tx,
                 shutdown_rx: upstream_shutdown_rx,
@@ -876,7 +874,7 @@ mod tests {
             upstream,
             SendContext {
                 #[cfg(feature = "external-clock")]
-                physical_clock: None,
+                physical_clock: Default::default(),
                 enclave_key: upstream,
                 async_tx: upstream_tx,
                 shutdown_rx: upstream_shutdown_rx,
@@ -935,7 +933,7 @@ mod tests {
             upstream,
             SendContext {
                 #[cfg(feature = "external-clock")]
-                physical_clock: None,
+                physical_clock: Default::default(),
                 enclave_key: upstream,
                 async_tx: upstream_tx,
                 shutdown_rx: upstream_shutdown_rx,

@@ -1263,11 +1263,11 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
     if let Some(clock) = &clock_run.0 {
         clock.attach(&event_senders, abort_handle.clone())?;
         for (slot, (_, storage)) in storages.iter_mut().enumerate() {
-            storage.set_physical_clock(crate::physical_clock::ClockContext {
-                clock: clock.clone(),
+            storage.set_physical_clock(crate::physical_clock::ClockContext::manual(
+                clock.clone(),
                 slot,
                 origin,
-            });
+            ));
         }
     }
     #[cfg(feature = "external-clock")]
@@ -2270,7 +2270,7 @@ mod scoped_spawn_tests {
             upstream,
             SendContext {
                 #[cfg(feature = "external-clock")]
-                physical_clock: None,
+                physical_clock: Default::default(),
                 enclave_key: upstream,
                 async_tx: upstream_tx,
                 shutdown_rx: upstream_shutdown_rx,

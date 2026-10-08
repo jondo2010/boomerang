@@ -6,8 +6,9 @@
 use std::pin::Pin;
 
 mod barrier;
+pub(crate) mod clock;
 mod compiled;
-mod core;
+pub(crate) mod core;
 pub(crate) mod federate;
 mod modal;
 mod queue;
@@ -618,7 +619,7 @@ impl Scheduler {
 
         SchedulerCore {
             #[cfg(feature = "external-clock")]
-            physical_clock: None,
+            physical_clock: &crate::physical_clock::NativeClock,
             #[cfg(feature = "external-clock")]
             physical_inputs: None,
             key: *key,

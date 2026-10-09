@@ -1,7 +1,5 @@
 //! Generic scheduler capabilities and algorithm shared by live and future compiled schedules.
 
-use kanal::ReceiveErrorTimeout;
-
 use super::{
     barrier::LogicalTimeBarrier,
     federate::{
@@ -12,6 +10,7 @@ use super::{
     Config, Stats,
 };
 use crate::{
+    clock::{ClockWaitResult, RuntimeClock, WaitContext},
     event::{AsyncEvent, AsyncEventTarget},
     keepalive,
     key_set::KeySetView,
@@ -125,14 +124,21 @@ pub(crate) struct ModeTransition<M> {
 /// Mutable execution storage consumed by the scheduler independently of its schedule.
 pub(crate) trait ExecutionStorage<S: Schedule> {
     /// Failure returned while invoking reactions.
-    type Error;
+    type Error: From<crate::clock::PhysicalClockError>;
 
-    /// Prepares the scheduler origin immediately before startup begins.
-    fn prepare_startup_origin(&mut self, start_time: &mut std::time::Instant);
     /// Resolves an externally supplied runtime action identity to this storage's action key.
     fn action_from_runtime(&self, key: ActionKey) -> S::Action;
     /// Retain an action value until its scheduled tag is processed.
     fn push_action_value(&mut self, action: S::Action, tag: Tag, value: Box<dyn ReactorData>);
+    /// Borrows an action using the resolved storage key.
+    fn action(&self, action: S::Action) -> &dyn crate::BaseAction;
+    /// Selects a tag past pending values at the same boundary port and offset.
+    /// Does not reserve the result or change the queue.
+    fn try_next_boundary_tag(
+        &self,
+        port: crate::image::PortIndex,
+        tag: Tag,
+    ) -> Result<Tag, Self::Error>;
     /// Stages one inbound scheduler-boundary value until its logical tag is processed.
     fn stage_inbound_boundary_value(
         &mut self,
@@ -170,6 +176,8 @@ where
 {
     /// Enclave whose logical time this invocation advances.
     pub(super) key: EnclaveKey,
+    /// Selected execution timeline, including the shared native origin.
+    pub(super) clock: RuntimeClock,
     /// Existing live scheduler configuration.
     pub(super) config: &'a Config,
     /// Optional snapshot-only scheduler observation state.
@@ -227,41 +235,6 @@ pub(crate) enum SchedulerError<E> {
         /// Original typed scheduler failure retained without formatting or reparsing.
         source: Box<SchedulerError<E>>,
     },
-}
-
-/// Raw result from the scheduler event channel before an interruption is handled.
-enum WallClockReceive {
-    /// The requested physical deadline elapsed normally.
-    DeadlineReached,
-    /// A scheduler event interrupted the deadline and remains to be handled.
-    Interrupted(AsyncEvent),
-    /// Federate coordination terminated the scheduler through its existing event channel.
-    FederateTerminated(FederateTermination),
-}
-
-/// Performs one uninterrupted scheduler-event receive until a physical deadline.
-fn receive_until_wall_clock_deadline(
-    target: std::time::Instant,
-    event_rx: &crate::Receiver<AsyncEvent>,
-    entered_receive: impl FnOnce(),
-    terminal_after_close: impl FnOnce()
-        -> Result<Option<FederateTermination>, FederateCoordinationError>,
-) -> Result<WallClockReceive, FederateCoordinationError> {
-    let advance = target.saturating_duration_since(std::time::Instant::now());
-    entered_receive();
-    match event_rx.recv_timeout(advance) {
-        Ok(event) => Ok(WallClockReceive::Interrupted(event)),
-        Err(ReceiveErrorTimeout::Closed) | Err(ReceiveErrorTimeout::SendClosed) => {
-            if let Some(termination) = terminal_after_close()? {
-                return Ok(WallClockReceive::FederateTerminated(termination));
-            }
-            if let Some(remaining) = target.checked_duration_since(std::time::Instant::now()) {
-                std::thread::sleep(remaining);
-            }
-            Ok(WallClockReceive::DeadlineReached)
-        }
-        Err(ReceiveErrorTimeout::Timeout) => Ok(WallClockReceive::DeadlineReached),
-    }
 }
 
 fn observe_coordination_wait<T>(
@@ -352,7 +325,21 @@ where
                 target,
                 value,
             } => {
-                let tag = Tag::from_physical_time(*self.start_time, time);
+                let tag = time.to_tag(Duration::ZERO)?;
+                let tag = tag.checked_after(*self.current_tag)?;
+                let tag = match target {
+                    AsyncEventTarget::Action(key) => {
+                        let action = self.storage.action_from_runtime(key);
+                        self.storage
+                            .action(action)
+                            .checked_next_tag_for_offset(tag)
+                            .ok_or(crate::clock::PhysicalClockError::Overflow)?
+                    }
+                    AsyncEventTarget::BoundaryPort(port)
+                    | AsyncEventTarget::NetworkBoundaryPort(port) => {
+                        self.storage.try_next_boundary_tag(port, tag)?
+                    }
+                };
                 self.admit_value(tag, target, value, origin)?;
             }
             AsyncEvent::Shutdown { delay } => {
@@ -445,7 +432,6 @@ where
         if let Some(observation) = self.observation {
             observation.mark_running();
         }
-        self.storage.prepare_startup_origin(self.start_time);
         let tag = Tag::ZERO;
 
         // Initialize the event queue with the startup actions
@@ -513,7 +499,7 @@ where
     /// Try to receive an asynchronous event
     fn receive_event_async(&mut self) -> Option<AsyncEvent> {
         if let Some(shutdown) = *self.shutdown_tag {
-            let abs = shutdown.to_logical_time(*self.start_time);
+            let abs = *self.start_time + shutdown.offset();
             if let Some(timeout) = abs.checked_duration_since(std::time::Instant::now()) {
                 tracing::debug!(target: "boomerang::runtime",
                     event = "runtime.scheduler.waiting", enclave = self.key.as_u32(),
@@ -764,16 +750,26 @@ where
         Ok(None)
     }
 
-    /// Synchronizes the next tag with the scheduler wall clock.
+    /// Paces the next tag through the selected clock and handles any interruption.
     fn synchronize_next_tag(
         &mut self,
         next_tag: Tag,
     ) -> Result<Option<bool>, SchedulerError<E::Error>> {
         if !self.config.fast_forward {
-            let target = next_tag.to_logical_time(*self.start_time);
-            match self.synchronize_wall_clock(target)? {
-                WallClockReceive::DeadlineReached => {}
-                WallClockReceive::Interrupted(event) => {
+            let mut wait = WaitContext {
+                key: self.key,
+                origin: *self.start_time,
+                event_rx: self.event_rx,
+                observation: self.observation,
+                coordination: &mut self.federate_coordination,
+            };
+            let received = self
+                .clock
+                .wait_until(next_tag, &mut wait)
+                .map_err(SchedulerError::FederateCoordination)?;
+            match received {
+                ClockWaitResult::DeadlineReached => {}
+                ClockWaitResult::Interrupted(event) => {
                     if matches!(
                         &event,
                         AsyncEvent::Logical { .. }
@@ -788,12 +784,12 @@ where
                         .map_err(SchedulerError::Execution)?;
                     return Ok(Some(true));
                 }
-                WallClockReceive::FederateTerminated(FederateTermination::Graceful { tag }) => {
+                ClockWaitResult::FederateTerminated(FederateTermination::Graceful { tag }) => {
                     let tag = tag.unwrap_or_else(|| self.next_shutdown_tag());
                     self.stop_for_federate_termination(tag);
                     return Ok(Some(true));
                 }
-                WallClockReceive::FederateTerminated(FederateTermination::Abort) => {
+                ClockWaitResult::FederateTerminated(FederateTermination::Abort) => {
                     self.abort_for_federate_termination();
                     return Ok(Some(false));
                 }
@@ -931,7 +927,13 @@ where
 
     /// Process one scheduler step, returning coordination failures to the caller.
     pub(super) fn try_next(&mut self) -> Result<bool, SchedulerError<E::Error>> {
+        if self.abort_if_clock_failed() {
+            return Ok(false);
+        }
         self.pump_pending_async_events()?;
+        if self.abort_if_clock_failed() {
+            return Ok(false);
+        }
         self.observe_event_queue();
 
         if self.event_rx.is_closed() {
@@ -960,6 +962,9 @@ where
                 return Ok(keep_running);
             }
 
+            if self.abort_if_clock_failed() {
+                return Ok(false);
+            }
             let result = self.process_next_event(logical_horizon);
             self.observe_event_queue();
             result
@@ -993,56 +998,13 @@ where
         Ok(())
     }
 
-    // Wait until the wall-clock time is reached
-    fn synchronize_wall_clock(
-        &mut self,
-        target: std::time::Instant,
-    ) -> Result<WallClockReceive, SchedulerError<E::Error>> {
-        let now = std::time::Instant::now();
-
-        match now.cmp(&target) {
-            std::cmp::Ordering::Less => {
-                let advance = target - now;
-                tracing::debug!(target: "boomerang::runtime",
-                    event = "runtime.scheduler.waiting", enclave = self.key.as_u32(),
-                    reason = "wall_clock", duration_ns = advance.as_nanos(),
-                );
-
-                let observation = self.observation;
-                let received = receive_until_wall_clock_deadline(
-                    target,
-                    self.event_rx,
-                    || {
-                        if let Some(observation) = observation {
-                            observation
-                                .enter(SchedulerPhase::PhysicalWait, std::time::Instant::now());
-                        }
-                    },
-                    || {
-                        self.federate_coordination.as_deref_mut().map_or(
-                            Ok(None),
-                            FederateSchedulerCoordination::terminal_after_event_channel_closed,
-                        )
-                    },
-                );
-                if let Some(observation) = observation {
-                    observation.enter(SchedulerPhase::Framework, std::time::Instant::now());
-                }
-                return received.map_err(SchedulerError::FederateCoordination);
-            }
-
-            std::cmp::Ordering::Greater => {
-                let delay = now - target;
-                tracing::warn!(target: "boomerang::runtime",
-                    event = "runtime.scheduler.deadline_missed", enclave = self.key.as_u32(),
-                    delay_ns = delay.as_nanos(),
-                );
-            }
-
-            std::cmp::Ordering::Equal => {}
+    /// Aborts this participant at an execution checkpoint if its clock has failed.
+    fn abort_if_clock_failed(&mut self) -> bool {
+        let failed = self.clock.failed();
+        if failed {
+            self.abort_for_federate_termination();
         }
-
-        Ok(WallClockReceive::DeadlineReached)
+        failed
     }
 
     /// Process the reactions at this tag in increasing order of level.
@@ -1230,65 +1192,5 @@ where
         );
 
         true
-    }
-}
-
-#[cfg(test)]
-mod wall_clock_tests {
-    //! Exact receive-entry coverage for coordinated wall-clock termination.
-
-    use super::{receive_until_wall_clock_deadline, WallClockReceive};
-    use crate::{
-        image::EnclaveIndex,
-        sched::federate::{
-            FederateCoordinationParts, FederateSchedulerCoordination, FederateTermination,
-            LifecyclePolicy, LocalFederateCoordinationBackend,
-        },
-        AsyncEvent,
-    };
-    use std::{sync::mpsc, time::Duration as StdDuration};
-
-    /// Verifies coordinator abort closes an entered timed receive only after queuing termination.
-    #[test]
-    fn coordinated_abort_interrupts_entered_wall_clock_receive() {
-        let enclave = EnclaveIndex::new(0);
-        let (event_tx, event_rx) = kanal::unbounded::<AsyncEvent>();
-        let scheduler_event_rx = event_rx.clone();
-        let FederateCoordinationParts {
-            abort_handle,
-            coordinator,
-            participants,
-            ..
-        } = FederateCoordinationParts::new(
-            [(enclave, event_tx, event_rx)],
-            LifecyclePolicy::KeepAlive,
-            LocalFederateCoordinationBackend::default(),
-        )
-        .unwrap();
-        let (_, mut participant) = participants.into_iter().next().unwrap();
-        let (entered_tx, entered_rx) = mpsc::sync_channel(0);
-        let target = std::time::Instant::now() + StdDuration::from_secs(1);
-
-        std::thread::scope(|scope| {
-            let coordinator = scope.spawn(move || coordinator.run());
-            let waiter = scope.spawn(move || {
-                receive_until_wall_clock_deadline(
-                    target,
-                    &scheduler_event_rx,
-                    || entered_tx.send(()).unwrap(),
-                    || participant.terminal_after_event_channel_closed(),
-                )
-            });
-            entered_rx
-                .recv_timeout(StdDuration::from_millis(100))
-                .expect("scheduler must enter the production timed-receive boundary");
-            abort_handle.abort();
-
-            assert!(matches!(
-                waiter.join().unwrap().unwrap(),
-                WallClockReceive::FederateTerminated(FederateTermination::Abort)
-            ));
-            coordinator.join().unwrap().coordination_result.unwrap();
-        });
     }
 }

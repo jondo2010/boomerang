@@ -7,6 +7,7 @@ pub use ::time::Duration;
 
 pub mod action;
 pub mod binding;
+pub mod clock;
 mod context;
 mod env;
 mod event;
@@ -90,6 +91,9 @@ impl<T: ReactorData> PayloadType<T> {
 
 #[derive(thiserror::Error, Debug)]
 pub enum RuntimeError {
+    /// Checked physical-time or microstep conversion failed during native execution.
+    #[error(transparent)]
+    PhysicalClock(#[from] crate::clock::PhysicalClockError),
     #[error("Port Key not found: {}", 0)]
     PortKeyNotFound(PortKey),
 

@@ -80,16 +80,20 @@ impl Schedule for EnclaveImageView<'_> {
 impl ExecutionStorage<EnclaveImageView<'_>> for OwnedStorage<'_> {
     type Error = OwnedStorageError;
 
-    fn prepare_startup_origin(&mut self, start_time: &mut std::time::Instant) {
-        self.initialize_reaction_context_origins(*start_time);
-    }
-
     fn action_from_runtime(&self, key: ActionKey) -> ActionIndex {
         self.scheduler_action(key)
     }
 
     fn push_action_value(&mut self, action: ActionIndex, tag: Tag, value: Box<dyn ReactorData>) {
         self.scheduler_push_action(action, tag, value);
+    }
+
+    fn action(&self, action: ActionIndex) -> &dyn crate::BaseAction {
+        self.scheduler_action_ref(action)
+    }
+
+    fn try_next_boundary_tag(&self, port: PortIndex, tag: Tag) -> Result<Tag, Self::Error> {
+        OwnedStorage::try_next_boundary_tag(self, port, tag).map_err(Into::into)
     }
 
     fn stage_inbound_boundary_value(
@@ -224,7 +228,7 @@ pub(crate) fn run_owned_scheduler_with_coordination_and_observation(
     let mut events = EventManager::new(reaction_limits, &schedule, observation.is_some());
     let event_rx = storage.scheduler_event_rx();
     let shutdown_tx = storage.take_scheduler_shutdown_tx();
-    let mut start_time = origin;
+    let mut start_time = storage.initialize_clock(origin);
     let mut current_tag = Tag::NEVER;
     let mut last_nonterminal_tag = None;
     let mut shutdown_tag = None;
@@ -252,7 +256,9 @@ pub(crate) fn run_owned_scheduler_with_coordination_and_observation(
     let mut transition_buffer = Vec::with_capacity(reaction_capacity);
     let mut outcomes = (0..reaction_capacity).map(|_| Default::default()).collect();
 
+    let clock = storage.scheduler_send_context().physical_clock;
     SchedulerCore {
+        clock,
         key,
         config,
         observation,
@@ -562,6 +568,107 @@ mod tests {
         OwnedStorage::new(EnclaveImageView::new(image.clone()).unwrap(), bindings).unwrap()
     }
 
+    /// Compiled native admission retains distinct work for two equal physical timestamps.
+    #[test]
+    fn native_physical_events_keep_distinct_compiled_microsteps() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        /// Two mailbox slots hold both observations before scheduler startup.
+        static TWO_EVENTS: EnclaveImage<'static> = EnclaveImage {
+            storage_bounds: &StorageBounds::new(1, 1, 2, 0, 0, 0),
+            ..IMAGE
+        };
+        let mut storage = build_storage_for_image(&TWO_EVENTS, calls.clone(), false);
+        let origin = std::time::Instant::now();
+        for _ in 0..2 {
+            assert!(storage
+                .scheduler_event_tx()
+                .try_send(AsyncEvent::Physical {
+                    time: crate::clock::PhysicalInstant::default(),
+                    target: crate::AsyncEventTarget::Action(ActionKey::from(0)),
+                    value: Box::new(()),
+                })
+                .unwrap());
+        }
+        run_owned_scheduler_with_coordination(
+            &mut storage,
+            &Config::default().with_fast_forward(true),
+            origin,
+            EnclaveDependencies::new(EnclaveKey::default()),
+            None,
+        )
+        .unwrap();
+        let tags: Vec<_> = calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|call| match call {
+                Call::Reaction(tag, _) => Some(*tag),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            tags,
+            [
+                Tag::ZERO,
+                Tag::new(Duration::ZERO, 1),
+                Tag::new(Duration::milliseconds(50), 0)
+            ]
+        );
+    }
+
+    /// Checks that failure during event pumping prevents a subsequent execution grant.
+    #[cfg(feature = "external-clock")]
+    #[test]
+    fn physical_failure_during_pump_stops_before_fast_forward_grant() {
+        use crate::clock::ManualClock;
+        use crate::clock::RuntimeClock;
+        use crate::clock::{PhysicalClockDomainId, PhysicalClockError};
+        /// Latches clock overflow when a queued test payload is discarded.
+        #[derive(Debug)]
+        struct FailOnDrop(ManualClock);
+        impl Drop for FailOnDrop {
+            fn drop(&mut self) {
+                self.0.latch(PhysicalClockError::Overflow);
+            }
+        }
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut storage = build_storage(Arc::clone(&calls), false);
+        let origin = std::time::Instant::now();
+        let clock = ManualClock::new(PhysicalClockDomainId(7)).unwrap();
+        storage.set_physical_clock(RuntimeClock::manual(clock.clone(), 0));
+        assert!(storage
+            .scheduler_event_tx()
+            .try_send(AsyncEvent::Logical {
+                tag: Tag::NEVER, // Rejected and dropped inside the event pump.
+                target: crate::event::AsyncEventTarget::Action(ActionKey::from(0)),
+                value: Box::new(FailOnDrop(clock.clone())),
+            })
+            .unwrap());
+        let mut port = coordination(
+            Arc::clone(&calls),
+            [FederateTagAcquisition::Granted],
+            [],
+            [],
+        );
+        run_owned_scheduler_with_coordination(
+            &mut storage,
+            &Config::default().with_fast_forward(true),
+            origin,
+            EnclaveDependencies::new(EnclaveKey::default()),
+            Some(&mut port),
+        )
+        .unwrap();
+        assert_eq!(clock.now(), Err(PhysicalClockError::Overflow));
+        let calls = calls.lock().unwrap();
+        assert!(
+            !calls.iter().any(|call| matches!(
+                call,
+                Call::Acquire(_) | Call::Reaction(..) | Call::Complete(_)
+            )),
+            "work after failure: {calls:?}"
+        );
+    }
+
     /// Builds a scripted coordination port over one shared call log.
     fn coordination(
         calls: Arc<Mutex<Vec<Call>>>,
@@ -590,6 +697,7 @@ mod tests {
         dependencies.add_upstream(
             upstream,
             SendContext {
+                physical_clock: Default::default(),
                 enclave_key: upstream,
                 async_tx: upstream_tx,
                 shutdown_rx: upstream_shutdown_rx,
@@ -667,6 +775,7 @@ mod tests {
         dependencies.add_upstream(
             upstream,
             SendContext {
+                physical_clock: Default::default(),
                 enclave_key: upstream,
                 async_tx: upstream_tx,
                 shutdown_rx: upstream_shutdown_rx,
@@ -751,6 +860,7 @@ mod tests {
         dependencies.add_upstream(
             upstream,
             SendContext {
+                physical_clock: Default::default(),
                 enclave_key: upstream,
                 async_tx: upstream_tx,
                 shutdown_rx: upstream_shutdown_rx,
@@ -800,6 +910,7 @@ mod tests {
         dependencies.add_upstream(
             upstream,
             SendContext {
+                physical_clock: Default::default(),
                 enclave_key: upstream,
                 async_tx: upstream_tx,
                 shutdown_rx: upstream_shutdown_rx,
@@ -848,7 +959,7 @@ mod tests {
         let origin = std::time::Instant::now();
         let control_tag = Tag::new(Duration::milliseconds(25), 0);
         let reaction_tag = Tag::new(Duration::milliseconds(50), 0);
-        let target = reaction_tag.to_logical_time(origin);
+        let target = origin + reaction_tag.offset();
         let mut storage = build_storage(Arc::clone(&calls), false);
         let upstream = EnclaveKey::from(1);
         let (upstream_tx, upstream_rx) = kanal::unbounded();
@@ -857,6 +968,7 @@ mod tests {
         dependencies.add_upstream(
             upstream,
             SendContext {
+                physical_clock: Default::default(),
                 enclave_key: upstream,
                 async_tx: upstream_tx,
                 shutdown_rx: upstream_shutdown_rx,

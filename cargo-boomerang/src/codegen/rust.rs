@@ -65,6 +65,25 @@ pub(super) fn render_tracing_init(
     }
 }
 
+/// Renders clock creation, the selected payload driver call, and Federate clock binding.
+fn render_physical_clock(
+    clock: &crate::manifest::ExternalClock,
+    alias: &str,
+) -> Result<TokenStream> {
+    let domain = clock.domain;
+    let driver: syn::Path = syn::parse_str(&format!(
+        "{}::{}",
+        alias.split("::").next().expect("payload crate alias"),
+        clock.entry
+    ))?;
+    Ok(quote! {
+        let clock_domain = boomerang_runtime::clock::PhysicalClockDomainId(#domain);
+        let physical_clock = boomerang_runtime::clock::ManualClock::new(clock_domain)?;
+        let _physical_clock_driver = #driver(physical_clock.clone())?;
+        let bindings = bindings.with_physical_clock(clock_domain, physical_clock);
+    })
+}
+
 /// Validates and deterministically formats one complete generated Rust file.
 pub(crate) fn format_rust(tokens: TokenStream) -> Result<String> {
     let file = syn::parse2(tokens).context("generated Rust syntax is invalid")?;
@@ -73,6 +92,7 @@ pub(crate) fn format_rust(tokens: TokenStream) -> Result<String> {
 
 /// Renders one complete static launcher source file from validated compiler output.
 pub(super) struct LauncherInstrumentation {
+    pub(super) physical_clock: Option<(crate::manifest::ExternalClock, String)>,
     pub(super) tracing: TokenStream,
     pub(super) telemetry: TelemetryBackend,
 }
@@ -86,8 +106,19 @@ pub(super) fn render_launcher(
     coordination: Option<TokenStream>,
     capabilities: LauncherCapabilities,
 ) -> Result<String> {
-    let LauncherInstrumentation { tracing, telemetry } = instrumentation;
-    let fingerprint = super::fingerprints::federate_image(slice, driver.bindings())?;
+    let LauncherInstrumentation {
+        tracing,
+        telemetry,
+        physical_clock,
+    } = instrumentation;
+    let fingerprint = super::fingerprints::with_physical_clock(
+        super::fingerprints::federate_image(slice, driver.bindings())?,
+        physical_clock.as_ref().map(|(clock, _)| clock),
+    )?;
+    let clock_binding = physical_clock
+        .as_ref()
+        .map(|(clock, alias)| render_physical_clock(clock, alias))
+        .transpose()?;
     let fingerprint_bytes = fingerprint.as_bytes().iter();
     let distributed = coordination.is_some();
     let enclaves = slice.enclaves();
@@ -180,8 +211,10 @@ pub(super) fn render_launcher(
         }
     } else {
         quote! {
+            let bindings = generated_bindings();
+            #clock_binding
             let execution = boomerang_runtime::execute_owned_federate_slice_with_observations(
-                FEDERATE, &FEDERATE_VIEW, generated_bindings(), #config,
+                FEDERATE, &FEDERATE_VIEW, bindings, #config,
                 &telemetry_observations,
             )?;
         }

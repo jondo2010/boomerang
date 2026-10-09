@@ -302,6 +302,8 @@ pub struct DownstreamRef {
 /// An Enclave is the self-contained runtime data fed into a single scheduler instance.
 #[derive(Debug)]
 pub struct Enclave {
+    /// Native timeline shared with send contexts and bound when execution starts.
+    pub(crate) physical_clock: crate::clock::RuntimeClock,
     /// The runtime environment
     pub env: Env,
     /// The reaction graph
@@ -326,6 +328,7 @@ impl Default for Enclave {
         let (event_tx, event_rx) = kanal::bounded(2);
         let (shutdown_tx, shutdown_rx) = keepalive::channel();
         Self {
+            physical_clock: Default::default(),
             env: Default::default(),
             graph: Default::default(),
             event_tx,
@@ -344,6 +347,7 @@ impl Enclave {
         let (event_tx, event_rx) = kanal::bounded(size);
         let (shutdown_tx, shutdown_rx) = keepalive::channel();
         Self {
+            physical_clock: Default::default(),
             env: Default::default(),
             graph: Default::default(),
             event_tx,
@@ -563,8 +567,11 @@ impl Enclave {
     }
 
     /// Create a [`SendContext`] for sending events into the scheduler.
+    /// Native clock reads and physical action scheduling return `NotStarted` until
+    /// execution binds the shared origin; logical and control events can be queued earlier.
     pub fn create_send_context(&self, key: EnclaveKey) -> SendContext {
         SendContext {
+            physical_clock: self.physical_clock.clone(),
             enclave_key: key,
             async_tx: self.event_tx.clone(),
             shutdown_rx: self.shutdown_rx.clone(),

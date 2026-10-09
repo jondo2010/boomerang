@@ -253,6 +253,9 @@ impl<T: ReactorData> PortFactory for TypedPortFactory<T> {
 pub(crate) trait OutboundRoute: Send {
     /// Clones and admits one present source value at its destination timing boundary.
     fn emit(&mut self, source: &dyn BasePort, tag: Tag) -> Result<(), OwnedStorageError>;
+    /// Installs the Enclave execution policy on a route before execution begins.
+    #[cfg(feature = "external-clock")]
+    fn set_physical_clock(&mut self, _clock: crate::clock::RuntimeClock) {}
 }
 
 /// Direct typed outbound route whose generic parameter is unified by `bind_route`.
@@ -269,11 +272,18 @@ struct TypedOutboundRoute<'image, T: ReactorData + Clone> {
     delay_nanos: u64,
     /// Destination scheduler event channel.
     destination_tx: crate::Sender<crate::event::AsyncEvent>,
+    /// Selected source clock; local Federate participants share the same epoch.
+    physical_clock: crate::clock::RuntimeClock,
     /// Retains the statically unified endpoint payload type.
     marker: PhantomData<fn() -> T>,
 }
 
 impl<T: ReactorData + Clone> OutboundRoute for TypedOutboundRoute<'_, T> {
+    #[cfg(feature = "external-clock")]
+    fn set_physical_clock(&mut self, clock: crate::clock::RuntimeClock) {
+        self.physical_clock = clock;
+    }
+
     fn emit(&mut self, source: &dyn BasePort, tag: Tag) -> Result<(), OwnedStorageError> {
         let typed = source.downcast_ref::<Port<T>>().ok_or_else(|| {
             OwnedStorageError::OutboundRoutePayloadTypeMismatch {
@@ -306,11 +316,17 @@ impl<T: ReactorData + Clone> OutboundRoute for TypedOutboundRoute<'_, T> {
                 }
             }
             TimingDomain::Physical => {
-                let time = Instant::now()
-                    .checked_add(std::time::Duration::from_nanos(self.delay_nanos))
-                    .ok_or_else(|| OwnedStorageError::OutboundRouteTimeOverflow {
-                        boundary: self.boundary.as_str().to_owned(),
-                        delay_nanos: self.delay_nanos,
+                let time = self
+                    .physical_clock
+                    .now_after(std::time::Duration::from_nanos(self.delay_nanos))
+                    .map_err(|error| match error {
+                        crate::clock::PhysicalClockError::Overflow => {
+                            OwnedStorageError::OutboundRouteTimeOverflow {
+                                boundary: self.boundary.as_str().to_owned(),
+                                delay_nanos: self.delay_nanos,
+                            }
+                        }
+                        error => error.into(),
                     })?;
                 crate::event::AsyncEvent::Physical {
                     time,
@@ -375,6 +391,9 @@ where
 /// Errors building or accessing heap-backed compiled-image storage.
 #[derive(thiserror::Error, Debug, Clone, PartialEq, Eq)]
 pub enum OwnedStorageError {
+    /// Selected time or a physical-event admission tag could not be represented.
+    #[error(transparent)]
+    PhysicalClock(#[from] crate::clock::PhysicalClockError),
     /// An external route's selected codec could not encode its value.
     #[error("external route '{boundary}' encoding failed: {source}")]
     ExternalRouteEncoding {
@@ -716,7 +735,7 @@ impl<'image> OwnedStorage<'image> {
     }
 
     /// Constructs owned storage whose reaction and send contexts use `enclave_key`.
-    /// Scheduler startup replaces the provisional context origin before any reaction executes.
+    /// Contexts share an unbound native clock until execution startup supplies the origin.
     pub(crate) fn new_for_enclave(
         image: EnclaveImageView<'image>,
         bindings: EnclaveBindings,
@@ -734,9 +753,9 @@ impl<'image> OwnedStorage<'image> {
         let reaction_refs = initialize_reaction_refs(&image, &mut ports, &mut actions)?;
         let states = initialize_states(&state_bindings, &bindings)?;
         let reactions = initialize_reactions(bindings);
-        let provisional_origin = Instant::now();
+        let physical_clock = crate::clock::RuntimeClock::default();
         let (contexts, event_tx, event_rx, shutdown_tx) =
-            initialize_contexts(&image, enclave_key, provisional_origin)?;
+            initialize_contexts(&image, enclave_key, physical_clock)?;
         let event_capacity = image.storage_bounds().event_capacity() as usize;
         let inbound_boundary_ports = image
             .routes()
@@ -773,11 +792,49 @@ impl<'image> OwnedStorage<'image> {
         self.emitted_outbound_ports = TinySecondaryMap::new();
     }
 
-    /// Initializes every owned reaction context with the scheduler's startup-time origin.
-    pub(crate) fn initialize_reaction_context_origins(&mut self, origin: Instant) {
-        self.contexts
-            .values_mut()
-            .for_each(|context| context.start_time = origin);
+    /// Binds the shared native origin before any participant starts executing.
+    pub(crate) fn initialize_clock(&self, origin: Instant) -> Instant {
+        self.scheduler_send_context()
+            .physical_clock
+            .initialize(origin)
+    }
+
+    /// Shares the Enclave clock policy with all reaction contexts and outbound routes.
+    #[cfg(feature = "external-clock")]
+    pub(crate) fn set_physical_clock(&mut self, clock: crate::clock::RuntimeClock) {
+        for context in self.contexts.values_mut() {
+            context.physical_clock = clock.clone();
+        }
+        for route in self
+            .outbound_routes
+            .iter_mut()
+            .flat_map(|(_, routes)| routes)
+        {
+            route.set_physical_clock(clock.clone());
+        }
+    }
+
+    /// Borrows the action stored in the slot declared by its compiled image row.
+    pub(crate) fn scheduler_action_ref(
+        &self,
+        action: crate::image::ActionIndex,
+    ) -> &dyn BaseAction {
+        self.actions[self.image.actions()[action].storage_slot()].as_ref()
+    }
+
+    /// Selects a tag past pending values at this port and offset without reserving it.
+    /// Other ports and offsets are independent. Microstep overflow leaves the queue unchanged.
+    pub(crate) fn try_next_boundary_tag(
+        &self,
+        port: PortIndex,
+        mut tag: Tag,
+    ) -> Result<Tag, crate::clock::PhysicalClockError> {
+        for (pending, target, _) in &self.pending_boundary_values {
+            if *target == port && pending.offset() == tag.offset() {
+                tag = tag.checked_after(*pending)?;
+            }
+        }
+        Ok(tag)
     }
 
     /// Returns a thread-safe context for local logical-time coordination with this scheduler.
@@ -811,6 +868,7 @@ impl<'image> OwnedStorage<'image> {
             timing_domain,
             delay_nanos,
             destination_tx,
+            physical_clock: self.scheduler_send_context().physical_clock,
             marker: PhantomData,
         });
         if let Some(routes) = self.outbound_routes.get_mut(source_port) {
@@ -1319,7 +1377,7 @@ fn initialize_reaction_refs(
 fn initialize_contexts(
     image: &EnclaveImageView<'_>,
     enclave_key: EnclaveKey,
-    start_time: Instant,
+    physical_clock: crate::clock::RuntimeClock,
 ) -> Result<InitializedContexts, OwnedStorageError> {
     let (event_tx, event_rx) = kanal::bounded(image.storage_bounds().event_capacity() as usize);
     let (shutdown_tx, shutdown_rx) = crate::keepalive::channel();
@@ -1331,7 +1389,7 @@ fn initialize_contexts(
         });
         let inserted = contexts.insert(Context::new(
             enclave_key,
-            start_time,
+            physical_clock.clone(),
             bank_info,
             event_tx.clone(),
             shutdown_rx.clone(),
@@ -1969,11 +2027,23 @@ mod tests {
             .stage_inbound_boundary_value(PortIndex::new(0), expected_tag, Box::new(42_u32))
             .unwrap();
 
+        assert_eq!(
+            storage.try_next_boundary_tag(PortIndex::new(0), expected_tag),
+            Ok(Tag::new(expected_tag.offset(), 1))
+        );
+        assert_eq!(
+            storage.try_next_boundary_tag(PortIndex::new(0), Tag::ZERO),
+            Ok(Tag::ZERO)
+        );
         storage.scheduler_commit_boundary_ports(Tag::ZERO).unwrap();
         assert!(!storage.ports[PortIndex::new(0)].is_set());
         storage
             .scheduler_commit_boundary_ports(expected_tag)
             .unwrap();
+        assert_eq!(
+            storage.try_next_boundary_tag(PortIndex::new(0), expected_tag),
+            Ok(expected_tag)
+        );
         assert_eq!(
             storage.ports[PortIndex::new(0)]
                 .downcast_ref::<crate::Port<u32>>()
@@ -2051,7 +2121,9 @@ mod tests {
             0,
             full_tx,
         );
-        let before = Instant::now();
+        let origin = Instant::now();
+        storage.initialize_clock(origin);
+        let before = origin.elapsed();
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {
             done_tx
@@ -2059,7 +2131,7 @@ mod tests {
                 .unwrap();
         });
         let result = done_rx.recv_timeout(std::time::Duration::from_secs(1));
-        let after = Instant::now();
+        let after = origin.elapsed();
         drop(full_rx);
         worker.join().unwrap();
         assert!(matches!(
@@ -2085,8 +2157,8 @@ mod tests {
                 target,
                 value,
             } => {
-                assert!(time >= before + std::time::Duration::from_secs(1));
-                assert!(time <= after + std::time::Duration::from_secs(1));
+                assert!(time.to_duration() >= before + std::time::Duration::from_secs(1));
+                assert!(time.to_duration() <= after + std::time::Duration::from_secs(1));
                 assert_eq!(
                     target,
                     crate::AsyncEventTarget::BoundaryPort(PortIndex::new(5))
@@ -2135,7 +2207,8 @@ mod tests {
             .bind_reaction(
                 BindingSlotIndex::new(1),
                 move |context: &mut Context, _state, _refs, _mode_effect| {
-                    *reaction_origin.lock().unwrap() = Some(context.get_start_time());
+                    *reaction_origin.lock().unwrap() =
+                        Some(context.physical_clock.initialize(Instant::now()));
                     context.schedule_shutdown(Some(Duration::ZERO));
                     Ok(())
                 },

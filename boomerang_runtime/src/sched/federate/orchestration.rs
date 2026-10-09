@@ -198,6 +198,7 @@ impl From<CoordinationStateError> for FederateCoordinationError {
 }
 
 /// Supervisor-owned handle retained outside worker threads to request Federate-wide abortion.
+#[derive(Clone)]
 pub(crate) struct FederateAbortHandle {
     /// Shared coordinator-report sender used for the terminal failure message.
     report_tx: mpsc::Sender<CoordinatorReport>,

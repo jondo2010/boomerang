@@ -52,7 +52,14 @@ impl<'a> ReactionTriggerCtx<'a> {
     /// Trigger the reaction with the given context and state.
     pub(crate) fn trigger(self, tag: Tag) -> &'a TriggerRes {
         if let Some(Deadline { deadline, handler }) = self.reaction.deadline.as_ref() {
-            let lag = self.context.get_physical_time() - self.context.get_logical_time();
+            let lag = self
+                .context
+                .try_get_physical_time()
+                .expect("selected physical clock failed")
+                .to_duration();
+            let lag = crate::Duration::try_from(lag)
+                .expect("physical duration fits logical duration")
+                - self.context.get_elapsed_logical_time();
             if lag > *deadline {
                 (handler.write().unwrap())();
             }
@@ -260,21 +267,9 @@ impl Store {
         actions[action_key].push_value(tag, value);
     }
 
-    /// Initializes every live reaction context with the scheduler's startup-time origin.
-    pub(crate) fn initialize_reaction_context_origins(
-        self: &mut Pin<Box<Self>>,
-        origin: std::time::Instant,
-    ) {
-        let caches = self.as_mut().project().caches;
-        for (_, cache) in caches.get_mut().iter_mut() {
-            // SAFETY: `Store::new` initialized each cache with the unique context pointer for
-            // its reaction after pinning `Store`. The context table is not moved or structurally
-            // modified afterwards, and iterating the distinct cache entries gives this loop the
-            // only mutable access to each context while it initializes its startup origin.
-            unsafe {
-                cache.context.as_mut().start_time = origin;
-            }
-        }
+    /// Borrows an action by its live storage key without exposing mutable pinned state.
+    pub(crate) fn action(&self, action: ActionKey) -> &dyn BaseAction {
+        self.inner.actions[action].as_ref()
     }
 
     pub fn reschedule_action_value(
@@ -402,7 +397,7 @@ pub mod tests {
             reaction_key,
             Context::new(
                 EnclaveKey::default(),
-                std::time::Instant::now(),
+                crate::clock::RuntimeClock::native(std::time::Instant::now()),
                 None,
                 event_tx,
                 shutdown_rx,
@@ -452,7 +447,7 @@ pub mod tests {
             ReactionKey::from(1),
             Context::new(
                 EnclaveKey::default(),
-                std::time::Instant::now(),
+                crate::clock::RuntimeClock::native(std::time::Instant::now()),
                 None,
                 event_tx,
                 shutdown_rx,

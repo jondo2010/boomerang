@@ -4,6 +4,14 @@
 //! - `LogicalAction`: Logical Actions are scheduled with a [`Tag`] equal to the current *logical time* + optional delay.
 //! - `PhysicalAction`: Physical Actions are scheduled with a [`Tag`] equal to the current *physical time* + optional delay.
 //!
+//! [`crate::Context::try_schedule_action`] validates effective delays, time arithmetic,
+//! and microstep availability for both kinds before storing a value or trigger.
+//! Logical actions retain the full logical-duration range. Physical actions also
+//! validate the selected clock and its epoch range. [`crate::ActionScheduleError`]
+//! distinguishes invalid delays, arithmetic exhaustion, and clock failures.
+//! [`crate::Context::schedule_action`] calls the same implementation and panics on
+//! rejection.
+//!
 //! Actions can be scheduled in two ways:
 //! **Synchronous**: Actions are scheduled synchronously from within a Reaction using an `ActionRef`. This is the most common
 //!     way to schedule Actions. A future `Tag` for the event is calculated for both Logical and Physical Actions, and the
@@ -43,6 +51,10 @@ pub trait BaseAction: Debug + Downcast + Send + Sync {
 
     /// Push a new value onto the action store. If the underlying types are not the same, this will panic.
     fn push_value(&mut self, tag: Tag, value: Box<dyn ReactorData>);
+
+    /// Selects an unused microstep at the base offset without reserving it.
+    /// Returns `None` if the microstep cursor is exhausted, regardless of action timing.
+    fn checked_next_tag_for_offset(&self, base: Tag) -> Option<Tag>;
 
     /// Move a stored value from one tag to another.
     fn reschedule_value(&mut self, from: Tag, to: Tag);
@@ -110,6 +122,12 @@ impl<T: ReactorData> BaseAction for Action<T> {
 
     fn reschedule_value(&mut self, from: Tag, to: Tag) {
         self.store.move_value(from, to);
+    }
+
+    fn checked_next_tag_for_offset(&self, base: Tag) -> Option<Tag> {
+        self.store
+            .checked_next_microstep_for_offset(base.offset(), base.microstep())
+            .map(|microstep| Tag::new(base.offset(), microstep))
     }
 
     fn clear_values(&mut self) {

@@ -267,3 +267,22 @@ fn coordination_tracks_compiled_in_transit_capacity() {
     let (topology, _, changed) = fixture_profile(1, 64, 0, "impl-a", "serde-json", false, 9);
     assert_ne!(base, coordination(&changed, &topology).unwrap());
 }
+
+/// Checks that clock selection, domain, and driver participate in image identity.
+#[test]
+fn physical_clock_selection_and_domain_change_image_fingerprint() {
+    let base = blake3::hash(b"image");
+    let mut clock = crate::manifest::ExternalClock {
+        domain: 7,
+        binding: "sensor".into(),
+        entry: "drive".into(),
+    };
+    assert_eq!(with_physical_clock(base, None).unwrap(), base);
+    let first = with_physical_clock(base, Some(&clock)).unwrap();
+    assert_ne!(first, base);
+    clock.domain = 8;
+    assert_ne!(first, with_physical_clock(base, Some(&clock)).unwrap());
+    clock.domain = 7;
+    clock.entry = "another_driver".into();
+    assert_ne!(first, with_physical_clock(base, Some(&clock)).unwrap());
+}

@@ -222,6 +222,11 @@ pub(crate) const fn runtime_enclave_key(enclave: EnclaveIndex) -> crate::Enclave
 /// compiled Federate's shared coordination.
 #[derive(Default)]
 pub struct FederateBindings<'binding> {
+    #[cfg(feature = "external-clock")]
+    physical_clock: Option<(
+        crate::clock::PhysicalClockDomainId,
+        crate::clock::ManualClock,
+    )>,
     /// Caller-supplied Enclave bindings keyed directly by canonical deployment index.
     enclaves: TinySecondaryMap<EnclaveIndex, EnclaveBindings>,
     /// Repeated Enclave indices retained for pre-initialization duplicate validation.
@@ -233,6 +238,17 @@ pub struct FederateBindings<'binding> {
 }
 
 impl<'binding> FederateBindings<'binding> {
+    /// Selects one external clock for every Enclave. Domain and single-use checks run before initialization.
+    #[cfg(feature = "external-clock")]
+    pub fn with_physical_clock(
+        mut self,
+        domain: crate::clock::PhysicalClockDomainId,
+        clock: crate::clock::ManualClock,
+    ) -> Self {
+        self.physical_clock = Some((domain, clock));
+        self
+    }
+
     /// Creates an empty Federate binding set.
     pub fn new() -> Self {
         Self::default()
@@ -354,7 +370,7 @@ struct PreparedFederate<'image> {
 pub struct FederateExecution {
     /// Per-Enclave results keyed by deployment-wide canonical Enclave index.
     enclaves: TinySecondaryMap<EnclaveIndex, EnclaveExecution>,
-    /// Single monotonic origin injected into every scheduler and reaction context.
+    /// Host monotonic origin used for native pacing and run-time diagnostics.
     origin: Instant,
     /// Scheduler-local work counters summed across successful Enclave executions.
     stats: Stats,
@@ -378,7 +394,8 @@ impl FederateExecution {
         self.enclaves.get(enclave)
     }
 
-    /// Returns the monotonic origin shared by every Enclave scheduler.
+    /// Returns the host monotonic origin used for native pacing and diagnostics.
+    /// Manual physical time has its own integer epoch and is not derived from this value.
     pub const fn origin(&self) -> Instant {
         self.origin
     }
@@ -397,6 +414,10 @@ impl FederateExecution {
 /// Failure while preflighting, initializing, or executing one owned compiled Federate.
 #[derive(Debug, thiserror::Error)]
 pub enum ExecuteOwnedFederateError {
+    /// Selected physical clock failed validation or terminated during execution.
+    #[cfg(feature = "external-clock")]
+    #[error(transparent)]
+    PhysicalClock(#[from] crate::clock::PhysicalClockError),
     /// The deployment root or one nested image was structurally invalid.
     #[error("invalid compiled deployment: {message}")]
     ImageValidation {
@@ -1023,6 +1044,17 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
     mut fail_spawn: impl FnMut(Option<EnclaveIndex>) -> bool,
 ) -> Result<FederateExecution, ExecuteOwnedFederateError> {
     let observations = prepare_observations(&prepared.images, observations)?;
+    #[cfg(feature = "external-clock")]
+    if bindings.physical_clock.is_some()
+        && prepared
+            .images
+            .values()
+            .any(|image| image.storage_bounds().event_capacity() == 0)
+    {
+        return Err(crate::clock::PhysicalClockError::WakeCapacity.into());
+    }
+    #[cfg(feature = "external-clock")]
+    let clock_run = crate::clock::ClockRun::new(bindings.physical_clock.as_ref())?;
     let PreparedFederate { images, endpoints } = prepared;
     let FederateBindings {
         enclaves,
@@ -1163,6 +1195,16 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
     };
     backend_phase.completed();
     let origin = Instant::now();
+    #[cfg(feature = "external-clock")]
+    if let Some(clock) = &clock_run.0 {
+        clock.attach(&event_senders, abort_handle.clone())?;
+        for (slot, (_, storage)) in storages.iter_mut().enumerate() {
+            storage.set_physical_clock(crate::clock::RuntimeClock::manual(clock.clone(), slot));
+        }
+    }
+    for (_, storage) in &storages {
+        storage.initialize_clock(origin);
+    }
     let dispatch = tracing::dispatcher::get_default(Clone::clone);
     let parent_span = tracing::Span::current();
     let mut worker_phase = ConstructionPhase::started("workers");
@@ -1344,6 +1386,10 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
         (results, failure)
     });
 
+    #[cfg(feature = "external-clock")]
+    if let Some(clock) = &clock_run.0 {
+        clock.now()?;
+    }
     if let Some(error) = failure {
         Err(error)
     } else {
@@ -2144,6 +2190,7 @@ mod scoped_spawn_tests {
         dependencies.add_upstream(
             upstream,
             SendContext {
+                physical_clock: Default::default(),
                 enclave_key: upstream,
                 async_tx: upstream_tx,
                 shutdown_rx: upstream_shutdown_rx,

@@ -1,5 +1,3 @@
-use time::ext::InstantExt;
-
 use crate::Duration;
 
 /// A tag is a logical time point in the system.
@@ -54,17 +52,22 @@ impl Tag {
         }
     }
 
-    /// Create a new Tag given a physical time and the start time
-    pub fn from_physical_time(origin: std::time::Instant, time: std::time::Instant) -> Self {
-        Self {
-            offset: time.signed_duration_since(origin),
-            microstep: 0,
+    /// Keeps a physical observation after completed logical work without wrapping microsteps.
+    pub(crate) fn checked_after(
+        self,
+        current: Self,
+    ) -> Result<Self, crate::clock::PhysicalClockError> {
+        if self > current {
+            Ok(self)
+        } else {
+            Ok(Self::new(
+                current.offset(),
+                current
+                    .microstep()
+                    .checked_add(1)
+                    .ok_or(crate::clock::PhysicalClockError::Overflow)?,
+            ))
         }
-    }
-
-    /// Create a instant given the origin
-    pub fn to_logical_time(&self, origin: std::time::Instant) -> std::time::Instant {
-        origin + self.offset
     }
 
     /// Create a new Tag strictly in the future from the current.

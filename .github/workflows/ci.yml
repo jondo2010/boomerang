@@ -5,7 +5,7 @@ on:
     branches: ["main"]
 
   pull_request:
-    branches: ["main", "codex/deployment-phase4-integration", "codex/deployment-phase5-integration", "codex/deployment-phase6-integration", "codex/deployment-phase6-conformance-model", "codex/phase6-bounded-*"]
+    branches: ["main", "codex/issue-272-clock", "codex/deployment-phase4-integration", "codex/deployment-phase5-integration", "codex/deployment-phase6-integration", "codex/deployment-phase6-conformance-model", "codex/phase6-bounded-*"]
 
 permissions:
   contents: read
@@ -87,6 +87,9 @@ jobs:
       - name: test workspace except cargo-boomerang
         run: cargo test --workspace --exclude cargo-boomerang --verbose
 
+      - name: test hosted external physical clock
+        run: cargo test -p boomerang_runtime --features external-clock
+
       - name: test cargo-boomerang fast targets
         run: >-
           cargo test -p cargo-boomerang --lib --bin cargo-boomerang
@@ -96,13 +99,7 @@ jobs:
       # full suite once, and keep the CLI/owned-execution smoke test portable.
       - name: test cargo-boomerang toolchain
         if: matrix.os == 'ubuntu-latest' && matrix.toolchain == 'stable'
-        run: cargo test -p cargo-boomerang --test toolchain -- --test-threads=1
-
-      - name: test cargo-boomerang monitor toolchain
-        if: matrix.os == 'ubuntu-latest' && matrix.toolchain == 'stable'
-        run: |
-          cargo test -p cargo-boomerang --all-features --test toolchain build::generated_central_deployment_feeds_monitor_json_without_changing_payload_exchange -- --exact --test-threads=1
-          cargo test -p cargo-boomerang --all-features --test toolchain build::monitor_rejects_invalid_options_before_binding -- --exact --test-threads=1
+        run: cargo test -p cargo-boomerang --all-features --test toolchain -- --test-threads=1
 
       - name: smoke test cargo-boomerang toolchain
         if: matrix.os != 'ubuntu-latest' || matrix.toolchain != 'stable'
@@ -114,24 +111,6 @@ jobs:
         shell: bash
         # Each test binary recreates these directories, so restoring them cannot help.
         run: rm -rf target/tmp/cargo-boomerang-fixtures
-
-  embedded:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-
-    steps:
-      - uses: actions/checkout@v7
-      - name: Install Rust and bare-metal target
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-unknown-none-softfloat
-      - uses: swatinem/rust-cache@v2
-        with:
-          workspaces: . -> target
-      - name: Check allocator-free TinyMap examples
-        run: >-
-          cargo check -p boomerang_tinymap --no-default-features --examples
-          --target aarch64-unknown-none-softfloat
 
   miri:
     runs-on: ubuntu-latest

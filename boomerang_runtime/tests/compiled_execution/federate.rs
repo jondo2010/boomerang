@@ -310,8 +310,10 @@ fn owned_federate_routes_typed_values_and_shares_one_origin() {
                 .scheduled_actions()
                 .saturating_add(sink.stats().scheduled_actions())
         );
-        assert_eq!(source_state.origin, Some(result.origin()));
-        assert_eq!(sink_state.origin, Some(result.origin()));
+        for bounds in [source_state.origin, sink_state.origin] {
+            let (before, after) = bounds.unwrap();
+            assert!((before..=after).contains(&result.origin()));
+        }
     }
 }
 
@@ -368,7 +370,8 @@ fn owned_federate_paced_origin_preserves_downstream_order() {
         .state::<RoutedSinkState>(StateSlotIndex::new(0))
         .unwrap();
 
-    assert_eq!(state.origin, Some(origin));
+    let (before, after) = state.origin.unwrap();
+    assert!((before..=after).contains(&origin));
     assert_eq!(sink_state.values, [42]);
     assert!(source.final_tag() < sink.final_tag());
     assert!(origin >= state.initialized_at);

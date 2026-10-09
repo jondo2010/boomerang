@@ -1,7 +1,7 @@
 //! Compiled Federate execution with shared manual clocks, actions, and physical routes.
 
 use super::*;
-use boomerang_runtime::{physical_clock::ManualClock, physical_time::*};
+use boomerang_runtime::{clock::ManualClock, clock::*};
 
 static FAST: [ActionImage; 1] = [fixture_timer_action(0, Some(2), r!(0, 1))];
 static SLOW: [ActionImage; 1] = [fixture_timer_action(0, Some(3), r!(0, 1))];
@@ -53,11 +53,7 @@ fn physical_clock_two_enclaves_preserve_all_timer_tags_across_jumps() {
                               state: &mut dyn ReactorData,
                               _: ReactionRefs<'_>,
                               _: Option<CompiledModeEffectRef>| {
-                            let time = ctx.physical_time().unwrap().unwrap();
-                            assert_eq!(
-                                ctx.try_get_physical_time().unwrap(),
-                                time.to_instant(ctx.get_start_time()).unwrap()
-                            );
+                            let time = ctx.try_get_physical_time().unwrap();
                             state
                                 .downcast_mut::<CounterState>()
                                 .unwrap()
@@ -81,8 +77,8 @@ fn physical_clock_two_enclaves_preserve_all_timer_tags_across_jumps() {
         let mut seen = vec![rx.recv().unwrap(), rx.recv().unwrap()];
         assert!(seen.iter().all(|(_, tag, time)| *tag == 0 && *time == 0));
         for (jump, count) in [(6, 5), (12, 3)] {
-            clock.advance_to(PhysicalTimeNanos(jump)).unwrap();
-            clock.advance_to(PhysicalTimeNanos(jump)).unwrap();
+            clock.advance_to(PhysicalInstant(jump)).unwrap();
+            clock.advance_to(PhysicalInstant(jump)).unwrap();
             for _ in 0..count {
                 seen.push(rx.recv().unwrap());
             }
@@ -318,7 +314,7 @@ fn physical_route_uses_selected_clock() {
             },
         ];
         let clock = ManualClock::new(PhysicalClockDomainId(7)).unwrap();
-        clock.advance_to(PhysicalTimeNanos(1_000_000_000)).unwrap();
+        clock.advance_to(PhysicalInstant(1_000_000_000)).unwrap();
         let source = EnclaveBindings::new()
             .bind_state(BindingSlotIndex::new(0), initialize_counter)
             .bind_port(BindingSlotIndex::new(2), PayloadType::<u32>::new())
@@ -422,7 +418,7 @@ fn physical_actions_at_frozen_time_preserve_microsteps_and_every_value() {
         }];
         let federates = [fixture_federate("clock", "host", "std", s!(0, 1))];
         let clock = ManualClock::new(PhysicalClockDomainId(7)).unwrap();
-        clock.advance_to(PhysicalTimeNanos(5)).unwrap();
+        clock.advance_to(PhysicalInstant(5)).unwrap();
         let bindings = EnclaveBindings::new()
             .bind_state(BindingSlotIndex::new(0), initialize_counter)
             .bind_action(BindingSlotIndex::new(2), PayloadType::<u32>::new())

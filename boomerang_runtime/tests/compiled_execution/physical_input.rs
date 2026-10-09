@@ -1,7 +1,7 @@
 //! Compiled two-Enclave physical-input integration and preflight tests.
 
 use super::*;
-use boomerang_runtime::{physical_clock::ManualClock, physical_input::*, physical_time::*};
+use boomerang_runtime::{clock::ManualClock, clock::*, physical_input::*};
 const PHYSICAL: ActionImage = ActionImage::new(
     ScopeIndex::new(0),
     ActionSlotIndex::new(1),
@@ -128,7 +128,7 @@ fn physical_input_two_enclave_batch_precedes_timers_and_clock_cannot_outrun_prog
             )
         });
         let inputs = handle.recv().unwrap();
-        clock.advance_to(PhysicalTimeNanos(12)).unwrap();
+        clock.advance_to(PhysicalInstant(12)).unwrap();
         let sources: Vec<_> = ["a", "b"].map(|id| inputs.source(id).unwrap()).into();
         inputs
             .submit(
@@ -139,7 +139,7 @@ fn physical_input_two_enclave_batch_precedes_timers_and_clock_cannot_outrun_prog
                         sequence: 1,
                         domain: clock.domain(),
                         epoch: clock.epoch(),
-                        acquired: PhysicalTimeNanos(0),
+                        acquired: PhysicalInstant(0),
                         values: vec![InputValue::new(
                             inputs.target(source, "sample").unwrap(),
                             7u32,
@@ -148,7 +148,7 @@ fn physical_input_two_enclave_batch_precedes_timers_and_clock_cannot_outrun_prog
                     .collect(),
                 &sources
                     .iter()
-                    .map(|&source| (source, PhysicalTimeNanos(1)))
+                    .map(|&source| (source, PhysicalInstant(1)))
                     .collect::<Vec<_>>(),
             )
             .unwrap();
@@ -156,9 +156,9 @@ fn physical_input_two_enclave_batch_precedes_timers_and_clock_cannot_outrun_prog
             let (_, tag, value) = rx.recv().unwrap();
             assert_eq!((tag, value), (0, 7));
         }
-        inputs.advance(sources[0], PhysicalTimeNanos(13)).unwrap();
+        inputs.advance(sources[0], PhysicalInstant(13)).unwrap();
         assert!(rx.try_recv().is_err());
-        inputs.advance(sources[1], PhysicalTimeNanos(7)).unwrap();
+        inputs.advance(sources[1], PhysicalInstant(7)).unwrap();
         let mut seen = Vec::new();
         for _ in 0..5 {
             seen.push(rx.recv().unwrap());
@@ -168,7 +168,7 @@ fn physical_input_two_enclave_batch_precedes_timers_and_clock_cannot_outrun_prog
             seen,
             [(0, 2, 0), (0, 4, 0), (0, 6, 0), (1, 3, 0), (1, 6, 0)]
         );
-        inputs.advance(sources[1], PhysicalTimeNanos(13)).unwrap();
+        inputs.advance(sources[1], PhysicalInstant(13)).unwrap();
         let result = runner.join().unwrap().unwrap();
         for index in 0..2 {
             assert_eq!(
@@ -183,7 +183,7 @@ fn physical_input_two_enclave_batch_precedes_timers_and_clock_cannot_outrun_prog
         }
         assert_eq!(
             inputs
-                .advance(sources[0], PhysicalTimeNanos(14))
+                .advance(sources[0], PhysicalInstant(14))
                 .unwrap_err()
                 .kind,
             InputErrorKind::Disconnected
@@ -299,7 +299,7 @@ fn physical_input_optional_batch_interrupts_old_grants_waiting_on_clock() {
                 assert!(Instant::now() < bound);
                 std::thread::yield_now();
             }
-            clock.advance_to(PhysicalTimeNanos(1)).unwrap();
+            clock.advance_to(PhysicalInstant(1)).unwrap();
             let batch = ["a", "b"].map(|id| {
                 let source = inputs.source(id).unwrap();
                 InputObservation {
@@ -307,7 +307,7 @@ fn physical_input_optional_batch_interrupts_old_grants_waiting_on_clock() {
                     sequence: 1,
                     domain: clock.domain(),
                     epoch: clock.epoch(),
-                    acquired: PhysicalTimeNanos(1),
+                    acquired: PhysicalInstant(1),
                     values: vec![InputValue::new(
                         inputs.target(source, "sample").unwrap(),
                         9u32,
@@ -319,7 +319,7 @@ fn physical_input_optional_batch_interrupts_old_grants_waiting_on_clock() {
                 let (_, tag, value) = rx.recv().unwrap();
                 assert_eq!((tag, value), (1, 9));
             }
-            clock.advance_to(PhysicalTimeNanos(6)).unwrap();
+            clock.advance_to(PhysicalInstant(6)).unwrap();
             runner.join().unwrap().unwrap();
         });
     });

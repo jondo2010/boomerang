@@ -39,7 +39,7 @@ fn GenericAfter() -> impl Reactor {
         delay_int::Test(),
         "test",
         delay_int::TestState {
-            start_time: std::time::Instant::now(),
+            start_time: Duration::ZERO,
         },
         false,
     )?;

@@ -1,13 +1,49 @@
 //! Bounded hosted physical-input admission and exclusive source progress.
 //!
-//! Adapters decode payloads before submission. Admission resolves declared source
-//! and target names once, validates coherent batches before fan-out, and publishes
-//! values before progress. The coordinator uses a cached required-source horizon
-//! and generation-bound authorization to fence execution against concurrent input.
-//! This module is available only with `external-clock`.
+//! # Setup and ownership
+//!
+//! [`crate::FederateBindings::with_physical_inputs`] installs an [`InputConfig`]
+//! sidecar. Before initializers or drivers run, resolution validates declared
+//! source and physical-action target identities, payload types, and minimum
+//! delays. Targets belong exclusively to the adapter; other publishers must use
+//! separate actions. The startup callback receives this run's [`InputAdmission`].
+//! All admission state and grant checks are absent without `external-clock`.
+//!
+//! # Atomic admission and reservations
+//!
+//! Adapters decode payloads before submission and resolve source/target names once.
+//! [`InputAdmission::submit`] validates an entire coherent batch, publishes at most
+//! one envelope per destination Enclave, then commits exclusive source progress.
+//! Receipts retain host arrival separately from mapped tags. Mapping uses checked
+//! acquisition time plus the compiled minimum delay; diagnostic arrival time does
+//! not affect scheduling.
+//!
+//! Reservations prevent replacement of a pending value at the same target/tag,
+//! including across batches. Value and retained-batch bounds produce explicit
+//! overflow. Retention is released when destination tags complete. The scheduler
+//! preserves these already-admitted tags instead of normalizing them as raw
+//! physical events. Partial fan-out aborts before a batch can execute.
+//!
+//! # Exclusive progress and authorization
+//!
+//! Advancing a source to F promises that later acquisition times are not less
+//! than F, so an observation at F remains admissible. Required sources initially
+//! gate all finite tags. The minimum predecessor of each required frontier plus
+//! target delay constrains the existing Federate grant horizon. This aggregate is
+//! cached on progress changes; generation-bound authorization fences execution
+//! against concurrent admission. Optional sources never constrain the horizon.
+//!
+//! Required sources keep an idle Federate alive, while shutdown and configured
+//! logical horizons continue through the existing coordinator and selected clock.
+//! Frontiers may exceed clock time; observations may not. Required protocol
+//! failures, overflow, and disconnection abort. Optional disconnection preserves
+//! committed observations. [`InputErrorKind`] retains distinct rejection causes.
+//! Clock advancement, admission, and progress remain separate responsibilities;
+//! this module introduces no additional scheduler or coordinator.
+
 use crate::{
-    image::*, physical_clock::ManualClock, physical_time::*, AsyncEvent, AsyncEventTarget,
-    Duration, ReactorData, Tag,
+    clock::ManualClock, clock::*, image::*, AsyncEvent, AsyncEventTarget, Duration, ReactorData,
+    Tag,
 };
 use std::{
     any::TypeId,
@@ -100,7 +136,7 @@ pub struct InputObservation {
     /// Fresh execution epoch supplied by the selected clock.
     pub epoch: ExecutionEpoch,
     /// Unsigned acquisition time within that epoch.
-    pub acquired: PhysicalTimeNanos,
+    pub acquired: PhysicalInstant,
     /// Owned decoded target values.
     pub values: Vec<InputValue>,
 }
@@ -169,8 +205,8 @@ struct Source {
     id: String,
     required: bool,
     enabled: bool,
-    last: Option<(u64, PhysicalTimeNanos)>,
-    frontier: Option<PhysicalTimeNanos>,
+    last: Option<(u64, PhysicalInstant)>,
+    frontier: Option<PhysicalInstant>,
     delay: Duration,
 }
 /// Per-Enclave mailbox count, execution reservation, and generation-bound authorization.
@@ -426,11 +462,7 @@ impl InputAdmission {
     /// Publishes an exclusive acquisition frontier, including explicit idle progress.
     /// Future acquisitions must be greater than or equal to the frontier. Progress
     /// may exceed the current clock time; it does not advance that clock.
-    pub fn advance(
-        &self,
-        source: SourceKey,
-        frontier: PhysicalTimeNanos,
-    ) -> Result<(), InputError> {
+    pub fn advance(&self, source: SourceKey, frontier: PhysicalInstant) -> Result<(), InputError> {
         self.submit(Vec::new(), &[(source, frontier)]).map(|_| ())
     }
     /// Validates the whole batch before fan-out, then publishes values before progress.
@@ -439,7 +471,7 @@ impl InputAdmission {
     pub fn submit(
         &self,
         observations: Vec<InputObservation>,
-        progress: &[(SourceKey, PhysicalTimeNanos)],
+        progress: &[(SourceKey, PhysicalInstant)],
     ) -> Result<InputReceipt, InputError> {
         let arrival = Instant::now();
         let mut state = self.0.state.lock().unwrap();

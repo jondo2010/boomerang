@@ -226,8 +226,8 @@ pub struct FederateBindings<'binding> {
     physical_inputs: Option<crate::physical_input::InputSetup<'binding>>,
     #[cfg(feature = "external-clock")]
     physical_clock: Option<(
-        crate::physical_time::PhysicalClockDomainId,
-        crate::physical_clock::ManualClock,
+        crate::clock::PhysicalClockDomainId,
+        crate::clock::ManualClock,
     )>,
     /// Caller-supplied Enclave bindings keyed directly by canonical deployment index.
     enclaves: TinySecondaryMap<EnclaveIndex, EnclaveBindings>,
@@ -260,8 +260,8 @@ impl<'binding> FederateBindings<'binding> {
     #[cfg(feature = "external-clock")]
     pub fn with_physical_clock(
         mut self,
-        domain: crate::physical_time::PhysicalClockDomainId,
-        clock: crate::physical_clock::ManualClock,
+        domain: crate::clock::PhysicalClockDomainId,
+        clock: crate::clock::ManualClock,
     ) -> Self {
         self.physical_clock = Some((domain, clock));
         self
@@ -388,7 +388,7 @@ struct PreparedFederate<'image> {
 pub struct FederateExecution {
     /// Per-Enclave results keyed by deployment-wide canonical Enclave index.
     enclaves: TinySecondaryMap<EnclaveIndex, EnclaveExecution>,
-    /// Single monotonic origin injected into every scheduler and reaction context.
+    /// Host monotonic origin used for native pacing and run-time diagnostics.
     origin: Instant,
     /// Scheduler-local work counters summed across successful Enclave executions.
     stats: Stats,
@@ -412,7 +412,8 @@ impl FederateExecution {
         self.enclaves.get(enclave)
     }
 
-    /// Returns the monotonic origin shared by every Enclave scheduler.
+    /// Returns the host monotonic origin used for native pacing and diagnostics.
+    /// Manual physical time has its own integer epoch and is not derived from this value.
     pub const fn origin(&self) -> Instant {
         self.origin
     }
@@ -438,7 +439,7 @@ pub enum ExecuteOwnedFederateError {
     /// Selected physical clock failed validation or terminated during execution.
     #[cfg(feature = "external-clock")]
     #[error(transparent)]
-    PhysicalClock(#[from] crate::physical_time::PhysicalClockError),
+    PhysicalClock(#[from] crate::clock::PhysicalClockError),
     /// The deployment root or one nested image was structurally invalid.
     #[error("invalid compiled deployment: {message}")]
     ImageValidation {
@@ -1083,10 +1084,10 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
             .values()
             .any(|image| image.storage_bounds().event_capacity() == 0)
     {
-        return Err(crate::physical_time::PhysicalClockError::WakeCapacity.into());
+        return Err(crate::clock::PhysicalClockError::WakeCapacity.into());
     }
     #[cfg(feature = "external-clock")]
-    let clock_run = crate::physical_clock::ClockRun::new(bindings.physical_clock.as_ref())?;
+    let clock_run = crate::clock::ClockRun::new(bindings.physical_clock.as_ref())?;
     #[cfg(feature = "external-clock")]
     let input_targets = bindings
         .physical_inputs
@@ -1263,12 +1264,11 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
     if let Some(clock) = &clock_run.0 {
         clock.attach(&event_senders, abort_handle.clone())?;
         for (slot, (_, storage)) in storages.iter_mut().enumerate() {
-            storage.set_physical_clock(crate::sched::clock::RuntimeClock::manual(
-                clock.clone(),
-                slot,
-                origin,
-            ));
+            storage.set_physical_clock(crate::clock::RuntimeClock::manual(clock.clone(), slot));
         }
+    }
+    for (_, storage) in &storages {
+        storage.initialize_clock(origin);
     }
     #[cfg(feature = "external-clock")]
     let _input_run =
@@ -2269,7 +2269,6 @@ mod scoped_spawn_tests {
         dependencies.add_upstream(
             upstream,
             SendContext {
-                #[cfg(feature = "external-clock")]
                 physical_clock: Default::default(),
                 enclave_key: upstream,
                 async_tx: upstream_tx,

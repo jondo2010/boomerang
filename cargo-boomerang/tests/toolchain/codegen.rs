@@ -257,12 +257,12 @@ fn generated_clock_fixture(with_inputs: bool) {
         source.push_str(r#"
 /// Submits the fixture physical sample and advances its selected clock.
 #[cfg(boomerang_facet = "payload")]
-pub fn drive_clock(clock: boomerang_runtime::physical_clock::ManualClock, inputs: boomerang_runtime::physical_input::InputAdmission) -> Result<(), boomerang_runtime::physical_input::InputError> {
-    use boomerang_runtime::{physical_input::*, physical_time::*};
+pub fn drive_clock(clock: boomerang_runtime::clock::ManualClock, inputs: boomerang_runtime::physical_input::InputAdmission) -> Result<(), boomerang_runtime::physical_input::InputError> {
+    use boomerang_runtime::{physical_input::*, clock::*};
     let source = inputs.source("plant").unwrap();
     let target = inputs.target(source, "sample").unwrap();
-    inputs.submit(vec![InputObservation { source, sequence: 1, acquired: PhysicalTimeNanos(0), domain: clock.domain(), epoch: clock.epoch(), values: vec![InputValue::new(target, 99u32)] }], &[])?;
-    clock.advance_to(PhysicalTimeNanos(100)).unwrap();
+    inputs.submit(vec![InputObservation { source, sequence: 1, acquired: PhysicalInstant(0), domain: clock.domain(), epoch: clock.epoch(), values: vec![InputValue::new(target, 99u32)] }], &[])?;
+    clock.advance_to(PhysicalInstant(100)).unwrap();
     Ok(())
 }
 "#);
@@ -270,9 +270,9 @@ pub fn drive_clock(clock: boomerang_runtime::physical_clock::ManualClock, inputs
         source.push_str(r#"
 /// Advances the fixture clock before the generated Federate starts.
 #[cfg(boomerang_facet = "payload")]
-pub fn drive_clock(clock: boomerang_runtime::physical_clock::ManualClock) -> Result<(), boomerang_runtime::physical_time::PhysicalClockError> {
-    assert_eq!(clock.domain(), boomerang_runtime::physical_time::PhysicalClockDomainId(7));
-    clock.advance_to(boomerang_runtime::physical_time::PhysicalTimeNanos(100))
+pub fn drive_clock(clock: boomerang_runtime::clock::ManualClock) -> Result<(), boomerang_runtime::clock::PhysicalClockError> {
+    assert_eq!(clock.domain(), boomerang_runtime::clock::PhysicalClockDomainId(7));
+    clock.advance_to(boomerang_runtime::clock::PhysicalInstant(100))
 }
 "#);
     }

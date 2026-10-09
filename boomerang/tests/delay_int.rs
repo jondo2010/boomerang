@@ -31,11 +31,11 @@ fn Delay(
 #[reactor]
 pub fn Test(
     #[input] in_: u32,
-    #[state(default = std::time::Instant::now())] start_time: std::time::Instant,
+    #[state(default = Duration::ZERO)] start_time: Duration,
 ) -> impl Reactor<TestState, Ports = TestPorts> {
     ctx.add_reaction(None)
         .with_startup_trigger()
-        .with_reaction_fn(move |ctx, state, _| state.start_time = ctx.get_logical_time())
+        .with_reaction_fn(move |ctx, state, _| state.start_time = ctx.get_elapsed_logical_time())
         .finish()?;
 
     ctx.add_reaction(None)
@@ -43,7 +43,7 @@ pub fn Test(
         .with_reaction_fn(|ctx, state, (in_,)| {
             println!("Received: {}", in_.unwrap());
             // Check the time of the input.
-            let current_time = ctx.get_logical_time();
+            let current_time = ctx.get_elapsed_logical_time();
             let elapsed = current_time - state.start_time;
             println!("After {elapsed:?} of logical time.");
             assert_eq!(

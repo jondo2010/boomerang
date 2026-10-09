@@ -2,7 +2,6 @@
 
 use super::{
     barrier::LogicalTimeBarrier,
-    clock::{mapping, ClockWaitResult, RuntimeClock, WaitContext},
     federate::{
         FederateControlAuthorization, FederateCoordinationError, FederateIdleWait,
         FederateSchedulerCoordination, FederateTagAcquisition, FederateTermination,
@@ -11,6 +10,7 @@ use super::{
     Config, Stats,
 };
 use crate::{
+    clock::{ClockWaitResult, RuntimeClock, WaitContext},
     event::{AsyncEvent, AsyncEventTarget},
     keepalive,
     key_set::KeySetView,
@@ -124,23 +124,21 @@ pub(crate) struct ModeTransition<M> {
 /// Mutable execution storage consumed by the scheduler independently of its schedule.
 pub(crate) trait ExecutionStorage<S: Schedule> {
     /// Failure returned while invoking reactions.
-    type Error;
+    type Error: From<crate::clock::PhysicalClockError>;
 
-    /// Prepares the scheduler origin immediately before startup begins.
-    fn prepare_startup_origin(&mut self, start_time: &mut std::time::Instant);
     /// Resolves an externally supplied runtime action identity to this storage's action key.
     fn action_from_runtime(&self, key: ActionKey) -> S::Action;
     /// Retain an action value until its scheduled tag is processed.
     fn push_action_value(&mut self, action: S::Action, tag: Tag, value: Box<dyn ReactorData>);
-    /// Reserves separate microsteps for queued physical values in selected-clock storage.
-    fn physical_event_tag(
+    /// Borrows an action using the resolved storage key.
+    fn action(&self, action: S::Action) -> &dyn crate::BaseAction;
+    /// Selects a tag past pending values at the same boundary port and offset.
+    /// Does not reserve the result or change the queue.
+    fn try_next_boundary_tag(
         &self,
-        _target: &AsyncEventTarget,
+        port: crate::image::PortIndex,
         tag: Tag,
-    ) -> Result<Tag, crate::physical_time::PhysicalClockError> {
-        // Live storage cannot select an external clock.
-        Ok(tag)
-    }
+    ) -> Result<Tag, Self::Error>;
     /// Stages one inbound scheduler-boundary value until its logical tag is processed.
     fn stage_inbound_boundary_value(
         &mut self,
@@ -178,7 +176,7 @@ where
 {
     /// Enclave whose logical time this invocation advances.
     pub(super) key: EnclaveKey,
-    /// Selected clock; native-only builds carry no clock state.
+    /// Selected execution timeline, including the shared native origin.
     pub(super) clock: RuntimeClock,
     #[cfg(feature = "external-clock")]
     pub(super) physical_inputs: Option<(crate::physical_input::InputAdmission, usize)>,
@@ -338,12 +336,20 @@ where
                 target,
                 value,
             } => {
-                let tag = Tag::from_physical_time(*self.start_time, time);
-                let tag = match mapping::event_tag(&self.clock, tag, *self.current_tag, |tag| {
-                    self.storage.physical_event_tag(&target, tag)
-                }) {
-                    Ok(tag) => tag,
-                    Err(_) => return Ok(()),
+                let tag = time.to_tag(Duration::ZERO)?;
+                let tag = tag.checked_after(*self.current_tag)?;
+                let tag = match target {
+                    AsyncEventTarget::Action(key) => {
+                        let action = self.storage.action_from_runtime(key);
+                        self.storage
+                            .action(action)
+                            .checked_next_tag_for_offset(tag)
+                            .ok_or(crate::clock::PhysicalClockError::Overflow)?
+                    }
+                    AsyncEventTarget::BoundaryPort(port)
+                    | AsyncEventTarget::NetworkBoundaryPort(port) => {
+                        self.storage.try_next_boundary_tag(port, tag)?
+                    }
                 };
                 self.admit_value(tag, target, value, origin)?;
             }
@@ -437,7 +443,6 @@ where
         if let Some(observation) = self.observation {
             observation.mark_running();
         }
-        self.storage.prepare_startup_origin(self.start_time);
         let tag = Tag::ZERO;
 
         // Initialize the event queue with the startup actions
@@ -505,7 +510,7 @@ where
     /// Try to receive an asynchronous event
     fn receive_event_async(&mut self) -> Option<AsyncEvent> {
         if let Some(shutdown) = *self.shutdown_tag {
-            let abs = shutdown.to_logical_time(*self.start_time);
+            let abs = *self.start_time + shutdown.offset();
             if let Some(timeout) = abs.checked_duration_since(std::time::Instant::now()) {
                 tracing::debug!(target: "boomerang::runtime",
                     event = "runtime.scheduler.waiting", enclave = self.key.as_u32(),

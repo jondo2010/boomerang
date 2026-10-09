@@ -6,7 +6,6 @@
 use std::pin::Pin;
 
 mod barrier;
-pub(crate) mod clock;
 mod compiled;
 pub(crate) mod core;
 pub(crate) mod federate;
@@ -204,18 +203,24 @@ impl std::fmt::Display for Stats {
 impl ExecutionStorage<ReactionGraph> for Pin<Box<Store>> {
     type Error = RuntimeError;
 
-    fn prepare_startup_origin(&mut self, start_time: &mut std::time::Instant) {
-        let origin = std::time::Instant::now();
-        *start_time = origin;
-        Store::initialize_reaction_context_origins(self, origin);
-    }
-
     fn action_from_runtime(&self, key: ActionKey) -> ActionKey {
         key
     }
 
     fn push_action_value(&mut self, action: ActionKey, tag: Tag, value: Box<dyn ReactorData>) {
         Store::push_action_value(self, action, tag, value);
+    }
+
+    fn action(&self, action: ActionKey) -> &dyn crate::BaseAction {
+        Store::action(self, action)
+    }
+
+    fn try_next_boundary_tag(
+        &self,
+        port: crate::image::PortIndex,
+        _tag: Tag,
+    ) -> Result<Tag, Self::Error> {
+        Err(RuntimeError::AsyncBoundaryPortUnsupported(port))
     }
 
     fn stage_inbound_boundary_value(
@@ -474,6 +479,8 @@ enum LiveSchedulerState {
 
 #[derive(Debug)]
 pub struct Scheduler {
+    /// Execution timeline shared with this Enclave's send and reaction contexts.
+    physical_clock: crate::clock::RuntimeClock,
     /// The enclave key
     key: EnclaveKey,
     /// The scheduler config
@@ -528,6 +535,7 @@ impl Scheduler {
         observation: Option<crate::ObservationHandle>,
     ) -> Self {
         let Enclave {
+            physical_clock,
             env,
             graph,
             event_tx,
@@ -542,7 +550,8 @@ impl Scheduler {
         let reaction_capacity = env.reactions.len();
         let reaction_set_limits = graph.reaction_limits();
         // Build contexts for each reaction
-        let contexts = build_reaction_contexts(key, &graph, start_time, event_tx, shutdown_rx);
+        let contexts =
+            build_reaction_contexts(key, &graph, physical_clock.clone(), event_tx, shutdown_rx);
 
         let store = Store::new(env, contexts, &graph);
         let has_modal_scopes = graph.has_modal_scopes();
@@ -569,6 +578,7 @@ impl Scheduler {
             .collect();
 
         Self {
+            physical_clock,
             key,
             config,
             store,
@@ -596,6 +606,7 @@ impl Scheduler {
         self.events
             .set_event_queue_observation_enabled(self.observation.is_some());
         let Self {
+            physical_clock,
             key,
             config,
             store,
@@ -618,7 +629,7 @@ impl Scheduler {
         } = self;
 
         SchedulerCore {
-            clock: Default::default(),
+            clock: physical_clock.clone(),
             #[cfg(feature = "external-clock")]
             physical_inputs: None,
             key: *key,
@@ -645,6 +656,11 @@ impl Scheduler {
         }
     }
 
+    /// Binds time before any participant can execute a startup reaction.
+    fn prepare_clock(&mut self, origin: std::time::Instant) {
+        self.start_time = self.physical_clock.initialize(origin);
+    }
+
     /// Executes scheduler startup once.
     ///
     /// Calls after startup or termination are no-ops; a terminated scheduler
@@ -653,6 +669,7 @@ impl Scheduler {
         if self.state != LiveSchedulerState::NotStarted {
             return;
         }
+        self.prepare_clock(std::time::Instant::now());
         self.core().startup();
         self.state = LiveSchedulerState::Running;
     }
@@ -782,6 +799,11 @@ pub fn execute_enclaves(
 fn execute_scheduler_threads(
     schedulers: impl Iterator<Item = Scheduler>,
 ) -> Result<tinymap::TinySecondaryMap<EnclaveKey, Env>, ExecuteEnclavesError> {
+    let mut schedulers: Vec<_> = schedulers.collect();
+    let origin = std::time::Instant::now();
+    for scheduler in &mut schedulers {
+        scheduler.prepare_clock(origin);
+    }
     let mut handles = Vec::new();
     for mut sched in schedulers {
         let enclave = sched.key;
@@ -865,7 +887,7 @@ mod tests {
             Reaction::new(
                 "record-origin",
                 reaction_closure!(ctx, _reactor, _refs => {
-                    *seen_origin.lock().unwrap() = Some(ctx.get_start_time());
+                    *seen_origin.lock().unwrap() = Some(ctx.physical_clock.initialize(std::time::Instant::now()));
                 }),
                 None,
             ),
@@ -892,6 +914,73 @@ mod tests {
             ),
             reaction,
         )
+    }
+
+    /// A sender created during graph construction must not timestamp against an arbitrary origin.
+    #[test]
+    fn native_send_context_requires_startup_and_shares_the_started_clock() {
+        use crate::clock::{PhysicalClockError, PhysicalInstant};
+        use crate::CommonContext;
+        let (mut enclave, _) = enclave_recording_start_origin(Arc::new(Mutex::new(None)));
+        let action_key = enclave
+            .insert_action(|key| crate::Action::<u32>::new("physical", key, None, false).boxed());
+        let action = enclave.create_async_action_ref::<u32>(action_key);
+        let sender = enclave.create_send_context(EnclaveKey::from(0));
+        assert_eq!(
+            sender.try_get_physical_time(),
+            Err(PhysicalClockError::NotStarted)
+        );
+        assert_eq!(
+            sender.try_schedule_action_async(&action, 7, None),
+            Err(PhysicalClockError::NotStarted)
+        );
+        assert!(enclave.event_rx.try_recv().unwrap().is_none());
+        let mut scheduler = Scheduler::new(EnclaveKey::from(0), enclave, Config::default(), None);
+        assert!(sender.try_get_physical_time().is_err());
+        scheduler.startup();
+        let before = sender.try_get_physical_time().unwrap();
+        assert!(sender.try_schedule_action_async(&action, 7, None).unwrap());
+        let after = sender.try_get_physical_time().unwrap();
+        let AsyncEvent::Physical { time, value, .. } = scheduler.event_rx.recv().unwrap() else {
+            panic!("expected physical event")
+        };
+        assert!((before..=after).contains(&time));
+        assert_eq!(*value.downcast::<u32>().ok().unwrap(), 7);
+        assert!(time >= PhysicalInstant::default());
+    }
+
+    /// Bulk execution binds destination senders before source startup reactions execute.
+    #[test]
+    fn live_participants_share_an_origin_before_startup_reactions() {
+        let observed = Arc::new(Mutex::new(None));
+        let (destination, _) = enclave_recording_start_origin(Arc::new(Mutex::new(None)));
+        let sender = destination.create_send_context(EnclaveKey::from(1));
+        let mut source = Enclave::default();
+        let reactor = source.insert_reactor(Reactor::new("source", ()).boxed(), None);
+        let scope = source.root_scope(reactor);
+        let record = observed.clone();
+        let reaction = source.insert_reaction(
+            Reaction::new("check-destination", reaction_closure!(ctx, _reactor, _refs => {
+                use crate::CommonContext;
+                assert!(sender.try_get_physical_time().is_ok());
+                let origin = std::time::Instant::now();
+                *record.lock().unwrap() = Some((ctx.physical_clock.initialize(origin), sender.physical_clock.initialize(origin)));
+            }), None),
+            reactor, std::iter::empty(), std::iter::empty(), std::iter::empty(), scope, None,
+        );
+        let startup = source
+            .insert_action(|key| crate::Action::<()>::new("startup", key, None, true).boxed());
+        source.insert_action_scope(startup, scope);
+        source.insert_startup_action(startup, Tag::ZERO);
+        source.insert_action_trigger(startup, (Level::from(0), reaction));
+        let config = Config::default().with_fast_forward(true);
+        let schedulers = [
+            Scheduler::new(EnclaveKey::from(0), source, config.clone(), None),
+            Scheduler::new(EnclaveKey::from(1), destination, config, None),
+        ];
+        execute_scheduler_threads(schedulers.into_iter()).unwrap();
+        let (source, destination) = observed.lock().unwrap().unwrap();
+        assert_eq!(source, destination);
     }
 
     #[test]
@@ -978,6 +1067,71 @@ mod tests {
         assert!(!scheduler.try_next().unwrap());
         scheduler.startup();
         assert_eq!(observation.snapshot(sampled_at).unwrap(), snapshot);
+    }
+
+    /// Equal-time native observations retain every value; unrepresentable admission fails the run.
+    #[test]
+    fn native_physical_admission_preserves_values_and_propagates_overflow() {
+        use crate::{Action, ActionRef, AsyncEventTarget};
+        for overflow in [false, true] {
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let record = seen.clone();
+            let mut enclave = Enclave::default();
+            let reactor = enclave.insert_reactor(Reactor::new("physical", ()).boxed(), None);
+            let scope = enclave.root_scope(reactor);
+            let action = enclave
+                .insert_action(|key| Action::<u32>::new("physical", key, None, false).boxed());
+            enclave.insert_action_scope(action, scope);
+            let reaction = enclave.insert_reaction(
+                Reaction::new(
+                    "record",
+                    reaction_closure!(ctx, _reactor, refs => {
+                        let mut action: ActionRef<u32> = refs.actions.partition_mut().unwrap();
+                        let value = *ctx.get_action_value(&mut action).unwrap();
+                        record.lock().unwrap().push((ctx.get_microstep(), value));
+                    }),
+                    None,
+                ),
+                reactor,
+                std::iter::empty(),
+                std::iter::empty(),
+                std::iter::once(action),
+                scope,
+                None,
+            );
+            enclave.insert_action_trigger(action, (Level::from(0), reaction));
+            let sender = enclave.event_tx.clone();
+            let mut scheduler = Scheduler::new(
+                EnclaveKey::from(0),
+                enclave,
+                Config::default().with_fast_forward(true),
+                None,
+            );
+            scheduler.startup();
+            scheduler.current_tag = Tag::new(Duration::ZERO, if overflow { usize::MAX } else { 7 });
+            for value in [11u32, 22] {
+                sender
+                    .send(AsyncEvent::Physical {
+                        time: crate::clock::PhysicalInstant::default(),
+                        target: AsyncEventTarget::Action(action),
+                        value: Box::new(value),
+                    })
+                    .unwrap();
+            }
+            if overflow {
+                assert!(matches!(
+                    scheduler.try_next(),
+                    Err(RuntimeError::PhysicalClock(
+                        crate::clock::PhysicalClockError::Overflow
+                    ))
+                ));
+                assert!(seen.lock().unwrap().is_empty());
+                assert!(!scheduler.try_next().unwrap());
+            } else {
+                while scheduler.try_next().unwrap() {}
+                assert_eq!(*seen.lock().unwrap(), [(8, 11), (9, 22)]);
+            }
+        }
     }
 
     #[test]

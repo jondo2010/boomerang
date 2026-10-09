@@ -82,7 +82,7 @@ fn sample(h: &Harness, source: usize, sequence: u64, time: u64) -> InputObservat
     InputObservation {
         source: SourceKey(source),
         sequence,
-        acquired: PhysicalTimeNanos(time),
+        acquired: PhysicalInstant(time),
         domain: h.inputs.0.clock.domain(),
         epoch: h.inputs.0.clock.epoch(),
         values: vec![InputValue::new(TargetKey(source * h.rx.len()), 42u32)],
@@ -110,32 +110,24 @@ fn drain(h: &Harness) {
 fn exclusive_frontiers_zero_delay_independence_and_optional_idle_sources() {
     let h = harness(&[true, true, false], 2, 3, 8);
     assert_eq!(h.inputs.horizon(), Tag::NEVER);
-    h.inputs
-        .advance(SourceKey(0), PhysicalTimeNanos(0))
-        .unwrap();
+    h.inputs.advance(SourceKey(0), PhysicalInstant(0)).unwrap();
     assert_eq!(h.inputs.horizon(), Tag::NEVER);
-    h.inputs
-        .advance(SourceKey(1), PhysicalTimeNanos(0))
-        .unwrap();
+    h.inputs.advance(SourceKey(1), PhysicalInstant(0)).unwrap();
     assert_eq!(
         h.inputs.horizon(),
         Tag::new(Duration::nanoseconds(2), usize::MAX)
     );
     h.inputs
-        .advance(SourceKey(0), PhysicalTimeNanos(100))
+        .advance(SourceKey(0), PhysicalInstant(100))
         .unwrap();
-    h.inputs
-        .advance(SourceKey(1), PhysicalTimeNanos(10))
-        .unwrap();
-    assert_eq!(h.inputs.0.clock.now().unwrap(), PhysicalTimeNanos(0));
+    h.inputs.advance(SourceKey(1), PhysicalInstant(10)).unwrap();
+    assert_eq!(h.inputs.0.clock.now().unwrap(), PhysicalInstant(0));
     assert_eq!(
         h.inputs.horizon(),
         Tag::new(Duration::nanoseconds(12), usize::MAX)
     );
     drain(&h);
-    h.inputs
-        .advance(SourceKey(1), PhysicalTimeNanos(10))
-        .unwrap();
+    h.inputs.advance(SourceKey(1), PhysicalInstant(10)).unwrap();
     assert!(h.rx[0].try_recv().unwrap().is_none());
     h.inputs.disconnect(SourceKey(2));
     assert_eq!(
@@ -144,7 +136,7 @@ fn exclusive_frontiers_zero_delay_independence_and_optional_idle_sources() {
     );
     assert_eq!(
         h.inputs
-            .advance(SourceKey(1), PhysicalTimeNanos(9))
+            .advance(SourceKey(1), PhysicalInstant(9))
             .unwrap_err()
             .kind,
         InputErrorKind::Protocol
@@ -162,7 +154,7 @@ fn admission_rejections_preserve_sequence_and_exact_frontier_is_admissible() {
     );
     assert_eq!(
         h.inputs
-            .advance(SourceKey(usize::MAX), PhysicalTimeNanos(1))
+            .advance(SourceKey(usize::MAX), PhysicalInstant(1))
             .unwrap_err()
             .kind,
         InputErrorKind::Malformed
@@ -186,10 +178,8 @@ fn admission_rejections_preserve_sequence_and_exact_frontier_is_admissible() {
             .kind,
         InputErrorKind::Future
     );
-    h.inputs.0.clock.advance_to(PhysicalTimeNanos(20)).unwrap();
-    h.inputs
-        .advance(SourceKey(0), PhysicalTimeNanos(10))
-        .unwrap();
+    h.inputs.0.clock.advance_to(PhysicalInstant(20)).unwrap();
+    h.inputs.advance(SourceKey(0), PhysicalInstant(10)).unwrap();
     let receipt = h.inputs.submit(vec![sample(&h, 0, 2, 10)], &[]).unwrap();
     assert!(receipt.arrival >= start);
     assert_eq!(receipt.tags, [Tag::new(Duration::nanoseconds(10), 0)]);
@@ -212,7 +202,7 @@ fn admission_rejections_preserve_sequence_and_exact_frontier_is_admissible() {
 #[test]
 fn retained_bounds_same_tag_conflicts_and_inflight_lateness() {
     let h = harness(&[false], 2, 0, 8);
-    h.inputs.0.clock.advance_to(PhysicalTimeNanos(30)).unwrap();
+    h.inputs.0.clock.advance_to(PhysicalInstant(30)).unwrap();
     h.inputs.submit(vec![sample(&h, 0, 1, 10)], &[]).unwrap();
     assert!(!h.inputs.reserve(0, Tag::new(Duration::nanoseconds(10), 0)));
     assert_eq!(
@@ -274,7 +264,7 @@ fn entire_batch_rejects_before_commit_and_partial_fanout_aborts() {
     batch.values.push(InputValue::new(TargetKey(1), 7u32));
     assert_eq!(
         h.inputs
-            .submit(vec![batch], &[(SourceKey(0), PhysicalTimeNanos(1))])
+            .submit(vec![batch], &[(SourceKey(0), PhysicalInstant(1))])
             .unwrap_err()
             .kind,
         InputErrorKind::Overflow
@@ -339,7 +329,7 @@ fn required_overflow_disconnect_and_checked_mapping_are_terminal_or_rejected() {
     h.inputs
         .0
         .clock
-        .advance_to(PhysicalTimeNanos(u64::MAX))
+        .advance_to(PhysicalInstant(u64::MAX))
         .unwrap();
     assert_eq!(
         h.inputs
@@ -350,7 +340,7 @@ fn required_overflow_disconnect_and_checked_mapping_are_terminal_or_rejected() {
     );
     assert_eq!(
         h.inputs
-            .advance(SourceKey(0), PhysicalTimeNanos(u64::MAX))
+            .advance(SourceKey(0), PhysicalInstant(u64::MAX))
             .unwrap_err()
             .kind,
         InputErrorKind::Malformed
@@ -386,11 +376,11 @@ fn admission_and_final_reservation_race_cannot_both_win() {
 /// Measures allocation-free horizon reads and reservations with maximum retained batches.
 #[test]
 fn cached_horizon_and_reservations_allocate_nothing_with_maximum_batches() {
-    use crate::physical_clock::tests::ALLOCATIONS;
+    use crate::clock::ALLOCATIONS;
     for enclaves in [2, 16] {
         for count in [1, 16, 64] {
             let h = harness(&vec![true; count], enclaves, 0, 8);
-            h.inputs.0.clock.advance_to(PhysicalTimeNanos(4)).unwrap();
+            h.inputs.0.clock.advance_to(PhysicalInstant(4)).unwrap();
             for start in [0, 2] {
                 let batch = (start..start + 2)
                     .map(|time| {
@@ -408,7 +398,7 @@ fn cached_horizon_and_reservations_allocate_nothing_with_maximum_batches() {
             }
             for source in 0..count {
                 h.inputs
-                    .advance(SourceKey(source), PhysicalTimeNanos(5))
+                    .advance(SourceKey(source), PhysicalInstant(5))
                     .unwrap();
             }
             drain(&h);
@@ -452,7 +442,7 @@ fn republish(h: &mut Harness, tag: Tag) {
 fn consumed_batch_invalidates_queued_grant_until_coordinator_reauthorizes() {
     use crate::sched::federate::FederateAcquisition;
     let mut h = harness(&[false], 2, 0, 8);
-    h.inputs.0.clock.advance_to(PhysicalTimeNanos(10)).unwrap();
+    h.inputs.0.clock.advance_to(PhysicalInstant(10)).unwrap();
     h._coordination.coordinator.state.physical_inputs = Some(h.inputs.clone());
     let tag = Tag::new(Duration::nanoseconds(10), 0);
     republish(&mut h, tag);
@@ -501,7 +491,7 @@ fn settled_acquisition_releases_successive_frontiers_through_coordinator() {
     assert_eq!(state.grant_horizon(), Some(Tag::NEVER));
     for frontier in [1, 2] {
         inputs
-            .advance(SourceKey(0), PhysicalTimeNanos(frontier))
+            .advance(SourceKey(0), PhysicalInstant(frontier))
             .unwrap();
         state.input_progress().unwrap();
         assert_eq!(state.grant_horizon(), Some(inputs.horizon()));
@@ -514,7 +504,7 @@ fn settled_acquisition_releases_successive_frontiers_through_coordinator() {
             let tx = tx.clone();
             scope.spawn(move || tx.send(port.acquire_tag(tag)).unwrap());
         }
-        inputs.advance(SourceKey(0), PhysicalTimeNanos(3)).unwrap();
+        inputs.advance(SourceKey(0), PhysicalInstant(3)).unwrap();
         let results: Vec<_> = (0..2)
             .map(|_| rx.recv_timeout(std::time::Duration::from_secs(2)))
             .collect();

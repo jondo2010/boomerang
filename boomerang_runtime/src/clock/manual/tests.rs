@@ -1,7 +1,7 @@
 //! Manual-clock protocol, conversion, and allocation regression tests.
 
 use super::*;
-use crate::sched::clock::RuntimeClock;
+use crate::clock::RuntimeClock;
 
 /// Creates an independent manual clock in the shared test domain.
 fn clock() -> ManualClock {
@@ -15,17 +15,17 @@ fn repeats_jumps_and_regression_are_retained() {
     let capability: &dyn PhysicalClock = &clock;
     assert_eq!(capability.domain(), clock.domain());
     assert_eq!(capability.epoch(), clock.epoch());
-    assert_eq!(capability.now(), Ok(PhysicalTimeNanos(0)));
-    clock.advance_to(PhysicalTimeNanos(10)).unwrap();
-    clock.advance_to(PhysicalTimeNanos(10)).unwrap();
-    assert_eq!(clock.now(), Ok(PhysicalTimeNanos(10)));
+    assert_eq!(capability.now(), Ok(PhysicalInstant(0)));
+    clock.advance_to(PhysicalInstant(10)).unwrap();
+    clock.advance_to(PhysicalInstant(10)).unwrap();
+    assert_eq!(clock.now(), Ok(PhysicalInstant(10)));
     assert_eq!(
-        clock.advance_to(PhysicalTimeNanos(9)),
+        clock.advance_to(PhysicalInstant(9)),
         Err(PhysicalClockError::Regression)
     );
     assert_eq!(clock.now(), Err(PhysicalClockError::Regression));
     assert_eq!(
-        clock.advance_to(PhysicalTimeNanos(100)),
+        clock.advance_to(PhysicalInstant(100)),
         Err(PhysicalClockError::Regression)
     );
     clock.close();
@@ -70,24 +70,24 @@ fn registration_racing_advance_retains_one_wake_and_reuses_slot() {
         std::thread::scope(|scope| {
             scope.spawn(|| {
                 barrier.wait();
-                clock.advance_to(PhysicalTimeNanos(100)).unwrap();
+                clock.advance_to(PhysicalInstant(100)).unwrap();
             });
             barrier.wait();
-            if !clock.register(0, PhysicalTimeNanos(100)).unwrap() {
+            if !clock.register(0, PhysicalInstant(100)).unwrap() {
                 rx.recv_timeout(std::time::Duration::from_secs(1)).unwrap();
             }
         });
         assert!(rx.try_recv().unwrap().is_none());
-        assert!(clock.register(0, PhysicalTimeNanos(100)).unwrap());
-        assert!(!clock.register(0, PhysicalTimeNanos(101)).unwrap());
-        assert!(!clock.register(0, PhysicalTimeNanos(102)).unwrap());
+        assert!(clock.register(0, PhysicalInstant(100)).unwrap());
+        assert!(!clock.register(0, PhysicalInstant(101)).unwrap());
+        assert!(!clock.register(0, PhysicalInstant(102)).unwrap());
         clock.cancel(0);
-        clock.advance_to(PhysicalTimeNanos(102)).unwrap();
+        clock.advance_to(PhysicalInstant(102)).unwrap();
         assert!(rx.try_recv().unwrap().is_none());
         clock.close();
         rx.recv().unwrap();
         assert_eq!(
-            clock.register(0, PhysicalTimeNanos(200)),
+            clock.register(0, PhysicalInstant(200)),
             Err(PhysicalClockError::Closed)
         );
     }
@@ -97,31 +97,37 @@ fn registration_racing_advance_retains_one_wake_and_reuses_slot() {
 #[test]
 fn checked_conversions_and_physical_actions_use_selected_time() {
     assert_eq!(
-        after_current_tag(Tag::ZERO, Tag::new(Duration::ZERO, usize::MAX)),
+        Tag::ZERO.checked_after(Tag::new(Duration::ZERO, usize::MAX)),
         Err(PhysicalClockError::Overflow)
     );
     use crate::{
         Action, ActionKey, ActionRef, BaseAction, CommonContext, Context, DynActionRefMut,
     };
     assert_eq!(
-        PhysicalTimeNanos(u64::MAX).checked_add(PhysicalTimeNanos(1)),
+        PhysicalInstant(u64::MAX).checked_add(core::time::Duration::from_nanos(1)),
         Err(PhysicalClockError::Overflow)
     );
     assert_eq!(
-        PhysicalTimeNanos::from_duration(std::time::Duration::MAX),
+        PhysicalInstant::from_duration(std::time::Duration::MAX),
         Err(PhysicalClockError::Overflow)
     );
     assert_eq!(
-        PhysicalTimeNanos(0).to_tag(Duration::nanoseconds(-1)),
+        PhysicalInstant(0).to_tag(Duration::nanoseconds(-1)),
         Err(PhysicalClockError::Overflow)
     );
     let clock = clock();
-    clock.advance_to(PhysicalTimeNanos(42)).unwrap();
+    clock.advance_to(PhysicalInstant(42)).unwrap();
     let origin = std::time::Instant::now();
     let (tx, rx) = kanal::bounded(4);
     let (_shutdown, shutdown_rx) = crate::keepalive::channel();
-    let mut ctx = Context::new(crate::EnclaveKey::from(0), origin, None, tx, shutdown_rx);
-    ctx.physical_clock = RuntimeClock::manual(clock.clone(), 0, origin);
+    let mut ctx = Context::new(
+        crate::EnclaveKey::from(0),
+        RuntimeClock::manual(clock.clone(), 0),
+        None,
+        tx,
+        shutdown_rx,
+    );
+    ctx.physical_clock = RuntimeClock::manual(clock.clone(), 0);
     let mut action = Action::<u32>::new(
         "physical",
         ActionKey::from(0),
@@ -131,11 +137,8 @@ fn checked_conversions_and_physical_actions_use_selected_time() {
     let mut action =
         ActionRef::<u32>::try_from(DynActionRefMut(&mut action as &mut dyn BaseAction)).unwrap();
     assert_eq!(
-        crate::sched::clock::mapping::check_action_tag(
-            &ctx.physical_clock,
-            Tag::new(Duration::ZERO, usize::MAX)
-        ),
-        Err(PhysicalClockError::Overflow)
+        action.try_next_tag_for_offset(Tag::new(Duration::ZERO, usize::MAX)),
+        Err(crate::ActionScheduleError::Overflow)
     );
     ctx.schedule_action(&mut action, 1, Some(Duration::nanoseconds(3)));
     assert_eq!(
@@ -143,35 +146,60 @@ fn checked_conversions_and_physical_actions_use_selected_time() {
         Tag::new(Duration::nanoseconds(47), 0)
     );
     let sender = ctx.make_send_context();
-    assert_eq!(sender.physical_time().unwrap(), Some(PhysicalTimeNanos(42)));
+    let expected = PhysicalInstant(42);
+    assert_eq!(ctx.try_get_physical_time().unwrap(), expected);
+    assert_eq!(sender.try_get_physical_time().unwrap(), expected);
     ctx.try_schedule_action_async(&action, 2, Some(Duration::nanoseconds(3)))
         .unwrap();
     assert!(
-        matches!(rx.recv().unwrap(), AsyncEvent::Physical { time, .. } if time == origin + std::time::Duration::from_nanos(47))
+        matches!(rx.recv().unwrap(), AsyncEvent::Physical { time, .. } if time == PhysicalInstant(47))
     );
     assert_eq!(
         ctx.try_schedule_action(&mut action, 3, Some(Duration::MIN)),
-        Err(PhysicalClockError::Overflow)
+        Err(crate::ActionScheduleError::InvalidDelay)
     );
-    clock.advance_to(PhysicalTimeNanos(u64::MAX)).unwrap();
+    clock.advance_to(PhysicalInstant(u64::MAX)).unwrap();
+    assert_eq!(ctx.try_get_physical_time(), Ok(PhysicalInstant(u64::MAX)));
+    assert_eq!(
+        sender.try_get_physical_time(),
+        Ok(PhysicalInstant(u64::MAX))
+    );
+    let scheduled = ctx.trigger_res.scheduled_actions.len();
+    assert_eq!(
+        ctx.try_schedule_action(&mut action, 3, None),
+        Err(crate::ActionScheduleError::PhysicalClock(
+            PhysicalClockError::Overflow
+        ))
+    );
+    assert_eq!(ctx.trigger_res.scheduled_actions.len(), scheduled);
     assert_eq!(
         sender.try_schedule_action_async(&action, 3, None),
         Err(PhysicalClockError::Overflow)
     );
+    assert!(rx.try_recv().unwrap().is_none());
     clock.close();
+    assert_eq!(ctx.try_get_physical_time(), Err(PhysicalClockError::Closed));
     assert_eq!(
         sender.try_get_physical_time(),
         Err(PhysicalClockError::Closed)
     );
     assert_eq!(
         ctx.try_schedule_action(&mut action, 4, None),
-        Err(PhysicalClockError::Closed)
+        Err(crate::ActionScheduleError::PhysicalClock(
+            PhysicalClockError::Closed
+        ))
     );
-    ctx.physical_clock = RuntimeClock::default();
+    ctx.physical_clock = RuntimeClock::native(origin);
     ctx.try_schedule_action(&mut action, 5, None).unwrap();
     let tag = ctx.trigger_res.scheduled_actions.last().unwrap().1;
     assert_eq!(action.get_value_at(tag), Some(&5));
-    assert!(ctx.make_send_context().try_get_physical_time().unwrap() >= origin);
+    assert!(
+        ctx.make_send_context()
+            .try_get_physical_time()
+            .unwrap()
+            .to_duration()
+            <= origin.elapsed()
+    );
 }
 
 /// Counts allocations on the measuring test thread while delegating to System.
@@ -207,42 +235,37 @@ fn clock_steady_state_allocates_nothing_at_two_and_sixteen_enclaves() {
             })
             .collect();
         let adapters: Vec<_> = (0..count)
-            .map(|slot| RuntimeClock::manual(clock.clone(), slot, std::time::Instant::now()))
+            .map(|slot| RuntimeClock::manual(clock.clone(), slot))
             .collect();
         let capacity = clock.0.state.lock().unwrap().slots.capacity();
         let start = std::time::Instant::now();
+        let native = RuntimeClock::native(start);
         ALLOCATIONS.with(|n| n.set(Some(0)));
         for step in 0..10_000 {
-            std::hint::black_box(RuntimeClock::default())
-                .instant_after(std::time::Duration::ZERO)
+            std::hint::black_box(native.clone())
+                .now_after(std::time::Duration::ZERO)
                 .unwrap();
-            std::hint::black_box(RuntimeClock::manual(
-                clock.clone(),
-                0,
-                std::time::Instant::now(),
-            ));
+            std::hint::black_box(RuntimeClock::manual(clock.clone(), 0));
             for adapter in &adapters {
                 assert!(!adapter.failed());
-                adapter.clone().instant().unwrap();
+                adapter.clone().now().unwrap();
             }
             for slot in 0..count {
                 assert!(!clock
-                    .register(slot, PhysicalTimeNanos(step * 100 + 1))
+                    .register(slot, PhysicalInstant(step * 100 + 1))
                     .unwrap());
                 clock.cancel(slot);
                 assert!(!clock
-                    .register(slot, PhysicalTimeNanos(step * 100 + 2))
+                    .register(slot, PhysicalInstant(step * 100 + 2))
                     .unwrap());
             }
-            clock.advance_to(PhysicalTimeNanos(step * 100)).unwrap(); // repeated timestamp
-            clock
-                .advance_to(PhysicalTimeNanos((step + 1) * 100))
-                .unwrap(); // jump across all deadlines
+            clock.advance_to(PhysicalInstant(step * 100)).unwrap(); // repeated timestamp
+            clock.advance_to(PhysicalInstant((step + 1) * 100)).unwrap(); // jump across all deadlines
             for (_, rx) in &channels {
                 rx.try_recv().unwrap().unwrap();
                 assert!(rx.try_recv().unwrap().is_none());
             }
-            assert_eq!(clock.now().unwrap(), PhysicalTimeNanos((step + 1) * 100));
+            assert_eq!(clock.now().unwrap(), PhysicalInstant((step + 1) * 100));
         }
         let allocations = ALLOCATIONS.with(|n| n.replace(None).unwrap());
         assert_eq!(allocations, 0);
@@ -251,15 +274,9 @@ fn clock_steady_state_allocates_nothing_at_two_and_sixteen_enclaves() {
     }
 }
 
-/// Checks host reads and preservation of terminal failure after run cleanup.
+/// Checks preservation of terminal failure after run cleanup.
 #[test]
-fn host_clock_uses_shared_integer_contract_and_run_cleanup_retains_failure() {
-    let origin = std::time::Instant::now();
-    let host = HostClock::new(PhysicalClockDomainId(7), origin).unwrap();
-    let capability: &dyn PhysicalClock = &host;
-    assert_eq!(capability.domain(), PhysicalClockDomainId(7));
-    assert_ne!(capability.epoch(), clock().epoch());
-    assert!(capability.now().unwrap().to_instant(origin).unwrap() <= std::time::Instant::now());
+fn run_cleanup_retains_failure() {
     let clock = clock();
     let run = ClockRun::new(Some(&(clock.domain(), clock.clone()))).unwrap();
     clock.close(); // terminal during construction, before participant attachment

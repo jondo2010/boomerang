@@ -161,12 +161,12 @@ impl<'store, T: ReactorData + Clone> ReactionFn<'store> for EnclaveSenderReactio
                         target: crate::AsyncEventTarget::Action(self.remote_action_ref.key()),
                         value: Box::new(value.clone()),
                     });
-            } else {
-                self.remote_context.schedule_action_async(
-                    &self.remote_action_ref,
-                    value.clone(),
-                    self.delay,
-                );
+            } else if let Err(error) = self.remote_context.try_schedule_action_async(
+                &self.remote_action_ref,
+                value.clone(),
+                self.delay,
+            ) {
+                tracing::error!(%error, "Failed to schedule physical Enclave connection");
             }
         } else {
             tracing::warn!("Port is empty, skipping event send");

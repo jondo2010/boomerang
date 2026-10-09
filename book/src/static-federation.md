@@ -37,3 +37,6 @@ cargo test -p cargo-boomerang --test toolchain run::generated_central_rti_exchan
 The RTI crate also provides an in-memory transport for testing and reference
 use. It is isolated from the generated deployment transport and is not the
 intended production hot path.
+
+For simulator-driven local execution, see [Hosted Physical Clocks](./hosted-physical-clocks.md)
+for deployment configuration and driver setup.

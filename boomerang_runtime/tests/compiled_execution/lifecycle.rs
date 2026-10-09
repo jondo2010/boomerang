@@ -52,7 +52,7 @@ fn bounded_runtime_trace_distinguishes_physical_and_logical_admission() {
         // the physical tag; the logical tag must survive unchanged.
         assert_eq!(
             sender.try_schedule_async(AsyncEvent::Physical {
-                time: std::time::Instant::now(),
+                time: sender.try_get_physical_time().unwrap(),
                 target: AsyncEventTarget::Action(action),
                 value: Box::new(42_u32),
             }),

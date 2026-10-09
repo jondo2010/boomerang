@@ -77,8 +77,8 @@ fn render_physical_clock(
         clock.entry
     ))?;
     Ok(quote! {
-        let clock_domain = boomerang_runtime::physical_time::PhysicalClockDomainId(#domain);
-        let physical_clock = boomerang_runtime::physical_clock::ManualClock::new(clock_domain)?;
+        let clock_domain = boomerang_runtime::clock::PhysicalClockDomainId(#domain);
+        let physical_clock = boomerang_runtime::clock::ManualClock::new(clock_domain)?;
         let _physical_clock_driver = #driver(physical_clock.clone())?;
         let bindings = bindings.with_physical_clock(clock_domain, physical_clock);
     })

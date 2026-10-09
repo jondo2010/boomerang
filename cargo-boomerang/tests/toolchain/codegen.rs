@@ -244,9 +244,9 @@ fn generated_external_clock_launcher_calls_selected_driver_and_executes() {
     source.push_str(r#"
 /// Advances the fixture clock before the generated Federate starts.
 #[cfg(boomerang_facet = "payload")]
-pub fn drive_clock(clock: boomerang_runtime::physical_clock::ManualClock) -> Result<(), boomerang_runtime::physical_time::PhysicalClockError> {
-    assert_eq!(clock.domain(), boomerang_runtime::physical_time::PhysicalClockDomainId(7));
-    clock.advance_to(boomerang_runtime::physical_time::PhysicalTimeNanos(100))
+pub fn drive_clock(clock: boomerang_runtime::clock::ManualClock) -> Result<(), boomerang_runtime::clock::PhysicalClockError> {
+    assert_eq!(clock.domain(), boomerang_runtime::clock::PhysicalClockDomainId(7));
+    clock.advance_to(boomerang_runtime::clock::PhysicalInstant(100))
 }
 "#);
     std::fs::write(path, source).unwrap();

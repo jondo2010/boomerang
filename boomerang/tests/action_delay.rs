@@ -34,8 +34,8 @@ fn Sink(#[state] success: bool, #[input] inp: u32) -> impl Reactor {
     reaction! {
         SinkReactionInt (inp) {
             let elapsed_logical = ctx.get_elapsed_logical_time();
-            let logical = ctx.get_logical_time();
-            let physical = ctx.get_physical_time();
+            let logical = ctx.try_get_logical_time().unwrap();
+            let physical = ctx.try_get_physical_time().expect("physical clock read");
             println!("logical time: {logical:?}");
             println!("physical time: {physical:?}");
             println!("elapsed logical time: {elapsed_logical:?}");

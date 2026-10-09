@@ -53,7 +53,13 @@ impl KeyboardInput {
                             break;
                         }
                         (KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down, _) => {
-                            let time = send_ctx.get_physical_time() + action.min_delay();
+                            let delay = Duration::try_from(action.min_delay())
+                                .map_err(std::io::Error::other)?;
+                            let time = send_ctx
+                                .try_get_physical_time()
+                                .map_err(std::io::Error::other)?
+                                .checked_add(delay)
+                                .map_err(std::io::Error::other)?;
                             if !send_until_stopped(&send_ctx, &stop_requested, || {
                                 AsyncEvent::Physical {
                                     time,

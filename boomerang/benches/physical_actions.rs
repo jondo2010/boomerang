@@ -64,17 +64,22 @@ fn bench(c: &mut Criterion) {
                     let send_ctx = enclave.create_send_context(enclave_key);
                     let action_ref = enclave.create_async_action_ref::<u32>(action_key);
                     let mut scheduler = runtime::Scheduler::new(enclave_key, enclave, config, None);
+                    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
                     let scheduler_thread = std::thread::spawn(move || {
+                        scheduler.startup();
+                        ready_tx.send(()).unwrap();
                         scheduler.try_event_loop().unwrap();
                     });
+                    ready_rx.recv().unwrap();
 
                     (send_ctx, action_ref, scheduler_thread, received)
                 },
                 |(mut send_ctx, action_ref, scheduler_thread, received)| {
                     for i in 0..count {
                         let delay = runtime::Duration::nanoseconds(i as i64);
-                        let scheduled =
-                            send_ctx.schedule_action_async(&action_ref, 0u32, Some(delay));
+                        let scheduled = send_ctx
+                            .try_schedule_action_async(&action_ref, 0u32, Some(delay))
+                            .expect("physical action scheduling failed");
                         assert!(scheduled, "failed to schedule physical action");
                     }
 

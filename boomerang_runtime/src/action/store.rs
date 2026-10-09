@@ -144,16 +144,22 @@ impl<T: ReactorData> ActionStore<T> {
         bucket.insert(tag.microstep(), data);
     }
 
-    /// Compute the next microstep for a given logical offset, ensuring it is at
-    /// least `min_microstep` and greater than any existing entry at the same
-    /// offset.
+    /// Selects an unused microstep at least `min_microstep` for this offset.
+    /// Rejects the store's saturated MAX cursor.
+    /// MAX cannot distinguish the last available slot from an already-used slot.
     #[inline]
-    pub fn next_microstep_for_offset(&self, offset: Duration, min_microstep: usize) -> usize {
-        self.offsets
+    pub(crate) fn checked_next_microstep_for_offset(
+        &self,
+        offset: Duration,
+        min_microstep: usize,
+    ) -> Option<usize> {
+        let microstep = self
+            .offsets
             .get(&offset)
             .map(|bucket| bucket.next_microstep)
             .unwrap_or(min_microstep)
-            .max(min_microstep)
+            .max(min_microstep);
+        (microstep < usize::MAX).then_some(microstep)
     }
 
     pub fn clear_older_than(&mut self, clear_tag: Tag) {
@@ -286,17 +292,17 @@ mod tests {
     }
 
     #[test]
-    fn test_next_microstep_prunes_offset_state() {
+    fn test_checked_next_microstep_prunes_offset_state() {
         let mut store = ActionStore::<u32>::new();
         let offset = Duration::seconds(1);
 
-        assert_eq!(store.next_microstep_for_offset(offset, 0), 0);
+        assert_eq!(store.checked_next_microstep_for_offset(offset, 0), Some(0));
 
         store.push(Tag::new(offset, 2), 20);
-        assert_eq!(store.next_microstep_for_offset(offset, 0), 3);
+        assert_eq!(store.checked_next_microstep_for_offset(offset, 0), Some(3));
 
         store.clear_older_than(Tag::new(Duration::seconds(2), 0));
-        assert_eq!(store.next_microstep_for_offset(offset, 5), 5);
+        assert_eq!(store.checked_next_microstep_for_offset(offset, 5), Some(5));
     }
 
     #[test]

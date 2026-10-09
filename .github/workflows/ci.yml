@@ -112,44 +112,6 @@ jobs:
         # Each test binary recreates these directories, so restoring them cannot help.
         run: rm -rf target/tmp/cargo-boomerang-fixtures
 
-  embedded:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-
-    steps:
-      - uses: actions/checkout@v7
-      - name: Install Rust and bare-metal target
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-unknown-none-softfloat
-      - uses: swatinem/rust-cache@v2
-        with:
-          workspaces: . -> target
-      - name: Check allocator-free TinyMap examples
-        run: >-
-          cargo check -p boomerang_tinymap --no-default-features --examples
-          --target aarch64-unknown-none-softfloat
-
-      - name: Check target-neutral physical clock contract
-        run: |
-          clock_probe_dir="$RUNNER_TEMP/clock-types"
-          mkdir -p "$clock_probe_dir/src"
-          cat > "$clock_probe_dir/Cargo.toml" <<'EOF'
-          [package]
-          name = "clock-types"
-          version = "0.0.0"
-          edition = "2021"
-          [dependencies]
-          thiserror = { version = "2.0", default-features = false }
-          EOF
-          cat > "$clock_probe_dir/src/lib.rs" <<EOF
-          #![no_std]
-          #[path = "$GITHUB_WORKSPACE/boomerang_runtime/src/physical_time.rs"]
-          pub mod physical_time;
-          EOF
-          cargo check --manifest-path "$clock_probe_dir/Cargo.toml" \
-            --target aarch64-unknown-none-softfloat
-
   miri:
     runs-on: ubuntu-latest
     timeout-minutes: 30

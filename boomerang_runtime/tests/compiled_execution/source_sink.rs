@@ -1,13 +1,22 @@
 //! Shared typed source/sink image fixtures for local routes and isolated backends.
 use super::*;
 
+/// Bounds the native epoch by bracketing a selected-clock read with host reads.
+/// Tests can verify the actual shared origin without exposing it through Context.
+fn sample_host_origin(context: &Context) -> (Instant, Instant) {
+    let before = Instant::now();
+    let elapsed = context.try_get_physical_time().unwrap().to_duration();
+    let after = Instant::now();
+    (before - elapsed, after - elapsed)
+}
+
 /// Source state used to verify the shared Federate origin.
 #[derive(Debug)]
 pub(super) struct RoutedSourceState {
     /// Completion time of this source's user initializer.
     pub(super) initialized_at: Instant,
     /// Origin observed from the source reaction context.
-    pub(super) origin: Option<Instant>,
+    pub(super) origin: Option<(Instant, Instant)>,
     /// Physical time at which the source timer reaction ran.
     pub(super) fired_at: Option<Instant>,
 }
@@ -34,7 +43,7 @@ pub(super) fn emit_routed_value(
     let state = state
         .downcast_mut::<RoutedSourceState>()
         .expect("the source state binding initializes RoutedSourceState");
-    state.origin = Some(context.get_start_time());
+    state.origin = Some(sample_host_origin(context));
     state.fired_at = Some(Instant::now());
     let mut output: OutputRef<u32> = refs.ports_mut.partition_mut()?;
     *output = Some(42);
@@ -47,7 +56,7 @@ pub(super) struct RoutedSinkState {
     /// Typed values observed by the destination reaction.
     pub(super) values: Vec<u32>,
     /// Origin observed from the destination reaction context.
-    pub(super) origin: Option<Instant>,
+    pub(super) origin: Option<(Instant, Instant)>,
 }
 
 pub(super) fn initialize_routed_sink() -> RoutedSinkState {
@@ -72,7 +81,7 @@ pub(super) fn receive_routed_value(
             .as_ref()
             .expect("the inbound route must set the triggering port"),
     );
-    state.origin = Some(context.get_start_time());
+    state.origin = Some(sample_host_origin(context));
     Ok(())
 }
 

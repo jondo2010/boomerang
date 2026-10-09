@@ -142,7 +142,6 @@ mod tests {
             released_tag: Tag::NEVER,
             provisional_tag: Tag::NEVER,
             upstream_ctx: SendContext {
-                #[cfg(feature = "external-clock")]
                 physical_clock: Default::default(),
                 enclave_key: upstream,
                 async_tx: upstream_tx,
@@ -168,7 +167,6 @@ mod tests {
             released_tag: Tag::NEVER,
             provisional_tag: Tag::NEVER,
             upstream_ctx: SendContext {
-                #[cfg(feature = "external-clock")]
                 physical_clock: Default::default(),
                 enclave_key: EnclaveKey::from(1),
                 async_tx: upstream_tx,
@@ -222,7 +220,6 @@ mod tests {
             released_tag: Tag::NEVER,
             provisional_tag: Tag::NEVER,
             upstream_ctx: SendContext {
-                #[cfg(feature = "external-clock")]
                 physical_clock: Default::default(),
                 enclave_key: EnclaveKey::from(1),
                 async_tx: upstream_tx,
@@ -272,7 +269,6 @@ mod tests {
             released_tag: Tag::NEVER,
             provisional_tag: Tag::NEVER,
             upstream_ctx: SendContext {
-                #[cfg(feature = "external-clock")]
                 physical_clock: Default::default(),
                 enclave_key: EnclaveKey::from(1),
                 async_tx: upstream_tx,

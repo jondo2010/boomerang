@@ -39,8 +39,16 @@ fn AsyncCallback() -> impl Reactor {
                 std::thread::sleep(std::time::Duration::from_millis(100));
                 // Schedule twice. If the action is not physical, these should get consolidated into a single action
                 // triggering. If it is, then they cause two separate triggerings with close but not equal time stamps.
-                send_ctx.schedule_action_async(&a, 0, None);
-                send_ctx.schedule_action_async(&a, 0, None);
+                for _ in 0..2 {
+                    let accepted = send_ctx
+                        .try_schedule_action_async(&a, 0, None)
+                        .expect("physical action scheduling failed");
+                    if !accepted {
+                        // The final callback may complete after the logical shutdown timeout.
+                        assert!(send_ctx.is_shutdown(), "scheduler rejected a live callback");
+                        break;
+                    }
+                }
             }));
         })
         .finish()?;

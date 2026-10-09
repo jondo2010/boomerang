@@ -1,40 +1,60 @@
-//! Shared hosted clocks and their domain/epoch read capabilities.
+//! Optional hosted manual clock, bounded deadline registry, and run ownership.
 //!
-//! A manual clock is claimed once per Federate and shared by its Enclaves. Its
-//! single mutex orders deadline registration, advancement, and terminal failure.
-//! Scheduler pacing and participant binding live in the private scheduler clock
-//! module. This module is gated by `external-clock`; target-neutral contracts live in
-//! [`crate::physical_time`].
-use crate::{physical_time::*, AsyncEvent, Duration, Tag};
+//! A [`ManualClock`] shares domain, epoch, time, failure, and deadline state through
+//! one reference-counted allocation. The run guard claims it once and detaches
+//! deadline slots on drop without making the clock reusable.
+//!
+//! Registration and advancement hold the same mutex, so advancing between a time
+//! check and registration cannot lose a wake. One preallocated slot per Enclave
+//! holds its current deadline and mailbox sender. Repeated timestamps do nothing;
+//! a forward jump clears each due slot and sends at most one wake per Enclave.
+//! A full mailbox already retains an interruption, after which the scheduler
+//! rechecks time. The existing event queue preserves every eligible timer tag.
+//! Deadline registration and advancement require no steady-state allocation.
+//!
+//! Regression, explicit close, and failure retain the first terminal error and
+//! release physical and coordination waits through the existing Federate abort
+//! path. Clock advancement provides time and wakeups; it does not authorize
+//! execution beyond unresolved input progress.
+
+use super::*;
+use crate::{observation::SchedulerPhase, AsyncEvent};
 use std::{
     sync::{Arc, Mutex},
     time::Instant,
 };
 
-/// Cloneable driver and observation handle for one execution's physical clock.
-#[derive(Clone)]
-pub struct ManualClock(Arc<ManualClockInner>);
+#[cfg(test)]
+mod tests;
+
 /// Shared identity and synchronized state for a single manual-clock execution.
 struct ManualClockInner {
     domain: PhysicalClockDomainId,
     epoch: ExecutionEpoch,
     state: Mutex<ManualClockState>,
 }
+
 /// Manual-clock time, first terminal failure, and deadline slots protected by one mutex.
 /// Registration and advancement use this same lock to avoid lost wakes.
 #[derive(Default)]
 struct ManualClockState {
-    now: PhysicalTimeNanos,
+    now: PhysicalInstant,
     failure: Option<PhysicalClockError>,
     used: bool,
     slots: Vec<DeadlineSlot>,
     abort: Option<crate::sched::federate::FederateAbortHandle>,
 }
+
 /// One reusable deadline and scheduler wake sender for an attached Enclave.
 struct DeadlineSlot {
-    deadline: Option<PhysicalTimeNanos>,
+    deadline: Option<PhysicalInstant>,
     wake: crate::Sender<AsyncEvent>,
 }
+
+/// Cloneable driver and observation handle for one execution's physical clock.
+#[derive(Clone)]
+pub struct ManualClock(Arc<ManualClockInner>);
+
 impl std::fmt::Debug for ManualClock {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ManualClock")
@@ -43,6 +63,7 @@ impl std::fmt::Debug for ManualClock {
             .finish_non_exhaustive()
     }
 }
+
 impl ManualClock {
     /// Creates a stopped-at-zero clock with a fresh random execution epoch.
     pub fn new(domain: PhysicalClockDomainId) -> Result<Self, PhysicalClockError> {
@@ -78,12 +99,12 @@ impl ManualClock {
         self.now().map(|_| ())
     }
     /// Reads epoch-relative physical time or the first retained terminal failure.
-    pub fn now(&self) -> Result<PhysicalTimeNanos, PhysicalClockError> {
+    pub fn now(&self) -> Result<PhysicalInstant, PhysicalClockError> {
         let state = self.0.state.lock().unwrap();
         state.failure.map_or(Ok(state.now), Err)
     }
     /// Advances once, waking each due Enclave at most once. Equal timestamps are no-ops.
-    pub fn advance_to(&self, time: PhysicalTimeNanos) -> Result<(), PhysicalClockError> {
+    pub fn advance_to(&self, time: PhysicalInstant) -> Result<(), PhysicalClockError> {
         let mut state = self.0.state.lock().unwrap();
         if let Some(error) = state.failure {
             return Err(error);
@@ -176,7 +197,7 @@ impl ManualClock {
     pub(crate) fn register(
         &self,
         slot: usize,
-        deadline: PhysicalTimeNanos,
+        deadline: PhysicalInstant,
     ) -> Result<bool, PhysicalClockError> {
         let mut state = self.0.state.lock().unwrap();
         if let Some(error) = state.failure {
@@ -190,53 +211,35 @@ impl ManualClock {
     pub(crate) fn cancel(&self, slot: usize) {
         self.0.state.lock().unwrap().slots[slot].deadline = None;
     }
-}
 
-impl PhysicalTimeNanos {
-    /// Converts the selected epoch offset to the legacy Instant representation, checking range.
-    pub fn to_instant(self, origin: Instant) -> Result<Instant, PhysicalClockError> {
-        origin
-            .checked_add(self.to_duration())
-            .ok_or(PhysicalClockError::Overflow)
-    }
-    /// Maps an acquisition offset and nonnegative minimum delay to a logical tag.
-    pub fn to_tag(self, minimum_delay: Duration) -> Result<Tag, PhysicalClockError> {
-        let delay = u64::try_from(minimum_delay.whole_nanoseconds())
-            .map_err(|_| PhysicalClockError::Overflow)?;
-        let offset = self.checked_add(Self(delay))?;
-        let duration =
-            Duration::try_from(offset.to_duration()).map_err(|_| PhysicalClockError::Overflow)?;
-        Ok(Tag::new(duration, 0))
-    }
-    /// Converts a logical offset to unsigned nanoseconds, ignoring its microstep.
-    pub(crate) fn from_tag(tag: Tag) -> Result<Self, PhysicalClockError> {
-        u64::try_from(tag.offset().whole_nanoseconds())
-            .map(Self)
-            .map_err(|_| PhysicalClockError::Overflow)
-    }
-}
-
-/// Keeps acquisition time separate from the next executable logical tag.
-pub(crate) fn after_current_tag(mapped: Tag, current: Tag) -> Result<Tag, PhysicalClockError> {
-    if mapped > current {
-        Ok(mapped)
-    } else {
-        Ok(Tag::new(
-            current.offset(),
-            current
-                .microstep()
-                .checked_add(1)
-                .ok_or(PhysicalClockError::Overflow)?,
-        ))
+    /// Registers a participant deadline before blocking on scheduler interruption.
+    pub(super) fn wait_until(
+        &self,
+        slot: usize,
+        tag: Tag,
+        wait: &mut WaitContext<'_, '_>,
+    ) -> Result<ClockWaitResult, FederateCoordinationError> {
+        match PhysicalInstant::from_tag(tag).and_then(|deadline| self.register(slot, deadline)) {
+            Ok(true) => Ok(ClockWaitResult::DeadlineReached),
+            Err(error) => {
+                self.latch(error);
+                Ok(ClockWaitResult::FederateTerminated(
+                    FederateTermination::Abort,
+                ))
+            }
+            Ok(false) => {
+                let result = wait.receive();
+                self.cancel(slot);
+                result
+            }
+        }
     }
 }
-
-#[cfg(test)]
-mod tests;
 
 /// Owns a clock claim for one run and detaches its deadline slots on drop.
 /// The claim remains consumed after cleanup, so the clock cannot be reused.
-pub(crate) struct ClockRun(pub(crate) Option<ManualClock>);
+pub struct ClockRun(pub(crate) Option<ManualClock>);
+
 impl ClockRun {
     /// Claims a selected manual clock, or creates an inert native-run guard.
     pub(crate) fn new(
@@ -248,6 +251,7 @@ impl ClockRun {
         Ok(Self(selection.map(|(_, clock)| clock.clone())))
     }
 }
+
 impl Drop for ClockRun {
     fn drop(&mut self) {
         if let Some(clock) = &self.0 {
@@ -256,40 +260,6 @@ impl Drop for ClockRun {
     }
 }
 
-/// Host-monotonic read capability for adapters using the Federate's existing shared origin.
-/// It does not change the default scheduler's native host wait path.
-#[derive(Clone, Debug)]
-pub struct HostClock {
-    domain: PhysicalClockDomainId,
-    epoch: ExecutionEpoch,
-    origin: Instant,
-}
-impl HostClock {
-    /// Creates one identity for a run's host-clock adapters; share clones within that run.
-    pub fn new(domain: PhysicalClockDomainId, origin: Instant) -> Result<Self, PhysicalClockError> {
-        let mut bytes = [0; 16];
-        getrandom::fill(&mut bytes).map_err(|_| PhysicalClockError::EntropyUnavailable)?;
-        Ok(Self {
-            domain,
-            epoch: ExecutionEpoch(u128::from_ne_bytes(bytes)),
-            origin,
-        })
-    }
-}
-impl PhysicalClock for HostClock {
-    fn domain(&self) -> PhysicalClockDomainId {
-        self.domain
-    }
-    fn epoch(&self) -> ExecutionEpoch {
-        self.epoch
-    }
-    fn now(&self) -> Result<PhysicalTimeNanos, PhysicalClockError> {
-        let elapsed = Instant::now()
-            .checked_duration_since(self.origin)
-            .ok_or(PhysicalClockError::Overflow)?;
-        PhysicalTimeNanos::from_duration(elapsed)
-    }
-}
 impl PhysicalClock for ManualClock {
     fn domain(&self) -> PhysicalClockDomainId {
         self.domain()
@@ -297,7 +267,33 @@ impl PhysicalClock for ManualClock {
     fn epoch(&self) -> ExecutionEpoch {
         self.epoch()
     }
-    fn now(&self) -> Result<PhysicalTimeNanos, PhysicalClockError> {
+    fn now(&self) -> Result<PhysicalInstant, PhysicalClockError> {
         self.now()
+    }
+}
+
+impl WaitContext<'_, '_> {
+    /// Receives an interruption without imposing a host-time deadline.
+    /// The selected manual clock has already registered its own deadline.
+    pub(crate) fn receive(&mut self) -> Result<ClockWaitResult, FederateCoordinationError> {
+        if let Some(observation) = self.observation {
+            observation.enter(SchedulerPhase::PhysicalWait, Instant::now());
+        }
+        let event = self.event_rx.recv();
+        if let Some(observation) = self.observation {
+            observation.enter(SchedulerPhase::Framework, Instant::now());
+        }
+        match event {
+            Ok(event) => Ok(ClockWaitResult::Interrupted(event)),
+            Err(_) => {
+                let terminal = self.coordination.as_deref_mut().map_or(
+                    Ok(None),
+                    FederateSchedulerCoordination::terminal_after_event_channel_closed,
+                )?;
+                Ok(ClockWaitResult::FederateTerminated(
+                    terminal.unwrap_or(FederateTermination::Abort),
+                ))
+            }
+        }
     }
 }

@@ -60,25 +60,34 @@ pub(crate) struct TriggerRes {
     pub scheduled_compiled_mode: Option<CompiledModeEffectRef>,
 }
 
+/// A logical or physical action could not be scheduled without changing existing state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum ActionScheduleError {
+    /// The minimum and requested delays add up to a negative duration.
+    #[error("effective action delay must be nonnegative")]
+    InvalidDelay,
+    /// Delay arithmetic, the logical offset, or the microstep cursor is exhausted.
+    #[error("action delay or tag cannot be represented")]
+    Overflow,
+    /// The selected physical clock failed or its epoch offset could not be represented.
+    #[error(transparent)]
+    PhysicalClock(#[from] crate::clock::PhysicalClockError),
+}
+
 /// Scheduler context passed into reactor functions.
 #[derive(Debug)]
 pub struct Context {
-    #[cfg(feature = "external-clock")]
-    pub(crate) physical_clock: crate::sched::clock::RuntimeClock,
+    pub(crate) physical_clock: crate::clock::RuntimeClock,
     /// The EnclaveId of this context
     enclave_key: EnclaveKey,
-    /// Physical time the Scheduler was started
-    pub(crate) start_time: std::time::Instant,
     /// Logical time of the currently executing epoch
     pub(crate) tag: Tag,
     /// Bank index and node count for a multi-bank reactor
     pub(crate) bank_info: Option<BankInfo>,
-
     /// Channel for asynchronous events
     pub(crate) async_tx: crate::Sender<AsyncEvent>,
     /// Shutdown channel
     pub(crate) shutdown_rx: keepalive::Receiver,
-
     /// Trigger result
     pub(crate) trigger_res: TriggerRes,
 }
@@ -88,29 +97,16 @@ pub trait CommonContext {
     /// Get this Enclave ID
     fn enclave_id(&self) -> EnclaveKey;
 
-    /// Get the current physical time
-    fn get_physical_time(&self) -> std::time::Instant {
-        self.try_get_physical_time()
-            .expect("selected physical clock failed")
-    }
-
-    /// Reads selected time in the legacy Instant representation, checking conversion and closure.
+    /// Reads the selected execution clock as a [`crate::clock::PhysicalInstant`].
+    ///
+    /// Native execution measures from the host origin bound at startup; manual
+    /// execution reads the driver's integer timeline directly. Native send contexts
+    /// created before startup return [`crate::clock::PhysicalClockError::NotStarted`]
+    /// until their scheduler binds the origin. Clock failure, closure, and overflow
+    /// also return errors. Watchdogs must use host time independently.
     fn try_get_physical_time(
         &self,
-    ) -> Result<std::time::Instant, crate::physical_time::PhysicalClockError> {
-        Ok(std::time::Instant::now())
-    }
-
-    /// Reads the external clock's integer epoch offset; `None` denotes the default host clock.
-    #[cfg(feature = "external-clock")]
-    fn physical_time(
-        &self,
-    ) -> Result<
-        Option<crate::physical_time::PhysicalTimeNanos>,
-        crate::physical_time::PhysicalClockError,
-    > {
-        Ok(None)
-    }
+    ) -> Result<crate::clock::PhysicalInstant, crate::clock::PhysicalClockError>;
 
     /// Has the scheduler already been shutdown?
     fn is_shutdown(&self) -> bool;
@@ -131,58 +127,21 @@ pub trait CommonContext {
     /// Returns `Some(true)` if the event was successfully scheduled, `Some(false)` if the channel was disconnected, and `None` if the channel would have blocked.
     fn try_schedule_async(&self, event: AsyncEvent) -> Option<bool>;
 
-    /// Schedule a new value for this action asynchronously
+    /// Schedules a physical action with checked delay in the selected execution epoch.
+    /// Returns an error without publication if clock reads or delay arithmetic fail,
+    /// including native reads before startup. Successful publication returns `Ok(true)`;
+    /// a stopped scheduler or disconnected channel returns `Ok(false)`.
+    /// A full channel blocks until space is available.
     ///
-    /// Returns true if the event was successfully scheduled, false if the channel was disconnected.
-    fn schedule_action_async<T: ReactorData>(
-        &self,
-        action: &impl ActionCommon<T>,
-        value: T,
-        delay: Option<Duration>,
-    ) -> bool {
-        #[cfg(feature = "external-clock")]
-        {
-            self.try_schedule_action_async(action, value, delay)
-                .unwrap_or(false)
-        }
-        #[cfg(not(feature = "external-clock"))]
-        {
-            let tag_delay = action.min_delay() + delay.unwrap_or_default();
-            let value = Box::new(value) as Box<dyn ReactorData>;
-
-            let event = if action.is_logical() {
-                // Logical actions are scheduled at the current logical time + tag_delay
-                todo!("Logical actions are not supported here");
-            } else {
-                // Physical actions are scheduled at the current physical time + tag_delay
-                let time = self.get_physical_time() + tag_delay;
-                AsyncEvent::physical(action.key(), time, value)
-            };
-
-            self.schedule_external(event)
-        }
-    }
-
-    /// Converts a delayed selected-clock timestamp without wrapping the epoch offset.
-    #[cfg(feature = "external-clock")]
-    fn try_get_physical_time_after(
-        &self,
-        delay: std::time::Duration,
-    ) -> Result<std::time::Instant, crate::physical_time::PhysicalClockError> {
-        self.try_get_physical_time()?
-            .checked_add(delay)
-            .ok_or(crate::physical_time::PhysicalClockError::Overflow)
-    }
-
-    /// Schedules a physical action with checked delay and selected-clock conversion.
-    #[cfg(feature = "external-clock")]
+    /// # Panics
+    /// Panics if `action` is logical; asynchronous action scheduling requires a physical action.
     fn try_schedule_action_async<T: ReactorData>(
         &self,
         action: &impl ActionCommon<T>,
         value: T,
         delay: Option<Duration>,
-    ) -> Result<bool, crate::physical_time::PhysicalClockError> {
-        use crate::physical_time::PhysicalClockError::Overflow;
+    ) -> Result<bool, crate::clock::PhysicalClockError> {
+        use crate::clock::PhysicalClockError::Overflow;
         assert!(
             !action.is_logical(),
             "logical actions are not supported asynchronously"
@@ -192,7 +151,7 @@ pub trait CommonContext {
             .checked_add(delay.unwrap_or_default())
             .ok_or(Overflow)?;
         let delay = std::time::Duration::try_from(delay).map_err(|_| Overflow)?;
-        let time = self.try_get_physical_time_after(delay)?;
+        let time = self.try_get_physical_time()?.checked_add(delay)?;
         Ok(self.schedule_external(AsyncEvent::physical(action.key(), time, Box::new(value))))
     }
 
@@ -202,18 +161,17 @@ pub trait CommonContext {
 }
 
 impl Context {
+    /// Creates a reaction context sharing its Enclave's selected clock.
     pub(crate) fn new(
         enclave_key: EnclaveKey,
-        start_time: std::time::Instant,
+        physical_clock: crate::clock::RuntimeClock,
         bank_info: Option<BankInfo>,
         async_tx: crate::Sender<AsyncEvent>,
         shutdown_rx: keepalive::Receiver,
     ) -> Self {
         Self {
-            #[cfg(feature = "external-clock")]
-            physical_clock: Default::default(),
+            physical_clock,
             enclave_key,
-            start_time,
             tag: Tag::NEVER,
             bank_info,
             async_tx,
@@ -235,9 +193,10 @@ impl Context {
         self.trigger_res.scheduled_compiled_mode = None;
     }
 
-    /// Get the physical start time of the scheduler
-    pub fn get_start_time(&self) -> std::time::Instant {
-        self.start_time
+    /// Returns the origin of this execution's physical timeline (always zero).
+    /// This is a coordinate, not a clock read or a startup-readiness check.
+    pub fn get_start_time(&self) -> crate::clock::PhysicalInstant {
+        crate::clock::PhysicalInstant::default()
     }
 
     /// Get the bank index for a multi-bank reactor
@@ -254,9 +213,15 @@ impl Context {
         self.tag
     }
 
-    /// Get the current logical time, frozen during the execution of a reaction.
-    pub fn get_logical_time(&self) -> std::time::Instant {
-        self.tag.to_logical_time(self.start_time)
+    /// Projects the current logical tag onto this execution's physical timeline.
+    ///
+    /// Ignores the microstep and does not read the clock. Returns overflow for
+    /// negative offsets or offsets beyond the physical range. Use
+    /// [`Self::get_elapsed_logical_time`] or [`Self::get_tag`] for the full logical range.
+    pub fn try_get_logical_time(
+        &self,
+    ) -> Result<crate::clock::PhysicalInstant, crate::clock::PhysicalClockError> {
+        crate::clock::PhysicalInstant::from_tag(self.tag)
     }
 
     /// Get the logical time elapsed since the start of the program.
@@ -272,7 +237,6 @@ impl Context {
     /// This is used to schedule asynchronous events.
     pub fn make_send_context(&self) -> SendContext {
         SendContext {
-            #[cfg(feature = "external-clock")]
             physical_clock: self.physical_clock.clone(),
             enclave_key: self.enclave_key,
             async_tx: self.async_tx.clone(),
@@ -288,69 +252,58 @@ impl Context {
         action.get_value_at(self.tag)
     }
 
-    /// Schedule a new value for this action
+    /// Schedules a value using the checked action-scheduling path.
+    ///
+    /// # Panics
+    /// Panics if [`Self::try_schedule_action`] rejects the delay, tag, or clock state.
     pub fn schedule_action<T: ReactorData>(
         &mut self,
         action: &mut ActionRef<T>,
         value: T,
         delay: Option<Duration>,
     ) {
-        #[cfg(feature = "external-clock")]
-        if !action.is_logical() {
-            self.try_schedule_action(action, value, delay)
-                .expect("selected physical action time is invalid");
-            return;
-        }
-        let tag_delay = action.min_delay() + delay.unwrap_or_default();
-
-        // Compute the base tag for this scheduling request using the existing
-        // semantics, then advance the microstep if there are already entries at
-        // the same logical offset.
-        let base_tag = if action.is_logical() {
-            // Logical actions are scheduled at the current logical time + tag_delay
-            self.tag.delay(tag_delay)
-        } else {
-            // Physical actions are scheduled at the current physical time + tag_delay
-            Tag::from_physical_time(self.get_start_time(), self.get_physical_time())
-                .delay(tag_delay)
-        };
-
-        let new_tag = action.next_tag_for_offset(base_tag);
-
-        // Push the new value into the store
-        action.set_value(new_tag, value);
-
-        // Schedule the action to trigger at the new tag
-        self.trigger_res
-            .scheduled_actions
-            .push((action.key(), new_tag));
+        self.try_schedule_action(action, value, delay)
+            .expect("action scheduling failed");
     }
 
-    /// Schedules using checked physical-time mapping, leaving action state unchanged on error.
-    #[cfg(feature = "external-clock")]
+    /// Schedules a logical or physical action without changing state on rejection.
+    ///
+    /// The minimum and requested delays are added with overflow checking; a negative
+    /// effective delay is rejected. Logical actions are relative to the current tag,
+    /// while physical actions use the selected clock and advance past completed work.
+    /// Both paths reserve a distinct microstep before storing the value and trigger.
     pub fn try_schedule_action<T: ReactorData>(
         &mut self,
         action: &mut ActionRef<T>,
         value: T,
         delay: Option<Duration>,
-    ) -> Result<(), crate::physical_time::PhysicalClockError> {
-        if !action.is_logical() {
-            let tag = crate::sched::clock::mapping::action_tag(
-                &self.physical_clock,
-                self.start_time,
-                self.tag,
-                action.min_delay(),
-                delay.unwrap_or_default(),
-            )?;
-            let tag = crate::sched::clock::mapping::check_action_tag(
-                &self.physical_clock,
-                action.next_tag_for_offset(tag),
-            )?;
-            action.set_value(tag, value);
-            self.trigger_res.scheduled_actions.push((action.key(), tag));
-            return Ok(());
+    ) -> Result<(), ActionScheduleError> {
+        use ActionScheduleError::{InvalidDelay, Overflow};
+        let delay = action
+            .min_delay()
+            .checked_add(delay.unwrap_or_default())
+            .ok_or(Overflow)?;
+        if delay.is_negative() {
+            return Err(InvalidDelay);
         }
-        self.schedule_action(action, value, delay);
+        let base = if action.is_logical() {
+            if delay.is_zero() {
+                Tag::new(
+                    self.tag.offset(),
+                    self.tag.microstep().checked_add(1).ok_or(Overflow)?,
+                )
+            } else {
+                Tag::new(self.tag.offset().checked_add(delay).ok_or(Overflow)?, 0)
+            }
+        } else {
+            let mapped = self.physical_clock.now()?.to_tag(delay)?;
+            Tag::new(mapped.offset(), usize::from(delay.is_zero()))
+                .checked_after(self.tag)
+                .map_err(|_| Overflow)?
+        };
+        let tag = action.try_next_tag_for_offset(base)?;
+        action.set_value(tag, value);
+        self.trigger_res.scheduled_actions.push((action.key(), tag));
         Ok(())
     }
 
@@ -365,28 +318,12 @@ impl Context {
 }
 
 impl CommonContext for Context {
-    #[cfg(feature = "external-clock")]
-    fn try_get_physical_time_after(
-        &self,
-        delay: std::time::Duration,
-    ) -> Result<std::time::Instant, crate::physical_time::PhysicalClockError> {
-        self.physical_clock.instant_after(delay)
-    }
-    #[cfg(feature = "external-clock")]
     fn try_get_physical_time(
         &self,
-    ) -> Result<std::time::Instant, crate::physical_time::PhysicalClockError> {
-        self.physical_clock.instant()
+    ) -> Result<crate::clock::PhysicalInstant, crate::clock::PhysicalClockError> {
+        self.physical_clock.now()
     }
-    #[cfg(feature = "external-clock")]
-    fn physical_time(
-        &self,
-    ) -> Result<
-        Option<crate::physical_time::PhysicalTimeNanos>,
-        crate::physical_time::PhysicalClockError,
-    > {
-        self.physical_clock.physical_time()
-    }
+
     fn enclave_id(&self) -> EnclaveKey {
         self.enclave_key
     }
@@ -430,8 +367,7 @@ impl CommonContext for Context {
 /// SendContext can be shared across threads and allows asynchronous events to be scheduled.
 #[derive(Debug, Clone)]
 pub struct SendContext {
-    #[cfg(feature = "external-clock")]
-    pub(crate) physical_clock: crate::sched::clock::RuntimeClock,
+    pub(crate) physical_clock: crate::clock::RuntimeClock,
     /// Enclave ID for this context
     pub(crate) enclave_key: EnclaveKey,
     /// Channel for asynchronous events
@@ -441,28 +377,12 @@ pub struct SendContext {
 }
 
 impl CommonContext for SendContext {
-    #[cfg(feature = "external-clock")]
-    fn try_get_physical_time_after(
-        &self,
-        delay: std::time::Duration,
-    ) -> Result<std::time::Instant, crate::physical_time::PhysicalClockError> {
-        self.physical_clock.instant_after(delay)
-    }
-    #[cfg(feature = "external-clock")]
     fn try_get_physical_time(
         &self,
-    ) -> Result<std::time::Instant, crate::physical_time::PhysicalClockError> {
-        self.physical_clock.instant()
+    ) -> Result<crate::clock::PhysicalInstant, crate::clock::PhysicalClockError> {
+        self.physical_clock.now()
     }
-    #[cfg(feature = "external-clock")]
-    fn physical_time(
-        &self,
-    ) -> Result<
-        Option<crate::physical_time::PhysicalTimeNanos>,
-        crate::physical_time::PhysicalClockError,
-    > {
-        self.physical_clock.physical_time()
-    }
+
     fn enclave_id(&self) -> EnclaveKey {
         self.enclave_key
     }
@@ -500,10 +420,10 @@ impl CommonContext for SendContext {
 }
 
 /// Build contexts for each reaction
-pub fn build_reaction_contexts(
+pub(crate) fn build_reaction_contexts(
     enclave_key: EnclaveKey,
     reaction_graph: &ReactionGraph,
-    start_time: std::time::Instant,
+    physical_clock: crate::clock::RuntimeClock,
     event_tx: crate::Sender<AsyncEvent>,
     shutdown_rx: keepalive::Receiver,
 ) -> tinymap::TinySecondaryMap<ReactionKey, Context> {
@@ -514,7 +434,7 @@ pub fn build_reaction_contexts(
             let bank_info = &reaction_graph.reactor_bank_infos[*reactor_key];
             let ctx = Context::new(
                 enclave_key,
-                start_time,
+                physical_clock.clone(),
                 bank_info.clone(),
                 event_tx.clone(),
                 shutdown_rx.clone(),
@@ -529,6 +449,172 @@ mod tests {
     use super::*;
     use crate::{action::Action, event::AsyncEvent, ActionKey, BaseAction, DynActionRefMut};
 
+    /// Checks that a rejected logical scheduling attempt preserves existing payloads and triggers.
+    fn assert_logical_rejected(
+        current: Tag,
+        minimum: Duration,
+        delay: Duration,
+        expected: ActionScheduleError,
+    ) {
+        let (tx, _rx) = kanal::unbounded();
+        let (_shutdown, shutdown_rx) = keepalive::channel();
+        let mut ctx = Context::new(
+            EnclaveKey::from(0),
+            crate::clock::RuntimeClock::native(std::time::Instant::now()),
+            None,
+            tx,
+            shutdown_rx,
+        );
+        ctx.reset_for_reaction(current);
+        let mut action = Action::<u32>::new("logical", ActionKey::from(0), Some(minimum), true);
+        let mut action =
+            ActionRef::<u32>::try_from(DynActionRefMut(&mut action as &mut dyn BaseAction))
+                .unwrap();
+        action.set_value(Tag::ZERO, 7);
+        assert_eq!(
+            ctx.try_schedule_action(&mut action, 9, Some(delay)),
+            Err(expected)
+        );
+        assert!(ctx.trigger_res.scheduled_actions.is_empty());
+        assert_eq!(action.get_value_at(Tag::ZERO), Some(&7));
+    }
+
+    /// Negative effective delays must not enqueue an event before the current tag.
+    #[test]
+    fn checked_logical_rejects_negative_delay() {
+        assert_logical_rejected(
+            Tag::new(Duration::nanoseconds(10), 0),
+            Duration::ZERO,
+            Duration::nanoseconds(-1),
+            ActionScheduleError::InvalidDelay,
+        );
+    }
+
+    /// Adding the minimum and requested delays must return an error instead of panicking.
+    #[test]
+    fn checked_logical_rejects_delay_sum_overflow() {
+        assert_logical_rejected(
+            Tag::ZERO,
+            Duration::nanoseconds(1),
+            Duration::MAX,
+            ActionScheduleError::Overflow,
+        );
+    }
+
+    /// A valid delay can still exceed the remaining range of the logical offset.
+    #[test]
+    fn checked_logical_rejects_offset_overflow() {
+        assert_logical_rejected(
+            Tag::new(Duration::MAX, 0),
+            Duration::ZERO,
+            Duration::nanoseconds(1),
+            ActionScheduleError::Overflow,
+        );
+    }
+
+    /// Zero-delay scheduling cannot wrap an exhausted current microstep.
+    #[test]
+    fn checked_logical_rejects_microstep_overflow() {
+        assert_logical_rejected(
+            Tag::new(Duration::ZERO, usize::MAX),
+            Duration::ZERO,
+            Duration::ZERO,
+            ActionScheduleError::Overflow,
+        );
+    }
+
+    /// The store's saturated cursor must be rejected before attempting to insert a value.
+    #[test]
+    fn checked_logical_rejects_saturated_cursor() {
+        assert_logical_rejected(
+            Tag::new(Duration::ZERO, usize::MAX - 1),
+            Duration::ZERO,
+            Duration::ZERO,
+            ActionScheduleError::Overflow,
+        );
+    }
+
+    /// Logical delays retain their full range and repeated values retain separate microsteps.
+    #[test]
+    fn checked_logical_preserves_large_offsets_and_values() {
+        let (tx, _rx) = kanal::unbounded();
+        let (_shutdown, shutdown_rx) = keepalive::channel();
+        let mut ctx = Context::new(
+            EnclaveKey::from(0),
+            crate::clock::RuntimeClock::native(std::time::Instant::now()),
+            None,
+            tx,
+            shutdown_rx,
+        );
+        ctx.reset_for_reaction(Tag::new(Duration::nanoseconds(10), 3));
+        let mut action = Action::<u32>::new(
+            "logical",
+            ActionKey::from(0),
+            Some(Duration::nanoseconds(2)),
+            true,
+        );
+        let mut action =
+            ActionRef::<u32>::try_from(DynActionRefMut(&mut action as &mut dyn BaseAction))
+                .unwrap();
+        let delay = Duration::seconds(20_000_000_000);
+        ctx.try_schedule_action(&mut action, 1, Some(delay))
+            .unwrap();
+        ctx.schedule_action(&mut action, 2, Some(delay));
+        let offset = Duration::seconds(20_000_000_000) + Duration::nanoseconds(12);
+        assert_eq!(
+            ctx.trigger_res.scheduled_actions,
+            [
+                (ActionKey::from(0), Tag::new(offset, 0)),
+                (ActionKey::from(0), Tag::new(offset, 1))
+            ]
+        );
+        assert_eq!(action.get_value_at(Tag::new(offset, 0)), Some(&1));
+        assert_eq!(action.get_value_at(Tag::new(offset, 1)), Some(&2));
+        ctx.reset_for_reaction(Tag::new(offset, 1));
+        assert_eq!(ctx.get_elapsed_logical_time(), offset);
+        assert_eq!(
+            ctx.try_get_logical_time(),
+            Err(crate::clock::PhysicalClockError::Overflow)
+        );
+        ctx.reset_for_reaction(Tag::new(Duration::nanoseconds(42), 7));
+        assert_eq!(
+            ctx.try_get_logical_time(),
+            Ok(crate::clock::PhysicalInstant(42))
+        );
+    }
+
+    /// Native physical actions cannot reenter a completed tag when logical time runs ahead.
+    #[test]
+    fn physical_actions_advance_past_current_tag_with_checked_overflow() {
+        let (tx, _rx) = kanal::unbounded();
+        let (_shutdown, shutdown_rx) = keepalive::channel();
+        let mut ctx = Context::new(
+            EnclaveKey::from(0),
+            crate::clock::RuntimeClock::native(std::time::Instant::now()),
+            None,
+            tx,
+            shutdown_rx,
+        );
+        let offset = Duration::seconds(1_000_000_000);
+        ctx.reset_for_reaction(Tag::new(offset, 7));
+        let mut action = Action::<u32>::new("physical", ActionKey::from(0), None, false);
+        let mut action =
+            ActionRef::<u32>::try_from(DynActionRefMut(&mut action as &mut dyn BaseAction))
+                .unwrap();
+        ctx.try_schedule_action(&mut action, 1, None).unwrap();
+        ctx.try_schedule_action(&mut action, 2, None).unwrap();
+        assert_eq!(ctx.trigger_res.scheduled_actions[0].1, Tag::new(offset, 8));
+        assert_eq!(ctx.trigger_res.scheduled_actions[1].1, Tag::new(offset, 9));
+        ctx.reset_for_reaction(Tag::new(offset, usize::MAX));
+        assert_eq!(
+            ctx.try_schedule_action(&mut action, 3, None),
+            Err(ActionScheduleError::Overflow)
+        );
+        assert!(ctx.trigger_res.scheduled_actions.is_empty());
+        assert_eq!(action.get_value_at(Tag::new(offset, 8)), Some(&1));
+        assert_eq!(action.get_value_at(Tag::new(offset, 9)), Some(&2));
+    }
+
     #[test]
     fn schedule_action_advances_microsteps_for_same_delay() {
         let (async_tx, _async_rx) = kanal::unbounded::<AsyncEvent>();
@@ -536,7 +622,7 @@ mod tests {
 
         let mut ctx = Context::new(
             EnclaveKey::from(0),
-            std::time::Instant::now(),
+            crate::clock::RuntimeClock::native(std::time::Instant::now()),
             None,
             async_tx,
             shutdown_rx,
@@ -550,7 +636,7 @@ mod tests {
                 .expect("action ref");
 
         ctx.schedule_action(&mut action_ref, 1, None);
-        ctx.schedule_action(&mut action_ref, 2, None);
+        ctx.try_schedule_action(&mut action_ref, 2, None).unwrap();
 
         let tags: Vec<Tag> = ctx
             .trigger_res
@@ -570,7 +656,7 @@ mod tests {
         let (_shutdown_tx, shutdown_rx) = keepalive::channel();
         let ctx = Context::new(
             EnclaveKey::from(0),
-            std::time::Instant::now(),
+            crate::clock::RuntimeClock::native(std::time::Instant::now()),
             None,
             async_tx,
             shutdown_rx,
@@ -601,7 +687,6 @@ mod tests {
         drop(async_rx);
         let (_shutdown_tx, shutdown_rx) = keepalive::channel();
         let mut ctx = SendContext {
-            #[cfg(feature = "external-clock")]
             physical_clock: Default::default(),
             enclave_key: EnclaveKey::from(0),
             async_tx,

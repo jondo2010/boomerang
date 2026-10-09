@@ -7,6 +7,7 @@ pub use ::time::Duration;
 
 pub mod action;
 pub mod binding;
+pub mod clock;
 mod context;
 mod env;
 mod event;
@@ -14,9 +15,6 @@ pub mod image;
 pub mod keepalive;
 mod key_set;
 mod observation;
-#[cfg(feature = "external-clock")]
-pub mod physical_clock;
-pub mod physical_time;
 pub mod port;
 pub mod reaction;
 mod reactor;
@@ -93,6 +91,9 @@ impl<T: ReactorData> PayloadType<T> {
 
 #[derive(thiserror::Error, Debug)]
 pub enum RuntimeError {
+    /// Checked physical-time or microstep conversion failed during native execution.
+    #[error(transparent)]
+    PhysicalClock(#[from] crate::clock::PhysicalClockError),
     #[error("Port Key not found: {}", 0)]
     PortKeyNotFound(PortKey),
 

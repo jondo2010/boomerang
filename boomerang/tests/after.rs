@@ -27,7 +27,10 @@ fn Print(
             println!("Result is {:?}", *x);
             assert_eq!(*x, Some(84), "Expected result to be 84");
             println!("Current logical time is: {}", elapsed_time);
-            println!("Current physical time is: {:?}", ctx.get_physical_time());
+            println!(
+                "Current physical time is: {:?}",
+                ctx.try_get_physical_time().expect("physical clock read")
+            );
             assert_eq!(
                 elapsed_time, state.expected_time,
                 "Expected logical time to be {}",

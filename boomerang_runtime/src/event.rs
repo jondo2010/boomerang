@@ -43,8 +43,8 @@ pub enum AsyncEvent {
 
     /// A Physical event has its `tag` set to the current physical time (+ an optional delay).
     Physical {
-        /// The instant at which the Action should be executed
-        time: std::time::Instant,
+        /// Due time in the destination execution's physical domain and epoch.
+        time: crate::clock::PhysicalInstant,
         /// Scheduler destination for the admitted value.
         target: AsyncEventTarget,
         /// The value associated with this event.
@@ -166,7 +166,7 @@ impl AsyncEvent {
     /// Create a physical event.
     pub(crate) fn physical(
         key: ActionKey,
-        time: std::time::Instant,
+        time: crate::clock::PhysicalInstant,
         value: Box<dyn ReactorData>,
     ) -> Self {
         AsyncEvent::Physical {

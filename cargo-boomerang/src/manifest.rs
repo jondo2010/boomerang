@@ -70,12 +70,44 @@ pub struct Topology {
 #[derive(Clone, Debug, Deserialize, serde::Serialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ExternalClock {
+    /// Bounded physical sources passed to the driver after compiled target resolution.
+    pub inputs: Option<PhysicalInputs>,
     /// Stable domain included in artifact fingerprints.
     pub domain: u64,
     /// Existing component-instance binding whose selected payload exports the driver.
     pub binding: String,
     /// Driver function relative to that payload's crate root.
     pub entry: String,
+}
+
+/// Hosted source declarations included in the selected clock configuration fingerprint.
+#[derive(Clone, Debug, Deserialize, serde::Serialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct PhysicalInputs {
+    /// Maximum values in one coherent batch.
+    pub max_batch_values: usize,
+    /// Maximum retained batches until their tags complete.
+    pub max_staged_batches: usize,
+    /// Stable source names and capabilities.
+    pub sources: BTreeMap<String, PhysicalSource>,
+}
+/// Required or optional source with declared compiled physical-action bindings.
+#[derive(Clone, Debug, Deserialize, serde::Serialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct PhysicalSource {
+    /// Whether explicit progress gates execution.
+    pub required: bool,
+    /// Target names mapped to their compiled Enclave and action payload binding.
+    pub targets: BTreeMap<String, PhysicalTarget>,
+}
+/// A typed destination resolved from the existing compiled binding before startup.
+#[derive(Clone, Debug, Deserialize, serde::Serialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct PhysicalTarget {
+    /// Stable Enclave identity in the compiled image.
+    pub enclave: String,
+    /// Stable action payload binding identity in that Enclave.
+    pub binding: String,
 }
 
 /// One named deployment variant, parameterized by its Federate representation.
@@ -174,6 +206,26 @@ impl Deployment<Federate> {
                     ));
                 }
                 validate_component_path(&clock.entry)?;
+                if let Some(inputs) = &clock.inputs {
+                    if inputs.max_batch_values == 0
+                        || inputs.max_staged_batches == 0
+                        || inputs
+                            .max_batch_values
+                            .checked_mul(inputs.max_staged_batches)
+                            .is_none()
+                        || inputs.sources.iter().any(|(id, source)| {
+                            id.is_empty()
+                                || source.targets.is_empty()
+                                || source.targets.iter().any(|(id, target)| {
+                                    id.is_empty()
+                                        || target.enclave.is_empty()
+                                        || target.binding.is_empty()
+                                })
+                        })
+                    {
+                        return Err(invalid_deployment(name, "physical-clock.inputs requires positive bounds and named sources/targets"));
+                    }
+                }
             }
             validate(
                 &format!("federates.{id}.bounded-tracing"),

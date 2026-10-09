@@ -204,7 +204,7 @@ fn checked_conversions_and_physical_actions_use_selected_time() {
 
 /// Counts allocations on the measuring test thread while delegating to System.
 struct CountingAllocator;
-thread_local! { static ALLOCATIONS: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) }; }
+thread_local! { pub(crate) static ALLOCATIONS: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) }; }
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator;
 unsafe impl std::alloc::GlobalAlloc for CountingAllocator {

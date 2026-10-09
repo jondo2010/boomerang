@@ -223,6 +223,8 @@ pub(crate) const fn runtime_enclave_key(enclave: EnclaveIndex) -> crate::Enclave
 #[derive(Default)]
 pub struct FederateBindings<'binding> {
     #[cfg(feature = "external-clock")]
+    physical_inputs: Option<crate::physical_input::InputSetup<'binding>>,
+    #[cfg(feature = "external-clock")]
     physical_clock: Option<(
         crate::clock::PhysicalClockDomainId,
         crate::clock::ManualClock,
@@ -238,6 +240,22 @@ pub struct FederateBindings<'binding> {
 }
 
 impl<'binding> FederateBindings<'binding> {
+    /// Declares bounded hosted inputs and starts the driver with this execution's resolved handle.
+    /// The callback must return promptly, retaining the handle in the caller's driver if needed.
+    #[cfg(feature = "external-clock")]
+    pub fn with_physical_inputs(
+        mut self,
+        config: crate::physical_input::InputConfig,
+        start: impl FnOnce(
+                crate::physical_input::InputAdmission,
+            ) -> Result<(), crate::physical_input::InputError>
+            + Send
+            + 'binding,
+    ) -> Self {
+        self.physical_inputs = Some((config, Box::new(start)));
+        self
+    }
+
     /// Selects one external clock for every Enclave. Domain and single-use checks run before initialization.
     #[cfg(feature = "external-clock")]
     pub fn with_physical_clock(
@@ -414,6 +432,10 @@ impl FederateExecution {
 /// Failure while preflighting, initializing, or executing one owned compiled Federate.
 #[derive(Debug, thiserror::Error)]
 pub enum ExecuteOwnedFederateError {
+    /// Hosted input declaration, driver, or required source failed.
+    #[cfg(feature = "external-clock")]
+    #[error(transparent)]
+    PhysicalInput(#[from] crate::physical_input::InputError),
     /// Selected physical clock failed validation or terminated during execution.
     #[cfg(feature = "external-clock")]
     #[error(transparent)]
@@ -1045,6 +1067,17 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
 ) -> Result<FederateExecution, ExecuteOwnedFederateError> {
     let observations = prepare_observations(&prepared.images, observations)?;
     #[cfg(feature = "external-clock")]
+    let lifecycle = if lifecycle == LifecyclePolicy::TerminateWhenIdle
+        && bindings
+            .physical_inputs
+            .as_ref()
+            .is_some_and(|(config, _)| config.sources.iter().any(|source| source.required))
+    {
+        LifecyclePolicy::KeepAlive
+    } else {
+        lifecycle
+    };
+    #[cfg(feature = "external-clock")]
     if bindings.physical_clock.is_some()
         && prepared
             .images
@@ -1055,10 +1088,23 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
     }
     #[cfg(feature = "external-clock")]
     let clock_run = crate::clock::ClockRun::new(bindings.physical_clock.as_ref())?;
+    #[cfg(feature = "external-clock")]
+    let input_targets = bindings
+        .physical_inputs
+        .as_ref()
+        .map(|(config, _)| {
+            if bindings.physical_clock.is_none() {
+                return Err(crate::physical_input::configuration_error());
+            }
+            config.resolve(&prepared.images, &bindings.enclaves)
+        })
+        .transpose()?;
     let PreparedFederate { images, endpoints } = prepared;
     let FederateBindings {
         enclaves,
         duplicate_enclaves: _,
+        #[cfg(feature = "external-clock")]
+        physical_inputs,
         routes,
         ..
     } = bindings;
@@ -1193,6 +1239,25 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
             return Err(error);
         }
     };
+    #[cfg(feature = "external-clock")]
+    let mut coordinator = coordinator;
+    #[cfg(feature = "external-clock")]
+    let inputs = if let Some((config, start)) = physical_inputs {
+        let inputs = crate::physical_input::InputAdmission::new(
+            config,
+            input_targets.unwrap(),
+            clock_run.0.as_ref().unwrap().clone(),
+            &event_senders,
+            abort_handle.clone(),
+        );
+        coordinator.state.physical_inputs = Some(inputs.clone());
+        for (slot, (_, storage)) in storages.iter_mut().enumerate() {
+            storage.physical_inputs = Some((inputs.clone(), slot));
+        }
+        Some((inputs, start))
+    } else {
+        None
+    };
     backend_phase.completed();
     let origin = Instant::now();
     #[cfg(feature = "external-clock")]
@@ -1205,6 +1270,16 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
     for (_, storage) in &storages {
         storage.initialize_clock(origin);
     }
+    #[cfg(feature = "external-clock")]
+    let _input_run =
+        crate::physical_input::InputRun(inputs.as_ref().map(|(inputs, _)| inputs.clone()));
+    #[cfg(feature = "external-clock")]
+    let inputs = inputs
+        .map(|(inputs, start)| {
+            start(inputs.clone())?;
+            Ok::<_, crate::physical_input::InputError>(inputs)
+        })
+        .transpose()?;
     let dispatch = tracing::dispatcher::get_default(Clone::clone);
     let parent_span = tracing::Span::current();
     let mut worker_phase = ConstructionPhase::started("workers");
@@ -1389,6 +1464,10 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
     #[cfg(feature = "external-clock")]
     if let Some(clock) = &clock_run.0 {
         clock.now()?;
+    }
+    #[cfg(feature = "external-clock")]
+    if let Some(inputs) = &inputs {
+        inputs.finish()?;
     }
     if let Some(error) = failure {
         Err(error)

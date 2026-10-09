@@ -259,6 +259,8 @@ pub(crate) fn run_owned_scheduler_with_coordination_and_observation(
     let clock = storage.scheduler_send_context().physical_clock;
     SchedulerCore {
         clock,
+        #[cfg(feature = "external-clock")]
+        physical_inputs: storage.physical_inputs.clone(),
         key,
         config,
         observation,

@@ -86,3 +86,55 @@ device decoding, and transport belong to the driver or adapter.
 
 See the [clock API documentation](https://docs.rs/boomerang_runtime/latest/boomerang_runtime/clock/index.html)
 for programmatic binding, checked context APIs, and runtime implementation details.
+
+## Timestamped physical inputs
+
+When a driver supplies observations as well as time, declare the sources and
+physical-action targets beneath the same `physical-clock` table:
+
+```toml
+[deployments.production.federates.host.physical-clock.inputs]
+max_batch_values = 16
+max_staged_batches = 8
+
+[deployments.production.federates.host.physical-clock.inputs.sources.plant]
+required = true
+
+[deployments.production.federates.host.physical-clock.inputs.sources.plant.targets.sample]
+enclave = "sensor"
+binding = "action/sensor/sample"
+```
+
+The target must identify an existing physical action with the matching payload
+type. Reserve it for this adapter; ordinary reactions and other drivers must use
+separate actions. `max_batch_values` bounds values in one submission, and
+`max_staged_batches` bounds batches retained until their destination tags finish.
+Exceeding these bounds returns an explicit error.
+
+With `inputs` configured, the driver entry takes `(ManualClock, InputAdmission)`
+and returns `Result<(), InputError>`. It must return promptly and can hand cloned
+handles to application-managed drivers. Resolve source and target names once,
+then submit decoded observations with a source sequence, domain, execution epoch,
+and acquisition time. Acquisition time, plus the action's configured minimum
+delay, determines the logical tag; host arrival time is diagnostic only.
+
+Use `submit(batch, progress)` to publish observations before their progress.
+`advance(source, F)` promises that future acquisition times will be at least F;
+an observation exactly at F is still allowed. Required sources hold back logical
+execution until they report progress. Optional sources do not hold it back.
+Periodic and idle required sources must publish progress explicitly, even when
+there are no new observations. Progress can exceed current clock time, but an
+observation cannot be acquired in the future.
+
+Clock advancement and input progress are separate: advancing the clock alone
+cannot release execution past unresolved required input. Required sources keep
+an idle Federate alive; explicit shutdown and configured logical horizons still
+apply. Malformed, future, late, duplicate, out-of-order, protocol, overflow, and
+disconnected submissions have distinct errors. Required protocol failures,
+overflow, or disconnection abort execution; optional disconnection retains
+already committed observations.
+
+Input declarations participate in artifact fingerprints and have the same local
+hosted deployment restrictions as the clock. See the
+[physical-input API documentation](https://docs.rs/boomerang_runtime/latest/boomerang_runtime/physical_input/index.html)
+for admission, reservation, and progress implementation details.

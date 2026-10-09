@@ -15,6 +15,8 @@ pub mod image;
 pub mod keepalive;
 mod key_set;
 mod observation;
+#[cfg(feature = "external-clock")]
+pub mod physical_input;
 pub mod port;
 pub mod reaction;
 mod reactor;

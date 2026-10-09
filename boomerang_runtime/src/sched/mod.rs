@@ -630,6 +630,8 @@ impl Scheduler {
 
         SchedulerCore {
             clock: physical_clock.clone(),
+            #[cfg(feature = "external-clock")]
+            physical_inputs: None,
             key: *key,
             config,
             observation: self.observation.as_ref(),

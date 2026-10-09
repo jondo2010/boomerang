@@ -76,10 +76,28 @@ fn render_physical_clock(
         alias.split("::").next().expect("payload crate alias"),
         clock.entry
     ))?;
+    let startup = if let Some(inputs) = &clock.inputs {
+        let max_values = inputs.max_batch_values;
+        let max_batches = inputs.max_staged_batches;
+        let sources = inputs.sources.iter().map(|(id, source)| {
+            let required = source.required;
+            let targets = source.targets.iter().map(|(id, target)| {
+                let enclave = &target.enclave; let binding = &target.binding;
+                quote!(boomerang_runtime::physical_input::InputTarget::from_binding(#id, #enclave, #binding))
+            });
+            quote!(boomerang_runtime::physical_input::InputSource { id: #id.into(), required: #required, targets: vec![#(#targets),*] })
+        });
+        quote! {
+            let driver_clock = physical_clock.clone();
+            let bindings = bindings.with_physical_inputs(boomerang_runtime::physical_input::InputConfig { max_batch_values: #max_values, max_staged_batches: #max_batches, sources: vec![#(#sources),*] }, move |inputs| #driver(driver_clock, inputs));
+        }
+    } else {
+        quote!(let _physical_clock_driver = #driver(physical_clock.clone())?;)
+    };
     Ok(quote! {
         let clock_domain = boomerang_runtime::clock::PhysicalClockDomainId(#domain);
         let physical_clock = boomerang_runtime::clock::ManualClock::new(clock_domain)?;
-        let _physical_clock_driver = #driver(physical_clock.clone())?;
+        #startup
         let bindings = bindings.with_physical_clock(clock_domain, physical_clock);
     })
 }

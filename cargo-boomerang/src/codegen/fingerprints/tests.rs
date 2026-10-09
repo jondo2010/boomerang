@@ -273,6 +273,7 @@ fn coordination_tracks_compiled_in_transit_capacity() {
 fn physical_clock_selection_and_domain_change_image_fingerprint() {
     let base = blake3::hash(b"image");
     let mut clock = crate::manifest::ExternalClock {
+        inputs: None,
         domain: 7,
         binding: "sensor".into(),
         entry: "drive".into(),
@@ -285,4 +286,22 @@ fn physical_clock_selection_and_domain_change_image_fingerprint() {
     clock.domain = 7;
     clock.entry = "another_driver".into();
     assert_ne!(first, with_physical_clock(base, Some(&clock)).unwrap());
+}
+
+/// Checks source requiredness and input bounds affect the generated artifact fingerprint.
+#[test]
+fn physical_source_declarations_change_fingerprint() {
+    let base = blake3::hash(b"image");
+    let clock = |required, max_batch_values| {
+        serde_json::from_value::<crate::manifest::ExternalClock>(serde_json::json!({"domain": 7, "binding": "sensor", "entry": "drive", "inputs": { "max_batch_values": max_batch_values, "max_staged_batches": 2, "sources": {"plant": {"required": required, "targets": {"sample": {"enclave": "e", "binding": "a"}}}}}})).unwrap()
+    };
+    let original = with_physical_clock(base, Some(&clock(true, 2))).unwrap();
+    assert_ne!(
+        original,
+        with_physical_clock(base, Some(&clock(false, 2))).unwrap()
+    );
+    assert_ne!(
+        original,
+        with_physical_clock(base, Some(&clock(true, 3))).unwrap()
+    );
 }

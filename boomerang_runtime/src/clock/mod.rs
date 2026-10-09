@@ -65,6 +65,8 @@ use crate::{
     },
     AsyncEvent, Duration, EnclaveKey, Tag,
 };
+#[cfg(all(test, feature = "external-clock"))]
+pub(crate) use manual::tests::ALLOCATIONS;
 #[cfg(feature = "external-clock")]
 pub use manual::{ClockRun, ManualClock};
 

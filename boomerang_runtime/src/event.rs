@@ -15,6 +15,9 @@ pub enum AsyncEventTarget {
 
 /// `AsyncEvent` is used to inject events into the scheduler from outside of the normal event loop.
 pub enum AsyncEvent {
+    /// Coherent owned observations validated by the hosted admission service.
+    #[cfg(feature = "external-clock")]
+    PhysicalBatch(crate::physical_input::InputBatchEvent),
     /// Federate coordination changed and the scheduler must recompute its pending candidate.
     FederateResume,
     /// A release event is used by upstream enclaves to signal that they have completed processing the tag.
@@ -61,6 +64,8 @@ pub enum AsyncEvent {
 impl Debug for AsyncEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            #[cfg(feature = "external-clock")]
+            Self::PhysicalBatch(batch) => f.debug_tuple("PhysicalBatch").field(batch).finish(),
             Self::FederateResume => f.write_str("FederateResume"),
             Self::TagRelease { enclave, tag } => f
                 .debug_struct("TagRelease")
@@ -102,6 +107,8 @@ impl Debug for AsyncEvent {
 impl Display for AsyncEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            #[cfg(feature = "external-clock")]
+            AsyncEvent::PhysicalBatch(_) => f.write_str("PhysicalBatch"),
             AsyncEvent::FederateResume => f.write_str("FederateResume"),
             AsyncEvent::TagRelease { enclave, tag } => {
                 write!(f, "TagRelease[enclave={enclave:?},tag={tag:.3}]")
@@ -131,9 +138,22 @@ impl Display for AsyncEvent {
 }
 
 impl AsyncEvent {
+    pub(crate) fn revises_candidate(&self) -> bool {
+        #[cfg(feature = "external-clock")]
+        if matches!(self, Self::PhysicalBatch(_)) {
+            return true;
+        }
+        matches!(
+            self,
+            Self::Logical { .. } | Self::Physical { .. } | Self::Shutdown { .. }
+        )
+    }
+
     /// Stable event category for native tracing, without inspecting its payload.
     pub fn kind_str(&self) -> &'static str {
         match self {
+            #[cfg(feature = "external-clock")]
+            Self::PhysicalBatch(_) => "physical_batch",
             Self::FederateResume => "federate_resume",
             Self::TagRelease { .. } => "tag_release",
             Self::TagReleaseProvisional { .. } => "tag_release_provisional",

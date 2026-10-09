@@ -8,6 +8,32 @@ pub struct PhysicalClockDomainId(pub u64);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ExecutionEpoch(pub u128);
 
+/// Checked physical-time and clock protocol failures.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("physical clock: {self:?}")]
+pub enum PhysicalClockError {
+    /// The native execution origin has not been bound at scheduler startup.
+    NotStarted,
+    /// The driver moved time backwards.
+    Regression,
+    /// Host entropy was unavailable when creating a fresh execution identity.
+    EntropyUnavailable,
+    /// The driver closed the clock.
+    Closed,
+    /// The driver explicitly failed the clock.
+    Failed,
+    /// A time, delay, or fresh epoch was not representable.
+    Overflow,
+    /// The configured clock domain does not match.
+    DomainMismatch,
+    /// The observation belongs to another execution.
+    EpochMismatch,
+    /// This clock has already been assigned to an execution.
+    AlreadyUsed,
+    /// A selected scheduler mailbox cannot retain even one wake notification.
+    WakeCapacity,
+}
+
 /// A point on a Boomerang execution's physical timeline.
 ///
 /// This is Boomerang's clock-selected counterpart to [`std::time::Instant`]. A
@@ -51,32 +77,6 @@ pub struct PhysicalInstant(
     /// Nanoseconds since the physical epoch of the associated execution.
     pub u64,
 );
-
-/// Checked physical-time and clock protocol failures.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("physical clock: {self:?}")]
-pub enum PhysicalClockError {
-    /// The native execution origin has not been bound at scheduler startup.
-    NotStarted,
-    /// The driver moved time backwards.
-    Regression,
-    /// Host entropy was unavailable when creating a fresh execution identity.
-    EntropyUnavailable,
-    /// The driver closed the clock.
-    Closed,
-    /// The driver explicitly failed the clock.
-    Failed,
-    /// A time, delay, or fresh epoch was not representable.
-    Overflow,
-    /// The configured clock domain does not match.
-    DomainMismatch,
-    /// The observation belongs to another execution.
-    EpochMismatch,
-    /// This clock has already been assigned to an execution.
-    AlreadyUsed,
-    /// A selected scheduler mailbox cannot retain even one wake notification.
-    WakeCapacity,
-}
 
 impl PhysicalInstant {
     /// Returns the elapsed duration from this instant's execution epoch.

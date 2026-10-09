@@ -68,9 +68,8 @@ use crate::{
 #[cfg(all(test, feature = "external-clock"))]
 pub(crate) use manual::tests::ALLOCATIONS;
 #[cfg(feature = "external-clock")]
-pub(crate) use manual::ClockRun;
-#[cfg(feature = "external-clock")]
-pub use manual::ManualClock;
+pub use manual::{ClockRun, ManualClock};
+
 use std::{
     sync::{Arc, OnceLock},
     time::Instant,
@@ -102,7 +101,7 @@ pub(crate) enum RuntimeClock {
     #[cfg(feature = "external-clock")]
     Manual {
         /// Shared time, execution identity and deadline registry.
-        clock: ManualClock,
+        clock: manual::ManualClock,
         /// Preallocated Enclave deadline slot.
         slot: usize,
     },
@@ -135,7 +134,7 @@ impl RuntimeClock {
 
     /// Binds one participant without another allocation.
     #[cfg(feature = "external-clock")]
-    pub(crate) fn manual(clock: ManualClock, slot: usize) -> Self {
+    pub(crate) fn manual(clock: manual::ManualClock, slot: usize) -> Self {
         Self::Manual { clock, slot }
     }
     /// Reports retained clock failure, including during logical fast-forward.

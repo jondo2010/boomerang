@@ -24,15 +24,16 @@ use std::{
     time::Instant,
 };
 
-/// Cloneable driver and observation handle for one execution's physical clock.
-#[derive(Clone)]
-pub struct ManualClock(Arc<ManualClockInner>);
+#[cfg(test)]
+pub(crate) mod tests;
+
 /// Shared identity and synchronized state for a single manual-clock execution.
 struct ManualClockInner {
     domain: PhysicalClockDomainId,
     epoch: ExecutionEpoch,
     state: Mutex<ManualClockState>,
 }
+
 /// Manual-clock time, first terminal failure, and deadline slots protected by one mutex.
 /// Registration and advancement use this same lock to avoid lost wakes.
 #[derive(Default)]
@@ -43,11 +44,17 @@ struct ManualClockState {
     slots: Vec<DeadlineSlot>,
     abort: Option<crate::sched::federate::FederateAbortHandle>,
 }
+
 /// One reusable deadline and scheduler wake sender for an attached Enclave.
 struct DeadlineSlot {
     deadline: Option<PhysicalInstant>,
     wake: crate::Sender<AsyncEvent>,
 }
+
+/// Cloneable driver and observation handle for one execution's physical clock.
+#[derive(Clone)]
+pub struct ManualClock(Arc<ManualClockInner>);
+
 impl std::fmt::Debug for ManualClock {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ManualClock")
@@ -56,6 +63,7 @@ impl std::fmt::Debug for ManualClock {
             .finish_non_exhaustive()
     }
 }
+
 impl ManualClock {
     /// Creates a stopped-at-zero clock with a fresh random execution epoch.
     pub fn new(domain: PhysicalClockDomainId) -> Result<Self, PhysicalClockError> {
@@ -203,14 +211,35 @@ impl ManualClock {
     pub(crate) fn cancel(&self, slot: usize) {
         self.0.state.lock().unwrap().slots[slot].deadline = None;
     }
-}
 
-#[cfg(test)]
-pub(crate) mod tests;
+    /// Registers a participant deadline before blocking on scheduler interruption.
+    pub(super) fn wait_until(
+        &self,
+        slot: usize,
+        tag: Tag,
+        wait: &mut WaitContext<'_, '_>,
+    ) -> Result<ClockWaitResult, FederateCoordinationError> {
+        match PhysicalInstant::from_tag(tag).and_then(|deadline| self.register(slot, deadline)) {
+            Ok(true) => Ok(ClockWaitResult::DeadlineReached),
+            Err(error) => {
+                self.latch(error);
+                Ok(ClockWaitResult::FederateTerminated(
+                    FederateTermination::Abort,
+                ))
+            }
+            Ok(false) => {
+                let result = wait.receive();
+                self.cancel(slot);
+                result
+            }
+        }
+    }
+}
 
 /// Owns a clock claim for one run and detaches its deadline slots on drop.
 /// The claim remains consumed after cleanup, so the clock cannot be reused.
-pub(crate) struct ClockRun(pub(crate) Option<ManualClock>);
+pub struct ClockRun(pub(crate) Option<ManualClock>);
+
 impl ClockRun {
     /// Claims a selected manual clock, or creates an inert native-run guard.
     pub(crate) fn new(
@@ -222,6 +251,7 @@ impl ClockRun {
         Ok(Self(selection.map(|(_, clock)| clock.clone())))
     }
 }
+
 impl Drop for ClockRun {
     fn drop(&mut self) {
         if let Some(clock) = &self.0 {
@@ -263,31 +293,6 @@ impl WaitContext<'_, '_> {
                 Ok(ClockWaitResult::FederateTerminated(
                     terminal.unwrap_or(FederateTermination::Abort),
                 ))
-            }
-        }
-    }
-}
-
-impl ManualClock {
-    /// Registers a participant deadline before blocking on scheduler interruption.
-    pub(super) fn wait_until(
-        &self,
-        slot: usize,
-        tag: Tag,
-        wait: &mut WaitContext<'_, '_>,
-    ) -> Result<ClockWaitResult, FederateCoordinationError> {
-        match PhysicalInstant::from_tag(tag).and_then(|deadline| self.register(slot, deadline)) {
-            Ok(true) => Ok(ClockWaitResult::DeadlineReached),
-            Err(error) => {
-                self.latch(error);
-                Ok(ClockWaitResult::FederateTerminated(
-                    FederateTermination::Abort,
-                ))
-            }
-            Ok(false) => {
-                let result = wait.receive();
-                self.cancel(slot);
-                result
             }
         }
     }

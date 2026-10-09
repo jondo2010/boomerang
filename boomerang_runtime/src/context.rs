@@ -84,12 +84,10 @@ pub struct Context {
     pub(crate) tag: Tag,
     /// Bank index and node count for a multi-bank reactor
     pub(crate) bank_info: Option<BankInfo>,
-
     /// Channel for asynchronous events
     pub(crate) async_tx: crate::Sender<AsyncEvent>,
     /// Shutdown channel
     pub(crate) shutdown_rx: keepalive::Receiver,
-
     /// Trigger result
     pub(crate) trigger_res: TriggerRes,
 }

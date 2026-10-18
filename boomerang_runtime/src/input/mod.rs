@@ -18,6 +18,7 @@ mod retention;
 mod source;
 
 pub use action::SourceAction;
+pub(crate) use admission::AdmissionProcessor;
 pub use admission::InputAdmission;
 pub use batch::{InputBatch, InputBatchEvent, InputObservation, InputReceipt, InputValue};
 pub use config::{InputConfig, InputSource};

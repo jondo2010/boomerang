@@ -6,6 +6,7 @@ use crate::{
     image::ActionIndex,
     input::{InputSource, InputValue},
 };
+use std::sync::Mutex;
 /// Checks that unknown required frontiers block finite tags and no required sources leaves no cap.
 #[test]
 fn required_without_frontier_blocks_all_finite_tags() {
@@ -22,10 +23,66 @@ use crate::sched::federate::{
 struct Harness {
     /// Independent manual time control retained only by the test driver.
     clock: ManualClock,
-    inputs: InputAdmission,
+    inputs: FixtureAdmission,
     rx: Vec<crate::Receiver<AsyncEvent>>,
     _coordination: FederateCoordinationParts<LocalFederateCoordinationBackend>,
 }
+/// Direct processor fixture for protocol and allocation tests. Locks exist only in this test module.
+struct FixtureService {
+    clock: SelectedClock,
+    endpoint: InputAdmission,
+    processor: Mutex<AdmissionProcessor>,
+    coordination: Mutex<FederateCoordinationState>,
+}
+#[derive(Clone)]
+struct FixtureAdmission(Arc<FixtureService>);
+impl FixtureAdmission {
+    fn submit(&self, batch: InputBatch) -> Result<InputReceipt, InputError> {
+        let mut processor = self.0.processor.lock().unwrap();
+        let AdmissionProcessor { engine, state, .. } = &mut *processor;
+        engine.submit(
+            state,
+            &mut self.0.coordination.lock().unwrap(),
+            batch,
+            Instant::now(),
+        )
+    }
+    fn advance(
+        &self,
+        source: &InputSourceHandle,
+        frontier: PhysicalInstant,
+    ) -> Result<(), InputError> {
+        let mut processor = self.0.processor.lock().unwrap();
+        let AdmissionProcessor { engine, state, .. } = &mut *processor;
+        engine
+            .submit_progress(
+                state,
+                &mut self.0.coordination.lock().unwrap(),
+                &[(source.clone(), frontier)],
+                Instant::now(),
+            )
+            .map(|_| ())
+    }
+    fn disconnect(&self, source: &InputSourceHandle) -> InputError {
+        let mut processor = self.0.processor.lock().unwrap();
+        let AdmissionProcessor { engine, state, .. } = &mut *processor;
+        engine.disconnect(
+            state,
+            &mut self.0.coordination.lock().unwrap(),
+            source,
+            Instant::now(),
+        )
+    }
+    fn horizon(&self) -> Tag {
+        let processor = self.0.processor.lock().unwrap();
+        if processor.state.failure.is_some() {
+            Tag::NEVER
+        } else {
+            processor.state.horizon
+        }
+    }
+}
+
 /// Deliberately sparse original compiled identities, unrelated to fixture vector positions.
 fn enclave_key(slot: usize) -> EnclaveIndex {
     EnclaveIndex::new(7 + 3 * u32::try_from(slot).unwrap())
@@ -33,7 +90,7 @@ fn enclave_key(slot: usize) -> EnclaveIndex {
 /// Constructs bounded participants and resolved sources with initial grant authorization.
 fn harness(required: &[bool], enclaves: usize, delay: i64, capacity: usize) -> Harness {
     let channels: Vec<_> = (0..enclaves).map(|_| kanal::bounded(capacity)).collect();
-    let coordination = FederateCoordinationParts::new(
+    let mut coordination = FederateCoordinationParts::new(
         channels
             .iter()
             .enumerate()
@@ -56,7 +113,7 @@ fn harness(required: &[bool], enclaves: usize, delay: i64, capacity: usize) -> H
         })
         .collect();
     let clock = ManualClock::new(PhysicalClockDomainId(7)).unwrap();
-    let inputs = InputAdmission::new(
+    let (endpoint, processor) = AdmissionProcessor::new(
         InputConfig {
             max_batch_values: enclaves * 2,
             max_staged_batches: 2,
@@ -72,9 +129,20 @@ fn harness(required: &[bool], enclaves: usize, delay: i64, capacity: usize) -> H
             .enumerate()
             .map(|(i, (tx, _))| (enclave_key(i), tx.clone()))
             .collect(),
-        coordination.coordinator.state.shared(),
+        &mut coordination.coordinator.state,
         coordination.abort_handle.clone(),
     );
+    let state = std::mem::replace(
+        &mut coordination.coordinator.state,
+        FederateCoordinationState::new((0..enclaves).map(enclave_key), LifecyclePolicy::KeepAlive)
+            .unwrap(),
+    );
+    let inputs = FixtureAdmission(Arc::new(FixtureService {
+        clock: endpoint.0.clock.clone(),
+        endpoint,
+        processor: Mutex::new(processor),
+        coordination: Mutex::new(state),
+    }));
     {
         let mut state = inputs.0.coordination.lock().unwrap();
         for slot in 0..enclaves {
@@ -101,18 +169,31 @@ fn harness(required: &[bool], enclaves: usize, delay: i64, capacity: usize) -> H
     }
 }
 impl Harness {
+    /// Transfer fixture state into the real coordinator before starting channel-level tests.
+    fn into_parts(mut self) -> FederateCoordinationParts<LocalFederateCoordinationBackend> {
+        let fixture = Arc::try_unwrap(self.inputs.0)
+            .ok()
+            .expect("fixture has no remaining clones");
+        self._coordination.coordinator.state = fixture.coordination.into_inner().unwrap();
+        self._coordination.coordinator.inputs = Some(fixture.processor.into_inner().unwrap());
+        for (_, port) in self._coordination.participants.iter_mut() {
+            port.input_enabled = true;
+        }
+        self._coordination
+    }
     /// Creates fixture source identity, including malformed keys for rejection tests.
     fn source(&self, source: usize) -> InputSourceHandle {
         InputSourceHandle {
             key: SourceKey::new(source as u32),
-            admission: self.inputs.clone(),
+            admission: self.inputs.0.endpoint.clone(),
         }
     }
     /// Bind a compiled action to its fixture source with the configured minimum delay.
     fn action(&self, target: usize) -> crate::input::SourceAction<u32> {
         let source = target / self.rx.len();
         let enclave = target % self.rx.len();
-        let delay = self.inputs.0.state.lock().unwrap().sources[SourceKey::from(source)].delay;
+        let delay =
+            self.inputs.0.processor.lock().unwrap().state.sources[SourceKey::from(source)].delay;
         crate::input::SourceAction {
             reference: CompiledPhysicalAction::new(enclave_key(enclave), ActionIndex::from(source)),
             source: self.source(source),
@@ -238,7 +319,7 @@ fn admission_rejections_preserve_sequence_and_exact_frontier_is_admissible() {
     invalid.epoch = ExecutionEpoch(0);
     assert_eq!(
         h.inputs
-            .submit(InputBatch::new(vec![invalid]), &[])
+            .submit(InputBatch::new(vec![invalid]))
             .unwrap_err()
             .kind,
         InputErrorKind::Malformed
@@ -250,14 +331,14 @@ fn admission_rejections_preserve_sequence_and_exact_frontier_is_admissible() {
     }];
     assert_eq!(
         h.inputs
-            .submit(InputBatch::new(vec![invalid]), &[])
+            .submit(InputBatch::new(vec![invalid]))
             .unwrap_err()
             .kind,
         InputErrorKind::Malformed
     );
     assert_eq!(
         h.inputs
-            .submit(InputBatch::new(vec![sample(&h, 0, 1, 10)]), &[])
+            .submit(InputBatch::new(vec![sample(&h, 0, 1, 10)]))
             .unwrap_err()
             .kind,
         InputErrorKind::Future
@@ -266,7 +347,7 @@ fn admission_rejections_preserve_sequence_and_exact_frontier_is_admissible() {
     h.inputs.advance(&h.source(0), PhysicalInstant(10)).unwrap();
     let receipt = h
         .inputs
-        .submit(InputBatch::new(vec![sample(&h, 0, 2, 10)]), &[])
+        .submit(InputBatch::new(vec![sample(&h, 0, 2, 10)]))
         .unwrap();
     assert!(receipt.arrival >= start);
     assert_eq!(receipt.tags, [Tag::new(Duration::nanoseconds(10), 0)]);
@@ -277,7 +358,7 @@ fn admission_rejections_preserve_sequence_and_exact_frontier_is_admissible() {
     ] {
         let failure = h
             .inputs
-            .submit(InputBatch::new(vec![sample(&h, 0, sequence, time)]), &[])
+            .submit(InputBatch::new(vec![sample(&h, 0, sequence, time)]))
             .unwrap_err();
         assert_eq!(failure.kind, kind);
         assert_eq!(failure.source_id.as_deref(), Some("s0"));
@@ -291,29 +372,29 @@ fn retained_bounds_same_tag_conflicts_and_inflight_lateness() {
     let h = harness(&[false], 2, 0, 8);
     h.clock.advance_to(PhysicalInstant(30)).unwrap();
     h.inputs
-        .submit(InputBatch::new(vec![sample(&h, 0, 1, 10)]), &[])
+        .submit(InputBatch::new(vec![sample(&h, 0, 1, 10)]))
         .unwrap();
     assert!(!h.reserve(0, Tag::new(Duration::nanoseconds(10), 0)));
     assert_eq!(
         h.inputs
-            .submit(InputBatch::new(vec![sample(&h, 0, 2, 10)]), &[])
+            .submit(InputBatch::new(vec![sample(&h, 0, 2, 10)]))
             .unwrap_err()
             .kind,
         InputErrorKind::Overflow
     );
     assert_eq!(
         h.inputs
-            .submit(InputBatch::new(vec![sample(&h, 0, 2, 9)]), &[])
+            .submit(InputBatch::new(vec![sample(&h, 0, 2, 9)]))
             .unwrap_err()
             .kind,
         InputErrorKind::OutOfOrder
     );
     h.inputs
-        .submit(InputBatch::new(vec![sample(&h, 0, 2, 11)]), &[])
+        .submit(InputBatch::new(vec![sample(&h, 0, 2, 11)]))
         .unwrap();
     assert_eq!(
         h.inputs
-            .submit(InputBatch::new(vec![sample(&h, 0, 3, 12)]), &[])
+            .submit(InputBatch::new(vec![sample(&h, 0, 3, 12)]))
             .unwrap_err()
             .kind,
         InputErrorKind::Overflow
@@ -323,20 +404,20 @@ fn retained_bounds_same_tag_conflicts_and_inflight_lateness() {
     assert!(h.reserve(0, Tag::new(Duration::nanoseconds(12), 0)));
     assert_eq!(
         h.inputs
-            .submit(InputBatch::new(vec![sample(&h, 0, 3, 12)]), &[])
+            .submit(InputBatch::new(vec![sample(&h, 0, 3, 12)]))
             .unwrap_err()
             .kind,
         InputErrorKind::Late
     );
     h.complete(0, Tag::new(Duration::nanoseconds(12), 0));
     h.inputs
-        .submit(InputBatch::new(vec![sample(&h, 0, 3, 13)]), &[])
+        .submit(InputBatch::new(vec![sample(&h, 0, 3, 13)]))
         .unwrap();
     h.inputs.disconnect(&h.source(0));
     drain(&h);
     authorize(&h);
     assert!(h.reserve(0, Tag::new(Duration::nanoseconds(13), 0)));
-    assert_eq!(h.inputs.0.state.lock().unwrap().retained.len(), 1);
+    assert_eq!(h.inputs.0.processor.lock().unwrap().state.retained.len(), 1);
 }
 /// Checks whole-batch rejection before commit and execution abortion on partial publication.
 #[test]
@@ -349,13 +430,13 @@ fn entire_batch_rejects_before_commit_and_partial_fanout_aborts() {
     });
     assert_eq!(
         h.inputs
-            .submit(InputBatch::new(vec![malformed]), &[])
+            .submit(InputBatch::new(vec![malformed]))
             .unwrap_err()
             .kind,
         InputErrorKind::Malformed
     );
     assert!(h.rx.iter().all(|rx| rx.try_recv().unwrap().is_none()));
-    h.inputs.0.senders[enclave_key(1)]
+    h.inputs.0.processor.lock().unwrap().engine.senders[enclave_key(1)]
         .try_send(AsyncEvent::FederateResume)
         .unwrap();
     let mut batch = sample(&h, 0, 1, 0);
@@ -363,8 +444,7 @@ fn entire_batch_rejects_before_commit_and_partial_fanout_aborts() {
     assert_eq!(
         h.inputs
             .submit(
-                InputBatch::new(vec![batch]),
-                &[(h.source(0), PhysicalInstant(1))]
+                InputBatch::new(vec![batch]).with_progress(vec![(h.source(0), PhysicalInstant(1))])
             )
             .unwrap_err()
             .kind,
@@ -382,9 +462,11 @@ fn entire_batch_rejects_before_commit_and_partial_fanout_aborts() {
         .lock()
         .unwrap()
         .begin_tag(enclave_key(0), Tag::ZERO));
-    assert!(h.inputs.0.state.lock().unwrap().sources[SourceKey::new(0)]
-        .frontier
-        .is_none());
+    assert!(
+        h.inputs.0.processor.lock().unwrap().state.sources[SourceKey::new(0)]
+            .frontier
+            .is_none()
+    );
 }
 /// Checks terminal required-source failures and rejection of invalid time mappings.
 #[test]
@@ -394,12 +476,12 @@ fn required_overflow_disconnect_and_checked_mapping_are_terminal_or_rejected() {
         .into_iter()
         .flat_map(|sources| [0, 1, 2].map(|mode| (sources, mode)))
     {
-        let mut h = harness(&sources, 1 + usize::from(mode == 1), 0, 1);
+        let h = harness(&sources, 1 + usize::from(mode == 1), 0, 1);
         if mode == 2 {
-            Arc::get_mut(&mut h.inputs.0).unwrap().max_values = 1;
+            h.inputs.0.processor.lock().unwrap().engine.max_values = 1;
         }
         let required = sources.contains(&true);
-        h.inputs.0.senders[enclave_key(0)]
+        h.inputs.0.processor.lock().unwrap().engine.senders[enclave_key(0)]
             .try_send(AsyncEvent::FederateResume)
             .unwrap();
         if mode == 1 {
@@ -409,13 +491,14 @@ fn required_overflow_disconnect_and_checked_mapping_are_terminal_or_rejected() {
         first.values[0].action = h.action(h.rx.len() - 1).admission(); // Last Enclave first.
         let failure = h
             .inputs
-            .submit(InputBatch::new(vec![first, sample(&h, 1, 1, 0)]), &[])
+            .submit(InputBatch::new(vec![first, sample(&h, 1, 1, 0)]))
             .unwrap_err();
         assert_eq!(
             failure.kind,
             if mode == 1 { Disconnected } else { Overflow }
         );
-        let state = h.inputs.0.state.lock().unwrap();
+        let processor = h.inputs.0.processor.lock().unwrap();
+        let state = &processor.state;
         assert_eq!(state.failure.is_some(), required);
         if !required && mode == 1 {
             assert_eq!(failure.source_id.as_deref(), Some("s1"));
@@ -427,16 +510,19 @@ fn required_overflow_disconnect_and_checked_mapping_are_terminal_or_rejected() {
         assert!(
             state.retained.len() == 0 && state.sources.values().all(|source| source.last.is_none())
         );
-        drop(state);
+        drop(processor);
         assert_eq!(h.reserve(0, Tag::ZERO), !required);
         h.inputs.disconnect(&h.source(0));
-        assert_eq!(h.inputs.0.state.lock().unwrap().failure.is_some(), required);
+        assert_eq!(
+            h.inputs.0.processor.lock().unwrap().state.failure.is_some(),
+            required
+        );
     }
     let h = harness(&[true], 2, 1, 8);
     h.clock.advance_to(PhysicalInstant(u64::MAX)).unwrap();
     assert_eq!(
         h.inputs
-            .submit(InputBatch::new(vec![sample(&h, 0, 1, u64::MAX)]), &[])
+            .submit(InputBatch::new(vec![sample(&h, 0, 1, u64::MAX)]))
             .unwrap_err()
             .kind,
         InputErrorKind::Malformed
@@ -448,9 +534,11 @@ fn required_overflow_disconnect_and_checked_mapping_are_terminal_or_rejected() {
             .kind,
         InputErrorKind::Malformed
     );
-    assert!(h.inputs.0.state.lock().unwrap().sources[SourceKey::new(0)]
-        .last
-        .is_none());
+    assert!(
+        h.inputs.0.processor.lock().unwrap().state.sources[SourceKey::new(0)]
+            .last
+            .is_none()
+    );
 }
 /// Checks admission and final execution reservation cannot both win for conflicting work.
 #[test]
@@ -463,7 +551,7 @@ fn admission_and_final_reservation_race_cannot_both_win() {
         std::thread::scope(|scope| {
             let admitted = scope.spawn(|| {
                 barrier.wait();
-                inputs.submit(InputBatch::new(vec![observation]), &[])
+                inputs.submit(InputBatch::new(vec![observation]))
             });
             barrier.wait();
             let reserved = h.reserve(0, Tag::ZERO);
@@ -497,11 +585,7 @@ fn cached_horizon_and_reservations_allocate_nothing_with_maximum_batches() {
                     })
                     .collect();
                 assert_eq!(
-                    h.inputs
-                        .submit(InputBatch::new(batch), &[])
-                        .unwrap()
-                        .tags
-                        .len(),
+                    h.inputs.submit(InputBatch::new(batch)).unwrap().tags.len(),
                     enclaves * 2
                 );
             }
@@ -524,15 +608,15 @@ fn cached_horizon_and_reservations_allocate_nothing_with_maximum_batches() {
             for slot in 0..enclaves {
                 h.complete(slot, Tag::new(Duration::nanoseconds(3), 0));
             }
-            h.inputs.submit(InputBatch::new(vec![]), &[]).unwrap();
-            assert!(h.inputs.0.state.lock().unwrap().retained.len() == 0);
+            h.inputs.submit(InputBatch::new(vec![])).unwrap();
+            assert!(h.inputs.0.processor.lock().unwrap().state.retained.len() == 0);
         }
     }
 }
 
 /// Marks fixture participants active and publishes the next tag.
 fn republish(h: &mut Harness, tag: Tag) {
-    let mut state = h._coordination.coordinator.state.lock();
+    let mut state = h.inputs.0.coordination.lock().unwrap();
     for slot in 0..h.rx.len() {
         let enclave = enclave_key(slot);
         state
@@ -554,37 +638,41 @@ fn consumed_batch_invalidates_queued_grant_until_coordinator_reauthorizes() {
     h.clock.advance_to(PhysicalInstant(10)).unwrap();
     let tag = Tag::new(Duration::nanoseconds(10), 0);
     republish(&mut h, tag);
-    let revision = h._coordination.coordinator.state.lock().revision();
-    h._coordination
-        .coordinator
-        .state
+    let revision = h.inputs.0.coordination.lock().unwrap().revision();
+    h.inputs
+        .0
+        .coordination
         .lock()
+        .unwrap()
         .handle_acquisition(FederateAcquisition::new(revision, tag))
         .unwrap();
     h.inputs
-        .submit(InputBatch::new(vec![sample(&h, 0, 1, 10)]), &[])
+        .submit(InputBatch::new(vec![sample(&h, 0, 1, 10)]))
         .unwrap();
     drain(&h);
     // A backend extension computed for the old publication must not bless the new generation.
-    h._coordination
-        .coordinator
-        .state
+    h.inputs
+        .0
+        .coordination
         .lock()
+        .unwrap()
         .handle_acquisition(FederateAcquisition::new(revision, Tag::FOREVER))
         .unwrap();
-    h._coordination
-        .coordinator
-        .state
+    h.inputs
+        .0
+        .coordination
         .lock()
+        .unwrap()
         .input_progress()
         .unwrap();
     assert!(!h.reserve(0, tag), "a queued grant from before batch admission must be stale even after its envelope was consumed");
     republish(&mut h, tag);
-    let revision = h._coordination.coordinator.state.lock().revision();
-    h._coordination
-        .coordinator
-        .state
+    let revision = h.inputs.0.coordination.lock().unwrap().revision();
+    h.inputs
+        .0
+        .coordination
         .lock()
+        .unwrap()
         .handle_acquisition(FederateAcquisition::new(revision, tag))
         .unwrap();
     assert!(h.reserve(0, tag));
@@ -597,10 +685,9 @@ fn settled_acquisition_releases_successive_frontiers_through_coordinator() {
         FederateAcquisition, FederateSchedulerCoordination, FederateTagAcquisition,
     };
     let mut h = harness(&[true], 2, 0, 8);
-    let inputs = h.inputs.clone();
     let tag = Tag::new(Duration::nanoseconds(2), 0);
     republish(&mut h, tag);
-    let mut state = h._coordination.coordinator.state.lock();
+    let mut state = h.inputs.0.coordination.lock().unwrap();
     // The backend's acquisition has been consumed and capped before the workers wait.
     let revision = state.revision();
     state
@@ -609,23 +696,25 @@ fn settled_acquisition_releases_successive_frontiers_through_coordinator() {
     assert_eq!(state.grant_horizon(), Some(Tag::NEVER));
     drop(state);
     for frontier in [1, 2] {
-        inputs
+        h.inputs
             .advance(&h.source(0), PhysicalInstant(frontier))
             .unwrap();
-        h._coordination
-            .coordinator
-            .state
+        h.inputs
+            .0
+            .coordination
             .lock()
+            .unwrap()
             .input_progress()
             .unwrap();
         assert_eq!(
-            h._coordination.coordinator.state.read().grant_horizon(),
-            Some(inputs.horizon())
+            h.inputs.0.coordination.lock().unwrap().grant_horizon(),
+            Some(h.inputs.horizon())
         );
     }
     let (tx, rx) = std::sync::mpsc::channel();
     let source = h.source(0);
-    let parts = h._coordination;
+    let inputs = h.inputs.0.endpoint.clone();
+    let parts = h.into_parts();
     let results = std::thread::scope(|scope| {
         scope.spawn(move || parts.coordinator.run());
         for (_, mut port) in parts.participants {
@@ -654,7 +743,7 @@ fn source_and_action_handles_cannot_cross_execution_epochs() {
     assert_eq!(
         second
             .inputs
-            .submit(InputBatch::new(vec![foreign_source]), &[])
+            .submit(InputBatch::new(vec![foreign_source]))
             .unwrap_err()
             .kind,
         InputErrorKind::Malformed
@@ -664,7 +753,7 @@ fn source_and_action_handles_cannot_cross_execution_epochs() {
     assert_eq!(
         second
             .inputs
-            .submit(InputBatch::new(vec![foreign_action]), &[])
+            .submit(InputBatch::new(vec![foreign_action]))
             .unwrap_err()
             .kind,
         InputErrorKind::Malformed
@@ -679,7 +768,7 @@ fn source_and_action_handles_cannot_cross_execution_epochs() {
     );
     second
         .inputs
-        .submit(InputBatch::new(vec![sample(&second, 0, 1, 0)]), &[])
+        .submit(InputBatch::new(vec![sample(&second, 0, 1, 0)]))
         .unwrap();
 }
 
@@ -719,7 +808,7 @@ fn coherent_input_does_not_require_idle_nontarget_to_republish() {
     // Only Enclave 7 receives a batch. Enclave 10 remains in wait(), where a
     // FederateResume wake is consumed without publishing another idle candidate.
     h.inputs
-        .submit(InputBatch::new(vec![sample(&h, 0, 1, 0)]), &[])
+        .submit(InputBatch::new(vec![sample(&h, 0, 1, 0)]))
         .unwrap();
     drain(&h);
     let mut state = h.inputs.0.coordination.lock().unwrap();
@@ -752,9 +841,23 @@ fn coherent_input_releases_target_with_unaffected_waiting_port() {
         let h = harness(&[!idle], 2, 0, 8);
         let observation = sample(&h, 0, 1, 0);
         let source = h.source(0);
-        let inputs = h.inputs.clone();
-        let state = inputs.0.coordination.clone();
-        let parts = h._coordination;
+        let inputs = h.inputs.0.endpoint.clone();
+        // Publish the unaffected candidate before starting its real wait path.
+        h.inputs
+            .0
+            .coordination
+            .lock()
+            .unwrap()
+            .handle_scheduler(SchedulerMessage::Publish {
+                enclave: enclave_key(1),
+                next_event: if idle {
+                    None
+                } else {
+                    Some(Tag::new(Duration::nanoseconds(10), 0))
+                },
+            })
+            .unwrap();
+        let parts = h.into_parts();
         let mut ports = parts.participants.into_iter();
         let (_, mut target) = ports.next().unwrap();
         let (_, mut unaffected) = ports.next().unwrap();
@@ -774,27 +877,10 @@ fn coherent_input_releases_target_with_unaffected_waiting_port() {
                 };
                 tx.send((false, success)).unwrap();
             });
-            // This state change acknowledges that the real port's initial Publish
-            // was processed, without any host sleep or fixture republish.
-            let bound = Instant::now() + std::time::Duration::from_secs(2);
-            let candidate = if idle { None } else { Some(future) };
-            let ready = loop {
-                if state.lock().unwrap().candidate(enclave_key(1)) == Some(candidate) {
-                    break true;
-                }
-                if Instant::now() >= bound {
-                    break false;
-                }
-                std::thread::yield_now();
-            };
-            if !ready {
-                parts.abort_handle.abort();
-                panic!("unaffected port did not publish its initial candidate");
-            }
             inputs
                 .submit(
-                    InputBatch::new(vec![observation]),
-                    &[(source, PhysicalInstant(11))],
+                    InputBatch::new(vec![observation])
+                        .with_progress(vec![(source, PhysicalInstant(11))]),
                 )
                 .unwrap();
             scope.spawn(move || {
@@ -847,33 +933,31 @@ fn retained_batches_reclaim_complete_batches_without_releasing_partial_batches()
     for (sequence, time) in [(1, 10), (2, 20)] {
         let mut observation = sample(&h, 0, sequence, time);
         observation.values.push(InputValue::new(&h.action(1), 7));
-        h.inputs
-            .submit(InputBatch::new(vec![observation]), &[])
-            .unwrap();
+        h.inputs.submit(InputBatch::new(vec![observation])).unwrap();
     }
     drain(&h);
     h.complete(0, Tag::new(Duration::nanoseconds(10), 0));
     assert_eq!(
         h.inputs
-            .submit(InputBatch::new(vec![sample(&h, 0, 3, 30)]), &[])
+            .submit(InputBatch::new(vec![sample(&h, 0, 3, 30)]))
             .unwrap_err()
             .kind,
         InputErrorKind::Overflow
     );
     h.complete(1, Tag::new(Duration::nanoseconds(10), 0));
     h.inputs
-        .submit(InputBatch::new(vec![sample(&h, 0, 3, 30)]), &[])
+        .submit(InputBatch::new(vec![sample(&h, 0, 3, 30)]))
         .unwrap();
-    assert_eq!(h.inputs.0.state.lock().unwrap().retained.len(), 2);
+    assert_eq!(h.inputs.0.processor.lock().unwrap().state.retained.len(), 2);
     h.complete(0, Tag::new(Duration::nanoseconds(20), 0));
-    h.inputs.submit(InputBatch::new(vec![]), &[]).unwrap();
-    assert_eq!(h.inputs.0.state.lock().unwrap().retained.len(), 2);
+    h.inputs.submit(InputBatch::new(vec![])).unwrap();
+    assert_eq!(h.inputs.0.processor.lock().unwrap().state.retained.len(), 2);
     h.complete(1, Tag::new(Duration::nanoseconds(20), 0));
-    h.inputs.submit(InputBatch::new(vec![]), &[]).unwrap();
-    assert_eq!(h.inputs.0.state.lock().unwrap().retained.len(), 1);
+    h.inputs.submit(InputBatch::new(vec![])).unwrap();
+    assert_eq!(h.inputs.0.processor.lock().unwrap().state.retained.len(), 1);
     h.complete(0, Tag::new(Duration::nanoseconds(30), 0));
-    h.inputs.submit(InputBatch::new(vec![]), &[]).unwrap();
-    assert_eq!(h.inputs.0.state.lock().unwrap().retained.len(), 0);
+    h.inputs.submit(InputBatch::new(vec![])).unwrap();
+    assert_eq!(h.inputs.0.processor.lock().unwrap().state.retained.len(), 0);
 }
 
 /// Retention storage reuses previously grown capacity across batch turnover.
@@ -907,9 +991,7 @@ fn source_batch_preserves_compiled_action_identity() {
     let h = harness(&[false, false], 2, 3, 8);
     let mut observation = sample(&h, 1, 1, 0);
     observation.values.push(InputValue::new(&h.action(3), 7u32));
-    h.inputs
-        .submit(InputBatch::new(vec![observation]), &[])
-        .unwrap();
+    h.inputs.submit(InputBatch::new(vec![observation])).unwrap();
     for (rx, expected) in h.rx.iter().zip([42u32, 7]) {
         let Some(AsyncEvent::PhysicalBatch(batch)) = rx.try_recv().unwrap() else {
             panic!("source admission must publish a batch to each destination");
@@ -923,9 +1005,10 @@ fn source_batch_preserves_compiled_action_identity() {
     }
 }
 
-/// Admission does not allocate buffers on first publication or after batch reclamation.
+/// Owned processor validation and publication reuse buffers after batch reclamation.
+/// This includes server processing on the measured thread, but excludes producer notifications.
 #[test]
-fn submission_reuses_initialized_and_caller_owned_buffers() {
+fn admission_processor_reuses_initialized_and_caller_owned_buffers() {
     for enclaves in [1, 8, 16] {
         let h = harness(&[false], enclaves, 0, 8);
         h.clock.advance_to(PhysicalInstant(100)).unwrap();
@@ -941,7 +1024,7 @@ fn submission_reuses_initialized_and_caller_owned_buffers() {
                 .collect();
             let batch = InputBatch::new(batch);
             crate::clock::ALLOCATIONS.with(|count| count.set(Some(0)));
-            let result = h.inputs.submit(batch, &[]);
+            let result = h.inputs.submit(batch);
             let allocations = crate::clock::ALLOCATIONS.with(|count| count.replace(None).unwrap());
             assert_eq!(result.unwrap().tags.len(), 2 * enclaves);
             assert_eq!(allocations, 0, "enclaves={enclaves}, turn={turn}");
@@ -958,29 +1041,23 @@ fn submission_reuses_initialized_and_caller_owned_buffers() {
     }
 }
 
-/// Progress uses no admission buffers beyond the hosted coordinator's notification.
+/// Measure owned processor work, including validation and publication, on this thread.
+/// The separate producer notification uses std mpsc and can allocate; it is not counted here.
 #[test]
-fn progress_submission_only_allocates_for_coordinator_notification() {
-    // Measure the real notification paths separately from admission storage.
-    let baseline = harness(&[true], 2, 0, 8);
-    crate::clock::ALLOCATIONS.with(|count| count.set(Some(0)));
-    baseline.inputs.0.abort.input_progress();
-    baseline.inputs.wake_schedulers();
-    let notification_allocations =
-        crate::clock::ALLOCATIONS.with(|count| count.replace(None).unwrap());
+fn progress_processor_reuses_initialized_and_caller_owned_buffers() {
     for sources in [1, 16, 64] {
         let h = harness(&vec![true; sources], 2, 0, 8);
-        // Initialize platform mutex backing storage without submitting input.
         h.clock.now().unwrap();
         h.inputs.horizon();
-        let progress: Vec<_> = (0..sources)
+        let progress = (0..sources)
             .map(|source| (h.source(source), PhysicalInstant(1)))
             .collect();
+        let batch = InputBatch::new(Vec::new()).with_progress(progress);
         crate::clock::ALLOCATIONS.with(|count| count.set(Some(0)));
-        let result = h.inputs.submit(InputBatch::new(Vec::new()), &progress);
+        let result = h.inputs.submit(batch);
         let allocations = crate::clock::ALLOCATIONS.with(|count| count.replace(None).unwrap());
         assert!(result.unwrap().tags.is_empty());
-        assert_eq!(allocations, notification_allocations, "sources={sources}");
+        assert_eq!(allocations, 0, "sources={sources}");
     }
 }
 
@@ -1004,7 +1081,7 @@ fn rejected_batch_does_not_leak_tentative_source_updates() {
         };
         assert_eq!(
             h.inputs
-                .submit(InputBatch::new(observations), &progress)
+                .submit(InputBatch::new(observations).with_progress(progress))
                 .unwrap_err()
                 .kind,
             InputErrorKind::Malformed
@@ -1014,10 +1091,313 @@ fn rejected_batch_does_not_leak_tentative_source_updates() {
         let receipt = h
             .inputs
             .submit(
-                InputBatch::new(vec![sample(&h, 0, 1, 1)]),
-                &[(h.source(0), PhysicalInstant(2))],
+                InputBatch::new(vec![sample(&h, 0, 1, 1)])
+                    .with_progress(vec![(h.source(0), PhysicalInstant(2))]),
             )
             .unwrap();
         assert_eq!(receipt.tags, [Tag::new(Duration::nanoseconds(1), 0)]);
     }
+}
+
+/// A completed admission result survives coordinator ownership ending before its receiver runs.
+#[test]
+fn admitted_reply_survives_processor_exit() {
+    let h = harness(&[false], 1, 0, 8);
+    let inputs = h.inputs.0.endpoint.clone();
+    inputs
+        .0
+        .requests
+        .send(AdmissionRequest {
+            arrival: Instant::now(),
+            operation: AdmissionOperation::Submit(InputBatch::new(Vec::new())),
+        })
+        .unwrap();
+    h.inputs
+        .0
+        .processor
+        .lock()
+        .unwrap()
+        .process(&mut h.inputs.0.coordination.lock().unwrap());
+    drop(h);
+    assert!(inputs.0.replies.recv().unwrap().is_ok());
+}
+
+/// Concurrent callers reuse one lane during admission-only startup.
+#[test]
+fn concurrent_startup_requests_recycle_the_reply_lane() {
+    let h = harness(&[false; 4], 1, 1, 8);
+    let sources: Vec<_> = (0..4).map(|index| h.source(index)).collect();
+    let inputs = h.inputs.0.endpoint.clone();
+    let mut parts = h.into_parts();
+    parts.coordinator.execution_open = false;
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        scope.spawn(move || parts.coordinator.run());
+        for (index, source) in sources.into_iter().enumerate() {
+            let inputs = inputs.clone();
+            let done = done_tx.clone();
+            scope.spawn(move || {
+                let result = (0..64).try_for_each(|_| {
+                    let error = inputs
+                        .advance(&source, PhysicalInstant(u64::MAX))
+                        .unwrap_err();
+                    assert_eq!(
+                        error.source_id.as_deref(),
+                        Some(format!("s{index}").as_str())
+                    );
+                    assert_eq!(error.kind, InputErrorKind::Malformed);
+                    inputs.advance(&source, PhysicalInstant(1))
+                });
+                done.send(result).unwrap();
+            });
+        }
+        let results: Vec<_> = (0..4)
+            .map(|_| done_rx.recv_timeout(std::time::Duration::from_secs(2)))
+            .collect();
+        inputs.finish().unwrap();
+        parts.abort_handle.abort();
+        assert!(results
+            .into_iter()
+            .all(|result| matches!(result, Ok(Ok(())))));
+    });
+}
+
+/// Closing the service wakes the checked-out reply waiter and all blocked lease callers.
+#[test]
+fn shutdown_and_processor_unwind_release_all_callers() {
+    for unwind in [false, true] {
+        let h = harness(&[false], 1, 0, 8);
+        let inputs = h.inputs.0.endpoint.clone();
+        let weak = Arc::downgrade(&inputs.0);
+        let source = h.source(0);
+        let parts = h.into_parts();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                let inputs = inputs.clone();
+                let source = source.clone();
+                let done = done_tx.clone();
+                scope.spawn(move || {
+                    done.send(inputs.advance(&source, PhysicalInstant(1)))
+                        .unwrap();
+                });
+            }
+            let deadline = Instant::now() + std::time::Duration::from_secs(2);
+            while inputs.0.requests.is_empty() && Instant::now() < deadline {
+                std::thread::yield_now();
+            }
+            let queued = inputs.0.requests.len() == 1;
+            if unwind {
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _coordinator = parts.coordinator;
+                    panic!("injected admission-owner unwind");
+                }));
+            } else {
+                inputs.finish().unwrap();
+                drop(parts.coordinator);
+            }
+            let results: Vec<_> = (0..4)
+                .map(|_| done_rx.recv_timeout(std::time::Duration::from_secs(2)))
+                .collect();
+            assert!(queued, "first request never occupied the bounded lane");
+            assert!(results.into_iter().all(|result| matches!(
+                result,
+                Ok(Err(InputError {
+                    kind: InputErrorKind::Disconnected,
+                    ..
+                }))
+            )));
+        });
+        drop(source);
+        drop(inputs);
+        assert!(
+            weak.upgrade().is_none(),
+            "queued handles must not retain an endpoint cycle"
+        );
+    }
+}
+
+/// The real message protocol serializes admission against the final execution permit.
+#[test]
+fn channel_admission_and_final_permit_cannot_both_win() {
+    use crate::sched::federate::FederateSchedulerCoordination;
+    for _ in 0..16 {
+        let h = harness(&[false], 1, 0, 8);
+        let observation = sample(&h, 0, 1, 0);
+        let inputs = h.inputs.0.endpoint.clone();
+        let parts = h.into_parts();
+        let mut port = parts.participants.into_iter().next().unwrap().1;
+        let barrier = std::sync::Barrier::new(2);
+        let (receipt_tx, receipt_rx) = std::sync::mpsc::channel();
+        let (permit_tx, permit_rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(move || parts.coordinator.run());
+            let barrier = &barrier;
+            let producer = inputs.clone();
+            scope.spawn(move || {
+                barrier.wait();
+                receipt_tx
+                    .send(producer.submit(InputBatch::new(vec![observation])))
+                    .unwrap();
+            });
+            scope.spawn(move || {
+                barrier.wait();
+                permit_tx.send(port.begin_tag(Tag::ZERO)).unwrap();
+            });
+            let receipt = receipt_rx.recv_timeout(std::time::Duration::from_secs(2));
+            let permit = permit_rx.recv_timeout(std::time::Duration::from_secs(2));
+            parts.abort_handle.abort();
+            match receipt.unwrap() {
+                Ok(_) => assert!(!permit.unwrap()),
+                Err(error) => {
+                    assert!(permit.unwrap());
+                    assert_eq!(error.kind, InputErrorKind::Late);
+                }
+            }
+        });
+    }
+}
+
+/// Both protocol orderings have deterministic and mutually exclusive outcomes.
+#[test]
+fn final_permit_and_batch_ordering_is_authoritative() {
+    use crate::sched::federate::FederateSchedulerCoordination;
+    for permit_first in [false, true] {
+        let h = harness(&[false], 1, 0, 8);
+        let observation = sample(&h, 0, 1, 0);
+        let inputs = h.inputs.0.endpoint.clone();
+        let parts = h.into_parts();
+        let mut port = parts.participants.into_iter().next().unwrap().1;
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(move || parts.coordinator.run());
+            scope.spawn(move || {
+                let early = permit_first.then(|| port.begin_tag(Tag::ZERO));
+                let receipt = inputs.submit(InputBatch::new(vec![observation]));
+                let permit = early.unwrap_or_else(|| port.begin_tag(Tag::ZERO));
+                done_tx.send((receipt, permit)).unwrap();
+            });
+            let result = done_rx.recv_timeout(std::time::Duration::from_secs(2));
+            parts.abort_handle.abort();
+            let (receipt, permit) = result.unwrap();
+            assert_eq!(permit, permit_first);
+            if permit_first {
+                assert_eq!(receipt.unwrap_err().kind, InputErrorKind::Late);
+            } else {
+                assert!(receipt.is_ok());
+            }
+        });
+    }
+}
+
+/// Dropping a queued request must not drop the last endpoint while its channel lock is held.
+#[test]
+fn queued_request_cannot_deadlock_last_endpoint_drop() {
+    let h = harness(&[false], 1, 0, 8);
+    let source = h.source(0);
+    let inputs = h.inputs.0.endpoint.clone();
+    let weak = Arc::downgrade(&inputs.0);
+    let parts = h.into_parts();
+    inputs
+        .0
+        .requests
+        .send(AdmissionRequest {
+            arrival: Instant::now(),
+            operation: AdmissionOperation::Advance(source, PhysicalInstant(1)),
+        })
+        .unwrap();
+    drop(inputs);
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        drop(parts);
+        done_tx.send(()).unwrap();
+    });
+    done_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("processor drop must not reacquire its own channel lock");
+    worker.join().unwrap();
+    assert!(weak.upgrade().is_none());
+}
+
+/// Backend cleanup can wait for a producer only after admission replies are released.
+#[test]
+fn backend_stop_can_wait_for_a_pending_source_caller() {
+    use crate::sched::federate::{
+        FederateAcquisition, FederateCompletion, FederateCoordinationBackend,
+        FederateCoordinationError, FederatePublication,
+    };
+    struct JoiningBackend {
+        result: std::sync::mpsc::Receiver<Result<InputReceipt, InputError>>,
+        released: Arc<std::sync::atomic::AtomicBool>,
+    }
+    impl FederateCoordinationBackend for JoiningBackend {
+        fn publish(&mut self, _: FederatePublication) -> Result<(), FederateCoordinationError> {
+            Ok(())
+        }
+        fn progress(
+            &mut self,
+            _: std::time::Duration,
+        ) -> Result<Option<FederateAcquisition>, FederateCoordinationError> {
+            Ok(None)
+        }
+        fn complete(&mut self, _: FederateCompletion) -> Result<(), FederateCoordinationError> {
+            Ok(())
+        }
+        fn stop(&mut self) -> Result<(), FederateCoordinationError> {
+            let released = matches!(
+                self.result
+                    .recv_timeout(std::time::Duration::from_millis(100)),
+                Ok(Err(InputError {
+                    kind: InputErrorKind::Disconnected,
+                    ..
+                }))
+            );
+            self.released
+                .store(released, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+    let (tx, rx) = kanal::bounded(1);
+    let (result_tx, result_rx) = std::sync::mpsc::channel();
+    let released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut parts = FederateCoordinationParts::new(
+        [(enclave_key(0), tx, rx)],
+        LifecyclePolicy::KeepAlive,
+        JoiningBackend {
+            result: result_rx,
+            released: released.clone(),
+        },
+    )
+    .unwrap();
+    let (inputs, processor) = AdmissionProcessor::new(
+        InputConfig {
+            max_batch_values: 1,
+            max_staged_batches: 1,
+            sources: Default::default(),
+        },
+        Default::default(),
+        ManualClock::new(PhysicalClockDomainId(7)).unwrap(),
+        Default::default(),
+        &mut parts.coordinator.state,
+        parts.abort_handle.clone(),
+    );
+    parts.coordinator.inputs = Some(processor);
+    // Ensure termination precedes the queued request notification.
+    parts.abort_handle.abort();
+    let producer = inputs.clone();
+    let caller = std::thread::spawn(move || {
+        let _ = result_tx.send(producer.submit(InputBatch::new(Vec::new())));
+    });
+    let deadline = Instant::now() + std::time::Duration::from_secs(2);
+    while inputs.0.requests.is_empty() && Instant::now() < deadline {
+        std::thread::yield_now();
+    }
+    let queued = !inputs.0.requests.is_empty();
+    parts.coordinator.run();
+    caller.join().unwrap();
+    assert!(queued);
+    assert!(
+        released.load(std::sync::atomic::Ordering::SeqCst),
+        "backend stop began before the pending reply waiter was released"
+    );
 }

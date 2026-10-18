@@ -1353,7 +1353,7 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
     );
     let FederateCoordinationParts {
         abort_handle,
-        coordinator,
+        mut coordinator,
         participants,
         ..
     } = match parts {
@@ -1363,6 +1363,8 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
             return Err(error);
         }
     };
+    #[cfg(feature = "hosted-source-input")]
+    let mut participants = participants;
     backend_phase.completed();
     let origin = Instant::now();
     #[cfg(feature = "hosted-manual-clock")]
@@ -1398,7 +1400,7 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
     };
     #[cfg(feature = "hosted-source-input")]
     let inputs = physical_inputs.map(|config| {
-        crate::input::InputAdmission::new(
+        let (endpoint, processor) = crate::input::AdmissionProcessor::new(
             config,
             input_targets.unwrap(),
             selected_clock.clone(),
@@ -1406,9 +1408,14 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
                 .iter()
                 .map(|(key, storage)| (*key, storage.scheduler_event_tx()))
                 .collect(),
-            coordinator.state.shared(),
+            &mut coordinator.state,
             abort_handle.clone(),
-        )
+        );
+        coordinator.inputs = Some(processor);
+        for (_, port) in participants.iter_mut() {
+            port.input_enabled = true;
+        }
+        endpoint
     });
     let shutdown = RunShutdown {
         abort: abort_handle.clone(),
@@ -1423,39 +1430,12 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
         selected_clock,
     };
     let _cleanup = CloseRunOnDrop(shutdown.clone());
-    for (enclave, storage) in &mut storages {
-        let initialized = std::panic::catch_unwind(AssertUnwindSafe(|| {
-            storage.initialize_states(
-                Some(*enclave),
-                #[cfg(feature = "hosted-source-input")]
-                inputs.as_ref(),
-                #[cfg(feature = "hosted-manual-clock")]
-                clock_run.0.as_ref(),
-            )
-        }));
-        match initialized {
-            Ok(Ok(())) => {}
-            Ok(Err(source)) => {
-                storage_phase.failed("initialization");
-                shutdown.close();
-                return Err(ExecuteOwnedFederateError::EnclaveInitialization {
-                    enclave: *enclave,
-                    source,
-                });
-            }
-            Err(payload) => {
-                shutdown.close();
-                std::panic::resume_unwind(payload);
-            }
-        }
-    }
-    if deferred_initialization {
-        storage_phase.completed();
-    }
     let dispatch = tracing::dispatcher::get_default(Clone::clone);
     let parent_span = tracing::Span::current();
     let mut worker_phase = ConstructionPhase::started("workers");
+    coordinator.execution_open = false;
     let (results, failure) = std::thread::scope(|scope| {
+        let _startup_cleanup = CloseRunOnDrop(shutdown.clone());
         let (result_tx, result_rx) = std::sync::mpsc::channel();
         let coordinator_thread = if fail_spawn(None) {
             Err(std::io::Error::other(
@@ -1486,6 +1466,39 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
                 );
             }
         };
+        for (enclave, storage) in &mut storages {
+            let initialized = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                storage.initialize_states(
+                    Some(*enclave),
+                    #[cfg(feature = "hosted-source-input")]
+                    inputs.as_ref(),
+                    #[cfg(feature = "hosted-manual-clock")]
+                    clock_run.0.as_ref(),
+                )
+            }));
+            match initialized {
+                Ok(Ok(())) => {}
+                Ok(Err(source)) => {
+                    storage_phase.failed("initialization");
+                    shutdown.close();
+                    return (
+                        TinySecondaryMap::with_capacity(enclave_count),
+                        Some(ExecuteOwnedFederateError::EnclaveInitialization {
+                            enclave: *enclave,
+                            source,
+                        }),
+                    );
+                }
+                Err(payload) => {
+                    shutdown.close();
+                    std::panic::resume_unwind(payload);
+                }
+            }
+        }
+        if deferred_initialization {
+            storage_phase.completed();
+        }
+        abort_handle.open_execution();
         let abort = || shutdown.close();
         let mut handles = Vec::with_capacity(enclave_count);
         let mut failure = None;
@@ -1637,6 +1650,12 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
 
     // Results now own returned states; close their capabilities before any early return.
     shutdown.close();
+    if matches!(
+        failure,
+        Some(ExecuteOwnedFederateError::EnclaveInitialization { .. })
+    ) {
+        return Err(failure.expect("matched initialization failure"));
+    }
     #[cfg(feature = "hosted-manual-clock")]
     if let Some(clock) = &clock_run.0 {
         if let Some(error) = shutdown

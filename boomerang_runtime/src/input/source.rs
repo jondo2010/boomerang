@@ -18,12 +18,8 @@ impl InputSourceHandle {
     }
     /// Submit a caller-prepared batch and source progress.
     /// The batch can include other sources from the same admission service and execution.
-    pub fn submit(
-        &self,
-        batch: InputBatch,
-        frontiers: &[(InputSourceHandle, PhysicalInstant)],
-    ) -> Result<InputReceipt, InputError> {
-        self.admission.submit(batch, frontiers)
+    pub fn submit(&self, batch: InputBatch) -> Result<InputReceipt, InputError> {
+        self.admission.submit(batch)
     }
     /// Advance this source's exclusive acquisition frontier without advancing the clock.
     pub fn advance(&self, frontier: PhysicalInstant) -> Result<(), InputError> {

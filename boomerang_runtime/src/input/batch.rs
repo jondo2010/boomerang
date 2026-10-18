@@ -47,10 +47,11 @@ pub struct InputBatch {
     pub(super) observations: Vec<InputObservation>,
     pub(super) envelopes: tinymap::TinySecondaryMap<EnclaveIndex, InputBatchEvent>,
     tags: Vec<Tag>,
+    pub(super) progress: Vec<(InputSourceHandle, PhysicalInstant)>,
 }
 
 impl InputBatch {
-    /// Prepare delivery buffers for the supplied observations before admission takes its locks.
+    /// Prepare delivery buffers for the supplied observations before submission.
     /// An empty batch needs no buffers and can be used to report progress only.
     pub fn new(observations: Vec<InputObservation>) -> Self {
         let mut counts = tinymap::TinySecondaryMap::<EnclaveIndex, usize>::new();
@@ -80,7 +81,14 @@ impl InputBatch {
             observations,
             envelopes,
             tags: Vec::with_capacity(values),
+            progress: Vec::new(),
         }
+    }
+
+    /// Attach caller-owned exclusive source frontiers. Values and progress are admitted together.
+    pub fn with_progress(mut self, progress: Vec<(InputSourceHandle, PhysicalInstant)>) -> Self {
+        self.progress = progress;
+        self
     }
 
     /// Move validated payloads into their prepared destination buffers.

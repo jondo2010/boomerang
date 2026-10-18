@@ -435,7 +435,7 @@ impl FederateCoordinationState {
             .is_some_and(|p| p.completed.is_some_and(|completed| tag <= completed))
     }
 
-    /// Invalidates issued grants and the existing publication fence before atomic fanout.
+    /// Invalidates provisional grants and the publication fence before atomic fanout.
     #[cfg(feature = "hosted-source-input")]
     pub(crate) fn input_publishing(&mut self, affected: impl Iterator<Item = EnclaveIndex>) {
         self.revise_publication();
@@ -450,7 +450,7 @@ impl FederateCoordinationState {
         }
     }
 
-    /// Checks the final execution boundary under the same lock as coherent publication.
+    /// Issues an irrevocable execution permit after the latest coherent publication.
     #[cfg(feature = "hosted-source-input")]
     pub(crate) fn begin_tag(&mut self, enclave: EnclaveIndex, tag: Tag) -> bool {
         let Some(cap) = self.input_horizon else {
@@ -871,51 +871,6 @@ impl FederateCoordinationState {
             (Some(_), _) => CoordinationPhase::Active,
         };
         Ok(actions)
-    }
-}
-
-/// The single coordinator state; hosted input builds share its execution/publication lock.
-/// Native builds retain direct ownership and compile away locking entirely.
-pub(crate) struct CoordinationStateCell {
-    #[cfg(feature = "hosted-source-input")]
-    inner: std::sync::Arc<std::sync::Mutex<FederateCoordinationState>>,
-    #[cfg(not(feature = "hosted-source-input"))]
-    inner: FederateCoordinationState,
-}
-impl CoordinationStateCell {
-    /// Wraps the authoritative state before participants are constructed.
-    pub(crate) fn new(state: FederateCoordinationState) -> Self {
-        Self {
-            #[cfg(feature = "hosted-source-input")]
-            inner: std::sync::Arc::new(std::sync::Mutex::new(state)),
-            #[cfg(not(feature = "hosted-source-input"))]
-            inner: state,
-        }
-    }
-    /// Borrows coordinator state in ordinary builds.
-    #[cfg(not(feature = "hosted-source-input"))]
-    pub(crate) fn lock(&mut self) -> &mut FederateCoordinationState {
-        &mut self.inner
-    }
-    /// Reads coordinator state in ordinary builds.
-    #[cfg(not(feature = "hosted-source-input"))]
-    pub(crate) fn read(&self) -> &FederateCoordinationState {
-        &self.inner
-    }
-    /// Serializes hosted execution, publication, and coordination transitions.
-    #[cfg(feature = "hosted-source-input")]
-    pub(crate) fn lock(&self) -> std::sync::MutexGuard<'_, FederateCoordinationState> {
-        self.inner.lock().unwrap()
-    }
-    /// Reads the shared authoritative state.
-    #[cfg(feature = "hosted-source-input")]
-    pub(crate) fn read(&self) -> std::sync::MutexGuard<'_, FederateCoordinationState> {
-        self.lock()
-    }
-    /// Shares the actual state with hosted action ingress and scheduler ports.
-    #[cfg(feature = "hosted-source-input")]
-    pub(crate) fn shared(&self) -> std::sync::Arc<std::sync::Mutex<FederateCoordinationState>> {
-        self.inner.clone()
     }
 }
 

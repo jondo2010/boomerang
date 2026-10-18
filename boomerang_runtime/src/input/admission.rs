@@ -1,10 +1,14 @@
 //! Source protocol validation and batch publication.
 //!
-//! Admission locks source state before coordinator state. Coordinator paths do not
-//! acquire the source lock. Both locks remain held through validation and publication.
+//! The coordinator owns validation, source progress, and publication state.
 //! The coordinator owns execution authority and publication fences.
 //! A partially published batch stops execution before admission requests an abort.
 //! Required-source protocol errors, overflow, and disconnection also abort execution.
+//!
+//! Producers lease one bounded request lane. Owned batches carry their progress.
+//! The coordinator replies through one reusable channel, separate from scheduler
+//! command and final-permit replies. The report-queue wake can allocate; this
+//! transport does not make complete submissions allocation-free.
 
 use super::{
     retention::{Reservation, RetainedBatches},
@@ -18,7 +22,7 @@ use crate::{
     AsyncEvent, Duration, Tag,
 };
 use std::{
-    sync::{Arc, Mutex},
+    sync::{Arc, OnceLock, Weak},
     time::Instant,
 };
 
@@ -64,26 +68,183 @@ struct AdmissionState {
     scratch: AdmissionScratch,
     horizon: Tag,
     failure: Option<InputError>,
-    closed: bool,
 }
-/// The shared clock, coordinator, source state, and scheduler mailboxes.
-pub(super) struct AdmissionService {
-    pub(super) clock: SelectedClock,
-    coordination: Arc<Mutex<FederateCoordinationState>>,
+/// Immutable execution identity and publication endpoints.
+struct AdmissionEngine {
+    clock: SelectedClock,
+    endpoint: Weak<AdmissionService>,
     senders: tinymap::TinySecondaryMap<EnclaveIndex, crate::Sender<AsyncEvent>>,
     max_values: usize,
     max_batches: usize,
-    state: Mutex<AdmissionState>,
     abort: crate::sched::federate::FederateAbortHandle,
 }
-/// An admission handle for one execution. You can clone it into application workers.
-/// All clones share the same source state and execution identity.
+
+/// Single-owner protocol processor. Only the coordinator processes requests.
+pub(crate) struct AdmissionProcessor {
+    engine: AdmissionEngine,
+    state: AdmissionState,
+    requests: crate::Receiver<AdmissionRequest>,
+    replies: crate::Sender<Result<InputReceipt, InputError>>,
+    leases: crate::Sender<()>,
+    failure: Arc<OnceLock<InputError>>,
+}
+
+/// One owned request occupies the reusable synchronous lane.
+struct AdmissionRequest {
+    arrival: Instant,
+    operation: AdmissionOperation,
+}
+
+/// Request payload owns every value that crosses the thread boundary.
+enum AdmissionOperation {
+    Submit(InputBatch),
+    Advance(InputSourceHandle, PhysicalInstant),
+    Disconnect(InputSourceHandle),
+}
+
+/// Channel endpoints and immutable execution metadata. No protocol state is shared.
+pub(super) struct AdmissionService {
+    pub(super) clock: SelectedClock,
+    sources: tinymap::TinyMap<SourceKey, ()>,
+    requests: crate::Sender<AdmissionRequest>,
+    replies: crate::Receiver<Result<InputReceipt, InputError>>,
+    leases: crate::Receiver<()>,
+    lease_return: crate::Sender<()>,
+    failure: Arc<OnceLock<InputError>>,
+    notify: crate::sched::federate::FederateAbortHandle,
+}
+
+/// A synchronous producer endpoint for one execution. Clones share one bounded request lane.
 #[derive(Clone)]
 pub struct InputAdmission(pub(super) Arc<AdmissionService>);
 
 impl std::fmt::Debug for InputAdmission {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("InputAdmission").finish_non_exhaustive()
+    }
+}
+
+impl InputAdmission {
+    /// Bind a compiled source index to this execution.
+    pub(crate) fn source_handle(&self, key: SourceKey) -> Result<InputSourceHandle, InputError> {
+        if self.0.sources.get(key).is_none() {
+            return Err(InputError::configuration_error());
+        }
+        Ok(InputSourceHandle {
+            key,
+            admission: self.clone(),
+        })
+    }
+
+    /// Submit caller-owned observations and progress. Wait until the coordinator admits them.
+    /// Prepare the batch before this call. Request and reply channel storage is reused.
+    pub fn submit(&self, batch: InputBatch) -> Result<InputReceipt, InputError> {
+        self.request(AdmissionOperation::Submit(batch))
+    }
+
+    /// Publish an exclusive acquisition frontier without advancing the selected clock.
+    pub fn advance(
+        &self,
+        source: &InputSourceHandle,
+        frontier: PhysicalInstant,
+    ) -> Result<(), InputError> {
+        self.request(AdmissionOperation::Advance(source.clone(), frontier))
+            .map(|_| ())
+    }
+
+    /// Disconnect a source under its required or optional error policy.
+    pub fn disconnect(&self, source: &InputSourceHandle) -> InputError {
+        self.request(AdmissionOperation::Disconnect(source.clone()))
+            .unwrap_err()
+    }
+
+    fn request(&self, operation: AdmissionOperation) -> Result<InputReceipt, InputError> {
+        let request = AdmissionRequest {
+            arrival: Instant::now(),
+            operation,
+        };
+        // The lease pairs a single outstanding request with its reusable reply channel.
+        self.0.leases.recv().map_err(|_| self.closed_error())?;
+        let lease = RequestLease(&self.0.lease_return);
+        self.0
+            .requests
+            .send(request)
+            .map_err(|_| self.closed_error())?;
+        self.0.notify.input_ready();
+        let response = self.0.replies.recv().map_err(|_| self.closed_error())?;
+        drop(lease);
+        response
+    }
+
+    fn closed_error(&self) -> InputError {
+        self.0
+            .failure
+            .get()
+            .cloned()
+            .unwrap_or_else(|| InputError::new(InputErrorKind::Disconnected))
+    }
+
+    /// Close all wait paths before application state or workers are dropped.
+    pub(crate) fn finish(&self) -> Result<(), InputError> {
+        let _ = self.0.leases.close();
+        let _ = self.0.requests.close();
+        // The processor owns the only reply sender. Dropping it wakes a pending
+        // caller while preserving a receipt that was already queued.
+        self.0.notify.abort();
+        self.0.failure.get().cloned().map_or(Ok(()), Err)
+    }
+}
+
+/// Returns the reusable lane on normal return and unwinding.
+struct RequestLease<'a>(&'a crate::Sender<()>);
+impl Drop for RequestLease<'_> {
+    fn drop(&mut self) {
+        let _ = self.0.try_send(());
+    }
+}
+
+impl Drop for AdmissionProcessor {
+    fn drop(&mut self) {
+        // Kanal clears queued requests under its lock. Their source handles can
+        // own the last endpoint. Keep it alive until that lock has been released.
+        let endpoint = self.engine.endpoint.upgrade();
+        if let Some(error) = &self.state.failure {
+            let _ = self.failure.set(error.clone());
+        }
+        let _ = self.leases.close();
+        let _ = self.requests.close();
+        drop(endpoint);
+        // Let the sole reply sender drop naturally so an admitted receipt survives.
+    }
+}
+
+impl AdmissionProcessor {
+    /// Process at most one owned request. The report queue provides wakeup and ordering.
+    pub(crate) fn process(&mut self, coordination: &mut FederateCoordinationState) {
+        let Ok(Some(request)) = self.requests.try_recv() else {
+            return;
+        };
+        let result = match request.operation {
+            AdmissionOperation::Submit(batch) => {
+                self.engine
+                    .submit(&mut self.state, coordination, batch, request.arrival)
+            }
+            AdmissionOperation::Advance(source, frontier) => self.engine.submit_progress(
+                &mut self.state,
+                coordination,
+                &[(source, frontier)],
+                request.arrival,
+            ),
+            AdmissionOperation::Disconnect(source) => {
+                Err(self
+                    .engine
+                    .disconnect(&mut self.state, coordination, &source, request.arrival))
+            }
+        };
+        if let Some(error) = &self.state.failure {
+            let _ = self.failure.set(error.clone());
+        }
+        let _ = self.replies.try_send(result);
     }
 }
 
@@ -96,16 +257,17 @@ fn aggregate(frontiers: impl Iterator<Item = Option<Tag>>) -> Tag {
         .unwrap_or(Tag::FOREVER)
 }
 
-impl InputAdmission {
-    /// Create source protocol state and share the coordinator before startup.
+impl AdmissionProcessor {
+    /// Create the endpoint and owned processor before startup.
     pub(crate) fn new(
         config: InputConfig,
         delays: tinymap::TinyMap<SourceKey, Duration>,
         clock: impl Into<SelectedClock>,
         senders: tinymap::TinySecondaryMap<EnclaveIndex, crate::Sender<AsyncEvent>>,
-        coordination: Arc<Mutex<FederateCoordinationState>>,
+        coordination: &mut FederateCoordinationState,
         abort: crate::sched::federate::FederateAbortHandle,
-    ) -> Self {
+    ) -> (InputAdmission, Self) {
+        let source_keys = config.sources.values().map(|_| ()).collect();
         let sources: tinymap::TinyMap<SourceKey, SourceState> = config
             .sources
             .into_iter()
@@ -120,39 +282,57 @@ impl InputAdmission {
             })
             .collect();
         let horizon = aggregate(sources.values().filter(|s| s.required).map(|_| None));
-        coordination.lock().unwrap().input_horizon = Some(horizon);
+        coordination.input_horizon = Some(horizon);
         let scratch = AdmissionScratch {
             sources: sources.values().map(|_| PendingSource::default()).collect(),
             reservations: Vec::with_capacity(config.max_batch_values),
         };
         let retained = RetainedBatches::new(config.max_batch_values, config.max_staged_batches);
-        Self(Arc::new(AdmissionService {
-            clock: clock.into(),
-            coordination,
-            senders,
-            max_values: config.max_batch_values,
-            max_batches: config.max_staged_batches,
-            state: Mutex::new(AdmissionState {
-                sources,
-                retained,
-                scratch,
-                horizon,
-                failure: None,
-                closed: false,
-            }),
-            abort,
-        }))
+        let clock = clock.into();
+        let failure = Arc::new(OnceLock::new());
+        let (request_tx, requests) = kanal::bounded(1);
+        let (replies, reply_rx) = kanal::bounded(1);
+        let (leases, lease_rx) = kanal::bounded(1);
+        leases.send(()).expect("new lease channel is open");
+        let endpoint = InputAdmission(Arc::new(AdmissionService {
+            clock: clock.clone(),
+            sources: source_keys,
+            requests: request_tx,
+            replies: reply_rx,
+            leases: lease_rx,
+            lease_return: leases.clone(),
+            failure: failure.clone(),
+            notify: abort.clone(),
+        }));
+        let weak_endpoint = Arc::downgrade(&endpoint.0);
+        (
+            endpoint,
+            Self {
+                engine: AdmissionEngine {
+                    clock,
+                    endpoint: weak_endpoint,
+                    senders,
+                    max_values: config.max_batch_values,
+                    max_batches: config.max_staged_batches,
+                    abort,
+                },
+                state: AdmissionState {
+                    sources,
+                    retained,
+                    scratch,
+                    horizon,
+                    failure: None,
+                },
+                requests,
+                replies,
+                leases,
+                failure,
+            },
+        )
     }
-    /// Bind a compiled source index to this admission service.
-    pub(crate) fn source_handle(&self, key: SourceKey) -> Result<InputSourceHandle, InputError> {
-        if self.0.state.lock().unwrap().sources.get(key).is_none() {
-            return Err(InputError::configuration_error());
-        }
-        Ok(InputSourceHandle {
-            key,
-            admission: self.clone(),
-        })
-    }
+}
+
+impl AdmissionEngine {
     fn reject(
         &self,
         state: &mut AdmissionState,
@@ -184,59 +364,82 @@ impl InputAdmission {
                 )
             {
                 state.failure.get_or_insert_with(|| diagnostic.clone());
-                self.0.abort.abort();
+                self.abort.abort();
             }
         }
         diagnostic
     }
     /// Disconnect a source. Previously submitted optional observations remain available for execution.
-    pub fn disconnect(&self, source: &InputSourceHandle) -> InputError {
-        let mut state = self.0.state.lock().unwrap();
-        if !Arc::ptr_eq(&source.admission.0, &self.0) || state.sources.get(source.key).is_none() {
+    fn disconnect(
+        &self,
+        state: &mut AdmissionState,
+        coordination: &mut FederateCoordinationState,
+        source: &InputSourceHandle,
+        arrival: Instant,
+    ) -> InputError {
+        if !Weak::ptr_eq(&Arc::downgrade(&source.admission.0), &self.endpoint)
+            || state.sources.get(source.key).is_none()
+        {
             return InputError::new(InputErrorKind::Malformed);
         }
         let diagnostic = self.reject(
-            &mut state,
+            state,
             Some(source.key),
             InputErrorKind::Disconnected,
-            Instant::now(),
+            arrival,
         );
         if state.failure.is_some() {
-            self.0.coordination.lock().unwrap().input_horizon = Some(Tag::NEVER);
+            coordination.input_horizon = Some(Tag::NEVER);
         }
         diagnostic
     }
-    /// Publish an exclusive acquisition frontier, including progress from an idle source.
-    /// Future acquisitions must be greater than or equal to the frontier. Progress
-    /// may exceed the current clock time; it does not advance that clock.
-    pub fn advance(
+    fn submit_progress(
         &self,
-        source: &InputSourceHandle,
-        frontier: PhysicalInstant,
-    ) -> Result<(), InputError> {
-        self.submit(InputBatch::new(Vec::new()), &[(source.clone(), frontier)])
-            .map(|_| ())
+        state: &mut AdmissionState,
+        coordination: &mut FederateCoordinationState,
+        progress: &[(InputSourceHandle, PhysicalInstant)],
+        arrival: Instant,
+    ) -> Result<InputReceipt, InputError> {
+        self.admit(
+            state,
+            coordination,
+            InputBatch::new(Vec::new()),
+            progress,
+            arrival,
+        )
     }
+
+    fn submit(
+        &self,
+        state: &mut AdmissionState,
+        coordination: &mut FederateCoordinationState,
+        mut batch: InputBatch,
+        arrival: Instant,
+    ) -> Result<InputReceipt, InputError> {
+        let progress = std::mem::take(&mut batch.progress);
+        self.admit(state, coordination, batch, &progress, arrival)
+    }
+
     /// Validate a prepared batch, then publish its values before its progress.
     ///
     /// Create the [`InputBatch`] before submission to allocate its delivery and receipt buffers.
     /// Admission reuses its validation and retention storage. Coordinator notifications and
     /// error diagnostics can still allocate. Partial publication aborts execution.
     /// Rejection can disable a source or retain an error without publishing values.
-    pub fn submit(
+    fn admit(
         &self,
+        state: &mut AdmissionState,
+        coordination: &mut FederateCoordinationState,
         mut batch: InputBatch,
         progress: &[(InputSourceHandle, PhysicalInstant)],
+        arrival: Instant,
     ) -> Result<InputReceipt, InputError> {
-        let arrival = Instant::now();
-        let mut state = self.0.state.lock().unwrap();
         if let Some(error) = &state.failure {
             return Err(error.clone());
         }
-        if state.closed || self.0.clock.now().is_err() {
+        if self.clock.now().is_err() {
             return Err(InputError::new(InputErrorKind::Disconnected));
         }
-        let mut coordination = self.0.coordination.lock().unwrap();
         if coordination.is_stopped() {
             return Err(InputError::new(InputErrorKind::Disconnected));
         }
@@ -244,14 +447,13 @@ impl InputAdmission {
             !coordination.input_completed(reservation.action.enclave, reservation.tag)
         });
         let now = self
-            .0
             .clock
             .now()
             .map_err(|_| InputError::new(InputErrorKind::Disconnected))?;
         let required = self
-            .validate_batch(&mut state, &coordination, &batch, progress, now)
+            .validate_batch(state, coordination, &batch, progress, now)
             .map_err(|(source, kind)| {
-                let diagnostic = self.reject(&mut state, Some(source), kind, arrival);
+                let diagnostic = self.reject(state, Some(source), kind, arrival);
                 if state.failure.is_some() {
                     coordination.input_horizon = Some(Tag::NEVER);
                 }
@@ -265,9 +467,8 @@ impl InputAdmission {
                 .iter()
                 .map(|reservation| reservation.tag),
         );
-        let sent =
-            self.publish_batch(&mut state, &mut coordination, &mut batch, required, arrival)?;
-        let changed = self.commit_batch(&mut state, &mut coordination);
+        let sent = self.publish_batch(state, coordination, &mut batch, required, arrival)?;
+        let changed = self.commit_batch(state, coordination);
         if sent || changed {
             self.wake_schedulers();
         }
@@ -319,10 +520,12 @@ impl InputAdmission {
         if !source.enabled {
             return Err(InputErrorKind::Disconnected);
         }
-        if !Arc::ptr_eq(&observation.source.admission.0, &self.0)
-            || observation.values.is_empty()
-            || observation.domain != self.0.clock.domain()
-            || observation.epoch != self.0.clock.epoch()
+        if !Weak::ptr_eq(
+            &Arc::downgrade(&observation.source.admission.0),
+            &self.endpoint,
+        ) || observation.values.is_empty()
+            || observation.domain != self.clock.domain()
+            || observation.epoch != self.clock.epoch()
         {
             return Err(InputErrorKind::Malformed);
         }
@@ -343,7 +546,7 @@ impl InputAdmission {
         for value in &observation.values {
             let target = &value.action;
             if target.source.key != key
-                || !Arc::ptr_eq(&target.source.admission.0, &self.0)
+                || !Weak::ptr_eq(&Arc::downgrade(&target.source.admission.0), &self.endpoint)
                 || !source.actions.contains(&target.reference)
                 || value.value.as_ref().type_id() != target.payload
             {
@@ -362,8 +565,8 @@ impl InputAdmission {
                 .iter()
                 .chain(state.retained.entries.iter())
                 .any(|reservation| reservation.action == target.reference && reservation.tag == tag)
-                || state.scratch.reservations.len() == self.0.max_values
-                || state.retained.len() == self.0.max_batches
+                || state.scratch.reservations.len() == self.max_values
+                || state.retained.len() == self.max_batches
             {
                 return Err(InputErrorKind::Overflow);
             }
@@ -388,7 +591,7 @@ impl InputAdmission {
         if !source.enabled {
             return Err(InputErrorKind::Disconnected);
         }
-        if !Arc::ptr_eq(&source_handle.admission.0, &self.0) {
+        if !Weak::ptr_eq(&Arc::downgrade(&source_handle.admission.0), &self.endpoint) {
             return Err(InputErrorKind::Malformed);
         }
         if state.scratch.sources[key]
@@ -404,7 +607,7 @@ impl InputAdmission {
         Ok(())
     }
 
-    /// Transfer prepared envelopes while both admission locks remain held.
+    /// Transfer all envelopes before the coordinator can issue another execution permit.
     fn publish_batch(
         &self,
         state: &mut AdmissionState,
@@ -432,7 +635,7 @@ impl InputAdmission {
             let event = AsyncEvent::PhysicalBatch(super::InputBatchEvent {
                 values: std::mem::take(&mut envelope.values),
             });
-            match self.0.senders[enclave].try_send(event) {
+            match self.senders[enclave].try_send(event) {
                 Ok(true) => {
                     if !sent {
                         coordination.input_publishing(
@@ -455,7 +658,7 @@ impl InputAdmission {
                     if sent || state.failure.is_some() {
                         state.failure.get_or_insert_with(|| diagnostic.clone());
                         coordination.input_horizon = Some(Tag::NEVER);
-                        self.0.abort.abort();
+                        self.abort.abort();
                     }
                     self.wake_schedulers();
                     return Err(diagnostic);
@@ -496,33 +699,15 @@ impl InputAdmission {
                     .map(|s| s.frontier.map(|f| f.to_tag(s.delay).unwrap().decrement())),
             );
             coordination.input_horizon = Some(state.horizon);
-            self.0.abort.input_progress();
         }
         changed
     }
 
     /// Wake publication or terminal processing without waiting for mailbox capacity.
     fn wake_schedulers(&self) {
-        for tx in self.0.senders.values() {
+        for tx in self.senders.values() {
             let _ = tx.try_send(AsyncEvent::FederateResume);
         }
-    }
-    /// Get the cached execution limit for tests.
-    #[cfg(all(test, feature = "hosted-manual-clock"))]
-    fn horizon(&self) -> Tag {
-        let state = self.0.state.lock().unwrap();
-        if state.closed || state.failure.is_some() {
-            Tag::NEVER
-        } else {
-            state.horizon
-        }
-    }
-    /// Close admission at run exit and return the first retained terminal input error.
-    pub(crate) fn finish(&self) -> Result<(), InputError> {
-        let mut state = self.0.state.lock().unwrap();
-        state.closed = true;
-        self.0.coordination.lock().unwrap().input_horizon = Some(Tag::NEVER);
-        state.failure.clone().map_or(Ok(()), Err)
     }
 }
 

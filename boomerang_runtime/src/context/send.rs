@@ -7,7 +7,7 @@
 use super::CommonContext;
 use crate::{
     clock::{PhysicalClockError, PhysicalInstant},
-    keepalive, ActionCommon, AsyncEvent, Duration, EnclaveKey, ReactorData,
+    keepalive, ActionCommon, AsyncEvent, Duration, EnclaveKey, ReactorData, Tag,
 };
 use std::marker::PhantomData;
 
@@ -47,29 +47,25 @@ impl CommonContext for SendContext {
         let event = AsyncEvent::shutdown(offset.unwrap_or_default());
         self.async_tx.send(event).is_ok()
     }
-
-    /// Send an external event to the scheduler.
-    fn schedule_external(&self, event: AsyncEvent) -> bool {
-        if self.is_shutdown() {
-            return false;
-        }
-        self.async_tx.send(event).is_ok()
-    }
-
-    fn try_schedule_async(&self, event: AsyncEvent) -> Option<bool> {
-        if self.is_shutdown() {
-            return Some(false);
-        }
-
-        match self.async_tx.try_send(event) {
-            Ok(true) => Some(true),
-            Ok(false) => None,
-            Err(_) => Some(false),
-        }
-    }
 }
 
-/// A physical action value prepared for delivery without blocking.
+/// The scheduler has stopped or its mailbox is closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("scheduler mailbox is closed")]
+pub struct SendError;
+
+/// A shutdown request could not enter the scheduler mailbox.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum TryShutdownError {
+    /// The mailbox is full. Retry the shutdown request.
+    #[error("scheduler mailbox is full")]
+    Full,
+    /// The scheduler has stopped or its mailbox is closed.
+    #[error("scheduler mailbox is closed")]
+    Closed,
+}
+
+/// A physical action value prepared for delivery.
 ///
 /// The prepared action owns its payload, timestamp, and destination.
 /// Drop it to cancel delivery before the mailbox accepts the event.
@@ -111,6 +107,17 @@ impl<T: ReactorData> PreparedAction<T> {
             _ => unreachable!("prepared actions are physical"),
         }
     }
+    /// Send the event. Wait if the scheduler mailbox is full.
+    ///
+    /// Use the prepared timestamp and payload without reading the clock again.
+    /// This method consumes the action, including when it returns [`SendError`].
+    /// Use [`Self::try_send`] when you need to retain an unsuccessful send.
+    /// Do not block during initialization or while the scheduler waits for this worker.
+    pub fn send(mut self) -> Result<(), SendError> {
+        self.sender
+            .send_event(self.event.take().expect("owned prepared event"))
+    }
+
     /// Try to send the event without blocking.
     ///
     /// This method does not read the clock or allocate a new payload.
@@ -127,6 +134,42 @@ impl<T: ReactorData> PreparedAction<T> {
     }
 }
 impl SendContext {
+    /// Request shutdown without blocking.
+    ///
+    /// An absent offset uses zero delay. The scheduler applies the offset relative
+    /// to its current logical tag when it receives the request.
+    /// Retry on [`TryShutdownError::Full`]. Stop retrying on [`TryShutdownError::Closed`].
+    pub fn try_shutdown(&self, offset: Option<Duration>) -> Result<(), TryShutdownError> {
+        if self.is_shutdown() {
+            return Err(TryShutdownError::Closed);
+        }
+        match self
+            .async_tx
+            .try_send(AsyncEvent::shutdown(offset.unwrap_or_default()))
+        {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(TryShutdownError::Full),
+            Err(_) => Err(TryShutdownError::Closed),
+        }
+    }
+
+    /// Send a runtime event. Wait if the mailbox is full.
+    pub(crate) fn send_event(&self, event: AsyncEvent) -> Result<(), SendError> {
+        if self.is_shutdown() {
+            return Err(SendError);
+        }
+        self.async_tx.send(event).map_err(|_| SendError)
+    }
+
+    /// Send a provisional-tag release to this context's Enclave.
+    pub(crate) fn release_provisional(
+        &self,
+        enclave: EnclaveKey,
+        tag: Tag,
+    ) -> Result<(), SendError> {
+        self.send_event(AsyncEvent::provisional(enclave, tag))
+    }
+
     /// Prepare a physical action value with the selected clock.
     ///
     /// Read the clock once and add the action's minimum delay and the requested delay.
@@ -149,8 +192,8 @@ impl SendContext {
         })
     }
 }
-/// Prepare an event for a blocking send or a prepared action.
-pub(super) fn prepare_event<T: ReactorData>(
+/// Prepare an event once for either delivery mode.
+fn prepare_event<T: ReactorData>(
     context: &(impl CommonContext + ?Sized),
     action: &impl ActionCommon<T>,
     value: T,

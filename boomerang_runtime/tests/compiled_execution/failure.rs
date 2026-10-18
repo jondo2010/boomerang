@@ -78,9 +78,10 @@ fn competing_panic_after_route_failure(
     _mode_effect: Option<CompiledModeEffectRef>,
 ) -> Result<(), ReactionBindingError> {
     COMPETING_PANIC_READY.store(true, Ordering::SeqCst);
-    assert!(!context.schedule_external(AsyncEvent::Shutdown {
-        delay: Duration::ZERO,
-    }));
+    assert_eq!(
+        context.make_send_context().try_shutdown(None),
+        Err(boomerang_runtime::TryShutdownError::Closed)
+    );
     panic!("competing scheduler panic");
 }
 

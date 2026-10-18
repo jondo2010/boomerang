@@ -77,10 +77,11 @@ fn bench(c: &mut Criterion) {
                 |(mut send_ctx, action_ref, scheduler_thread, received)| {
                     for i in 0..count {
                         let delay = runtime::Duration::nanoseconds(i as i64);
-                        let scheduled = send_ctx
-                            .try_schedule_action_async(&action_ref, 0u32, Some(delay))
-                            .expect("physical action scheduling failed");
-                        assert!(scheduled, "failed to schedule physical action");
+                        send_ctx
+                            .prepare_action(&action_ref, 0u32, Some(delay))
+                            .expect("physical action preparation failed")
+                            .send()
+                            .expect("physical action send failed");
                     }
 
                     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);

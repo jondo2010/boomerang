@@ -207,34 +207,96 @@ fn schedule_action_advances_microsteps_for_same_delay() {
 }
 
 #[test]
-fn nonblocking_sends_distinguish_acceptance_backpressure_and_disconnection() {
+fn nonblocking_shutdown_distinguishes_acceptance_backpressure_and_closure() {
     let (async_tx, async_rx) = kanal::bounded::<AsyncEvent>(1);
-    let (_shutdown_tx, shutdown_rx) = keepalive::channel();
-    let ctx = Context::new(
-        EnclaveKey::from(0),
-        crate::clock::ExecutionClock::host_monotonic(std::time::Instant::now()),
-        None,
+    let (shutdown_tx, shutdown_rx) = keepalive::channel();
+    let sender = SendContext {
+        clock: Default::default(),
+        enclave_key: EnclaveKey::new(0),
         async_tx,
         shutdown_rx,
+    };
+    assert_eq!(sender.try_shutdown(Some(Duration::seconds(2))), Ok(()));
+    assert_eq!(sender.try_shutdown(None), Err(TryShutdownError::Full));
+    assert!(
+        matches!(async_rx.recv().unwrap(), AsyncEvent::Shutdown { delay } if delay == Duration::seconds(2))
     );
-    let sender = ctx.make_send_context();
-    let event = || AsyncEvent::shutdown(Duration::ZERO);
+    drop(shutdown_tx);
+    assert_eq!(sender.try_shutdown(None), Err(TryShutdownError::Closed));
+    assert!(async_rx.try_recv().unwrap().is_none());
+}
 
-    assert_eq!(ctx.try_schedule_async(event()), Some(true));
-    assert_eq!(ctx.try_schedule_async(event()), None);
-    assert_eq!(sender.try_schedule_async(event()), None);
-    assert!(matches!(
-        async_rx.recv().unwrap(),
-        AsyncEvent::Shutdown { .. }
-    ));
-    assert_eq!(sender.try_schedule_async(event()), Some(true));
-    assert!(matches!(
-        async_rx.recv().unwrap(),
-        AsyncEvent::Shutdown { .. }
-    ));
+#[test]
+fn nonblocking_shutdown_reports_disconnected_mailbox() {
+    let (async_tx, async_rx) = kanal::bounded::<AsyncEvent>(1);
+    let (_shutdown_tx, shutdown_rx) = keepalive::channel();
+    let sender = SendContext {
+        clock: Default::default(),
+        enclave_key: EnclaveKey::new(0),
+        async_tx,
+        shutdown_rx,
+    };
     drop(async_rx);
-    assert_eq!(ctx.try_schedule_async(event()), Some(false));
-    assert_eq!(sender.try_schedule_async(event()), Some(false));
+    assert!(!sender.is_shutdown());
+    assert_eq!(sender.try_shutdown(None), Err(TryShutdownError::Closed));
+}
+
+#[test]
+fn blocking_send_keeps_prepared_time_and_payload_when_mailbox_is_full() {
+    let (tx, rx) = kanal::bounded(1);
+    let (_keepalive, shutdown_rx) = keepalive::channel();
+    let sender = SendContext {
+        clock: crate::clock::ExecutionClock::host_monotonic(std::time::Instant::now()),
+        enclave_key: EnclaveKey::new(0),
+        async_tx: tx,
+        shutdown_rx,
+    };
+    sender.try_shutdown(None).unwrap();
+    let action = Action::<Payload>::new("input", ActionKey::new(0), None, false);
+    let action = AsyncActionRef::<Payload>::try_from(DynActionRef(&action)).unwrap();
+    let payload = Payload(Box::new(42));
+    let allocation = payload.0.as_ref() as *const u32;
+    let prepared = sender.prepare_action(&action, payload, None).unwrap();
+    let expected_time = prepared.time();
+    let worker = std::thread::spawn(move || prepared.send());
+    assert!(matches!(rx.recv().unwrap(), AsyncEvent::Shutdown { .. }));
+    let AsyncEvent::Physical { time, value, .. } = rx.recv().unwrap() else {
+        panic!("physical input")
+    };
+    worker.join().unwrap().unwrap();
+    let payload = value.downcast::<Payload>().ok().unwrap();
+    assert_eq!(payload.0.as_ref() as *const u32, allocation);
+    assert_eq!(*payload.0, 42);
+    assert_eq!(time, expected_time);
+}
+
+#[test]
+fn blocking_send_reports_closed_mailbox_and_drops_payload_once() {
+    #[derive(Debug)]
+    struct Value(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+    impl Drop for Value {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    let (tx, rx) = kanal::bounded(0);
+    let (_keepalive, shutdown_rx) = keepalive::channel();
+    let sender = SendContext {
+        clock: crate::clock::ExecutionClock::host_monotonic(std::time::Instant::now()),
+        enclave_key: EnclaveKey::new(0),
+        async_tx: tx,
+        shutdown_rx,
+    };
+    let action = Action::<Value>::new("input", ActionKey::new(0), None, false);
+    let action = AsyncActionRef::<Value>::try_from(DynActionRef(&action)).unwrap();
+    let drops = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let prepared = sender
+        .prepare_action(&action, Value(drops.clone()), None)
+        .unwrap();
+    let worker = std::thread::spawn(move || prepared.send());
+    drop(rx);
+    assert_eq!(worker.join().unwrap(), Err(SendError));
+    assert_eq!(drops.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
 
 #[test]
@@ -363,7 +425,9 @@ fn manual_time_advance_does_not_retime_or_allocate_on_retry() {
     );
     let action = AsyncActionRef::<u32>::try_from(DynActionRef(&action)).unwrap();
     sender
-        .try_schedule_action_async(&action, 1, Some(Duration::nanoseconds(3)))
+        .prepare_action(&action, 1, Some(Duration::nanoseconds(3)))
+        .unwrap()
+        .send()
         .unwrap();
     let prepared = sender
         .prepare_action(&action, 2, Some(Duration::nanoseconds(3)))
@@ -385,7 +449,7 @@ fn manual_time_advance_does_not_retime_or_allocate_on_retry() {
     assert_eq!(
         time,
         PhysicalInstant(47),
-        "blocking compatibility helper shares preparation"
+        "blocking send uses the prepared timestamp"
     );
     prepared.try_send().unwrap();
     let AsyncEvent::Physical { time, .. } = rx.recv().unwrap() else {

@@ -437,10 +437,11 @@ fn physical_actions_at_frozen_time_preserve_microsteps_and_every_value() {
                         as usize;
                     let mut send = |action: &mut ActionRef<u32>, value| {
                         if asynchronous {
-                            assert!(ctx
-                                .make_send_context()
-                                .try_schedule_action_async(action, value, None)
-                                .unwrap());
+                            ctx.make_send_context()
+                                .prepare_action(action, value, None)
+                                .unwrap()
+                                .send()
+                                .unwrap();
                         } else {
                             ctx.try_schedule_action(action, value, None).unwrap();
                         }

@@ -1,7 +1,7 @@
 //! Own the terminal mode and the thread that feeds the keyboard physical action.
 
 use boomerang::runtime::{
-    ActionCommon, AsyncActionRef, AsyncEvent, AsyncEventTarget, CommonContext, SendContext,
+    AsyncActionRef, PreparedAction, SendContext, TrySendError, TryShutdownError,
 };
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
@@ -45,28 +45,14 @@ impl KeyboardInput {
                         (KeyCode::Char('c'), modifiers)
                             if modifiers.contains(KeyModifiers::CONTROL) =>
                         {
-                            send_until_stopped(&send_ctx, &stop_requested, || {
-                                AsyncEvent::Shutdown {
-                                    delay: Default::default(),
-                                }
-                            });
+                            request_shutdown_until_stopped(&send_ctx, &stop_requested);
                             break;
                         }
                         (KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down, _) => {
-                            let delay = Duration::try_from(action.min_delay())
+                            let prepared = send_ctx
+                                .prepare_action(&action, key, None)
                                 .map_err(std::io::Error::other)?;
-                            let time = send_ctx
-                                .try_get_physical_time()
-                                .map_err(std::io::Error::other)?
-                                .checked_add(delay)
-                                .map_err(std::io::Error::other)?;
-                            if !send_until_stopped(&send_ctx, &stop_requested, || {
-                                AsyncEvent::Physical {
-                                    time,
-                                    target: AsyncEventTarget::Action(action.key()),
-                                    value: Box::new(key),
-                                }
-                            }) {
+                            if !send_until_stopped(prepared, &stop_requested) {
                                 break;
                             }
                         }
@@ -77,9 +63,7 @@ impl KeyboardInput {
             })();
             if let Err(error) = result {
                 tracing::error!(%error, "keyboard input failed");
-                send_until_stopped(&send_ctx, &stop_requested, || AsyncEvent::Shutdown {
-                    delay: Default::default(),
-                });
+                request_shutdown_until_stopped(&send_ctx, &stop_requested);
             }
         }));
     }
@@ -96,15 +80,25 @@ impl KeyboardInput {
     }
 }
 
-fn send_until_stopped(
-    sender: &SendContext,
-    stop_requested: &AtomicBool,
-    event: impl Fn() -> AsyncEvent,
-) -> bool {
-    // A blocking send can deadlock a shutdown reaction that joins this thread.
+fn send_until_stopped(mut prepared: PreparedAction<KeyEvent>, stop_requested: &AtomicBool) -> bool {
     while !stop_requested.load(Ordering::Relaxed) {
-        if let Some(accepted) = sender.try_schedule_async(event()) {
-            return accepted;
+        match prepared.try_send() {
+            Ok(()) => return true,
+            Err(TrySendError::Closed(_)) => return false,
+            Err(TrySendError::Full(retry)) => prepared = retry,
+        }
+        std::thread::park_timeout(Duration::from_millis(1));
+    }
+    false
+}
+
+fn request_shutdown_until_stopped(sender: &SendContext, stop_requested: &AtomicBool) -> bool {
+    // Do not block a worker that the shutdown reaction must join.
+    while !stop_requested.load(Ordering::Relaxed) {
+        match sender.try_shutdown(None) {
+            Ok(()) => return true,
+            Err(TryShutdownError::Closed) => return false,
+            Err(TryShutdownError::Full) => {}
         }
         std::thread::sleep(Duration::from_millis(1));
     }
@@ -120,21 +114,18 @@ impl Drop for KeyboardInput {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use boomerang::runtime::{AsyncEvent, Enclave, EnclaveKey};
+    use boomerang::runtime::{Enclave, EnclaveKey};
 
     #[test]
-    fn stopping_input_cancels_a_send_to_a_full_scheduler_mailbox() {
+    fn stopping_input_cancels_shutdown_to_a_full_scheduler_mailbox() {
         let enclave = Enclave::with_event_q_size(1);
         let sender = enclave.create_send_context(EnclaveKey::default());
-        let shutdown = || AsyncEvent::Shutdown {
-            delay: Default::default(),
-        };
-        assert!(sender.schedule_external(shutdown()));
+        sender.try_shutdown(None).unwrap();
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = stop.clone();
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {
-            let accepted = send_until_stopped(&sender, &worker_stop, shutdown);
+            let accepted = request_shutdown_until_stopped(&sender, &worker_stop);
             done_tx.send(accepted).unwrap();
         });
         std::thread::sleep(Duration::from_millis(20));
@@ -142,6 +133,45 @@ mod tests {
         let result = done_rx.recv_timeout(Duration::from_secs(1));
         // Release even a broken blocking sender before failing the assertion.
         drop(enclave);
+        worker.join().unwrap();
+        assert_eq!(result, Ok(false));
+    }
+
+    #[test]
+    fn stopping_input_cancels_a_typed_send_to_a_full_scheduler_mailbox() {
+        use boomerang::runtime::{Action, Config, Scheduler};
+        let mut enclave = Enclave::with_event_q_size(1);
+        let key =
+            enclave.insert_action(|key| Action::<KeyEvent>::new("key", key, None, false).boxed());
+        let action = enclave.create_async_action_ref::<KeyEvent>(key);
+        let sender = enclave.create_send_context(EnclaveKey::default());
+        let mut scheduler = Scheduler::new(EnclaveKey::default(), enclave, Config::default(), None);
+        scheduler.startup();
+        let key = KeyEvent::new(KeyCode::Left, KeyModifiers::NONE);
+        sender
+            .prepare_action(&action, key, None)
+            .unwrap()
+            .try_send()
+            .unwrap();
+        let prepared = sender.prepare_action(&action, key, None).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = stop.clone();
+        let (full_tx, full_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let Err(TrySendError::Full(prepared)) = prepared.try_send() else {
+                panic!("mailbox must be full");
+            };
+            full_tx.send(()).unwrap();
+            done_tx
+                .send(send_until_stopped(prepared, &worker_stop))
+                .unwrap();
+        });
+        full_rx.recv().unwrap();
+        stop.store(true, Ordering::Relaxed);
+        let result = done_rx.recv_timeout(Duration::from_secs(1));
+        // Close the mailbox before joining, in case the sender blocks.
+        drop(scheduler);
         worker.join().unwrap();
         assert_eq!(result, Ok(false));
     }

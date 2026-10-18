@@ -80,9 +80,10 @@ impl LogicalTimeBarrier {
         }
 
         if upstream_tag > self.provisional_tag {
-            if !self
+            if self
                 .upstream_ctx
                 .release_provisional(this_enclave, upstream_tag)
+                .is_err()
             {
                 // The upstream has terminated try to return a queued event here. If the upstream terminated, we probably
                 // have an event queued from it. This prevents pre-mature termination of this enclave.

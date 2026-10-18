@@ -41,6 +41,7 @@ fn bounded_runtime_trace_distinguishes_physical_and_logical_admission() {
             enclave.insert_action(|key| Action::<u32>::new("key", key, None, false).boxed());
         enclave.insert_action_scope(action, scope);
         let sender = enclave.create_send_context(EnclaveKey::new(7));
+        let event_tx = enclave.event_tx.clone();
         let mut scheduler = Scheduler::new(
             EnclaveKey::new(7),
             enclave,
@@ -48,23 +49,23 @@ fn bounded_runtime_trace_distinguishes_physical_and_logical_admission() {
             None,
         );
         scheduler.startup();
-        // Use the keyboard's real nonblocking submission API. The scheduler assigns
+        // Inject both event kinds to check admission tracing. The scheduler assigns
         // the physical tag; the logical tag must survive unchanged.
         assert_eq!(
-            sender.try_schedule_async(AsyncEvent::Physical {
+            event_tx.try_send(AsyncEvent::Physical {
                 time: sender.try_get_physical_time().unwrap(),
                 target: AsyncEventTarget::Action(action),
                 value: Box::new(42_u32),
             }),
-            Some(true)
+            Ok(true)
         );
         assert_eq!(
-            sender.try_schedule_async(AsyncEvent::Logical {
+            event_tx.try_send(AsyncEvent::Logical {
                 tag: Tag::new(Duration::seconds(1), 3),
                 target: AsyncEventTarget::Action(action),
                 value: Box::new(99_u32),
             }),
-            Some(true)
+            Ok(true)
         );
         while scheduler.try_next().unwrap() {}
     });

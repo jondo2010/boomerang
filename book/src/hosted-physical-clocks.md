@@ -55,7 +55,8 @@ manual time does not need to fit the host's `std::time::Instant` representation.
 A native send context created before execution returns `NotStarted` until its
 scheduler starts. Start external producers from a startup reaction, or call
 `Scheduler::startup()` before signaling a producer that the scheduler is ready.
-Use `try_schedule_action_async` when the producer needs to handle this error.
+Use `SendContext::prepare_action` to handle this error before sending.
+Call `PreparedAction::send` for blocking delivery or `try_send` for nonblocking delivery.
 
 `Context::get_start_time()` returns the epoch coordinate, zero.
 `try_get_logical_time()` projects the current logical offset into a

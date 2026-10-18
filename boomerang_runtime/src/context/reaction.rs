@@ -287,26 +287,6 @@ impl CommonContext for Context {
             .map_or(Some(tag), |prev| Some(prev.min(tag)));
         true
     }
-
-    /// Send an event to the scheduler mailbox.
-    fn schedule_external(&self, event: AsyncEvent) -> bool {
-        if self.shutdown_rx.is_shutdwon() {
-            return false;
-        }
-        self.async_tx.send(event).is_ok()
-    }
-
-    fn try_schedule_async(&self, event: AsyncEvent) -> Option<bool> {
-        if self.is_shutdown() {
-            return Some(false);
-        }
-
-        match self.async_tx.try_send(event) {
-            Ok(true) => Some(true),
-            Ok(false) => None,
-            Err(_) => Some(false),
-        }
-    }
 }
 
 /// Build one context for each reaction.

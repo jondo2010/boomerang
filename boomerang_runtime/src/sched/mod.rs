@@ -928,15 +928,19 @@ mod tests {
             Err(PhysicalClockError::NotStarted)
         );
         assert_eq!(
-            sender.try_schedule_action_async(&action, 7, None),
-            Err(PhysicalClockError::NotStarted)
+            sender.prepare_action(&action, 7, None).unwrap_err(),
+            PhysicalClockError::NotStarted
         );
         assert!(enclave.event_rx.try_recv().unwrap().is_none());
         let mut scheduler = Scheduler::new(EnclaveKey::from(0), enclave, Config::default(), None);
         assert!(sender.try_get_physical_time().is_err());
         scheduler.startup();
         let before = sender.try_get_physical_time().unwrap();
-        assert!(sender.try_schedule_action_async(&action, 7, None).unwrap());
+        sender
+            .prepare_action(&action, 7, None)
+            .unwrap()
+            .send()
+            .unwrap();
         let after = sender.try_get_physical_time().unwrap();
         let AsyncEvent::Physical { time, value, .. } = scheduler.event_rx.recv().unwrap() else {
             panic!("expected physical event")

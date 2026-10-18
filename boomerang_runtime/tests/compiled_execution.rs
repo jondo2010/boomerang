@@ -8,7 +8,6 @@ use std::{
     time::Instant,
 };
 
-use boomerang_runtime::AsyncEvent;
 use boomerang_runtime::{
     execute_owned, execute_owned_federate,
     image::{

@@ -3,9 +3,8 @@
 use std::{collections::HashMap, path::Path};
 
 use crate::{
-    event::AsyncEvent, reaction::ReactionFn, ActionKey, ActionRef, BaseReactor, CommonContext,
-    Context, Duration, Enclave, EnclaveKey, ReactionRefs, ReactorData, RuntimeError, SendContext,
-    Tag,
+    event::AsyncEvent, reaction::ReactionFn, ActionKey, ActionRef, BaseReactor, Context, Duration,
+    Enclave, EnclaveKey, ReactionRefs, ReactorData, RuntimeError, SendContext, Tag,
 };
 
 /// Re-export the `foxglove` and `mcap` crates for use in this module.
@@ -300,7 +299,7 @@ where
                 let key = tinymap::DefaultKey::from(inner.channel.id as usize);
                 if let Some(replay_ctx) = replayers.get(key) {
                     let event = replay_ctx.replayer.process(&inner)?;
-                    if !replay_ctx.context.schedule_external(event) {
+                    if replay_ctx.context.send_event(event).is_err() {
                         return Err(ReplayError::SchedulerClosed {
                             enclave_key: replay_ctx.enclave_key,
                             action_key: replay_ctx.action_key,

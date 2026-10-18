@@ -149,7 +149,10 @@ fn checked_conversions_and_physical_actions_use_selected_time() {
     let expected = PhysicalInstant(42);
     assert_eq!(ctx.try_get_physical_time().unwrap(), expected);
     assert_eq!(sender.try_get_physical_time().unwrap(), expected);
-    ctx.try_schedule_action_async(&action, 2, Some(Duration::nanoseconds(3)))
+    sender
+        .prepare_action(&action, 2, Some(Duration::nanoseconds(3)))
+        .unwrap()
+        .send()
         .unwrap();
     assert!(
         matches!(rx.recv().unwrap(), AsyncEvent::Physical { time, .. } if time == PhysicalInstant(47))
@@ -173,8 +176,8 @@ fn checked_conversions_and_physical_actions_use_selected_time() {
     );
     assert_eq!(ctx.trigger_res.scheduled_actions.len(), scheduled);
     assert_eq!(
-        sender.try_schedule_action_async(&action, 3, None),
-        Err(PhysicalClockError::Overflow)
+        sender.prepare_action(&action, 3, None).unwrap_err(),
+        PhysicalClockError::Overflow
     );
     assert!(rx.try_recv().unwrap().is_none());
     clock.close();

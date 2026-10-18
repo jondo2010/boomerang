@@ -20,11 +20,6 @@ use super::{
 };
 use crate::{image::EnclaveIndex, AsyncEvent, Tag};
 
-/// Returns whether one asynchronous event introduces executable or terminal scheduler work.
-fn revises_candidate(event: &AsyncEvent) -> bool {
-    event.revises_candidate()
-}
-
 /// Terminal coordinator reason consumed by a scheduler wake path.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum FederateTermination {
@@ -367,23 +362,26 @@ impl<B: FederateCoordinationBackend> FederateCoordinator<B> {
                 generation,
             } => {
                 self.require_participant(enclave)?;
-                if generation == self.publication_generation {
-                    self.publication_observed[enclave] = generation;
-                    if self
-                        .publication_observed
-                        .values()
-                        .all(|observed| *observed == generation)
-                    {
-                        if let Some(publication) = self.pending_publication.take() {
-                            if publication.revision() == self.state.revision() {
-                                self.backend.publish(publication)?;
-                                let actions = self.state.handle_publication_sent(publication)?;
-                                return self.execute_actions(actions);
-                            }
-                        }
-                    }
+                if generation != self.publication_generation {
+                    return Ok(false);
                 }
-                Ok(false)
+                self.publication_observed[enclave] = generation;
+                if !self
+                    .publication_observed
+                    .values()
+                    .all(|observed| *observed == generation)
+                {
+                    return Ok(false);
+                }
+                let Some(publication) = self.pending_publication.take() else {
+                    return Ok(false);
+                };
+                if publication.revision() != self.state.revision() {
+                    return Ok(false);
+                }
+                self.backend.publish(publication)?;
+                let actions = self.state.handle_publication_sent(publication)?;
+                self.execute_actions(actions)
             }
             CoordinatorReport::Scheduler(message) => {
                 let actions = self.state.handle_scheduler(message)?;
@@ -435,7 +433,9 @@ impl<B: FederateCoordinationBackend> FederateCoordinator<B> {
                         generation: self.publication_generation,
                     })?;
                 }
-                action @ CoordinationAction::AdvanceHorizon { .. } => {
+                action @ (CoordinationAction::AdvanceHorizon { .. }
+                | CoordinationAction::Probe { .. }
+                | CoordinationAction::Park { .. }) => {
                     self.send_all(ParticipantCommand::Action(action))?;
                 }
                 action @ (CoordinationAction::Grant { enclave, .. }
@@ -443,9 +443,6 @@ impl<B: FederateCoordinationBackend> FederateCoordinator<B> {
                     self.send_one(enclave, ParticipantCommand::Action(action))?;
                 }
                 CoordinationAction::Complete(completion) => self.backend.complete(completion)?,
-                action @ (CoordinationAction::Probe { .. } | CoordinationAction::Park { .. }) => {
-                    self.send_all(ParticipantCommand::Action(action))?;
-                }
                 action @ CoordinationAction::Recheck { .. } => {
                     #[cfg(test)]
                     if let Some(hook) = self.commit_window_hook.take() {
@@ -631,21 +628,6 @@ pub(crate) struct EnclaveCoordinationPort {
 }
 
 impl EnclaveCoordinationPort {
-    /// Final hosted execution boundary, serialized with coherent action publication.
-    #[cfg(feature = "hosted-source-input")]
-    fn begin_input_tag(&self, tag: Tag) -> bool {
-        if self
-            .report(CoordinatorReport::BeginTag {
-                enclave: self.enclave,
-                tag,
-            })
-            .is_err()
-        {
-            return false;
-        }
-        self.permit_rx.recv().unwrap_or(false)
-    }
-
     /// Retains one broadcast Federate grant without allowing the horizon to regress.
     fn advance_horizon(&mut self, tag: Tag) {
         self.grant_horizon = Some(self.grant_horizon.map_or(tag, |current| current.max(tag)));
@@ -723,8 +705,7 @@ impl EnclaveCoordinationPort {
         self.take_deferred_error()?;
         while self.termination.is_none() {
             match FederateSchedulerCoordination::wait(self)? {
-                FederateIdleWait::Interrupted(_) => {}
-                FederateIdleWait::LogicalHorizon(_) => {}
+                FederateIdleWait::Interrupted(_) | FederateIdleWait::LogicalHorizon(_) => {}
                 FederateIdleWait::Stopped | FederateIdleWait::Aborted => break,
             }
         }
@@ -775,7 +756,7 @@ impl EnclaveCoordinationPort {
             if matches!(event, Some(AsyncEvent::FederateResume)) {
                 continue;
             }
-            if event.as_ref().is_some_and(revises_candidate) {
+            if event.as_ref().is_some_and(AsyncEvent::revises_candidate) {
                 self.report(CoordinatorReport::Scheduler(SchedulerMessage::Active {
                     enclave: self.enclave,
                 }))?;
@@ -786,10 +767,22 @@ impl EnclaveCoordinationPort {
 }
 
 impl FederateSchedulerCoordination for EnclaveCoordinationPort {
-    /// Reports work without inventing a candidate tag.
+    /// Request a final execution permit after physical pacing.
     #[cfg(feature = "hosted-source-input")]
     fn begin_tag(&mut self, tag: Tag) -> bool {
-        !self.input_enabled || self.begin_input_tag(tag)
+        if !self.input_enabled {
+            return true;
+        }
+        if self
+            .report(CoordinatorReport::BeginTag {
+                enclave: self.enclave,
+                tag,
+            })
+            .is_err()
+        {
+            return false;
+        }
+        self.permit_rx.recv().unwrap_or(false)
     }
 
     #[cfg(feature = "hosted-source-input")]
@@ -797,6 +790,7 @@ impl FederateSchedulerCoordination for EnclaveCoordinationPort {
         self.input_enabled
     }
 
+    /// Report work without assigning a candidate tag.
     fn active(&mut self) {
         self.report_infallible(CoordinatorReport::Scheduler(SchedulerMessage::Active {
             enclave: self.enclave,
@@ -1143,9 +1137,7 @@ impl<B: FederateCoordinationBackend> FederateCoordinationParts<B> {
             );
         }
         Ok(Self {
-            abort_handle: FederateAbortHandle {
-                report_tx: report_tx.clone(),
-            },
+            abort_handle: FederateAbortHandle { report_tx },
             coordinator: FederateCoordinator {
                 report_rx,
                 commands,
@@ -1184,10 +1176,11 @@ mod tests {
             LocalFederateCoordinationBackend::default(),
         )
         .unwrap();
-        let port = parts.participants.into_iter().next().unwrap().1;
+        let mut port = parts.participants.into_iter().next().unwrap().1;
+        port.input_enabled = true;
         let (done_tx, done_rx) = mpsc::channel();
         let worker = std::thread::spawn(move || {
-            done_tx.send(port.begin_input_tag(Tag::ZERO)).unwrap();
+            done_tx.send(port.begin_tag(Tag::ZERO)).unwrap();
         });
         let early = done_rx.recv_timeout(StdDuration::from_millis(50));
         drop(parts.coordinator);
@@ -1308,10 +1301,11 @@ mod tests {
         parts.coordinator.commands[enclave]
             .send(ParticipantCommand::PublicationProbe { generation: 7 })
             .unwrap();
-        let port = parts.participants.into_iter().next().unwrap().1;
+        let mut port = parts.participants.into_iter().next().unwrap().1;
+        port.input_enabled = true;
         let (done_tx, done_rx) = mpsc::channel();
         let worker = std::thread::spawn(move || {
-            done_tx.send(port.begin_input_tag(Tag::ZERO)).unwrap();
+            done_tx.send(port.begin_tag(Tag::ZERO)).unwrap();
         });
         let request = parts
             .coordinator

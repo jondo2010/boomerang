@@ -480,7 +480,7 @@ enum LiveSchedulerState {
 #[derive(Debug)]
 pub struct Scheduler {
     /// Execution timeline shared with this Enclave's send and reaction contexts.
-    physical_clock: crate::clock::RuntimeClock,
+    clock: crate::clock::ExecutionClock,
     /// The enclave key
     key: EnclaveKey,
     /// The scheduler config
@@ -535,7 +535,7 @@ impl Scheduler {
         observation: Option<crate::ObservationHandle>,
     ) -> Self {
         let Enclave {
-            physical_clock,
+            clock,
             env,
             graph,
             event_tx,
@@ -550,8 +550,7 @@ impl Scheduler {
         let reaction_capacity = env.reactions.len();
         let reaction_set_limits = graph.reaction_limits();
         // Build contexts for each reaction
-        let contexts =
-            build_reaction_contexts(key, &graph, physical_clock.clone(), event_tx, shutdown_rx);
+        let contexts = build_reaction_contexts(key, &graph, clock.clone(), event_tx, shutdown_rx);
 
         let store = Store::new(env, contexts, &graph);
         let has_modal_scopes = graph.has_modal_scopes();
@@ -578,7 +577,7 @@ impl Scheduler {
             .collect();
 
         Self {
-            physical_clock,
+            clock,
             key,
             config,
             store,
@@ -606,7 +605,7 @@ impl Scheduler {
         self.events
             .set_event_queue_observation_enabled(self.observation.is_some());
         let Self {
-            physical_clock,
+            clock,
             key,
             config,
             store,
@@ -629,7 +628,7 @@ impl Scheduler {
         } = self;
 
         SchedulerCore {
-            clock: physical_clock.clone(),
+            clock: clock.clone(),
             key: *key,
             config,
             observation: self.observation.as_ref(),
@@ -656,7 +655,7 @@ impl Scheduler {
 
     /// Binds time before any participant can execute a startup reaction.
     fn prepare_clock(&mut self, origin: std::time::Instant) {
-        self.start_time = self.physical_clock.initialize(origin);
+        self.start_time = self.clock.initialize(origin);
     }
 
     /// Executes scheduler startup once.
@@ -885,7 +884,7 @@ mod tests {
             Reaction::new(
                 "record-origin",
                 reaction_closure!(ctx, _reactor, _refs => {
-                    *seen_origin.lock().unwrap() = Some(ctx.physical_clock.initialize(std::time::Instant::now()));
+                    *seen_origin.lock().unwrap() = Some(ctx.clock.initialize(std::time::Instant::now()));
                 }),
                 None,
             ),
@@ -962,7 +961,7 @@ mod tests {
                 use crate::CommonContext;
                 assert!(sender.try_get_physical_time().is_ok());
                 let origin = std::time::Instant::now();
-                *record.lock().unwrap() = Some((ctx.physical_clock.initialize(origin), sender.physical_clock.initialize(origin)));
+                *record.lock().unwrap() = Some((ctx.clock.initialize(origin), sender.clock.initialize(origin)));
             }), None),
             reactor, std::iter::empty(), std::iter::empty(), std::iter::empty(), scope, None,
         );

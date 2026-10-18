@@ -254,8 +254,8 @@ pub(crate) trait OutboundRoute: Send {
     /// Clones and admits one present source value at its destination timing boundary.
     fn emit(&mut self, source: &dyn BasePort, tag: Tag) -> Result<(), OwnedStorageError>;
     /// Installs the Enclave execution policy on a route before execution begins.
-    #[cfg(feature = "external-clock")]
-    fn set_physical_clock(&mut self, _clock: crate::clock::RuntimeClock) {}
+    #[cfg(feature = "hosted-manual-clock")]
+    fn set_clock(&mut self, _clock: crate::clock::ExecutionClock) {}
 }
 
 /// Direct typed outbound route whose generic parameter is unified by `bind_route`.
@@ -273,15 +273,15 @@ struct TypedOutboundRoute<'image, T: ReactorData + Clone> {
     /// Destination scheduler event channel.
     destination_tx: crate::Sender<crate::event::AsyncEvent>,
     /// Selected source clock; local Federate participants share the same epoch.
-    physical_clock: crate::clock::RuntimeClock,
+    clock: crate::clock::ExecutionClock,
     /// Retains the statically unified endpoint payload type.
     marker: PhantomData<fn() -> T>,
 }
 
 impl<T: ReactorData + Clone> OutboundRoute for TypedOutboundRoute<'_, T> {
-    #[cfg(feature = "external-clock")]
-    fn set_physical_clock(&mut self, clock: crate::clock::RuntimeClock) {
-        self.physical_clock = clock;
+    #[cfg(feature = "hosted-manual-clock")]
+    fn set_clock(&mut self, clock: crate::clock::ExecutionClock) {
+        self.clock = clock;
     }
 
     fn emit(&mut self, source: &dyn BasePort, tag: Tag) -> Result<(), OwnedStorageError> {
@@ -317,7 +317,7 @@ impl<T: ReactorData + Clone> OutboundRoute for TypedOutboundRoute<'_, T> {
             }
             TimingDomain::Physical => {
                 let time = self
-                    .physical_clock
+                    .clock
                     .now_after(std::time::Duration::from_nanos(self.delay_nanos))
                     .map_err(|error| match error {
                         crate::clock::PhysicalClockError::Overflow => {
@@ -753,9 +753,9 @@ impl<'image> OwnedStorage<'image> {
         let reaction_refs = initialize_reaction_refs(&image, &mut ports, &mut actions)?;
         let states = initialize_states(&state_bindings, &bindings)?;
         let reactions = initialize_reactions(bindings);
-        let physical_clock = crate::clock::RuntimeClock::default();
+        let clock = crate::clock::ExecutionClock::default();
         let (contexts, event_tx, event_rx, shutdown_tx) =
-            initialize_contexts(&image, enclave_key, physical_clock)?;
+            initialize_contexts(&image, enclave_key, clock)?;
         let event_capacity = image.storage_bounds().event_capacity() as usize;
         let inbound_boundary_ports = image
             .routes()
@@ -794,23 +794,21 @@ impl<'image> OwnedStorage<'image> {
 
     /// Binds the shared native origin before any participant starts executing.
     pub(crate) fn initialize_clock(&self, origin: Instant) -> Instant {
-        self.scheduler_send_context()
-            .physical_clock
-            .initialize(origin)
+        self.scheduler_send_context().clock.initialize(origin)
     }
 
     /// Shares the Enclave clock policy with all reaction contexts and outbound routes.
-    #[cfg(feature = "external-clock")]
-    pub(crate) fn set_physical_clock(&mut self, clock: crate::clock::RuntimeClock) {
+    #[cfg(feature = "hosted-manual-clock")]
+    pub(crate) fn set_clock(&mut self, clock: crate::clock::ExecutionClock) {
         for context in self.contexts.values_mut() {
-            context.physical_clock = clock.clone();
+            context.clock = clock.clone();
         }
         for route in self
             .outbound_routes
             .iter_mut()
             .flat_map(|(_, routes)| routes)
         {
-            route.set_physical_clock(clock.clone());
+            route.set_clock(clock.clone());
         }
     }
 
@@ -868,7 +866,7 @@ impl<'image> OwnedStorage<'image> {
             timing_domain,
             delay_nanos,
             destination_tx,
-            physical_clock: self.scheduler_send_context().physical_clock,
+            clock: self.scheduler_send_context().clock,
             marker: PhantomData,
         });
         if let Some(routes) = self.outbound_routes.get_mut(source_port) {
@@ -1377,7 +1375,7 @@ fn initialize_reaction_refs(
 fn initialize_contexts(
     image: &EnclaveImageView<'_>,
     enclave_key: EnclaveKey,
-    physical_clock: crate::clock::RuntimeClock,
+    clock: crate::clock::ExecutionClock,
 ) -> Result<InitializedContexts, OwnedStorageError> {
     let (event_tx, event_rx) = kanal::bounded(image.storage_bounds().event_capacity() as usize);
     let (shutdown_tx, shutdown_rx) = crate::keepalive::channel();
@@ -1389,7 +1387,7 @@ fn initialize_contexts(
         });
         let inserted = contexts.insert(Context::new(
             enclave_key,
-            physical_clock.clone(),
+            clock.clone(),
             bank_info,
             event_tx.clone(),
             shutdown_rx.clone(),
@@ -2208,7 +2206,7 @@ mod tests {
                 BindingSlotIndex::new(1),
                 move |context: &mut Context, _state, _refs, _mode_effect| {
                     *reaction_origin.lock().unwrap() =
-                        Some(context.physical_clock.initialize(Instant::now()));
+                        Some(context.clock.initialize(Instant::now()));
                     context.schedule_shutdown(Some(Duration::ZERO));
                     Ok(())
                 },

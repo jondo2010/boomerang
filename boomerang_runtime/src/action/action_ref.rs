@@ -85,15 +85,30 @@ impl<T: ReactorData> ActionCommon<T> for ActionRef<'_, T> {
     }
 }
 
-/// [`AsyncActionRef`] is the type received by a user Reaction when they want to interact with an Action asynchronously.
+/// An action handle for ordinary event delivery through [`crate::SendContext`].
+///
+/// Preparation captures selected physical time plus the action's delay. The
+/// scheduler adjusts late timestamps and assigns distinct microsteps as needed.
+/// This contract works with host monotonic or manual time and does not report source progress.
 /// It is the asynchronous version of [`ActionRef`].
-#[derive(Clone)]
 pub struct AsyncActionRef<T: ReactorData = ()> {
     name: String,
     key: ActionKey,
     min_delay: Option<Duration>,
     is_logical: bool,
     _phantom: std::marker::PhantomData<fn() -> T>,
+}
+
+impl<T: ReactorData> Clone for AsyncActionRef<T> {
+    fn clone(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            key: self.key,
+            min_delay: self.min_delay,
+            is_logical: self.is_logical,
+            _phantom: std::marker::PhantomData,
+        }
+    }
 }
 
 impl<'a, T: ReactorData> TryFrom<DynActionRef<'a>> for AsyncActionRef<T> {

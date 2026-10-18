@@ -1,4 +1,4 @@
-//! Host-monotonic pacing for native execution.
+//! Physical-time pacing with the host monotonic clock.
 use super::{ClockWaitResult, WaitContext};
 use crate::{
     observation::SchedulerPhase,
@@ -9,8 +9,8 @@ use crate::{
 };
 use kanal::ReceiveErrorTimeout;
 
-/// Synchronizes a tag to the system timer with the existing native receive behavior.
-pub(super) fn wait_native(
+/// Wait for a logical tag using the host monotonic clock.
+pub(super) fn wait_host_monotonic(
     tag: Tag,
     wait: &mut WaitContext<'_, '_>,
 ) -> Result<ClockWaitResult, FederateCoordinationError> {
@@ -22,11 +22,11 @@ pub(super) fn wait_native(
             let advance = target - now;
             tracing::debug!(target: "boomerang::runtime",
                 event = "runtime.scheduler.waiting", enclave = wait.key.as_u32(),
-                reason = "wall_clock", duration_ns = advance.as_nanos(),
+                reason = "host_monotonic", duration_ns = advance.as_nanos(),
             );
 
             let observation = wait.observation;
-            let received = receive_until_wall_clock_deadline(
+            let received = receive_until_host_deadline(
                 target,
                 wait.event_rx,
                 || {
@@ -62,7 +62,7 @@ pub(super) fn wait_native(
 }
 
 /// Performs one uninterrupted scheduler-event receive until a physical deadline.
-fn receive_until_wall_clock_deadline(
+fn receive_until_host_deadline(
     target: std::time::Instant,
     event_rx: &crate::Receiver<AsyncEvent>,
     entered_receive: impl FnOnce(),
@@ -87,10 +87,10 @@ fn receive_until_wall_clock_deadline(
 }
 
 #[cfg(test)]
-mod wall_clock_tests {
-    //! Exact receive-entry coverage for coordinated wall-clock termination.
+mod tests {
+    //! Coordinated termination during a host deadline wait.
 
-    use super::{receive_until_wall_clock_deadline, ClockWaitResult};
+    use super::{receive_until_host_deadline, ClockWaitResult};
     use crate::{
         image::EnclaveIndex,
         sched::federate::{
@@ -101,10 +101,10 @@ mod wall_clock_tests {
     };
     use std::{sync::mpsc, time::Duration as StdDuration};
 
-    /// Checks that native pacing leaves due tags alone and returns queued interruptions.
+    /// Checks that host monotonic pacing leaves due tags alone and returns queued interruptions.
     #[test]
-    fn native_clock_paces_tags_and_preserves_interruptions() {
-        use crate::clock::{RuntimeClock, WaitContext};
+    fn host_monotonic_clock_paces_tags_and_preserves_interruptions() {
+        use crate::clock::{ExecutionClock, WaitContext};
         use crate::{Duration, EnclaveKey, Tag};
         let (tx, rx) = kanal::unbounded();
         let mut coordination = None;
@@ -117,32 +117,32 @@ mod wall_clock_tests {
         };
         tx.send(AsyncEvent::FederateResume).unwrap();
         assert!(matches!(
-            RuntimeClock::default()
+            ExecutionClock::default()
                 .wait_until(Tag::new(Duration::ZERO, 0), &mut wait)
                 .unwrap(),
             ClockWaitResult::DeadlineReached
         ));
         assert!(matches!(
-            RuntimeClock::default()
+            ExecutionClock::default()
                 .wait_until(Tag::new(Duration::seconds(60), 0), &mut wait)
                 .unwrap(),
             ClockWaitResult::Interrupted(AsyncEvent::FederateResume)
         ));
     }
 
-    /// Native handles contain only shared origin ownership, with no hosted registry.
-    #[cfg(not(feature = "external-clock"))]
+    /// Host clock handles contain only shared origin ownership, with no hosted registry.
+    #[cfg(not(feature = "hosted-manual-clock"))]
     #[test]
-    fn native_clock_handle_contains_only_shared_origin() {
+    fn host_monotonic_clock_handle_contains_only_shared_origin() {
         assert_eq!(
-            std::mem::size_of::<crate::clock::RuntimeClock>(),
+            std::mem::size_of::<crate::clock::ExecutionClock>(),
             std::mem::size_of::<usize>()
         );
     }
 
     /// Verifies coordinator abort closes an entered timed receive only after queuing termination.
     #[test]
-    fn coordinated_abort_interrupts_entered_wall_clock_receive() {
+    fn coordinated_abort_interrupts_entered_host_deadline_receive() {
         let enclave = EnclaveIndex::new(0);
         let (event_tx, event_rx) = kanal::unbounded::<AsyncEvent>();
         let scheduler_event_rx = event_rx.clone();
@@ -164,7 +164,7 @@ mod wall_clock_tests {
         std::thread::scope(|scope| {
             let coordinator = scope.spawn(move || coordinator.run());
             let waiter = scope.spawn(move || {
-                receive_until_wall_clock_deadline(
+                receive_until_host_deadline(
                     target,
                     &scheduler_event_rx,
                     || entered_tx.send(()).unwrap(),

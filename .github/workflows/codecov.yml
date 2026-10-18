@@ -4,7 +4,7 @@ on:
   push:
     branches: ["main"]
   pull_request:
-    branches: ["main", "codex/issue-272-clock"]
+    branches: ["main", "codex/issue-272-clock", "codex/issue-272-context-clock", "codex/issue-272-source-runtime"]
 
 permissions:
   contents: read

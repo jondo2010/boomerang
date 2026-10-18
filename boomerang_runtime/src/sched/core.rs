@@ -10,7 +10,7 @@ use super::{
     Config, Stats,
 };
 use crate::{
-    clock::{ClockWaitResult, RuntimeClock, WaitContext},
+    clock::{ClockWaitResult, ExecutionClock, WaitContext},
     event::{AsyncEvent, AsyncEventTarget},
     keepalive,
     key_set::KeySetView,
@@ -177,7 +177,7 @@ where
     /// Enclave whose logical time this invocation advances.
     pub(super) key: EnclaveKey,
     /// Selected execution timeline, including the shared native origin.
-    pub(super) clock: RuntimeClock,
+    pub(super) clock: ExecutionClock,
     /// Existing live scheduler configuration.
     pub(super) config: &'a Config,
     /// Optional snapshot-only scheduler observation state.

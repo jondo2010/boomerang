@@ -8,7 +8,7 @@ pub use ::time::Duration;
 pub mod action;
 pub mod binding;
 pub mod clock;
-mod context;
+pub mod context;
 mod env;
 mod event;
 pub mod image;

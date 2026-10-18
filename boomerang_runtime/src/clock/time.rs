@@ -12,13 +12,13 @@ pub struct ExecutionEpoch(pub u128);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("physical clock: {self:?}")]
 pub enum PhysicalClockError {
-    /// The native execution origin has not been bound at scheduler startup.
+    /// The host monotonic origin has not been bound at scheduler startup.
     NotStarted,
     /// The driver moved time backwards.
     Regression,
     /// Host entropy was unavailable when creating a fresh execution identity.
     EntropyUnavailable,
-    /// The driver closed the clock.
+    /// The clock or execution has closed.
     Closed,
     /// The driver explicitly failed the clock.
     Failed,

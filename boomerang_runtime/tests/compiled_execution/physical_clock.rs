@@ -39,8 +39,7 @@ fn physical_clock_two_enclaves_preserve_all_timer_tags_across_jumps() {
     bounded(|| {
         let clock = ManualClock::new(PhysicalClockDomainId(7)).unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
-        let mut bindings =
-            FederateBindings::new().with_physical_clock(clock.domain(), clock.clone());
+        let mut bindings = FederateBindings::new().with_manual_clock(clock.domain(), clock.clone());
         for enclave in 0..2 {
             let tx = tx.clone();
             bindings = bindings.bind_enclave(
@@ -126,7 +125,7 @@ fn physical_clock_failure_releases_physical_and_idle_coordination_waits() {
                 },
             ];
             let mut bindings =
-                FederateBindings::new().with_physical_clock(clock.domain(), clock.clone());
+                FederateBindings::new().with_manual_clock(clock.domain(), clock.clone());
             for i in 0..2 {
                 bindings = bindings.bind_enclave(EnclaveIndex::new(i), reference_bindings());
             }
@@ -189,7 +188,7 @@ fn physical_clock_preflight_rejects_domain_closed_and_reuse() {
     let clock = ManualClock::new(PhysicalClockDomainId(7)).unwrap();
     let run = |domain| {
         let bindings = (0..2).fold(
-            FederateBindings::new().with_physical_clock(domain, clock.clone()),
+            FederateBindings::new().with_manual_clock(domain, clock.clone()),
             |bindings, i| bindings.bind_enclave(EnclaveIndex::new(i), reference_bindings()),
         );
         execute_owned_federate(
@@ -235,7 +234,7 @@ fn physical_clock_rejects_mailboxes_without_a_retained_wake_slot() {
         CLOCK_ENCLAVES[1].clone(),
     ];
     let bindings = (0..2).fold(
-        FederateBindings::new().with_physical_clock(clock.domain(), clock),
+        FederateBindings::new().with_manual_clock(clock.domain(), clock),
         |bindings, i| bindings.bind_enclave(EnclaveIndex::new(i), reference_bindings()),
     );
     let result = execute_owned_federate(
@@ -338,7 +337,7 @@ fn physical_route_uses_selected_clock() {
             },
             FederateIndex::new(0),
             FederateBindings::new()
-                .with_physical_clock(clock.domain(), clock)
+                .with_manual_clock(clock.domain(), clock)
                 .bind_enclave(EnclaveIndex::new(0), source)
                 .bind_enclave(EnclaveIndex::new(1), sink_bindings())
                 .bind_route(
@@ -467,7 +466,7 @@ fn physical_actions_at_frozen_time_preserve_microsteps_and_every_value() {
             },
             FederateIndex::new(0),
             FederateBindings::new()
-                .with_physical_clock(clock.domain(), clock)
+                .with_manual_clock(clock.domain(), clock)
                 .bind_enclave(EnclaveIndex::new(0), bindings),
             Config::default(),
         )

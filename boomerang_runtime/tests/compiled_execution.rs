@@ -406,6 +406,6 @@ mod timers;
 use source_sink::*;
 use timers::PERIODIC_ACTIONS;
 
-#[cfg(feature = "external-clock")]
+#[cfg(feature = "hosted-manual-clock")]
 #[path = "compiled_execution/physical_clock.rs"]
 mod physical_clock;

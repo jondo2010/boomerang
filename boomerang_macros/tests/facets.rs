@@ -6,7 +6,7 @@ use std::{
 };
 
 const MACRO_ABI_INPUT: &str = "BOOMERANG_PAYLOAD_INPUT_V1_MACRO_ABI";
-const SENSOR_FINGERPRINT: &str = "adf86bcf69509f81e115866c31e02ab770c32b966644a3bff0328485d53b88f1";
+const SENSOR_FINGERPRINT: &str = "fb3a9cf22e1b7b339eb863c20248a2c34e95983da3d46c96b0124e6d699cc62d";
 const EMPTY_FINGERPRINT: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
 static FIXTURE_LOCK: Mutex<()> = Mutex::new(());
@@ -112,6 +112,7 @@ fn command(fixture: &str, subcommand: &str, facets: &[&str], args: &[&str]) -> C
         ("example.custom", "Custom", EMPTY_FINGERPRINT),
         ("example.shaped", "Shaped", EMPTY_FINGERPRINT),
         ("example.lifetime", "Lifetime", EMPTY_FINGERPRINT),
+        ("example.generic", "Generic", EMPTY_FINGERPRINT),
         ("example.private-empty", "Empty", EMPTY_FINGERPRINT),
         ("example.actions", "Actions", EMPTY_FINGERPRINT),
     ] {
@@ -458,8 +459,8 @@ fn named_command(mode: &str, features: &str) -> Command {
         &["--features", features],
     );
     cargo.env(named_input_key(), concat!(
-        "named_components::parent::keyboard=e0055db4be88cc8e0abadd0f4314cfa176d1b46c9b65730bef680f2676a08e6f\n",
-        "named_components::parent::alternate=1af19367a6fe4903a6f7a28a6a630513a160c6d9397e2777d31c78e05f0c12a5",
+        "named_components::parent::keyboard=ad5a07639b3b64665a94cfcdc6dbcb1d849ce0afe97238066091efd2a6c7f1b6\n",
+        "named_components::parent::alternate=b8a3cad879b9331eff9a58945950335930577a4aa08ac6ce0ac3a7932bbfcdf2",
     ));
     cargo
 }
@@ -613,7 +614,7 @@ fn named_components_payload_can_compile_unselected_components() {
 #[test]
 fn named_components_payload_can_select_one_component_from_an_owning_crate() {
     let mut cargo = named_command("payload", "subset-assert");
-    cargo.env(named_input_key(), "named_components::parent::keyboard=e0055db4be88cc8e0abadd0f4314cfa176d1b46c9b65730bef680f2676a08e6f");
+    cargo.env(named_input_key(), "named_components::parent::keyboard=ad5a07639b3b64665a94cfcdc6dbcb1d849ce0afe97238066091efd2a6c7f1b6");
     let output = run(cargo, "named-components");
     assert!(
         output.status.success(),
@@ -625,7 +626,7 @@ fn named_components_payload_can_select_one_component_from_an_owning_crate() {
 #[test]
 fn named_components_payload_normalizes_raw_module_path_segments() {
     let mut cargo = named_command("payload", "subset-assert");
-    cargo.env(named_input_key(), "r#named_components::r#parent::r#keyboard=e0055db4be88cc8e0abadd0f4314cfa176d1b46c9b65730bef680f2676a08e6f");
+    cargo.env(named_input_key(), "r#named_components::r#parent::r#keyboard=ad5a07639b3b64665a94cfcdc6dbcb1d849ce0afe97238066091efd2a6c7f1b6");
     let output = run(cargo, "named-components");
     assert!(
         output.status.success(),
@@ -637,10 +638,10 @@ fn named_components_payload_normalizes_raw_module_path_segments() {
 #[test]
 fn named_components_payload_rejects_missing_entries_and_ambiguous_or_malformed_tables() {
     for (input, message) in [
-        ("named_components::parent::alternate=e0055db4be88cc8e0abadd0f4314cfa176d1b46c9b65730bef680f2676a08e6f", "missing payload descriptor fingerprint compile input"),
+        ("named_components::parent::alternate=ad5a07639b3b64665a94cfcdc6dbcb1d849ce0afe97238066091efd2a6c7f1b6", "missing payload descriptor fingerprint compile input"),
         ("not a record", "malformed component payload fingerprint input record"),
-        (concat!("named_components::parent::keyboard=e0055db4be88cc8e0abadd0f4314cfa176d1b46c9b65730bef680f2676a08e6f\n",
-            "named_components::parent::r#keyboard=e0055db4be88cc8e0abadd0f4314cfa176d1b46c9b65730bef680f2676a08e6f"), "duplicate component payload fingerprint input record"),
+        (concat!("named_components::parent::keyboard=ad5a07639b3b64665a94cfcdc6dbcb1d849ce0afe97238066091efd2a6c7f1b6\n",
+            "named_components::parent::r#keyboard=ad5a07639b3b64665a94cfcdc6dbcb1d849ce0afe97238066091efd2a6c7f1b6"), "duplicate component payload fingerprint input record"),
     ] {
         let mut cargo = named_command("payload", "subset-assert");
         cargo.env(named_input_key(), input);
@@ -648,4 +649,10 @@ fn named_components_payload_rejects_missing_entries_and_ambiguous_or_malformed_t
         assert!(error.contains(message), "{error}");
         assert!(error.contains("E0080"), "selected-component validation must fail at compile time: {error}");
     }
+}
+
+#[test]
+fn generic_initialization_context_preserves_parameters_in_compiled_facets() {
+    cargo_check("descriptor-pass", &["descriptor"], &[]).unwrap();
+    cargo_check("descriptor-pass", &["payload"], &["--no-default-features"]).unwrap();
 }

@@ -1,9 +1,10 @@
-//! Pure lifecycle and logical-time coordination for one compiled Federate.
+//! Federate lifecycle and logical-time coordination with an optional hosted input-progress gate.
 //!
 //! The state machine aggregates scheduler candidates and completions by compiled [`EnclaveIndex`],
-//! advances revision-bound fixed-point phases, and latches terminal stop or failure without owning
-//! channels, clocks, scheduler storage, or a concrete coordination backend. A later adapter maps
-//! these semantic [`CoordinationAction`] values onto runtime operations.
+//! advances revision-bound fixed-point phases, and latches terminal stop or failure.
+//! With `hosted-source-input`, source progress supplies a cached cap to this same state.
+//! Coherent action publication and final execution share its publication/execution lock. The orchestration adapter maps [`CoordinationAction`]
+//! values onto runtime operations; scheduler storage and the backend remain external.
 
 use tinymap::TinySecondaryMap;
 
@@ -188,6 +189,12 @@ pub(crate) enum CoordinationStateError {
 /// Mutable candidate, completion, and observation state for one participant.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct ParticipantState {
+    /// Accepted authority awaiting the final execution boundary.
+    #[cfg(feature = "hosted-source-input")]
+    granted: Option<Tag>,
+    /// Greatest tag that crossed the final execution boundary.
+    #[cfg(feature = "hosted-source-input")]
+    started: Option<Tag>,
     /// Most recently published optional next logical event.
     candidate: Option<Tag>,
     /// Greatest logical completion tag reported by this participant.
@@ -200,9 +207,15 @@ struct ParticipantState {
     observation: Option<Observation>,
 }
 
-/// Pure coordination state for every compiled participant in one Federate.
+/// Participant coordination state with optional hosted input grant authorization.
 #[derive(Debug)]
 pub(crate) struct FederateCoordinationState {
+    /// Cached exclusive-source cap; absent when no hosted ingress is installed.
+    #[cfg(feature = "hosted-source-input")]
+    pub(crate) input_horizon: Option<Tag>,
+    /// Uncapped authority retained only until the next publication.
+    #[cfg(feature = "hosted-source-input")]
+    input_acquisition: Option<FederateAcquisition>,
     /// Sparse participant state keyed by original compiled identity.
     participants: TinySecondaryMap<EnclaveIndex, ParticipantState>,
     /// Version of the current aggregate candidate.
@@ -249,6 +262,10 @@ impl FederateCoordinationState {
         }
 
         Ok(Self {
+            #[cfg(feature = "hosted-source-input")]
+            input_horizon: None,
+            #[cfg(feature = "hosted-source-input")]
+            input_acquisition: None,
             participants,
             revision: CoordinationRevision::new(0),
             pending_publication: None,
@@ -350,6 +367,16 @@ impl FederateCoordinationState {
         }
 
         let granted = acquisition.granted();
+        #[cfg(feature = "hosted-source-input")]
+        if self.input_horizon.is_some()
+            && self.input_acquisition.is_none_or(|old| {
+                old.revision() != acquisition.revision() || old.granted() < granted
+            })
+        {
+            self.input_acquisition = Some(acquisition);
+        }
+        #[cfg(feature = "hosted-source-input")]
+        let granted = self.input_horizon.map_or(granted, |cap| granted.min(cap));
         if self.pending_publication.is_none()
             && self.grant_horizon.is_none_or(|horizon| granted <= horizon)
         {
@@ -359,6 +386,10 @@ impl FederateCoordinationState {
             .grant_horizon
             .map_or(granted, |existing| existing.max(granted));
         self.grant_horizon = Some(horizon);
+        #[cfg(feature = "hosted-source-input")]
+        for (_, participant) in self.participants.iter_mut() {
+            participant.granted = Some(granted);
+        }
         let mut actions = vec![CoordinationAction::AdvanceHorizon { tag: horizon }];
         actions.extend(
             self.participants
@@ -385,6 +416,66 @@ impl FederateCoordinationState {
         self.pending_publication = None;
 
         Ok(actions)
+    }
+
+    /// Rejects input at or before a participant's actual execution boundary.
+    #[cfg(feature = "hosted-source-input")]
+    pub(crate) fn input_is_late(&self, enclave: EnclaveIndex, tag: Tag) -> bool {
+        self.participants.get(enclave).is_none_or(|p| {
+            p.started.is_some_and(|started| tag <= started)
+                || p.completed.is_some_and(|completed| tag <= completed)
+        })
+    }
+
+    /// Returns authoritative participant completion for bounded staging collection.
+    #[cfg(feature = "hosted-source-input")]
+    pub(crate) fn input_completed(&self, enclave: EnclaveIndex, tag: Tag) -> bool {
+        self.participants
+            .get(enclave)
+            .is_some_and(|p| p.completed.is_some_and(|completed| tag <= completed))
+    }
+
+    /// Invalidates provisional grants and the publication fence before atomic fanout.
+    #[cfg(feature = "hosted-source-input")]
+    pub(crate) fn input_publishing(&mut self, affected: impl Iterator<Item = EnclaveIndex>) {
+        self.revise_publication();
+        self.input_acquisition = None;
+        for (_, participant) in self.participants.iter_mut() {
+            participant.granted = None;
+        }
+        // Unaffected idle and acquisition waiters retain valid candidates. They
+        // still cross the existing fresh-mailbox publication fence before grants.
+        for enclave in affected {
+            self.participants[enclave].published = false;
+        }
+    }
+
+    /// Issues an irrevocable execution permit after the latest coherent publication.
+    #[cfg(feature = "hosted-source-input")]
+    pub(crate) fn begin_tag(&mut self, enclave: EnclaveIndex, tag: Tag) -> bool {
+        let Some(cap) = self.input_horizon else {
+            return true;
+        };
+        if self.is_stopped() || tag > cap {
+            return false;
+        }
+        let Some(participant) = self.participants.get_mut(enclave) else {
+            return false;
+        };
+        if participant.granted.is_none_or(|granted| tag > granted) {
+            return false;
+        }
+        participant.started = Some(tag);
+        true
+    }
+
+    /// Reapplies retained backend authority when only the input cap advances.
+    #[cfg(feature = "hosted-source-input")]
+    pub(crate) fn input_progress(
+        &mut self,
+    ) -> Result<Vec<CoordinationAction>, CoordinationStateError> {
+        self.input_acquisition
+            .map_or_else(|| Ok(Vec::new()), |grant| self.handle_acquisition(grant))
     }
 
     /// Reuses accepted authority only after the publication crossed the backend fence.
@@ -536,18 +627,25 @@ impl FederateCoordinationState {
             return Ok(Vec::new());
         }
 
-        self.revision = self.revision.next();
-        self.pending_publication = None;
-        self.phase = CoordinationPhase::Active;
-        for (_, participant) in self.participants.iter_mut() {
-            participant.observation = None;
-        }
+        self.revise_publication();
         self.participants[enclave].published = false;
 
         Ok(vec![CoordinationAction::Resume {
             enclave,
             revision: self.revision,
         }])
+    }
+
+    /// Revises the existing publication and fixed-point fences after candidate changes.
+    fn revise_publication(&mut self) {
+        self.revision = self.revision.next();
+        self.pending_publication = None;
+        self.completion_probe = None;
+        self.idle_authorization = None;
+        self.phase = CoordinationPhase::Active;
+        for (_, participant) in self.participants.iter_mut() {
+            participant.observation = None;
+        }
     }
 
     /// Resolves a compiled participant or returns an identity error without mutation.
@@ -708,13 +806,7 @@ impl FederateCoordinationState {
         let resume = changed && self.phase != CoordinationPhase::Active;
 
         if changed {
-            self.completion_probe = None;
-            self.revision = self.revision.next();
-            self.pending_publication = None;
-            self.phase = CoordinationPhase::Active;
-            for (_, participant) in self.participants.iter_mut() {
-                participant.observation = None;
-            }
+            self.revise_publication();
         } else if was_published {
             let action = match self.phase {
                 CoordinationPhase::Probing => Some(CoordinationAction::Probe {
@@ -753,6 +845,10 @@ impl FederateCoordinationState {
             .min();
         let publication = FederatePublication::new(self.revision, next_event)
             .with_grant_horizon(self.grant_horizon);
+        #[cfg(feature = "hosted-source-input")]
+        {
+            self.input_acquisition = None;
+        }
         self.pending_publication = Some(publication);
         let mut actions = vec![CoordinationAction::Publish(publication)];
         if resume {

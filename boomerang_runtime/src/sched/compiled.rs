@@ -84,6 +84,11 @@ impl ExecutionStorage<EnclaveImageView<'_>> for OwnedStorage<'_> {
         self.scheduler_action(key)
     }
 
+    #[cfg(feature = "hosted-source-input")]
+    fn action_from_compiled(&self, action: ActionIndex) -> Result<ActionIndex, Self::Error> {
+        Ok(action)
+    }
+
     fn push_action_value(&mut self, action: ActionIndex, tag: Tag, value: Box<dyn ReactorData>) {
         self.scheduler_push_action(action, tag, value);
     }
@@ -568,9 +573,9 @@ mod tests {
         OwnedStorage::new(EnclaveImageView::new(image.clone()).unwrap(), bindings).unwrap()
     }
 
-    /// Compiled native admission retains distinct work for two equal physical timestamps.
+    /// Compiled admission with the host clock retains distinct work for two equal physical timestamps.
     #[test]
-    fn native_physical_events_keep_distinct_compiled_microsteps() {
+    fn host_clock_physical_events_keep_distinct_compiled_microsteps() {
         let calls = Arc::new(Mutex::new(Vec::new()));
         /// Two mailbox slots hold both observations before scheduler startup.
         static TWO_EVENTS: EnclaveImage<'static> = EnclaveImage {

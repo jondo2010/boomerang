@@ -131,6 +131,29 @@ pub struct Store {
 }
 
 impl Store {
+    /// Checks structural invariants before a live initializer can produce owned state.
+    pub(crate) fn valid_layout(env: &Env, graph: &ReactionGraph) -> bool {
+        itertools::equal(env.reactions.keys(), graph.reaction_use_ports.keys())
+            && itertools::equal(env.reactions.keys(), graph.reaction_effect_ports.keys())
+            && itertools::equal(env.reactions.keys(), graph.reaction_actions.keys())
+            && itertools::equal(env.reactions.keys(), graph.reaction_reactors.keys())
+            && graph
+                .reaction_reactors
+                .values()
+                .all(|key| env.reactors.get(*key).is_some())
+            && graph
+                .reaction_actions
+                .values()
+                .flatten()
+                .all(|key| env.actions.get(*key).is_some())
+            && graph
+                .reaction_use_ports
+                .values()
+                .chain(graph.reaction_effect_ports.values())
+                .flatten()
+                .all(|key| env.ports.get(*key).is_some())
+    }
+
     /// Create a new `Store` from the given `Env`, `Contexts`, and `ReactionGraph`.
     ///
     /// # Panics
@@ -143,14 +166,7 @@ impl Store {
         reaction_graph: &ReactionGraph,
     ) -> Pin<Box<Self>> {
         assert!(
-            itertools::equal(env.reactions.keys(), contexts.keys())
-                && itertools::equal(env.reactions.keys(), reaction_graph.reaction_use_ports.keys())
-                && itertools::equal(
-                    env.reactions.keys(),
-                    reaction_graph.reaction_effect_ports.keys(),
-                )
-                && itertools::equal(env.reactions.keys(), reaction_graph.reaction_actions.keys())
-                && itertools::equal(env.reactions.keys(), reaction_graph.reaction_reactors.keys()),
+            itertools::equal(env.reactions.keys(), contexts.keys()) && Self::valid_layout(&env, reaction_graph),
             "Store contexts must exactly cover reactions; reaction graph tables must match the same key set",
         );
 

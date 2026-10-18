@@ -1,109 +1,163 @@
-//! Test asynchronous callbacks that trigger a physical action.
-
+//! Each timer request delivers two values through a physical action.
 use boomerang::prelude::*;
-use std::thread::JoinHandle;
+use boomerang::runtime::context::TrySendError;
+use std::{
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc,
+    },
+    thread::JoinHandle,
+};
 
-#[derive(Debug, Default)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-struct State {
-    #[cfg_attr(feature = "serde", serde(skip))]
+/// A worker that owns callback requests and joins its thread when dropped.
+#[derive(Debug)]
+struct CallbackWorker {
+    requests: Option<mpsc::Sender<usize>>,
+    cancelled: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
+}
+impl CallbackWorker {
+    fn new(init: CallbackInit) -> Self {
+        let (requests, incoming) = mpsc::channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let stop = cancelled.clone();
+        let thread = std::thread::spawn(move || {
+            while let Ok(request) = incoming.recv() {
+                if stop.load(Ordering::Acquire) {
+                    return;
+                }
+                // Simulate asynchronous work requested by a timer reaction.
+                // The work can finish after the scheduler timeout.
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                for callback in 0..2 {
+                    let Ok(mut prepared) =
+                        init.send
+                            .prepare_action(&init.a, request * 2 + callback, None)
+                    else {
+                        return;
+                    };
+                    loop {
+                        if stop.load(Ordering::Acquire) {
+                            return;
+                        }
+                        match prepared.try_send() {
+                            Ok(()) => break,
+                            Err(TrySendError::Closed(_)) => return,
+                            Err(TrySendError::Full(retry)) => prepared = retry,
+                        }
+                        std::thread::park_timeout(std::time::Duration::from_millis(1));
+                    }
+                }
+            }
+        });
+        Self {
+            requests: Some(requests),
+            cancelled,
+            thread: Some(thread),
+        }
+    }
+    fn request(&self, request: usize) {
+        self.requests.as_ref().unwrap().send(request).unwrap();
+    }
+}
+impl Drop for CallbackWorker {
+    fn drop(&mut self) {
+        self.cancelled.store(true, Ordering::Release);
+        self.requests.take();
+        if let Some(worker) = self.thread.take() {
+            worker.join().unwrap();
+        }
+    }
+}
+#[derive(Debug)]
+struct State {
+    worker: CallbackWorker,
     expected_time: Duration,
     toggle: bool,
-    i: usize,
+    received: usize,
+    requested: usize,
 }
-
-#[reactor(state = State)]
-fn AsyncCallback() -> impl Reactor {
+impl State {
+    fn new(init: CallbackInit) -> Result<Self, std::convert::Infallible> {
+        Ok(Self {
+            worker: CallbackWorker::new(init),
+            expected_time: Duration::milliseconds(100),
+            toggle: false,
+            received: 0,
+            requested: 0,
+        })
+    }
+}
+#[reactor(state = State, state_init = State::new, init_context(name = CallbackInit, actions = [a]))]
+fn AsyncCallback(#[physical_action] a: usize) -> impl Reactor {
     let t = ctx.add_timer(
         "t",
         TimerSpec::default().with_period(Duration::milliseconds(200)),
     )?;
-    let a = ctx.add_physical_action::<usize>("a", None)?;
-
-    ctx.add_reaction(Some("T"))
+    ctx.add_reaction(Some("Request"))
         .with_trigger(t)
-        .with_effect(a)
-        .with_reaction_fn(|ctx, state, (_t, a)| {
-            // make sure to join the old thread first
-            if let Some(thread) = state.thread.take() {
-                thread.join().unwrap();
-            }
-
-            let send_ctx = ctx.make_send_context();
-            let a = a.to_async();
-
-            // start new thread
-            state.thread = Some(std::thread::spawn(move || {
-                // Simulate time passing before a callback occurs
-                std::thread::sleep(std::time::Duration::from_millis(100));
-                // Schedule twice. If the action is not physical, these should get consolidated into a single action
-                // triggering. If it is, then they cause two separate triggerings with close but not equal time stamps.
-                for _ in 0..2 {
-                    let sent = send_ctx
-                        .prepare_action(&a, 0, None)
-                        .expect("physical action preparation failed")
-                        .send();
-                    if sent.is_err() {
-                        // The final callback may complete after the logical shutdown timeout.
-                        assert!(send_ctx.is_shutdown(), "scheduler rejected a live callback");
-                        break;
-                    }
-                }
-            }));
-        })
-        .finish()?;
-
-    reaction! {
-        A (a) {
-            let elapsed_time = ctx.get_elapsed_logical_time();
-            state.i += 1;
-            eprintln!(
-                "Asynchronous callback {}: Assigned logical time greater than start time by {elapsed_time:?}",
-                state.i,
-            );
-            if elapsed_time <= state.expected_time {
-                panic!(
-                    "ERROR: Expected logical time to be larger than {:?}, was {elapsed_time:?}",
-                    state.expected_time
-                );
-            }
-            if state.toggle {
-                state.toggle = false;
-                state.expected_time += Duration::milliseconds(200);
-            } else {
-                state.toggle = true;
-            }
-        }
-    }
-
-    ctx.add_reaction(Some("Shutdown"))
-        .with_shutdown_trigger()
         .with_reaction_fn(|_ctx, state, _| {
-            // make sure to join the thread before shutting down
-            if state.thread.is_some() {
-                std::mem::take(&mut state.thread).unwrap().join().unwrap();
+            if state.requested < 10 {
+                state.worker.request(state.requested);
+                state.requested += 1;
             }
         })
         .finish()?;
+    reaction! { Callback(a) {
+        let elapsed = ctx.get_elapsed_logical_time();
+        assert!(elapsed > state.expected_time, "callback must follow its requested work");
+        assert_eq!(ctx.get_action_value(&mut a), Some(&state.received));
+        state.received += 1;
+        if state.received == 20 { ctx.schedule_shutdown(None); }
+        if state.toggle { state.expected_time += Duration::milliseconds(200); }
+        state.toggle = !state.toggle;
+    } }
 }
-
 #[test]
 fn async_callback() {
-    tracing_subscriber::fmt::init();
-    let config = runtime::Config::default()
-        .with_fast_forward(false)
-        .with_timeout(Duration::seconds(2));
-    let _ = boomerang_util::runner::build_and_test_reactor(
+    let config = runtime::Config::default().with_timeout(Duration::seconds(30));
+    let (_, envs) = boomerang_util::runner::build_and_test_reactor_initialized(
         AsyncCallback(),
         "async_callback",
-        State {
-            thread: None,
-            expected_time: Duration::milliseconds(100),
-            toggle: false,
-            i: 0,
-        },
         config,
     )
     .unwrap();
+    let state = envs[0]
+        .reactors
+        .values()
+        .find_map(|r| r.get_state::<State>())
+        .unwrap();
+    assert_eq!(
+        state.received, 20,
+        "ten timer requests each deliver two separate callbacks"
+    );
+    // Dropping state cancels the worker and joins its thread.
+    drop(envs);
+}
+
+#[test]
+fn callback_finishing_after_timeout_observes_closed_mailbox() {
+    let config = runtime::Config::default().with_timeout(Duration::milliseconds(20));
+    let (_, envs) = boomerang_util::runner::build_and_test_reactor_initialized(
+        AsyncCallback(),
+        "late_callback",
+        config,
+    )
+    .unwrap();
+    let state = envs[0]
+        .reactors
+        .values()
+        .find_map(|r| r.get_state::<State>())
+        .unwrap();
+    assert_eq!(state.received, 0);
+    // Keep state alive until the requested callback finishes.
+    // The worker returns when the runtime closes the mailbox.
+    let mut envs = envs;
+    let state = envs[0]
+        .reactors
+        .values_mut()
+        .find_map(|r| r.get_state_mut::<State>())
+        .unwrap();
+    state.worker.requests.take();
+    state.worker.thread.take().unwrap().join().unwrap();
 }

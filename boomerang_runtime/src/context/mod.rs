@@ -11,6 +11,8 @@
 //! A retry keeps the same timestamp, payload, and destination.
 //! Drop the prepared action to cancel delivery.
 //!
+//! With `hosted-source-input`, timestamped observations and source progress use `crate::input`.
+//! Reactor state construction and capability binding use [`crate::initialization`].
 
 mod common;
 mod reaction;

@@ -9,15 +9,18 @@ use syn::{
 
 use crate::util::convert_from_snake_case;
 
+mod init_context;
 mod topology;
 
-/// Top-level arguments for the #[reactor] macro
+/// Top-level arguments for the `#[reactor]` macro.
 #[derive(attribute_derive::FromAttr)]
 pub struct ReactorArgs {
     /// The name of the state type to use. If not provided, a state struct will be generated.
     state: Option<TypePath>,
-    /// Zero-argument constructor for custom state in payload builds.
+    /// State constructor. Receives the generated context when `init_context` is set.
     state_init: Option<syn::Path>,
+    /// Fields of the generated context passed to the state constructor.
+    init_context: Option<init_context::InitContextArgs>,
     /// Stable component contract identity for descriptor builds.
     contract: Option<syn::LitStr>,
     /// Stable component contract version for descriptor builds.
@@ -49,6 +52,12 @@ struct DescriptorBoundsValues {
 
 impl ReactorArgs {
     fn validate(&self) -> syn::Result<()> {
+        if self.init_context.is_some() && (self.state.is_none() || self.state_init.is_none()) {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                "init_context requires state and state_init",
+            ));
+        }
         if let (Some(state_init), None) = (&self.state_init, &self.state) {
             return Err(syn::Error::new_spanned(
                 state_init,
@@ -1216,16 +1225,40 @@ fn payload_output(
         })
     });
     let state_symbol = required_binding_symbol("state_", &[&reactor_name]);
-    let state_init = reactor_args.state_init.as_ref().map_or_else(
-        || quote!(::core::default::Default::default()),
-        |path| quote!(#path()),
-    );
-    let (state_generics, _, state_where_clause) = model.generics.split_for_impl();
+    let state_type_symbol = format_ident!("type_{state_symbol}");
+    let mut state_witness_generics = model.generics.clone();
+    state_witness_generics
+        .make_where_clause()
+        .predicates
+        .push(syn::parse_quote!(#state_type: ::boomerang::runtime::ReactorData));
+    let (state_type_generics, _, state_type_where) = state_witness_generics.split_for_impl();
+    let capability_declaration = match init_context::declaration(reactor_args, model) {
+        Ok(value) => value,
+        Err(error) => return error.to_compile_error(),
+    };
+    let state_initializer = if reactor_args.init_context.is_some() {
+        match init_context::initializer(reactor_args, model, &state_symbol, state_type) {
+            Ok(value) => value,
+            Err(error) => return error.to_compile_error(),
+        }
+    } else {
+        let state_init = reactor_args.state_init.as_ref().map_or_else(
+            || quote!(::core::default::Default::default()),
+            |path| quote!(#path()),
+        );
+        let (state_generics, _, state_where_clause) = model.generics.split_for_impl();
+        quote! {
+            /// Constructs this reactor's concrete payload state.
+            #[allow(non_snake_case)]
+            pub fn #state_symbol #state_generics() -> #state_type #state_where_clause { #state_init }
+        }
+    };
 
     quote! {
         #state_struct
         #state_impl
 
+        #capability_declaration
         #fingerprint_declaration
         pub mod __boomerang {
             #[allow(unused_imports)]
@@ -1233,11 +1266,10 @@ fn payload_output(
 
             #binding_manifest
 
-            /// Constructs this reactor's concrete payload state.
+            /// Identifies concrete state independently of its initialization signature.
             #[allow(non_snake_case)]
-            pub fn #state_symbol #state_generics() -> #state_type #state_where_clause {
-                #state_init
-            }
+            pub fn #state_type_symbol #state_type_generics() -> ::boomerang::runtime::PayloadType<#state_type> #state_type_where { ::boomerang::runtime::PayloadType::new() }
+            #state_initializer
 
             #(#binding_exports)*
             #(#reaction_exports)*
@@ -1305,10 +1337,15 @@ fn descriptor_output(reactor_args: &ReactorArgs, model: &Model) -> TokenStream {
     let name = &model.name;
     let reactor_name = ident_text(name);
     let reactor_path = stable_path_tokens(std::slice::from_ref(&reactor_name));
+    let capabilities = match init_context::descriptor(reactor_args, model) {
+        Ok(value) => value,
+        Err(error) => return error.to_compile_error(),
+    };
     let reactor_slot = quote! {
         ::boomerang::builder::ReactorSlot {
             id: ::boomerang::builder::ReactorSlotId::from_path(#reactor_path),
             parent: None,
+            capabilities: #capabilities,
         }
     };
     let port_names = model
@@ -1873,7 +1910,26 @@ impl ToTokens for ArgsModel {
             _ => unreachable!("reactor argument validation requires complete contract metadata"),
         };
 
-        let output = if has_banked_ports {
+        let capability_mode = reactor_args.init_context.is_some();
+        let live_registration = match init_context::live_registration(reactor_args, &self.1) {
+            Ok(tokens) => tokens,
+            Err(error) => {
+                tokens.append_all(error.to_compile_error());
+                return;
+            }
+        };
+        let state_parameter = if capability_mode {
+            quote!(Option<#state_type_path>)
+        } else {
+            quote!(#state_type_path)
+        };
+        let context_creation = if capability_mode {
+            quote!(let mut ctx = ::boomerang::builder::ReactorContext::<#state_type_path>::new_optional(name, parent, bank_info, state, placement, assembly);)
+        } else {
+            quote!(let mut ctx = assembly.add_reactor(name, parent, bank_info, state, placement);)
+        };
+        let adapter = capability_mode.then(|| quote!(::boomerang::builder::CapabilityReactor));
+        let output = if has_banked_ports || capability_mode {
             let ports_struct_fields = args.iter().filter_map(
                 |Arg {
                      docs,
@@ -2047,21 +2103,22 @@ impl ToTokens for ArgsModel {
                 #[allow(non_snake_case)]
                 #docs
                 #vis fn #name #impl_generics(#(#param_args,)*) #ret #where_clause {
-                    move |name: &str,
-                         state: #state_type_path,
+                    #adapter (move |name: &str,
+                         state: #state_parameter,
                          parent: Option<::boomerang::builder::AssemblyReactorKey>,
                          scope_mode: Option<::boomerang::builder::AssemblyModeKey>,
                          bank_info: Option<::boomerang::runtime::BankInfo>,
                          placement: ::boomerang::builder::ReactorPlacement,
                          assembly: &mut ::boomerang::builder::Assembly| {
                         #(#len_bindings)*
-                        let mut ctx = assembly.add_reactor(name, parent, bank_info, state, placement);
+                        #context_creation
                         #component_metadata
                         if let Some(scope_mode) = scope_mode {
                             ctx.set_scope_mode(scope_mode)?;
                         }
                         #(#create_ports)*
                         #(#action_bindings)*
+                        #live_registration
                         (move |ctx: &mut ::boomerang::builder::ReactorContext<'_, #state_type_path>,
                               ports: (#(#local_types,)* )| -> Result<(), ::boomerang::builder::AssemblyError> {
                             #[allow(non_snake_case)]
@@ -2074,7 +2131,7 @@ impl ToTokens for ArgsModel {
                         Ok(#ports_name {
                             #(#field_inits,)*
                         })
-                    }
+                    })
                 }
             }
         } else {
@@ -2098,6 +2155,13 @@ impl ToTokens for ArgsModel {
             }
         };
 
+        let capability_declaration = match init_context::declaration(reactor_args, &self.1) {
+            Ok(value) => value,
+            Err(error) => {
+                tokens.append_all(error.to_compile_error());
+                return;
+            }
+        };
         let facet_module = format_ident!("__boomerang_facets_for_{name}");
         tokens.append_all(quote! {
             #[allow(non_snake_case, unexpected_cfgs)]
@@ -2127,7 +2191,7 @@ impl ToTokens for ArgsModel {
                 pub(super) use payload;
             }
 
-            #facet_module::hosted! { #output #topology_output }
+            #facet_module::hosted! { #capability_declaration #output #topology_output }
             #facet_module::descriptor! { #descriptor_output }
             #facet_module::payload! { #payload_output }
             #facet_module::conflict! { #conflict_output }

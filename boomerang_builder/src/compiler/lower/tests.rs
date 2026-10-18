@@ -100,6 +100,7 @@ fn descriptor_with_root(
         1,
         COMPONENT_DESCRIPTOR_MACRO_ABI,
         vec![ReactorSlot {
+            capabilities: None,
             id: reactor.clone(),
             parent: None,
         }],
@@ -839,6 +840,7 @@ fn lowering_reports_invalid_descriptor_slot_mappings() {
     let root = ReactorSlotId::new("Controller").unwrap();
     let missing_reaction = controller_descriptor_with(
         vec![ReactorSlot {
+            capabilities: None,
             id: root,
             parent: None,
         }],

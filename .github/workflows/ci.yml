@@ -62,7 +62,8 @@ jobs:
             toolchain: nightly
 
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    # The full toolchain suite builds fresh payload and descriptor fixtures.
+    timeout-minutes: ${{ matrix.os == 'ubuntu-latest' && matrix.toolchain == 'stable' && 60 || 30 }}
 
     steps:
       - uses: actions/checkout@v7
@@ -86,8 +87,12 @@ jobs:
       - name: test workspace except cargo-boomerang
         run: cargo test --workspace --exclude cargo-boomerang --verbose
 
-      - name: test hosted external physical clock
-        run: cargo test -p boomerang_runtime --features external-clock
+      - name: test independent hosted runtime capabilities
+        run: |
+          cargo test -p boomerang_runtime --no-default-features
+          cargo test -p boomerang_runtime --no-default-features --features hosted-manual-clock
+          cargo test -p boomerang_runtime --no-default-features --features hosted-source-input
+          cargo test -p boomerang_runtime --no-default-features --features external-clock
 
       - name: test cargo-boomerang fast targets
         run: >-

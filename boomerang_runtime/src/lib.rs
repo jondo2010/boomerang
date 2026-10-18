@@ -12,6 +12,9 @@ pub mod context;
 mod env;
 mod event;
 pub mod image;
+pub mod initialization;
+#[cfg(feature = "hosted-source-input")]
+pub mod input;
 pub mod keepalive;
 mod key_set;
 mod observation;
@@ -91,7 +94,7 @@ impl<T: ReactorData> PayloadType<T> {
 
 #[derive(thiserror::Error, Debug)]
 pub enum RuntimeError {
-    /// Checked physical-time or microstep conversion failed during native execution.
+    /// Physical-time or microstep conversion exceeded its supported range.
     #[error(transparent)]
     PhysicalClock(#[from] crate::clock::PhysicalClockError),
     #[error("Port Key not found: {}", 0)]
@@ -100,6 +103,11 @@ pub enum RuntimeError {
     /// Live graphs do not admit ordinary synchronous ports through the async channel.
     #[error("async boundary port target is not available in a live graph: {0}")]
     AsyncBoundaryPortUnsupported(image::PortIndex),
+
+    /// Source admission requires compiled execution. A live graph cannot accept source batches.
+    #[cfg(feature = "hosted-source-input")]
+    #[error("source input is not available in a live graph")]
+    SourceInputUnsupported,
 
     /// Advancing a logical tag by a positive duration exceeded the tag range.
     #[error("logical tag {tag} cannot advance by {period} without overflowing")]

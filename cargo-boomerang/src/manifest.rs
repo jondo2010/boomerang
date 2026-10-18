@@ -66,16 +66,33 @@ pub struct Topology {
     pub entry: String,
 }
 
-/// Hosted clock sidecar; the driver entry receives a clone of the run's selected ManualClock.
+/// Manual physical-clock selection, independent of input policy and component initialization.
 #[derive(Clone, Debug, Deserialize, serde::Serialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ExternalClock {
     /// Stable domain included in artifact fingerprints.
     pub domain: u64,
-    /// Existing component-instance binding whose selected payload exports the driver.
-    pub binding: String,
-    /// Driver function relative to that payload's crate root.
-    pub entry: String,
+}
+
+/// Independent hosted source declarations included in execution artifact identity.
+#[derive(Clone, Debug, Deserialize, serde::Serialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct PhysicalInputs {
+    /// Maximum values in one coherent batch.
+    pub max_batch_values: usize,
+    /// Maximum retained batches until their tags complete.
+    pub max_staged_batches: usize,
+    /// Stable source names and capabilities.
+    pub sources: BTreeMap<String, PhysicalSource>,
+}
+/// Required or optional source with declared compiled physical-action bindings.
+#[derive(Clone, Debug, Deserialize, serde::Serialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct PhysicalSource {
+    /// Component instance whose declared source capability owns this policy.
+    pub component: String,
+    /// Whether explicit progress gates execution.
+    pub required: bool,
 }
 
 /// One named deployment variant, parameterized by its Federate representation.
@@ -153,7 +170,7 @@ impl Deployment<Federate> {
         };
         validate("bounded-tracing", self.bounded_tracing.as_ref())?;
         for (id, federate) in &self.federates {
-            if let Some(clock) = &federate.physical_clock {
+            if federate.physical_clock.is_some() || federate.physical_inputs.is_some() {
                 if federate.runtime != "std"
                     || self.federates.len() != 1
                     || federate.target_json.is_some()
@@ -167,13 +184,20 @@ impl Deployment<Federate> {
                         "physical-clock requires one local hosted std Federate on the host target",
                     ));
                 }
-                if !self.bindings.contains_key(&clock.binding) {
-                    return Err(invalid_deployment(
-                        name,
-                        "physical-clock.binding must name a declared payload binding",
-                    ));
+                if let Some(inputs) = &federate.physical_inputs {
+                    if inputs.max_batch_values == 0
+                        || inputs.max_staged_batches == 0
+                        || inputs
+                            .max_batch_values
+                            .checked_mul(inputs.max_staged_batches)
+                            .is_none()
+                        || inputs.sources.iter().any(|(id, source)| {
+                            id.is_empty() || !self.bindings.contains_key(&source.component)
+                        })
+                    {
+                        return Err(invalid_deployment(name, "physical-inputs requires positive bounds, declared component owners and named sources/targets"));
+                    }
                 }
-                validate_component_path(&clock.entry)?;
             }
             validate(
                 &format!("federates.{id}.bounded-tracing"),
@@ -346,8 +370,10 @@ fn validate_component_path(value: &str) -> Result<()> {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct Federate {
-    /// Optional hosted external clock and its explicitly selected payload driver.
+    /// Optional hosted manual clock policy.
     pub physical_clock: Option<ExternalClock>,
+    /// Bounded source admission policy independent of the selected clock.
+    pub physical_inputs: Option<PhysicalInputs>,
     /// Per-field overrides of deployment bounded capture defaults.
     pub bounded_tracing: Option<BoundedTracingSettings>,
     /// Stable placement groups assigned to the Federate.
@@ -481,22 +507,52 @@ mod clock_tests {
     #[test]
     fn physical_clock_configuration_requires_a_local_hosted_driver() {
         let source = include_str!("../tests/fixtures/workspace/Boomerang.toml");
-        let source = format!("{source}\n[deployments.production.federates.host.physical-clock]\ndomain = 7\nbinding = 'sensor'\nentry = 'drive_clock'\n");
+        let source = format!(
+            "{source}\n[deployments.production.federates.host.physical-clock]\ndomain = 7\n"
+        );
         let parsed = parse_manifest(&source).unwrap();
         let selected = parsed.deployments["production"].federates["host"]
             .physical_clock
             .as_ref()
             .unwrap();
         assert_eq!(selected.domain, 7);
-        assert!(
-            parse_manifest(&source.replace("binding = 'sensor'", "binding = 'missing'")).is_err()
-        );
+        assert!(parse_manifest(&format!("{source}binding = 'sensor'\n")).is_err());
         assert!(
             parse_manifest(&source.replace("runtime = \"std\"", "runtime = \"pico\"")).is_err()
         );
-        assert!(
-            parse_manifest(&source.replace("entry = 'drive_clock'", "entry = 'not valid'"))
-                .is_err()
-        );
+        assert!(parse_manifest(&format!("{source}entry = 'drive_clock'\n")).is_err());
+    }
+
+    /// Reject unsupported deployments for each hosted capability selection.
+    #[test]
+    fn hosted_capabilities_require_one_local_hosted_federate() {
+        let source = include_str!("../tests/fixtures/workspace/Boomerang.toml");
+        let clock = "[deployments.production.federates.host.physical-clock]\ndomain = 7\n";
+        let input = "[deployments.production.federates.host.physical-inputs]\n\
+            max_batch_values = 2\nmax_staged_batches = 2\n\
+            [deployments.production.federates.host.physical-inputs.sources.sensor]\n\
+            component = 'sensor'\nrequired = true\n";
+        for capabilities in [
+            clock.to_owned(),
+            input.to_owned(),
+            format!("{clock}{input}"),
+        ] {
+            let manifest = parse_manifest(&format!("{source}\n{capabilities}")).unwrap();
+            for case in 0..4 {
+                let mut deployment = manifest.deployments["production"].clone();
+                let host = deployment.federates.get_mut("host").unwrap();
+                match case {
+                    0 => host.runtime = "pico".into(),
+                    1 => host.target = Some("thumbv6m-none-eabi".into()),
+                    2 => host.target_json = Some("targets/custom.json".into()),
+                    _ => {
+                        let peer = host.clone();
+                        deployment.federates.insert("peer".into(), peer);
+                    }
+                }
+                let error = deployment.validate("production").unwrap_err();
+                assert!(error.to_string().contains("one local hosted std Federate"));
+            }
+        }
     }
 }

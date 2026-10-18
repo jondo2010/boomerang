@@ -27,7 +27,7 @@ use std::{
 #[cfg(test)]
 pub(crate) mod tests;
 
-/// Shared identity and synchronized state for a single manual-clock execution.
+/// Shared identity and synchronized state for a single manual clock execution.
 struct ManualClockInner {
     domain: PhysicalClockDomainId,
     epoch: ExecutionEpoch,
@@ -41,6 +41,8 @@ struct ManualClockState {
     now: PhysicalInstant,
     failure: Option<PhysicalClockError>,
     used: bool,
+    /// Runtime completion closes handles without replacing the original failure.
+    finished: bool,
     slots: Vec<DeadlineSlot>,
     abort: Option<crate::sched::federate::FederateAbortHandle>,
 }
@@ -101,13 +103,25 @@ impl ManualClock {
     /// Reads epoch-relative physical time or the first retained terminal failure.
     pub fn now(&self) -> Result<PhysicalInstant, PhysicalClockError> {
         let state = self.0.state.lock().unwrap();
-        state.failure.map_or(Ok(state.now), Err)
+        state.failure.map_or_else(
+            || {
+                if state.finished {
+                    Err(PhysicalClockError::Closed)
+                } else {
+                    Ok(state.now)
+                }
+            },
+            Err,
+        )
     }
     /// Advances once, waking each due Enclave at most once. Equal timestamps are no-ops.
     pub fn advance_to(&self, time: PhysicalInstant) -> Result<(), PhysicalClockError> {
         let mut state = self.0.state.lock().unwrap();
         if let Some(error) = state.failure {
             return Err(error);
+        }
+        if state.finished {
+            return Err(PhysicalClockError::Closed);
         }
         if time < state.now {
             Self::terminate(&mut state, PhysicalClockError::Regression);
@@ -154,16 +168,30 @@ impl ManualClock {
     }
     /// Validates the domain and irrevocably reserves this clock for one Federate run.
     pub(crate) fn claim(&self, domain: PhysicalClockDomainId) -> Result<(), PhysicalClockError> {
-        self.validate(domain, self.epoch())?;
-        let mut state = self.0.state.lock().unwrap();
-        if state.used {
-            return Err(PhysicalClockError::AlreadyUsed);
+        if domain != self.domain() {
+            return Err(PhysicalClockError::DomainMismatch);
         }
+        let mut state = self.0.state.lock().unwrap();
         if let Some(error) = state.failure {
             return Err(error);
         }
+        if state.used {
+            return Err(PhysicalClockError::AlreadyUsed);
+        }
         state.used = true;
         Ok(())
+    }
+    /// Closes execution handles without overwriting failure or clock reuse diagnostics.
+    pub(crate) fn finish_run(&self) {
+        let mut state = self.0.state.lock().unwrap();
+        state.finished = true;
+        for slot in &mut state.slots {
+            slot.deadline = None;
+            let _ = slot.wake.try_send(AsyncEvent::FederateResume);
+        }
+        if let Some(abort) = &state.abort {
+            abort.abort();
+        }
     }
     /// Allocates one deadline slot per Enclave and installs the run abort handle.
     /// Called after claiming the clock and before starting participant execution.
@@ -200,6 +228,9 @@ impl ManualClock {
         deadline: PhysicalInstant,
     ) -> Result<bool, PhysicalClockError> {
         let mut state = self.0.state.lock().unwrap();
+        if state.finished {
+            return Err(state.failure.unwrap_or(PhysicalClockError::Closed));
+        }
         if let Some(error) = state.failure {
             return Err(error);
         }
@@ -241,7 +272,7 @@ impl ManualClock {
 pub struct ClockRun(pub(crate) Option<ManualClock>);
 
 impl ClockRun {
-    /// Claims a selected manual clock, or creates an inert native-run guard.
+    /// Claims a selected manual clock, or creates an inert host clock run guard.
     pub(crate) fn new(
         selection: Option<&(PhysicalClockDomainId, ManualClock)>,
     ) -> Result<Self, PhysicalClockError> {

@@ -9,14 +9,21 @@ use input::KeyboardInput;
 use boomerang::prelude::*;
 use crossterm::event::KeyEvent;
 
-#[derive(Default)]
 pub struct KeyboardState {
     terminal: KeyboardInput,
 }
 
+impl KeyboardState {
+    /// Starts terminal input after its typed action and selected clock are ready.
+    pub fn new(init: KeyboardInit) -> std::io::Result<Self> {
+        Ok(Self { terminal: KeyboardInput::start(init.send, init.key_press)? })
+    }
+}
+
 #[reactor(
     state = KeyboardState,
-    state_init = KeyboardState::default,
+    state_init = KeyboardState::new,
+    init_context(name = KeyboardInit, actions = [key_press]),
     contract = "snake.keyboard",
     contract_version = 1,
     bounds(
@@ -32,8 +39,7 @@ pub fn Keyboard(
     #[output] ready: (),
 ) -> impl Reactor {
     reaction! {
-        Startup (startup) -> key_press, ready {
-            state.terminal.start(ctx.make_send_context(), key_press.to_async());
+        Startup (startup) -> ready {
             *ready = Some(());
         }
     }

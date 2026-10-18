@@ -1,89 +1,117 @@
-# Hosted Physical Clocks
+# Physical clocks
 
-Use an externally advanced clock when a simulator or another driver supplies
-physical time for a local deployment. Without a clock selection, Boomerang uses
-the host's monotonic clock. Every Enclave in the selected Federate observes the
-same externally supplied time.
+Boomerang uses the host monotonic clock by default. Select a manual clock when
+an application or simulator controls physical time. All Enclaves in a compiled
+Federate share the selected clock and execution epoch.
 
-## Deployment configuration
+Clock selection and input delivery are separate. Ordinary asynchronous events
+and timestamped source observations can use either clock.
+See [External inputs](./external-inputs.md) to choose an input contract.
 
-Add a `physical-clock` table to the hosted Federate in your `Boomerang.toml`:
+## Select and advance a manual clock
+
+For manual time, add this table to the Federate configuration:
 
 ```toml
 [deployments.production.federates.host.physical-clock]
 domain = 7
-binding = "sensor"
-entry = "drive_clock"
 ```
 
-This fragment extends an existing deployment. The `host` Federate must use the
-`std` runtime, and `sensor` must already name a payload binding under
-`deployments.production.bindings`.
+A component that requests `clock_control = true` needs this clock selection.
+For a component that only controls the clock, declare
+`init_context(name = ClockInit, clock_control = true)`.
+No input configuration is needed for that component. Declare `state` and
+`state_init` as described in [Reactor initialization](./reactor-initialization.md).
+Only one component initializer can request clock control for a Federate.
 
-- `domain` identifies the physical clock domain shared by the driver and its data.
-- `binding` selects the payload package containing the driver.
-- `entry` names the driver function relative to that package's crate root.
+The initializer receives `clock: ManualClock` in its generated context.
+For example, a worker can advance time to 10 ms:
 
-Generated launchers enable the runtime's `external-clock` feature. A payload
-package that directly uses clock APIs must also enable that feature on its
-`boomerang_runtime` dependency.
+```rust,no_run
+use boomerang_runtime::clock::{ManualClock, PhysicalClockError, PhysicalInstant};
+use core::time::Duration;
 
-The clock-only driver receives a `boomerang_runtime::clock::ManualClock` and
-returns `Result<Guard, E>`. The launcher retains the returned guard throughout
-execution. The driver must return after advancing time or starting its own
-advancement mechanism; blocking inside the entry function prevents scheduler
-startup. Keep a clone of the clock in the driver to advance it during execution.
+fn advance(clock: &ManualClock) -> Result<(), PhysicalClockError> {
+    clock.advance_to(PhysicalInstant::from_duration(Duration::from_millis(10))?)
+}
+```
 
-Clock selection, domain, and driver configuration participate in generated
-artifact fingerprints. The runtime creates a fresh execution identity for each
-run; that identity does not change the artifact fingerprint.
+Call `advance_to` with a `PhysicalInstant` on the selected timeline.
+While the clock is active, an equal timestamp leaves time unchanged.
+A later timestamp advances time. A backward change fails the run.
+A forward jump preserves all intervening timer tags.
 
-## Driving time
+`close` and `fail` terminate the clock and release waiting execution.
+`fast_forward` skips physical pacing, but clock readings still use the selected
+clock.
 
-`PhysicalInstant` is a point on the selected physical clock's timeline, much like
-`std::time::Instant` is a point on the host monotonic clock. Its coordinate is
-nanoseconds since this execution's physical epoch; zero is the epoch origin.
-Compare values only within the same clock domain and execution epoch. Adapters
-carry those identities separately; the numeric timestamp cannot validate them.
-Use `Duration` for elapsed intervals and delays, and `PhysicalInstant::checked_add`
-to compute a later time without advancing the clock.
+For host monotonic time, omit `physical-clock` and `clock_control`.
+The toolchain rejects obsolete clock options `entry`, driver `binding`, and
+nested `inputs`.
 
-Reaction and send contexts expose the selected timeline through
-`try_get_physical_time() -> Result<PhysicalInstant, PhysicalClockError>`.
-Physical events and asynchronous action scheduling use the same coordinates;
-manual time does not need to fit the host's `std::time::Instant` representation.
-A native send context created before execution returns `NotStarted` until its
-scheduler starts. Start external producers from a startup reaction, or call
-`Scheduler::startup()` before signaling a producer that the scheduler is ready.
-Use `SendContext::prepare_action` to handle this error before sending.
-Call `PreparedAction::send` for blocking delivery or `try_send` for nonblocking delivery.
+## Read time and identify an execution
 
-`Context::get_start_time()` returns the epoch coordinate, zero.
-`try_get_logical_time()` projects the current logical offset into a
-`PhysicalInstant`, returning an error if it is outside the physical range.
-`get_elapsed_logical_time()` and `get_tag()` retain the full signed logical range.
-Use `std::time::Instant` independently for host watchdogs and elapsed run timing.
+`PhysicalInstant` stores unsigned nanoseconds from the execution's physical
+origin. The clock domain identifies the timeline. The execution epoch identifies
+one execution on that timeline. Compare timestamps only within the same clock
+domain and execution epoch.
 
-Call `advance_to(PhysicalInstant(n))` with unsigned nanoseconds since the start
-of this execution. Equal timestamps are accepted, and forward jumps are allowed.
-Timers due within a jump still execute in logical-tag order, so a large jump can
-produce a burst of work. Moving time backwards fails the run. `close` and `fail`
-terminate the clock and release waiting execution.
+Sources that use the host clock use domain zero and a fresh execution epoch.
+`source.clock()` provides these identities and time readings without manual
+clock control.
 
-`fast_forward` bypasses waiting for physical time. Reactions and physical actions
-still read the selected clock, so enable it only when that separation is intended.
-Use the host monotonic clock for driver watchdogs and connection timeouts.
+The `boomerang_runtime::context` module exports `Context`, `SendContext`, and
+`CommonContext`. Use `Context` inside reactions. Use `SendContext` in workers
+and callbacks. Import `CommonContext` to use their shared methods.
 
-Physical events arriving behind completed logical work move to a later
-microstep. Multiple physical values for an action at the same offset retain
-separate microsteps. Time or microstep overflow produces an error.
+Both context types provide `try_get_physical_time()` through `CommonContext`.
+The other methods in this table belong to `Context`:
 
-## Supported deployments
+| Method | Result |
+| --- | --- |
+| `try_get_physical_time()` | Current time from the selected clock. |
+| `get_start_time()` | Epoch coordinate zero. |
+| `try_get_logical_time()` | Current logical tag converted to physical coordinates, with range checking. |
+| `get_elapsed_logical_time()` | Elapsed logical time with the signed logical range. |
+| `get_tag()` | Current logical tag with the signed logical range. |
 
-External clock selection currently supports one local hosted Federate, which can
-contain multiple Enclaves. Non-host targets, custom target JSON, non-`std`
-runtimes, and distributed clock configuration are rejected. Simulator stepping,
-device decoding, and transport belong to the driver or adapter.
+A context that uses the host clock without an initializer context returns
+`NotStarted` until scheduler startup establishes its origin. Start input producers from a startup
+reaction if they need that origin before sending.
 
-See the [clock API documentation](https://docs.rs/boomerang_runtime/latest/boomerang_runtime/clock/index.html)
-for programmatic binding, checked context APIs, and runtime implementation details.
+## Coordinate clock time and source progress
+
+Clock advancement does not report source progress. A required source can hold
+back logical execution even when the clock has advanced. Publish observations
+before their corresponding progress. See
+[Report source progress](./external-inputs.md#report-source-progress).
+
+Use `std::time::Instant` for host watchdogs, connection timeouts, and shutdown
+bounds. These measurements continue independently of manual clock advancement.
+
+## Supported deployments and features
+
+Manual clock control requires compiled execution with one local hosted `std`
+Federate and one or more Enclaves. The toolchain rejects non-host targets,
+custom target JSON, and distributed manual clock configuration.
+
+Enable the required features on the `boomerang_runtime` dependency of each
+payload package that uses these APIs:
+
+| Use | Cargo feature |
+| --- | --- |
+| Host monotonic time with ordinary sending | Neither hosted feature |
+| Source admission with host monotonic time | `hosted-source-input` |
+| Manual clock control without source admission | `hosted-manual-clock` |
+| Source admission with manual clock control | Both features |
+
+Generated launcher manifests select each feature independently from the
+Federate configuration. `external-clock` is a compatibility alias that enables
+both features. Neither hosted feature is supported on constrained targets such
+as Pico. The toolchain rejects these target configurations.
+
+The live builder and runner use the host monotonic clock.
+See the [clock API](https://docs.rs/boomerang_runtime/latest/boomerang_runtime/clock/index.html)
+for type and method details. The
+[complete input example](./external-inputs.md#run-the-complete-example)
+combines a manual clock with a timestamped source.

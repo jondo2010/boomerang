@@ -76,11 +76,20 @@ impl petgraph::graph::GraphIndex for AssemblyReactorKey {
 pub(super) struct ReactorState<T: runtime::ReactorData>(T);
 
 pub(super) trait BaseReactorState: Debug {
-    fn into_runtime(self: Box<Self>, name: &str) -> Box<dyn runtime::BaseReactor>;
+    fn into_runtime(
+        self: Box<Self>,
+        name: &str,
+        assembly: &crate::RuntimeAssembly,
+    ) -> Box<dyn runtime::BaseReactor>;
 }
 
 impl<T: runtime::ReactorData> BaseReactorState for ReactorState<T> {
-    fn into_runtime(self: Box<Self>, name: &str) -> Box<dyn runtime::BaseReactor> {
+    fn into_runtime(
+        self: Box<Self>,
+        name: &str,
+        assembly: &crate::RuntimeAssembly,
+    ) -> Box<dyn runtime::BaseReactor> {
+        let _ = assembly;
         runtime::Reactor::new(name, self.0).boxed()
     }
 }
@@ -129,7 +138,7 @@ pub struct ReactorSpec {
     /// The instantiated/child name of the Reactor
     name: String,
     /// The user's Reactor
-    state: Box<dyn BaseReactorState>,
+    state: Option<Box<dyn BaseReactorState>>,
     /// The top-level/class name of the Reactor
     type_name: String,
     /// Optional component contract declared by generated hosted code.
@@ -172,11 +181,31 @@ impl ReactorSpec {
         bank_info: Option<runtime::BankInfo>,
         placement: impl Into<ReactorPlacement>,
     ) -> Self {
+        Self::new_optional(
+            name,
+            type_name,
+            Some(reactor_state),
+            parent,
+            bank_info,
+            placement,
+        )
+    }
+
+    /// Builds metadata independently of whether application state is supplied or deferred.
+    fn new_optional<S: runtime::ReactorData>(
+        name: &str,
+        type_name: &'static str,
+        reactor_state: Option<S>,
+        parent: Option<AssemblyReactorKey>,
+        bank_info: Option<runtime::BankInfo>,
+        placement: impl Into<ReactorPlacement>,
+    ) -> Self {
         let placement = placement.into();
         let is_enclave = placement.starts_enclave();
         Self {
             name: name.into(),
-            state: Box::new(ReactorState(reactor_state)),
+            state: reactor_state
+                .map(|state| Box::new(ReactorState(state)) as Box<dyn BaseReactorState>),
             type_name: type_name.into(),
             component_contract: None,
             parent_reactor_key: parent,
@@ -219,8 +248,17 @@ impl ReactorSpec {
     }
 
     /// Build this [`ReactorSpec`] into a [`Box<dyn runtime::BaseReactor>`]
-    pub fn into_runtime(self, name: &str) -> Box<dyn runtime::BaseReactor> {
-        self.state.into_runtime(name)
+    pub fn into_runtime(
+        self,
+        name: &str,
+        assembly: &crate::RuntimeAssembly,
+    ) -> Result<Box<dyn runtime::BaseReactor>, AssemblyError> {
+        Ok(self
+            .state
+            .ok_or_else(|| AssemblyError::InconsistentAssemblyState {
+                what: "deferred reactor has no initializer".into(),
+            })?
+            .into_runtime(name, assembly))
     }
 }
 
@@ -245,8 +283,27 @@ impl<'a, S: runtime::ReactorData> ReactorContext<'a, S> {
         placement: impl Into<ReactorPlacement>,
         assembly: &'a mut Assembly,
     ) -> Self {
+        Self::new_optional(
+            name,
+            parent,
+            bank_info,
+            Some(reactor_state),
+            placement,
+            assembly,
+        )
+    }
+
+    /// Allocates graph identity without fabricating user state for initialized reactors.
+    pub fn new_optional(
+        name: &str,
+        parent: Option<AssemblyReactorKey>,
+        bank_info: Option<runtime::BankInfo>,
+        reactor_state: Option<S>,
+        placement: impl Into<ReactorPlacement>,
+        assembly: &'a mut Assembly,
+    ) -> Self {
         let type_name = std::any::type_name::<S>();
-        let reactor_key = assembly.reactor_specs.insert(ReactorSpec::new(
+        let reactor_key = assembly.reactor_specs.insert(ReactorSpec::new_optional(
             name,
             type_name,
             reactor_state,
@@ -270,6 +327,25 @@ impl<'a, S: runtime::ReactorData> ReactorContext<'a, S> {
             shutdown_action,
             current_mode: None,
             phantom: std::marker::PhantomData,
+        }
+    }
+
+    /// Whether this declaration selected deferred capability initialization.
+    pub fn needs_initialization(&self) -> bool {
+        self.assembly.reactor_specs[self.reactor_key]
+            .state
+            .is_none()
+    }
+
+    /// Registers an initializer only for the explicitly selected deferred construction path.
+    /// Assembly aliases resolve action identities before this factory reaches the runtime.
+    pub fn initialize_with(
+        &mut self,
+        factory: impl FnOnce(&str, &crate::RuntimeAssembly) -> Box<dyn runtime::BaseReactor> + 'static,
+    ) {
+        let spec = &mut self.assembly.reactor_specs[self.reactor_key];
+        if spec.state.is_none() {
+            spec.state = Some(Box::new(DeferredStateFactory(Some(Box::new(factory)))));
         }
     }
 
@@ -734,5 +810,24 @@ impl<'a, S: runtime::ReactorData> ReactorContext<'a, S> {
                 Box::new(runtime::replay::TypedReplayer::<T>::new(action_key))
             })?;
         Ok(())
+    }
+}
+
+/// Builder-only erased factory; it constructs a runtime shell, never application state.
+type DeferredFactory =
+    Box<dyn FnOnce(&str, &crate::RuntimeAssembly) -> Box<dyn runtime::BaseReactor>>;
+struct DeferredStateFactory(Option<DeferredFactory>);
+impl Debug for DeferredStateFactory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DeferredStateFactory")
+    }
+}
+impl BaseReactorState for DeferredStateFactory {
+    fn into_runtime(
+        mut self: Box<Self>,
+        name: &str,
+        assembly: &crate::RuntimeAssembly,
+    ) -> Box<dyn runtime::BaseReactor> {
+        self.0.take().expect("factory runs once")(name, assembly)
     }
 }

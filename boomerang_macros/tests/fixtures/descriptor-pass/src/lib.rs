@@ -251,8 +251,9 @@ mod descriptor_tests {
                 .fingerprint()
                 .to_bytes(),
             [
-                173, 248, 107, 207, 105, 80, 159, 129, 225, 21, 134, 108, 49, 224, 42, 183,
-                112, 195, 43, 150, 102, 68, 163, 191, 240, 50, 132, 133, 213, 59, 136, 241,
+                0xfb, 0x3a, 0x9c, 0xf2, 0x2e, 0x1b, 0x7b, 0x33, 0x9e, 0xb8, 0x63, 0xc2, 0x02, 0x48,
+                0xa2, 0xc3, 0x4e, 0x95, 0x98, 0x3d, 0xa3, 0xd4, 0x6c, 0x96, 0xb0, 0x12, 0x4e, 0x6d,
+                0x69, 0x9c, 0xc6, 0x2d
             ]
         );
     }
@@ -290,8 +291,9 @@ mod payload_compile_input_tests {
                 .descriptor_fingerprint()
                 .to_bytes(),
             [
-                173, 248, 107, 207, 105, 80, 159, 129, 225, 21, 134, 108, 49, 224, 42, 183,
-                112, 195, 43, 150, 102, 68, 163, 191, 240, 50, 132, 133, 213, 59, 136, 241,
+                0xfb, 0x3a, 0x9c, 0xf2, 0x2e, 0x1b, 0x7b, 0x33, 0x9e, 0xb8, 0x63, 0xc2, 0x02, 0x48,
+                0xa2, 0xc3, 0x4e, 0x95, 0x98, 0x3d, 0xa3, 0xd4, 0x6c, 0x96, 0xb0, 0x12, 0x4e, 0x6d,
+                0x69, 0x9c, 0xc6, 0x2d
             ],
         );
         assert_eq!(
@@ -303,5 +305,54 @@ mod payload_compile_input_tests {
         assert_eq!(state.r#loop, 3);
         let custom_state: super::custom::CustomState = super::custom::__boomerang::state_Custom();
         assert_eq!(custom_state.count, 11);
+    }
+}
+
+/// Generic parameters and bounds must reach initialization contexts and payload adapters.
+#[cfg(any(boomerang_facet = "descriptor", boomerang_facet = "payload"))]
+pub mod generic_init {
+    use super::*;
+
+    #[derive(Debug)]
+    pub struct GenericState;
+
+    #[cfg(not(boomerang_facet = "descriptor"))]
+    fn initialize<T, U, const N: usize>(
+        context: GenericInit<T, U, N>,
+    ) -> Result<GenericState, std::io::Error>
+    where
+        T: runtime::ReactorData + Copy + Default,
+        U: runtime::ReactorData,
+    {
+        let _: runtime::AsyncActionRef<u32> = context.sample;
+        Ok(GenericState)
+    }
+
+    #[reactor(
+        contract = "example.generic",
+        contract_version = 1,
+        bounds(queue_capacity = 2, payload_bytes = 16, state_bytes = 1, scratch_bytes = 1),
+        state = GenericState,
+        state_init = initialize::<T, U, N>,
+        init_context(name = GenericInit, actions = [sample])
+    )]
+    pub fn Generic<T, U, const N: usize>(
+        #[input] _input: u32,
+        #[input] _unused_in_context: u32,
+        #[physical_action] sample: u32,
+    ) -> impl Reactor
+    where
+        T: runtime::ReactorData + Copy + Default,
+        U: runtime::ReactorData,
+    {
+        reaction! { observe(sample) {} }
+    }
+
+    #[cfg(boomerang_facet = "payload")]
+    pub fn bind_generic(
+        context: &runtime::initialization::StateInitContext<'_, '_>,
+        actions: &[runtime::image::ActionIndex],
+    ) -> Result<GenericState, runtime::initialization::StateInitializationError> {
+        __boomerang::state_Generic::<u32, String, 2>(context, actions)
     }
 }

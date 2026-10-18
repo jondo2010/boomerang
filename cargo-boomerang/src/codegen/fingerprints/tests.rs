@@ -91,6 +91,7 @@ fn fixture_profile(
             version,
             COMPONENT_DESCRIPTOR_MACRO_ABI,
             vec![ReactorSlot {
+                capabilities: None,
                 id: ReactorSlotId::new("Root").unwrap(),
                 parent: None,
             }],
@@ -272,17 +273,28 @@ fn coordination_tracks_compiled_in_transit_capacity() {
 #[test]
 fn physical_clock_selection_and_domain_change_image_fingerprint() {
     let base = blake3::hash(b"image");
-    let mut clock = crate::manifest::ExternalClock {
-        domain: 7,
-        binding: "sensor".into(),
-        entry: "drive".into(),
-    };
+    let mut clock = crate::manifest::ExternalClock { domain: 7 };
     assert_eq!(with_physical_clock(base, None).unwrap(), base);
     let first = with_physical_clock(base, Some(&clock)).unwrap();
     assert_ne!(first, base);
     clock.domain = 8;
     assert_ne!(first, with_physical_clock(base, Some(&clock)).unwrap());
-    clock.domain = 7;
-    clock.entry = "another_driver".into();
-    assert_ne!(first, with_physical_clock(base, Some(&clock)).unwrap());
+}
+
+/// Checks source requiredness and input bounds affect the generated artifact fingerprint.
+#[test]
+fn physical_source_declarations_change_fingerprint() {
+    let base = blake3::hash(b"image");
+    let clock = |required, max_batch_values| {
+        serde_json::from_value::<crate::manifest::PhysicalInputs>(serde_json::json!({ "max_batch_values": max_batch_values, "max_staged_batches": 2, "sources": {"plant": {"component": "sensor", "required": required}}})).unwrap()
+    };
+    let original = with_physical_inputs(base, Some(&clock(true, 2))).unwrap();
+    assert_ne!(
+        original,
+        with_physical_inputs(base, Some(&clock(false, 2))).unwrap()
+    );
+    assert_ne!(
+        original,
+        with_physical_inputs(base, Some(&clock(true, 3))).unwrap()
+    );
 }

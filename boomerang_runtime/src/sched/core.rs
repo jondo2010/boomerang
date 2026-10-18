@@ -128,6 +128,12 @@ pub(crate) trait ExecutionStorage<S: Schedule> {
 
     /// Resolves an externally supplied runtime action identity to this storage's action key.
     fn action_from_runtime(&self, key: ActionKey) -> S::Action;
+    /// Accept a compiled source target, or reject it if this storage uses a live graph.
+    #[cfg(feature = "hosted-source-input")]
+    fn action_from_compiled(
+        &self,
+        action: crate::image::ActionIndex,
+    ) -> Result<S::Action, Self::Error>;
     /// Retain an action value until its scheduled tag is processed.
     fn push_action_value(&mut self, action: S::Action, tag: Tag, value: Box<dyn ReactorData>);
     /// Borrows an action using the resolved storage key.
@@ -176,7 +182,7 @@ where
 {
     /// Enclave whose logical time this invocation advances.
     pub(super) key: EnclaveKey,
-    /// Selected execution timeline, including the shared native origin.
+    /// Selected execution timeline, including the shared host monotonic origin.
     pub(super) clock: ExecutionClock,
     /// Existing live scheduler configuration.
     pub(super) config: &'a Config,
@@ -280,6 +286,18 @@ where
         }
         let origin = event.kind_str();
         match event {
+            #[cfg(feature = "hosted-source-input")]
+            AsyncEvent::PhysicalBatch(batch) => {
+                for (tag, target, value) in batch.values {
+                    let action = self.storage.action_from_compiled(target)?;
+                    self.admit_action(tag, action, value);
+                    tracing::debug!(target: "boomerang::runtime",
+                        event = "runtime.event.admitted", enclave = self.key.as_u32(),
+                        kind = "action", origin, action = target.as_u32(),
+                        tag_kind = tag.kind_str(), tag_offset_ns = tag.offset().whole_nanoseconds(), tag_microstep = tag.microstep(),
+                    );
+                }
+            }
             AsyncEvent::FederateResume => {}
             AsyncEvent::TagRelease { enclave, tag } => {
                 self.upstream_enclaves
@@ -354,7 +372,19 @@ where
         Ok(())
     }
 
-    /// Stores one action or validated boundary-port payload and schedules its trigger set.
+    /// Store an action value and schedule its triggers with the schedule's action identity.
+    fn admit_action(&mut self, tag: Tag, action: S::Action, value: Box<dyn ReactorData>) {
+        self.storage.push_action_value(action, tag, value);
+        self.events.push_action_event(
+            action,
+            tag,
+            self.schedule.action_triggers(action),
+            false,
+            self.schedule,
+        );
+    }
+
+    /// Store an action or validated boundary-port payload and schedule its triggers.
     fn admit_value(
         &mut self,
         tag: Tag,
@@ -365,14 +395,7 @@ where
         match target {
             AsyncEventTarget::Action(key) => {
                 let action = self.storage.action_from_runtime(key);
-                self.storage.push_action_value(action, tag, value);
-                self.events.push_action_event(
-                    action,
-                    tag,
-                    self.schedule.action_triggers(action),
-                    false,
-                    self.schedule,
-                );
+                self.admit_action(tag, action, value);
                 tracing::debug!(target: "boomerang::runtime",
                     event = "runtime.event.admitted", enclave = self.key.as_u32(),
                     kind = "action", origin, action = key.as_u32(),
@@ -599,12 +622,7 @@ where
     /// Drains pending scheduler events without blocking.
     fn pump_pending_async_events(&mut self) -> Result<(), SchedulerError<E::Error>> {
         while let Ok(Some(async_event)) = self.event_rx.try_recv() {
-            if matches!(
-                &async_event,
-                AsyncEvent::Logical { .. }
-                    | AsyncEvent::Physical { .. }
-                    | AsyncEvent::Shutdown { .. }
-            ) {
+            if async_event.revises_candidate() {
                 if let Some(coordination) = self.federate_coordination.as_deref_mut() {
                     coordination.active();
                 }
@@ -623,8 +641,18 @@ where
         logical_horizon: Option<Tag>,
     ) -> Result<Option<bool>, SchedulerError<E::Error>> {
         let observation = self.observation;
+        #[cfg(feature = "hosted-source-input")]
+        let input_bound = self
+            .federate_coordination
+            .as_deref()
+            .is_some_and(|port| port.requires_horizon_candidate());
+        #[cfg(not(feature = "hosted-source-input"))]
+        let input_bound = false;
         if let Some(coordination) = self.federate_coordination.as_deref_mut() {
-            if logical_horizon == Some(next_tag) && !self.events.has_nonterminal_work() {
+            if !input_bound
+                && logical_horizon == Some(next_tag)
+                && !self.events.has_nonterminal_work()
+            {
                 match observe_coordination_wait(observation, || coordination.wait())
                     .map_err(SchedulerError::FederateCoordination)
                 {
@@ -730,12 +758,7 @@ where
                     }
                 };
                 if let Some(async_event) = async_event {
-                    if matches!(
-                        &async_event,
-                        AsyncEvent::Logical { .. }
-                            | AsyncEvent::Physical { .. }
-                            | AsyncEvent::Shutdown { .. }
-                    ) {
+                    if async_event.revises_candidate() {
                         if let Some(coordination) = self.federate_coordination.as_deref_mut() {
                             coordination.active();
                         }
@@ -770,12 +793,7 @@ where
             match received {
                 ClockWaitResult::DeadlineReached => {}
                 ClockWaitResult::Interrupted(event) => {
-                    if matches!(
-                        &event,
-                        AsyncEvent::Logical { .. }
-                            | AsyncEvent::Physical { .. }
-                            | AsyncEvent::Shutdown { .. }
-                    ) {
+                    if event.revises_candidate() {
                         if let Some(coordination) = self.federate_coordination.as_deref_mut() {
                             coordination.active();
                         }
@@ -964,6 +982,15 @@ where
 
             if self.abort_if_clock_failed() {
                 return Ok(false);
+            }
+            #[cfg(feature = "hosted-source-input")]
+            if self.federate_shutdown_tag != Some(next_tag)
+                && self
+                    .federate_coordination
+                    .as_deref_mut()
+                    .is_some_and(|port| !port.begin_tag(next_tag))
+            {
+                return Ok(true);
             }
             let result = self.process_next_event(logical_horizon);
             self.observe_event_queue();

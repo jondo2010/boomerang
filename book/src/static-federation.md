@@ -38,5 +38,9 @@ The RTI crate also provides an in-memory transport for testing and reference
 use. It is isolated from the generated deployment transport and is not the
 intended production hot path.
 
-For simulator-driven local execution, see [Hosted Physical Clocks](./hosted-physical-clocks.md)
+For simulator-driven local execution, see [Physical Clocks](./hosted-physical-clocks.md)
 for deployment configuration and driver setup.
+
+For timestamped sources, see [External inputs](./external-inputs.md).
+Source policies, clock selection, and initializer capability declarations affect
+generated artifact fingerprints. Fresh execution epochs do not affect them.

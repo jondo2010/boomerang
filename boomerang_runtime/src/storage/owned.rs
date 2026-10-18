@@ -1,7 +1,10 @@
 //! Owned payload bindings and mutable storage for compiled scheduler images.
 
-use std::{any::TypeId, fmt, marker::PhantomData, ptr::NonNull, time::Instant};
+use std::{any::TypeId, fmt, marker::PhantomData, ptr::NonNull, sync::Arc, time::Instant};
 
+use crate::initialization::{
+    InitializationError, StateCapabilities, StateInitContext, StateInitializationError,
+};
 use tinymap::{TinyMap, TinySecondaryMap};
 
 use crate::{
@@ -49,12 +52,174 @@ impl EnclaveBindings {
     pub fn bind_state<T: ReactorData>(mut self, slot: BindingSlotIndex, init: fn() -> T) -> Self {
         self.insert_binding(
             slot,
-            Binding::State(Box::new(TypedStateInitializer::<T> {
+            Binding::State(Arc::new(PlainStateInitializer::<T> {
                 init,
                 marker: PhantomData,
             })),
         );
         self
+    }
+    /// Binds a fallible typed initializer after validating its compiled capabilities.
+    pub fn bind_state_with_capabilities<T, F>(
+        mut self,
+        slot: BindingSlotIndex,
+        requirements: StateCapabilities,
+        init: F,
+    ) -> Self
+    where
+        T: ReactorData,
+        F: Fn(&StateInitContext<'_, '_>) -> Result<T, StateInitializationError>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.insert_binding(
+            slot,
+            Binding::State(Arc::new(CapabilityStateInitializer {
+                requirements,
+                init,
+                marker: PhantomData,
+            })),
+        );
+        self
+    }
+    /// Whether any state requires the staged hosted initialization path.
+    pub(crate) fn has_capabilities(&self) -> bool {
+        self.bindings.values().any(|binding| matches!(binding, Binding::State(initializer) if initializer.capabilities().is_some()))
+    }
+    /// Checks actual physical action factories before any user initializer runs.
+    pub(crate) fn validate_ordinary_capabilities(
+        &self,
+        image: &EnclaveImageView<'_>,
+    ) -> Result<(), OwnedStorageError> {
+        for reactor in image.reactors().values() {
+            let Some(Binding::State(init)) = self.bindings.get(reactor.state_binding()) else {
+                continue;
+            };
+            let Some(required) = init.capabilities() else {
+                continue;
+            };
+            #[cfg(not(feature = "hosted-manual-clock"))]
+            if required.clock_control {
+                return Err(InitializationError::InvalidCapabilities.into());
+            }
+            for capability in &required.actions {
+                let row = image
+                    .actions()
+                    .get(capability.action)
+                    .ok_or(InitializationError::InvalidCapabilities)?;
+                if !matches!(
+                    row.timing(),
+                    ActionTiming::Standard {
+                        domain: TimingDomain::Physical,
+                        ..
+                    }
+                ) {
+                    return Err(InitializationError::InvalidCapabilities.into());
+                }
+                let Some(Binding::Action(factory)) =
+                    row.binding().and_then(|slot| self.bindings.get(slot))
+                else {
+                    return Err(InitializationError::InvalidCapabilities.into());
+                };
+                if factory.payload_type() != capability.payload {
+                    return Err(InitializationError::InvalidCapabilities.into());
+                }
+            }
+        }
+        Ok(())
+    }
+    /// Validate manual clock requests and count writer claims before initialization.
+    #[cfg(feature = "hosted-manual-clock")]
+    pub(crate) fn validate_clock_capabilities(
+        &self,
+        image: &EnclaveImageView<'_>,
+        selected: bool,
+    ) -> Result<usize, OwnedStorageError> {
+        let mut writers = 0;
+        for reactor in image.reactors().values() {
+            let Some(Binding::State(init)) = self.bindings.get(reactor.state_binding()) else {
+                continue;
+            };
+            if init
+                .capabilities()
+                .is_some_and(|required| required.clock_control)
+            {
+                if !selected {
+                    return Err(InitializationError::InvalidCapabilities.into());
+                }
+                writers += 1;
+            }
+        }
+        Ok(writers)
+    }
+    /// Validate source/action ownership and return declared source claims.
+    #[cfg(feature = "hosted-source-input")]
+    pub(crate) fn validate_source_capabilities(
+        &self,
+        image: &EnclaveImageView<'_>,
+        enclave: EnclaveIndex,
+        inputs: Option<&crate::input::InputConfig>,
+    ) -> Result<Vec<crate::input::SourceKey>, crate::input::InputError> {
+        use crate::input::{CompiledPhysicalAction, InputError};
+        let mut sources = Vec::new();
+        for reactor in image.reactors().values() {
+            let Some(Binding::State(init)) = self.bindings.get(reactor.state_binding()) else {
+                continue;
+            };
+            let Some(required) = init.capabilities() else {
+                continue;
+            };
+            let source = required
+                .source
+                .map(|key| {
+                    inputs
+                        .and_then(|config| config.sources.get(key))
+                        .ok_or_else(InputError::configuration_error)
+                })
+                .transpose()?;
+            if let Some(key) = required.source {
+                sources.push(key);
+            }
+            for required_action in &required.actions {
+                let action = required_action.action;
+                let row = image
+                    .actions()
+                    .get(action)
+                    .ok_or_else(InputError::configuration_error)?;
+                if !matches!(
+                    row.timing(),
+                    ActionTiming::Standard {
+                        domain: TimingDomain::Physical,
+                        ..
+                    }
+                ) {
+                    return Err(InputError::configuration_error());
+                }
+                let reference = CompiledPhysicalAction::new(enclave, action);
+                if let Some(source) = source {
+                    if !source.actions.contains(&reference) {
+                        return Err(InputError::configuration_error());
+                    }
+                } else if inputs.is_some_and(|config| {
+                    config
+                        .sources
+                        .values()
+                        .any(|source| source.actions.contains(&reference))
+                }) {
+                    return Err(InputError::configuration_error());
+                }
+                let Some(Binding::Action(factory)) =
+                    row.binding().and_then(|slot| self.bindings.get(slot))
+                else {
+                    return Err(InputError::configuration_error());
+                };
+                if factory.payload_type() != required_action.payload {
+                    return Err(InputError::configuration_error());
+                }
+            }
+        }
+        Ok(sources)
     }
     /// Binds a payload action type to its stable required binding slot.
     pub fn bind_action<T: ReactorData>(
@@ -113,7 +278,7 @@ impl EnclaveBindings {
         }
     }
 
-    /// Returns the concrete payload type bound to one compiled port slot.
+    /// Returns the payload type and diagnostic name of a bound port factory.
     pub(crate) fn port_payload_type(
         &self,
         slot: BindingSlotIndex,
@@ -128,7 +293,7 @@ impl EnclaveBindings {
 /// A heterogeneous implementation value occupying a required image binding slot.
 enum Binding {
     /// A factory for one reactor's concrete state value.
-    State(Box<dyn StateInitializer>),
+    State(Arc<dyn StateInitializer>),
     /// An invoker for one generated reaction implementation.
     Reaction(Box<dyn ReactionInvoker>),
     /// A factory for one concrete port payload type.
@@ -152,7 +317,14 @@ impl Binding {
 /// Object-safe state construction behind the public generic binding method.
 trait StateInitializer: Send + Sync {
     /// Builds a fresh dynamically typed reactor state.
-    fn initialize(&self) -> StoredState;
+    fn initialize(
+        &self,
+        context: Option<&StateInitContext<'_, '_>>,
+    ) -> Result<StoredState, OwnedStorageError>;
+    /// Returns declared hosted requirements; ordinary initializers request none.
+    fn capabilities(&self) -> Option<&StateCapabilities> {
+        None
+    }
 }
 
 /// A dynamically stored state value retaining its concrete type for checked diagnostics.
@@ -164,25 +336,62 @@ pub(crate) struct StoredState {
 }
 
 /// A concrete function-pointer state initializer.
-struct TypedStateInitializer<T: ReactorData> {
+struct PlainStateInitializer<T: ReactorData> {
     /// The caller-supplied initializer function.
     init: fn() -> T,
     /// Retains the erased concrete state type.
     marker: PhantomData<fn() -> T>,
 }
 
-impl<T: ReactorData> StateInitializer for TypedStateInitializer<T> {
+impl<T: ReactorData> StateInitializer for PlainStateInitializer<T> {
     /// Builds the concrete state and erases only its payload type.
-    fn initialize(&self) -> StoredState {
-        StoredState {
+    fn initialize(
+        &self,
+        _context: Option<&StateInitContext<'_, '_>>,
+    ) -> Result<StoredState, OwnedStorageError> {
+        Ok(StoredState {
             value: Box::new((self.init)()),
             type_name: std::any::type_name::<T>(),
-        }
+        })
+    }
+}
+
+/// Concrete capability-aware initializer erased only after checked argument construction.
+struct CapabilityStateInitializer<T, F> {
+    /// Compiler-resolved requirements.
+    requirements: StateCapabilities,
+    /// Generated typed adapter.
+    init: F,
+    /// Concrete user state marker.
+    marker: PhantomData<fn() -> T>,
+}
+impl<T: ReactorData, F> StateInitializer for CapabilityStateInitializer<T, F>
+where
+    F: Fn(&StateInitContext<'_, '_>) -> Result<T, StateInitializationError> + Send + Sync,
+{
+    fn initialize(
+        &self,
+        context: Option<&StateInitContext<'_, '_>>,
+    ) -> Result<StoredState, OwnedStorageError> {
+        let context = context.ok_or(OwnedStorageError::MissingInitializationContext)?;
+        let state =
+            (self.init)(context).map_err(|source| OwnedStorageError::StateInitialization {
+                source: StateInitializationFailure(source.into()),
+            })?;
+        Ok(StoredState {
+            value: Box::new(state),
+            type_name: std::any::type_name::<T>(),
+        })
+    }
+    fn capabilities(&self) -> Option<&StateCapabilities> {
+        Some(&self.requirements)
     }
 }
 
 /// Object-safe action construction behind the public generic binding method.
 trait ActionFactory: Send + Sync {
+    /// Concrete payload identity checked before user initialization.
+    fn payload_type(&self) -> TypeId;
     /// Builds a standard action for the supplied slot and timing domain.
     fn create(
         &self,
@@ -199,6 +408,9 @@ struct TypedActionFactory<T: ReactorData> {
 }
 
 impl<T: ReactorData> ActionFactory for TypedActionFactory<T> {
+    fn payload_type(&self) -> TypeId {
+        TypeId::of::<T>()
+    }
     /// Builds a typed standard action using validated compiled timing.
     fn create(
         &self,
@@ -388,9 +600,35 @@ where
     }
 }
 
+/// Retains a user error source while keeping storage diagnostics cloneable.
+#[derive(Clone, Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct StateInitializationFailure(
+    #[source] pub(crate) std::sync::Arc<dyn std::error::Error + Send + Sync>,
+);
+impl PartialEq for StateInitializationFailure {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+impl Eq for StateInitializationFailure {}
+
 /// Errors building or accessing heap-backed compiled-image storage.
 #[derive(thiserror::Error, Debug, Clone, PartialEq, Eq)]
 pub enum OwnedStorageError {
+    /// A capability-aware initializer requires staged Federate construction.
+    #[error("capability initializer requires prepared Federate context")]
+    MissingInitializationContext,
+    /// Typed capability preflight failed before user state construction.
+    #[error(transparent)]
+    Capabilities(#[from] InitializationError),
+    /// User state construction failed after validated capability preparation.
+    #[error("state initializer failed: {source}")]
+    StateInitialization {
+        /// Original application error.
+        #[source]
+        source: StateInitializationFailure,
+    },
     /// Selected time or a physical-event admission tag could not be represented.
     #[error(transparent)]
     PhysicalClock(#[from] crate::clock::PhysicalClockError),
@@ -641,6 +879,8 @@ pub struct OwnedStorage<'image> {
     image: EnclaveImageView<'image>,
     /// Concrete reactor payloads keyed by exact image state slots.
     states: TinyMap<StateSlotIndex, StoredState>,
+    /// State constructors retained until endpoints/coordinator/capabilities are prepared.
+    initializers: TinyMap<StateSlotIndex, Arc<dyn StateInitializer>>,
     /// Concrete actions keyed by exact image action storage slots.
     actions: TinyMap<ActionSlotIndex, Box<dyn BaseAction>>,
     /// Concrete ports keyed by exact image port slots.
@@ -735,8 +975,28 @@ impl<'image> OwnedStorage<'image> {
     }
 
     /// Constructs owned storage whose reaction and send contexts use `enclave_key`.
-    /// Contexts share an unbound native clock until execution startup supplies the origin.
+    /// Contexts share an unbound host monotonic clock until execution startup supplies the origin.
     pub(crate) fn new_for_enclave(
+        image: EnclaveImageView<'image>,
+        bindings: EnclaveBindings,
+        enclave_key: EnclaveKey,
+    ) -> Result<Self, OwnedStorageError> {
+        if bindings.has_capabilities() {
+            return Err(OwnedStorageError::MissingInitializationContext);
+        }
+        let mut storage = Self::prepare_for_enclave(image, bindings, enclave_key)?;
+        storage.initialize_states(
+            None,
+            #[cfg(feature = "hosted-source-input")]
+            None,
+            #[cfg(feature = "hosted-manual-clock")]
+            None,
+        )?;
+        Ok(storage)
+    }
+
+    /// Allocates endpoints without executing application state construction.
+    pub(crate) fn prepare_for_enclave(
         image: EnclaveImageView<'image>,
         bindings: EnclaveBindings,
         enclave_key: EnclaveKey,
@@ -751,8 +1011,23 @@ impl<'image> OwnedStorage<'image> {
         let mut actions = initialize_actions(&action_images, &bindings)?;
         let mut ports = initialize_ports(&image, &bindings)?;
         let reaction_refs = initialize_reaction_refs(&image, &mut ports, &mut actions)?;
-        let states = initialize_states(&state_bindings, &bindings)?;
-        let reactions = initialize_reactions(bindings);
+        let initializers: TinyMap<_, _> = state_bindings
+            .values()
+            .map(|binding_slot| {
+                let Some(Binding::State(initializer)) = bindings.get(*binding_slot) else {
+                    unreachable!("validated state binding")
+                };
+                Arc::clone(initializer)
+            })
+            .collect();
+        let reactions = bindings
+            .into_iter()
+            .filter_map(|(slot, binding)| match binding {
+                Binding::Reaction(invoker) => Some((slot, invoker)),
+                _ => None,
+            })
+            .collect();
+        let states = TinyMap::with_capacity(initializers.len());
         let clock = crate::clock::ExecutionClock::default();
         let (contexts, event_tx, event_rx, shutdown_tx) =
             initialize_contexts(&image, enclave_key, clock)?;
@@ -766,6 +1041,7 @@ impl<'image> OwnedStorage<'image> {
         Ok(Self {
             image,
             states,
+            initializers,
             actions,
             ports,
             contexts,
@@ -781,6 +1057,34 @@ impl<'image> OwnedStorage<'image> {
         })
     }
 
+    /// Runs state construction only after shared execution resources are ready.
+    pub(crate) fn initialize_states(
+        &mut self,
+        enclave: Option<EnclaveIndex>,
+        #[cfg(feature = "hosted-source-input")] inputs: Option<&crate::input::InputAdmission>,
+        #[cfg(feature = "hosted-manual-clock")] clock: Option<&crate::clock::ManualClock>,
+    ) -> Result<(), OwnedStorageError> {
+        for (_, initializer) in std::mem::take(&mut self.initializers) {
+            let context = enclave.and_then(|_enclave| {
+                initializer
+                    .capabilities()
+                    .map(|requirements| StateInitContext {
+                        storage: self,
+                        requirements,
+                        #[cfg(feature = "hosted-source-input")]
+                        enclave: _enclave,
+                        #[cfg(feature = "hosted-source-input")]
+                        inputs,
+                        #[cfg(feature = "hosted-manual-clock")]
+                        clock,
+                    })
+            });
+            let state = initializer.initialize(context.as_ref())?;
+            self.states.insert(state);
+        }
+        Ok(())
+    }
+
     /// Releases the final owned states after scheduler-owned image data is no longer needed.
     pub(crate) fn into_states(self) -> TinyMap<StateSlotIndex, StoredState> {
         self.states
@@ -792,7 +1096,7 @@ impl<'image> OwnedStorage<'image> {
         self.emitted_outbound_ports = TinySecondaryMap::new();
     }
 
-    /// Binds the shared native origin before any participant starts executing.
+    /// Binds the shared host monotonic origin before any participant starts executing.
     pub(crate) fn initialize_clock(&self, origin: Instant) -> Instant {
         self.scheduler_send_context().clock.initialize(origin)
     }
@@ -1201,27 +1505,6 @@ fn validate_startup_delays(image: &EnclaveImageView<'_>) -> Result<(), OwnedStor
 }
 
 /// Initializes the dense state map only after all binding and slot validation succeeds.
-fn initialize_states(
-    state_bindings: &TinySecondaryMap<StateSlotIndex, BindingSlotIndex>,
-    bindings: &TinySecondaryMap<BindingSlotIndex, Binding>,
-) -> Result<TinyMap<StateSlotIndex, StoredState>, OwnedStorageError> {
-    let mut states = TinyMap::with_capacity(state_bindings.len());
-    for (slot, binding_slot) in state_bindings.iter() {
-        let binding_slot = *binding_slot;
-        let binding = &bindings[binding_slot];
-        let Binding::State(initializer) = binding else {
-            return Err(OwnedStorageError::BindingKindMismatch {
-                slot: binding_slot,
-                expected: BindingKind::StateInitializer,
-                found: binding.kind(),
-            });
-        };
-        let inserted = states.insert(initializer.initialize());
-        debug_assert_eq!(inserted, slot);
-    }
-    Ok(states)
-}
-
 /// Rejects unsupported or unrepresentable action timing before state initialization.
 fn validate_action_timing(
     action_images: &TinySecondaryMap<ActionSlotIndex, &crate::image::ActionImage>,
@@ -1331,19 +1614,6 @@ fn initialize_ports(
         debug_assert_eq!(inserted, slot);
     }
     Ok(ports)
-}
-
-/// Separates validated reaction invokers from state initializers by their exact binding slots.
-fn initialize_reactions(
-    bindings: TinySecondaryMap<BindingSlotIndex, Binding>,
-) -> TinySecondaryMap<BindingSlotIndex, Box<dyn ReactionInvoker>> {
-    let mut reactions = TinySecondaryMap::new();
-    for (slot, binding) in bindings {
-        if let Binding::Reaction(invoker) = binding {
-            reactions.insert(slot, invoker);
-        }
-    }
-    reactions
 }
 
 /// Precomputes alias-checked reference pointers after their boxed storage targets are initialized.

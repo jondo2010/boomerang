@@ -59,6 +59,70 @@ pub fn reactor_ports(
 ///    // Your reactor implementation goes here
 /// }
 /// ```
+///
+/// ### Construct state before logical startup
+///
+/// Use `state_init = path` to select a constructor for `state = T`.
+/// Without `init_context`, the constructor has signature `fn() -> T`.
+/// Add `init_context` to generate a named context and pass it to the constructor:
+///
+/// ```rust,no_run
+/// use boomerang::prelude::*;
+///
+/// #[derive(Debug)]
+/// pub struct InputState;
+/// impl InputState {
+///     fn new(init: InputInit) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+///         init.send.prepare_action(&init.sample, 42, None)?.try_send()?;
+///         Ok(Self)
+///     }
+/// }
+///
+/// #[reactor(
+///     state = InputState,
+///     state_init = InputState::new,
+///     init_context(name = InputInit, actions = [sample])
+/// )]
+/// pub fn Input(#[physical_action] sample: u32) -> impl Reactor {
+///     reaction! { receive(sample) {
+///         let _ = ctx.get_action_value(&mut sample);
+///     } }
+/// }
+/// ```
+///
+/// `init_context` requires `state` and `state_init`. With this option, the
+/// constructor has signature `fn(GeneratedContext) -> Result<T, E>`.
+/// `E` must convert to `Box<dyn std::error::Error + Send + Sync>`.
+/// The macro passes the generated context by value. For a generic reactor,
+/// the context has the same generic parameters and bounds.
+///
+/// | Option | Generated fields |
+/// | --- | --- |
+/// | `name = InputInit` | Sets the generated structure name. |
+/// | Always present | `send: SendContext` |
+/// | `actions = [sample]`, without `source` | `sample: AsyncActionRef<T>` for payload type `T` |
+/// | `source = "plant"` | `source: InputSourceHandle` |
+/// | `actions = [sample]`, with `source` | `sample: SourceAction<T>` |
+/// | `clock_control = true` | `clock: ManualClock` |
+///
+/// Each action must be a local physical action. Duplicate names and the names
+/// `source`, `clock`, `send`, and `__boomerang_marker` are rejected. A source declaration applies to
+/// all listed actions; one context cannot mix ordinary and source action handles.
+/// Compiled source declarations require at least one action.
+///
+/// Generated local hosted launchers call these initializers automatically.
+/// With the live builder, use `Reactor::build_initialized`. Methods that accept
+/// supplied state do not call the initializer. The live builder supports ordinary
+/// action contexts. Sources and manual clock control require compiled local
+/// hosted Federate execution and the runtime features `hosted-source-input` and
+/// `hosted-manual-clock`, respectively. They are independent options.
+/// A source also needs a deployment source policy. Manual clock control needs a
+/// selected manual clock and permits only one owning initializer per Federate.
+///
+/// Capability validation finishes before context initializers run. They run before logical
+/// startup and must return without waiting for reactions. Use nonblocking sends
+/// during initialization. Keep guards that cancel and join workers in the
+/// returned state. Clean up workers if construction fails before returning state.
 #[proc_macro_error2::proc_macro_error]
 #[proc_macro_attribute]
 pub fn reactor(

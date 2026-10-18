@@ -19,7 +19,7 @@ mod source;
 
 pub use action::SourceAction;
 pub use admission::InputAdmission;
-pub use batch::{InputBatchEvent, InputObservation, InputReceipt, InputValue};
+pub use batch::{InputBatch, InputBatchEvent, InputObservation, InputReceipt, InputValue};
 pub use config::{InputConfig, InputSource};
 pub use source::InputSourceHandle;
 

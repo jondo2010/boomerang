@@ -8,12 +8,13 @@
 
 use super::{
     retention::{Reservation, RetainedBatches},
-    CompiledPhysicalAction, InputBatchEvent, InputConfig, InputError, InputErrorKind,
-    InputObservation, InputReceipt, InputSourceHandle, SourceKey,
+    CompiledPhysicalAction, InputBatch, InputConfig, InputError, InputErrorKind, InputObservation,
+    InputReceipt, InputSourceHandle, SourceKey,
 };
 use crate::{
     clock::{PhysicalInstant, SelectedClock},
     image::EnclaveIndex,
+    sched::federate::state::FederateCoordinationState,
     AsyncEvent, Duration, Tag,
 };
 use std::{
@@ -32,10 +33,35 @@ struct SourceState {
     delay: Duration,
 }
 
+/// Tentative source updates. Copy these into source state only after publication succeeds.
+#[derive(Clone, Copy, Default)]
+struct PendingSource {
+    last: Option<(u64, PhysicalInstant)>,
+    frontier: Option<PhysicalInstant>,
+}
+
+/// Reusable validation storage. Its capacities are fixed before execution starts.
+struct AdmissionScratch {
+    sources: tinymap::TinyMap<SourceKey, PendingSource>,
+    reservations: Vec<Reservation>,
+}
+
+impl AdmissionScratch {
+    /// Discard tentative updates from the previous submission.
+    fn reset(&mut self, sources: &tinymap::TinyMap<SourceKey, SourceState>) {
+        for (pending, source) in self.sources.values_mut().zip(sources.values()) {
+            pending.last = source.last;
+            pending.frontier = source.frontier;
+        }
+        self.reservations.clear();
+    }
+}
+
 /// Source protocol state and retained-batch counts. The coordinator owns execution authority.
 struct AdmissionState {
     sources: tinymap::TinyMap<SourceKey, SourceState>,
     retained: RetainedBatches,
+    scratch: AdmissionScratch,
     horizon: Tag,
     failure: Option<InputError>,
     closed: bool,
@@ -43,7 +69,7 @@ struct AdmissionState {
 /// The shared clock, coordinator, source state, and scheduler mailboxes.
 pub(super) struct AdmissionService {
     pub(super) clock: SelectedClock,
-    coordination: Arc<Mutex<crate::sched::federate::state::FederateCoordinationState>>,
+    coordination: Arc<Mutex<FederateCoordinationState>>,
     senders: tinymap::TinySecondaryMap<EnclaveIndex, crate::Sender<AsyncEvent>>,
     max_values: usize,
     max_batches: usize,
@@ -77,7 +103,7 @@ impl InputAdmission {
         delays: tinymap::TinyMap<SourceKey, Duration>,
         clock: impl Into<SelectedClock>,
         senders: tinymap::TinySecondaryMap<EnclaveIndex, crate::Sender<AsyncEvent>>,
-        coordination: Arc<Mutex<crate::sched::federate::state::FederateCoordinationState>>,
+        coordination: Arc<Mutex<FederateCoordinationState>>,
         abort: crate::sched::federate::FederateAbortHandle,
     ) -> Self {
         let sources: tinymap::TinyMap<SourceKey, SourceState> = config
@@ -95,6 +121,11 @@ impl InputAdmission {
             .collect();
         let horizon = aggregate(sources.values().filter(|s| s.required).map(|_| None));
         coordination.lock().unwrap().input_horizon = Some(horizon);
+        let scratch = AdmissionScratch {
+            sources: sources.values().map(|_| PendingSource::default()).collect(),
+            reservations: Vec::with_capacity(config.max_batch_values),
+        };
+        let retained = RetainedBatches::new(config.max_batch_values, config.max_staged_batches);
         Self(Arc::new(AdmissionService {
             clock: clock.into(),
             coordination,
@@ -103,7 +134,8 @@ impl InputAdmission {
             max_batches: config.max_staged_batches,
             state: Mutex::new(AdmissionState {
                 sources,
-                retained: RetainedBatches::new(),
+                retained,
+                scratch,
                 horizon,
                 failure: None,
                 closed: false,
@@ -182,15 +214,18 @@ impl InputAdmission {
         source: &InputSourceHandle,
         frontier: PhysicalInstant,
     ) -> Result<(), InputError> {
-        self.submit(Vec::new(), &[(source.clone(), frontier)])
+        self.submit(InputBatch::new(Vec::new()), &[(source.clone(), frontier)])
             .map(|_| ())
     }
-    /// Validate the complete batch, then publish its values before its progress.
-    /// Return the mapped tags and host arrival time. Partial publication aborts execution.
+    /// Validate a prepared batch, then publish its values before its progress.
+    ///
+    /// Create the [`InputBatch`] before submission to allocate its delivery and receipt buffers.
+    /// Admission reuses its validation and retention storage. Coordinator notifications and
+    /// error diagnostics can still allocate. Partial publication aborts execution.
     /// Rejection can disable a source or retain an error without publishing values.
     pub fn submit(
         &self,
-        observations: Vec<InputObservation>,
+        mut batch: InputBatch,
         progress: &[(InputSourceHandle, PhysicalInstant)],
     ) -> Result<InputReceipt, InputError> {
         let arrival = Instant::now();
@@ -213,143 +248,177 @@ impl InputAdmission {
             .clock
             .now()
             .map_err(|_| InputError::new(InputErrorKind::Disconnected))?;
-        let mut last: tinymap::TinyMap<SourceKey, _> =
-            state.sources.values().map(|s| s.last).collect();
-        let mut frontiers: tinymap::TinyMap<SourceKey, _> =
-            state.sources.values().map(|s| s.frontier).collect();
-        let mut reservations = Vec::new();
-        let mut mapped = Vec::new();
-        let required = observations.iter().map(|o| o.source.key).find(|key| {
+        let required = self
+            .validate_batch(&mut state, &coordination, &batch, progress, now)
+            .map_err(|(source, kind)| {
+                let diagnostic = self.reject(&mut state, Some(source), kind, arrival);
+                if state.failure.is_some() {
+                    coordination.input_horizon = Some(Tag::NEVER);
+                }
+                diagnostic
+            })?;
+
+        batch.route_values(
+            state
+                .scratch
+                .reservations
+                .iter()
+                .map(|reservation| reservation.tag),
+        );
+        let sent =
+            self.publish_batch(&mut state, &mut coordination, &mut batch, required, arrival)?;
+        let changed = self.commit_batch(&mut state, &mut coordination);
+        if sent || changed {
+            self.wake_schedulers();
+        }
+        Ok(batch.receipt(arrival))
+    }
+
+    /// Check all observations and progress without committing source state.
+    fn validate_batch(
+        &self,
+        state: &mut AdmissionState,
+        coordination: &FederateCoordinationState,
+        batch: &InputBatch,
+        progress: &[(InputSourceHandle, PhysicalInstant)],
+        now: PhysicalInstant,
+    ) -> Result<Option<SourceKey>, (SourceKey, InputErrorKind)> {
+        state.scratch.reset(&state.sources);
+        let required = batch.observations.iter().map(|o| o.source.key).find(|key| {
             state
                 .sources
                 .get(*key)
                 .is_some_and(|source| source.required)
         });
-        for observation in &observations {
-            let key = observation.source.key;
-            let validation = (|| {
-                let source = state.sources.get(key).ok_or(InputErrorKind::Malformed)?;
-                if !source.enabled {
-                    return Err(InputErrorKind::Disconnected);
-                }
-                if !Arc::ptr_eq(&observation.source.admission.0, &self.0)
-                    || observation.values.is_empty()
-                    || observation.domain != self.0.clock.domain()
-                    || observation.epoch != self.0.clock.epoch()
-                {
-                    return Err(InputErrorKind::Malformed);
-                }
-                if source.frontier.is_some_and(|f| observation.acquired < f) {
-                    return Err(InputErrorKind::Protocol);
-                }
-                if observation.acquired > now {
-                    return Err(InputErrorKind::Future);
-                }
-                if let Some((sequence, acquired)) = last[key] {
-                    if observation.sequence == sequence {
-                        return Err(InputErrorKind::Duplicate);
-                    }
-                    if observation.sequence < sequence || observation.acquired < acquired {
-                        return Err(InputErrorKind::OutOfOrder);
-                    }
-                }
-                for value in &observation.values {
-                    let target = &value.action;
-                    if target.source.key != key
-                        || !Arc::ptr_eq(&target.source.admission.0, &self.0)
-                        || !source.actions.contains(&target.reference)
-                        || value.value.as_ref().type_id() != target.payload
-                    {
-                        return Err(InputErrorKind::Malformed);
-                    }
-                    let tag = observation
-                        .acquired
-                        .to_tag(target.delay)
-                        .map_err(|_| InputErrorKind::Malformed)?;
-                    if coordination.input_is_late(target.reference.enclave, tag) {
-                        return Err(InputErrorKind::Late);
-                    }
-                    if reservations
-                        .iter()
-                        .chain(state.retained.entries.iter())
-                        .any(|reservation: &Reservation| {
-                            reservation.action == target.reference && reservation.tag == tag
-                        })
-                    {
-                        return Err(InputErrorKind::Overflow);
-                    }
-                    if reservations.len() == self.0.max_values
-                        || state.retained.len() == self.0.max_batches
-                    {
-                        return Err(InputErrorKind::Overflow);
-                    }
-                    reservations.push(Reservation {
-                        action: target.reference,
-                        tag,
-                    });
-                    mapped.push(tag);
-                }
-                last[key] = Some((observation.sequence, observation.acquired));
-                Ok(())
-            })();
-            if let Err(kind) = validation {
-                let key = required
-                    .filter(|_| kind == InputErrorKind::Overflow)
-                    .unwrap_or(key);
-                let diagnostic = self.reject(&mut state, Some(key), kind, arrival);
-                if state.failure.is_some() {
-                    coordination.input_horizon = Some(Tag::NEVER);
-                }
-                return Err(diagnostic);
+        for observation in &batch.observations {
+            self.validate_observation(state, coordination, observation, now)
+                .map_err(|kind| {
+                    let source = required
+                        .filter(|_| kind == InputErrorKind::Overflow)
+                        .unwrap_or(observation.source.key);
+                    (source, kind)
+                })?;
+        }
+        for (source, frontier) in progress {
+            self.validate_progress(state, source, *frontier)
+                .map_err(|kind| (source.key, kind))?;
+        }
+        Ok(required)
+    }
+
+    /// Validate one acquisition and reserve its action/tag pairs in scratch storage.
+    fn validate_observation(
+        &self,
+        state: &mut AdmissionState,
+        coordination: &FederateCoordinationState,
+        observation: &InputObservation,
+        now: PhysicalInstant,
+    ) -> Result<(), InputErrorKind> {
+        let key = observation.source.key;
+        let source = state.sources.get(key).ok_or(InputErrorKind::Malformed)?;
+        if !source.enabled {
+            return Err(InputErrorKind::Disconnected);
+        }
+        if !Arc::ptr_eq(&observation.source.admission.0, &self.0)
+            || observation.values.is_empty()
+            || observation.domain != self.0.clock.domain()
+            || observation.epoch != self.0.clock.epoch()
+        {
+            return Err(InputErrorKind::Malformed);
+        }
+        if source.frontier.is_some_and(|f| observation.acquired < f) {
+            return Err(InputErrorKind::Protocol);
+        }
+        if observation.acquired > now {
+            return Err(InputErrorKind::Future);
+        }
+        if let Some((sequence, acquired)) = state.scratch.sources[key].last {
+            if observation.sequence == sequence {
+                return Err(InputErrorKind::Duplicate);
+            }
+            if observation.sequence < sequence || observation.acquired < acquired {
+                return Err(InputErrorKind::OutOfOrder);
             }
         }
-        for (source_handle, frontier) in progress {
-            let key = source_handle.key;
-            let frontier = *frontier;
-            let validation = (|| {
-                let source = state.sources.get(key).ok_or(InputErrorKind::Malformed)?;
-                if !source.enabled {
-                    return Err(InputErrorKind::Disconnected);
-                }
-                if !Arc::ptr_eq(&source_handle.admission.0, &self.0) {
-                    return Err(InputErrorKind::Malformed);
-                }
-                if frontiers[key].is_some_and(|f| frontier < f) {
-                    return Err(InputErrorKind::Protocol);
-                }
-                frontier
-                    .to_tag(source.delay)
-                    .map_err(|_| InputErrorKind::Malformed)?;
-                frontiers[key] = Some(frontier);
-                Ok(())
-            })();
-            if let Err(kind) = validation {
-                let diagnostic = self.reject(&mut state, Some(key), kind, arrival);
-                if state.failure.is_some() {
-                    coordination.input_horizon = Some(Tag::NEVER);
-                }
-                return Err(diagnostic);
+        for value in &observation.values {
+            let target = &value.action;
+            if target.source.key != key
+                || !Arc::ptr_eq(&target.source.admission.0, &self.0)
+                || !source.actions.contains(&target.reference)
+                || value.value.as_ref().type_id() != target.payload
+            {
+                return Err(InputErrorKind::Malformed);
             }
-        }
-        let mut envelopes = tinymap::TinySecondaryMap::<EnclaveIndex, Vec<_>>::new();
-        let mut tags = mapped.iter();
-        for observation in observations {
-            for value in observation.values {
-                let enclave = value.action.reference.enclave;
-                if !envelopes.contains_key(enclave) {
-                    envelopes.insert(enclave, Vec::new());
-                }
-                envelopes[enclave].push((
-                    *tags.next().unwrap(),
-                    value.action.reference.action,
-                    value.value,
-                ));
+            let tag = observation
+                .acquired
+                .to_tag(target.delay)
+                .map_err(|_| InputErrorKind::Malformed)?;
+            if coordination.input_is_late(target.reference.enclave, tag) {
+                return Err(InputErrorKind::Late);
             }
+            if state
+                .scratch
+                .reservations
+                .iter()
+                .chain(state.retained.entries.iter())
+                .any(|reservation| reservation.action == target.reference && reservation.tag == tag)
+                || state.scratch.reservations.len() == self.0.max_values
+                || state.retained.len() == self.0.max_batches
+            {
+                return Err(InputErrorKind::Overflow);
+            }
+            state.scratch.reservations.push(Reservation {
+                action: target.reference,
+                tag,
+            });
         }
+        state.scratch.sources[key].last = Some((observation.sequence, observation.acquired));
+        Ok(())
+    }
+
+    /// Check one exclusive frontier against the tentative source state.
+    fn validate_progress(
+        &self,
+        state: &mut AdmissionState,
+        source_handle: &InputSourceHandle,
+        frontier: PhysicalInstant,
+    ) -> Result<(), InputErrorKind> {
+        let key = source_handle.key;
+        let source = state.sources.get(key).ok_or(InputErrorKind::Malformed)?;
+        if !source.enabled {
+            return Err(InputErrorKind::Disconnected);
+        }
+        if !Arc::ptr_eq(&source_handle.admission.0, &self.0) {
+            return Err(InputErrorKind::Malformed);
+        }
+        if state.scratch.sources[key]
+            .frontier
+            .is_some_and(|f| frontier < f)
+        {
+            return Err(InputErrorKind::Protocol);
+        }
+        frontier
+            .to_tag(source.delay)
+            .map_err(|_| InputErrorKind::Malformed)?;
+        state.scratch.sources[key].frontier = Some(frontier);
+        Ok(())
+    }
+
+    /// Transfer prepared envelopes while both admission locks remain held.
+    fn publish_batch(
+        &self,
+        state: &mut AdmissionState,
+        coordination: &mut FederateCoordinationState,
+        batch: &mut InputBatch,
+        required: Option<SourceKey>,
+        arrival: Instant,
+    ) -> Result<bool, InputError> {
         let mut sent = false;
-        for (enclave, values) in envelopes {
+        for (enclave, envelope) in batch.envelopes.iter_mut() {
             let source = required.or_else(|| {
-                reservations
+                state
+                    .scratch
+                    .reservations
                     .iter()
                     .find(|reservation| reservation.action.enclave == enclave)
                     .and_then(|reservation| {
@@ -360,13 +429,16 @@ impl InputAdmission {
                             .map(|(key, _)| key)
                     })
             });
-            match self.0.senders[enclave]
-                .try_send(AsyncEvent::PhysicalBatch(InputBatchEvent { values }))
-            {
+            let event = AsyncEvent::PhysicalBatch(super::InputBatchEvent {
+                values: std::mem::take(&mut envelope.values),
+            });
+            match self.0.senders[enclave].try_send(event) {
                 Ok(true) => {
                     if !sent {
                         coordination.input_publishing(
-                            reservations
+                            state
+                                .scratch
+                                .reservations
                                 .iter()
                                 .map(|reservation| reservation.action.enclave),
                         );
@@ -379,36 +451,41 @@ impl InputAdmission {
                     } else {
                         InputErrorKind::Overflow
                     };
-                    let diagnostic = self.reject(&mut state, source, kind, arrival);
+                    let diagnostic = self.reject(state, source, kind, arrival);
                     if sent || state.failure.is_some() {
                         state.failure.get_or_insert_with(|| diagnostic.clone());
                         coordination.input_horizon = Some(Tag::NEVER);
                         self.0.abort.abort();
                     }
-                    // Wake existing publication or terminal paths after a rejected fanout.
-                    for tx in self.0.senders.values() {
-                        let _ = tx.try_send(AsyncEvent::FederateResume);
-                    }
+                    self.wake_schedulers();
                     return Err(diagnostic);
                 }
             }
         }
-        if !reservations.is_empty() {
-            state.retained.append(&reservations);
+        Ok(sent)
+    }
+
+    /// Commit reservations and source updates after every envelope was accepted.
+    fn commit_batch(
+        &self,
+        state: &mut AdmissionState,
+        coordination: &mut FederateCoordinationState,
+    ) -> bool {
+        if !state.scratch.reservations.is_empty() {
+            state.retained.append(&state.scratch.reservations);
         }
         let changed = state
             .sources
             .values()
-            .zip(frontiers.values())
-            .any(|(source, frontier)| source.frontier != *frontier);
-        for ((source, last), frontier) in state
+            .zip(state.scratch.sources.values())
+            .any(|(source, pending)| source.frontier != pending.frontier);
+        for (source, pending) in state
             .sources
             .values_mut()
-            .zip(last.values())
-            .zip(frontiers.values())
+            .zip(state.scratch.sources.values())
         {
-            source.last = *last;
-            source.frontier = *frontier;
+            source.last = pending.last;
+            source.frontier = pending.frontier;
         }
         if changed {
             state.horizon = aggregate(
@@ -421,15 +498,14 @@ impl InputAdmission {
             coordination.input_horizon = Some(state.horizon);
             self.0.abort.input_progress();
         }
-        if sent || changed {
-            for tx in self.0.senders.values() {
-                let _ = tx.try_send(AsyncEvent::FederateResume);
-            }
+        changed
+    }
+
+    /// Wake publication or terminal processing without waiting for mailbox capacity.
+    fn wake_schedulers(&self) {
+        for tx in self.0.senders.values() {
+            let _ = tx.try_send(AsyncEvent::FederateResume);
         }
-        Ok(InputReceipt {
-            arrival,
-            tags: mapped,
-        })
     }
     /// Get the cached execution limit for tests.
     #[cfg(all(test, feature = "hosted-manual-clock"))]

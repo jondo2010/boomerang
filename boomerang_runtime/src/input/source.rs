@@ -1,6 +1,6 @@
 //! Source handles for observations, progress, and clock readings.
 
-use super::{InputAdmission, InputError, InputObservation, InputReceipt, SourceKey};
+use super::{InputAdmission, InputBatch, InputError, InputReceipt, SourceKey};
 use crate::clock::{PhysicalInstant, SelectedClock};
 
 /// A source handle for one execution. Generated initializers receive this handle.
@@ -16,14 +16,14 @@ impl InputSourceHandle {
     pub fn clock(&self) -> SelectedClock {
         self.admission.0.clock.clone()
     }
-    /// Submit a batch of observations and source progress.
+    /// Submit a caller-prepared batch and source progress.
     /// The batch can include other sources from the same admission service and execution.
     pub fn submit(
         &self,
-        observations: Vec<InputObservation>,
+        batch: InputBatch,
         frontiers: &[(InputSourceHandle, PhysicalInstant)],
     ) -> Result<InputReceipt, InputError> {
-        self.admission.submit(observations, frontiers)
+        self.admission.submit(batch, frontiers)
     }
     /// Advance this source's exclusive acquisition frontier without advancing the clock.
     pub fn advance(&self, frontier: PhysicalInstant) -> Result<(), InputError> {

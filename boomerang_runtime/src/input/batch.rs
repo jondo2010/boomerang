@@ -3,7 +3,7 @@
 use super::InputSourceHandle;
 use crate::{
     clock::{ExecutionEpoch, PhysicalClockDomainId, PhysicalInstant},
-    image::ActionIndex,
+    image::{ActionIndex, EnclaveIndex},
     ReactorData, Tag,
 };
 use std::time::Instant;
@@ -37,6 +37,77 @@ pub struct InputObservation {
     /// The owned action values.
     pub values: Vec<InputValue>,
 }
+/// An owned batch with delivery and receipt storage prepared by the caller.
+///
+/// Construction allocates buffers but does not validate or publish input.
+/// Admission consumes the batch. It transfers each delivery buffer to its scheduler
+/// and returns the tag buffer in [`InputReceipt`]. Payloads are not cloned.
+/// This preparation does not make the complete hosted runtime allocation-free.
+pub struct InputBatch {
+    pub(super) observations: Vec<InputObservation>,
+    pub(super) envelopes: tinymap::TinySecondaryMap<EnclaveIndex, InputBatchEvent>,
+    tags: Vec<Tag>,
+}
+
+impl InputBatch {
+    /// Prepare delivery buffers for the supplied observations before admission takes its locks.
+    /// An empty batch needs no buffers and can be used to report progress only.
+    pub fn new(observations: Vec<InputObservation>) -> Self {
+        let mut counts = tinymap::TinySecondaryMap::<EnclaveIndex, usize>::new();
+        let mut values = 0;
+        for observation in &observations {
+            for value in &observation.values {
+                let enclave = value.action.reference.enclave;
+                if !counts.contains_key(enclave) {
+                    counts.insert(enclave, 0);
+                }
+                counts[enclave] += 1;
+                values += 1;
+            }
+        }
+        let envelopes = counts
+            .into_iter()
+            .map(|(enclave, count)| {
+                (
+                    enclave,
+                    InputBatchEvent {
+                        values: Vec::with_capacity(count),
+                    },
+                )
+            })
+            .collect();
+        Self {
+            observations,
+            envelopes,
+            tags: Vec::with_capacity(values),
+        }
+    }
+
+    /// Move validated payloads into their prepared destination buffers.
+    pub(super) fn route_values(&mut self, tags: impl Iterator<Item = Tag>) {
+        self.tags.extend(tags);
+        let mut tags = self.tags.iter();
+        for observation in self.observations.drain(..) {
+            for value in observation.values {
+                let target = value.action.reference;
+                self.envelopes[target.enclave].values.push((
+                    *tags.next().expect("one mapped tag per validated value"),
+                    target.action,
+                    value.value,
+                ));
+            }
+        }
+    }
+
+    /// Return the caller-prepared tag storage after publication succeeds.
+    pub(super) fn receipt(self, arrival: Instant) -> InputReceipt {
+        InputReceipt {
+            arrival,
+            tags: self.tags,
+        }
+    }
+}
+
 /// The result of a successful batch submission.
 #[derive(Debug)]
 pub struct InputReceipt {

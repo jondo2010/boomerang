@@ -18,11 +18,15 @@ pub(super) struct RetainedBatches {
 }
 
 impl RetainedBatches {
-    /// Start empty. Storage capacity grows as batches are admitted.
-    pub(super) fn new() -> Self {
+    /// Allocate the configured reservation and batch bounds before execution.
+    pub(super) fn new(max_values: usize, max_batches: usize) -> Self {
         Self {
-            entries: Vec::new(),
-            ends: Vec::new(),
+            entries: Vec::with_capacity(
+                max_values
+                    .checked_mul(max_batches)
+                    .expect("validated input bounds"),
+            ),
+            ends: Vec::with_capacity(max_batches),
         }
     }
 

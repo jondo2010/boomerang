@@ -182,18 +182,20 @@ fn physical_input_two_enclave_batch_precedes_timers_and_clock_cannot_outrun_prog
         let sources = &inputs.sources;
         inputs
             .submit(
-                sources
-                    .iter()
-                    .enumerate()
-                    .map(|(index, source)| InputObservation {
-                        source: source.clone(),
-                        sequence: 1,
-                        domain: clock.domain(),
-                        epoch: clock.epoch(),
-                        acquired: PhysicalInstant(0),
-                        values: vec![InputValue::new(&inputs.actions[index], 7u32)],
-                    })
-                    .collect(),
+                InputBatch::new(
+                    sources
+                        .iter()
+                        .enumerate()
+                        .map(|(index, source)| InputObservation {
+                            source: source.clone(),
+                            sequence: 1,
+                            domain: clock.domain(),
+                            epoch: clock.epoch(),
+                            acquired: PhysicalInstant(0),
+                            values: vec![InputValue::new(&inputs.actions[index], 7u32)],
+                        })
+                        .collect(),
+                ),
                 &sources
                     .iter()
                     .map(|source| (source.clone(), PhysicalInstant(1)))
@@ -361,7 +363,7 @@ fn physical_input_optional_batch_interrupts_old_grants_waiting_on_clock() {
                     values: vec![InputValue::new(&inputs.actions[index], 9u32)],
                 }
             });
-            inputs.submit(batch.into(), &[]).unwrap();
+            inputs.submit(InputBatch::new(batch.into()), &[]).unwrap();
             for _ in 0..2 {
                 let (_, tag, value) = rx.recv().unwrap();
                 assert_eq!((tag, value), (1, 9));
@@ -497,14 +499,14 @@ fn required_host_clock_source_initializes_at_epoch_zero() {
                             assert!(clock.now().is_ok());
                             readers.lock().unwrap().push(clock.clone());
                             source.submit(
-                                vec![InputObservation {
+                                InputBatch::new(vec![InputObservation {
                                     source: source.clone(),
                                     sequence: 1,
                                     acquired: PhysicalInstant(0),
                                     domain: clock.domain(),
                                     epoch: clock.epoch(),
                                     values: vec![InputValue::new(&sample, 42)],
-                                }],
+                                }]),
                                 &[(source.clone(), PhysicalInstant(100))],
                             )?;
                             Ok(initialize_counter())

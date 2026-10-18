@@ -237,7 +237,10 @@ fn admission_rejections_preserve_sequence_and_exact_frontier_is_admissible() {
     let mut invalid = sample(&h, 0, 1, 0);
     invalid.epoch = ExecutionEpoch(0);
     assert_eq!(
-        h.inputs.submit(vec![invalid], &[]).unwrap_err().kind,
+        h.inputs
+            .submit(InputBatch::new(vec![invalid]), &[])
+            .unwrap_err()
+            .kind,
         InputErrorKind::Malformed
     );
     let mut invalid = sample(&h, 0, 1, 0);
@@ -246,19 +249,25 @@ fn admission_rejections_preserve_sequence_and_exact_frontier_is_admissible() {
         value: Box::new("wrong"),
     }];
     assert_eq!(
-        h.inputs.submit(vec![invalid], &[]).unwrap_err().kind,
+        h.inputs
+            .submit(InputBatch::new(vec![invalid]), &[])
+            .unwrap_err()
+            .kind,
         InputErrorKind::Malformed
     );
     assert_eq!(
         h.inputs
-            .submit(vec![sample(&h, 0, 1, 10)], &[])
+            .submit(InputBatch::new(vec![sample(&h, 0, 1, 10)]), &[])
             .unwrap_err()
             .kind,
         InputErrorKind::Future
     );
     h.clock.advance_to(PhysicalInstant(20)).unwrap();
     h.inputs.advance(&h.source(0), PhysicalInstant(10)).unwrap();
-    let receipt = h.inputs.submit(vec![sample(&h, 0, 2, 10)], &[]).unwrap();
+    let receipt = h
+        .inputs
+        .submit(InputBatch::new(vec![sample(&h, 0, 2, 10)]), &[])
+        .unwrap();
     assert!(receipt.arrival >= start);
     assert_eq!(receipt.tags, [Tag::new(Duration::nanoseconds(10), 0)]);
     for (sequence, time, kind) in [
@@ -268,7 +277,7 @@ fn admission_rejections_preserve_sequence_and_exact_frontier_is_admissible() {
     ] {
         let failure = h
             .inputs
-            .submit(vec![sample(&h, 0, sequence, time)], &[])
+            .submit(InputBatch::new(vec![sample(&h, 0, sequence, time)]), &[])
             .unwrap_err();
         assert_eq!(failure.kind, kind);
         assert_eq!(failure.source_id.as_deref(), Some("s0"));
@@ -281,26 +290,30 @@ fn admission_rejections_preserve_sequence_and_exact_frontier_is_admissible() {
 fn retained_bounds_same_tag_conflicts_and_inflight_lateness() {
     let h = harness(&[false], 2, 0, 8);
     h.clock.advance_to(PhysicalInstant(30)).unwrap();
-    h.inputs.submit(vec![sample(&h, 0, 1, 10)], &[]).unwrap();
+    h.inputs
+        .submit(InputBatch::new(vec![sample(&h, 0, 1, 10)]), &[])
+        .unwrap();
     assert!(!h.reserve(0, Tag::new(Duration::nanoseconds(10), 0)));
     assert_eq!(
         h.inputs
-            .submit(vec![sample(&h, 0, 2, 10)], &[])
+            .submit(InputBatch::new(vec![sample(&h, 0, 2, 10)]), &[])
             .unwrap_err()
             .kind,
         InputErrorKind::Overflow
     );
     assert_eq!(
         h.inputs
-            .submit(vec![sample(&h, 0, 2, 9)], &[])
+            .submit(InputBatch::new(vec![sample(&h, 0, 2, 9)]), &[])
             .unwrap_err()
             .kind,
         InputErrorKind::OutOfOrder
     );
-    h.inputs.submit(vec![sample(&h, 0, 2, 11)], &[]).unwrap();
+    h.inputs
+        .submit(InputBatch::new(vec![sample(&h, 0, 2, 11)]), &[])
+        .unwrap();
     assert_eq!(
         h.inputs
-            .submit(vec![sample(&h, 0, 3, 12)], &[])
+            .submit(InputBatch::new(vec![sample(&h, 0, 3, 12)]), &[])
             .unwrap_err()
             .kind,
         InputErrorKind::Overflow
@@ -310,13 +323,15 @@ fn retained_bounds_same_tag_conflicts_and_inflight_lateness() {
     assert!(h.reserve(0, Tag::new(Duration::nanoseconds(12), 0)));
     assert_eq!(
         h.inputs
-            .submit(vec![sample(&h, 0, 3, 12)], &[])
+            .submit(InputBatch::new(vec![sample(&h, 0, 3, 12)]), &[])
             .unwrap_err()
             .kind,
         InputErrorKind::Late
     );
     h.complete(0, Tag::new(Duration::nanoseconds(12), 0));
-    h.inputs.submit(vec![sample(&h, 0, 3, 13)], &[]).unwrap();
+    h.inputs
+        .submit(InputBatch::new(vec![sample(&h, 0, 3, 13)]), &[])
+        .unwrap();
     h.inputs.disconnect(&h.source(0));
     drain(&h);
     authorize(&h);
@@ -333,7 +348,10 @@ fn entire_batch_rejects_before_commit_and_partial_fanout_aborts() {
         value: Box::new(false),
     });
     assert_eq!(
-        h.inputs.submit(vec![malformed], &[]).unwrap_err().kind,
+        h.inputs
+            .submit(InputBatch::new(vec![malformed]), &[])
+            .unwrap_err()
+            .kind,
         InputErrorKind::Malformed
     );
     assert!(h.rx.iter().all(|rx| rx.try_recv().unwrap().is_none()));
@@ -344,7 +362,10 @@ fn entire_batch_rejects_before_commit_and_partial_fanout_aborts() {
     batch.values.push(InputValue::new(&h.action(1), 7u32));
     assert_eq!(
         h.inputs
-            .submit(vec![batch], &[(h.source(0), PhysicalInstant(1))])
+            .submit(
+                InputBatch::new(vec![batch]),
+                &[(h.source(0), PhysicalInstant(1))]
+            )
             .unwrap_err()
             .kind,
         InputErrorKind::Overflow
@@ -388,7 +409,7 @@ fn required_overflow_disconnect_and_checked_mapping_are_terminal_or_rejected() {
         first.values[0].action = h.action(h.rx.len() - 1).admission(); // Last Enclave first.
         let failure = h
             .inputs
-            .submit(vec![first, sample(&h, 1, 1, 0)], &[])
+            .submit(InputBatch::new(vec![first, sample(&h, 1, 1, 0)]), &[])
             .unwrap_err();
         assert_eq!(
             failure.kind,
@@ -415,7 +436,7 @@ fn required_overflow_disconnect_and_checked_mapping_are_terminal_or_rejected() {
     h.clock.advance_to(PhysicalInstant(u64::MAX)).unwrap();
     assert_eq!(
         h.inputs
-            .submit(vec![sample(&h, 0, 1, u64::MAX)], &[])
+            .submit(InputBatch::new(vec![sample(&h, 0, 1, u64::MAX)]), &[])
             .unwrap_err()
             .kind,
         InputErrorKind::Malformed
@@ -442,7 +463,7 @@ fn admission_and_final_reservation_race_cannot_both_win() {
         std::thread::scope(|scope| {
             let admitted = scope.spawn(|| {
                 barrier.wait();
-                inputs.submit(vec![observation], &[])
+                inputs.submit(InputBatch::new(vec![observation]), &[])
             });
             barrier.wait();
             let reserved = h.reserve(0, Tag::ZERO);
@@ -476,7 +497,11 @@ fn cached_horizon_and_reservations_allocate_nothing_with_maximum_batches() {
                     })
                     .collect();
                 assert_eq!(
-                    h.inputs.submit(batch, &[]).unwrap().tags.len(),
+                    h.inputs
+                        .submit(InputBatch::new(batch), &[])
+                        .unwrap()
+                        .tags
+                        .len(),
                     enclaves * 2
                 );
             }
@@ -499,7 +524,7 @@ fn cached_horizon_and_reservations_allocate_nothing_with_maximum_batches() {
             for slot in 0..enclaves {
                 h.complete(slot, Tag::new(Duration::nanoseconds(3), 0));
             }
-            h.inputs.submit(vec![], &[]).unwrap();
+            h.inputs.submit(InputBatch::new(vec![]), &[]).unwrap();
             assert!(h.inputs.0.state.lock().unwrap().retained.len() == 0);
         }
     }
@@ -536,7 +561,9 @@ fn consumed_batch_invalidates_queued_grant_until_coordinator_reauthorizes() {
         .lock()
         .handle_acquisition(FederateAcquisition::new(revision, tag))
         .unwrap();
-    h.inputs.submit(vec![sample(&h, 0, 1, 10)], &[]).unwrap();
+    h.inputs
+        .submit(InputBatch::new(vec![sample(&h, 0, 1, 10)]), &[])
+        .unwrap();
     drain(&h);
     // A backend extension computed for the old publication must not bless the new generation.
     h._coordination
@@ -627,7 +654,7 @@ fn source_and_action_handles_cannot_cross_execution_epochs() {
     assert_eq!(
         second
             .inputs
-            .submit(vec![foreign_source], &[])
+            .submit(InputBatch::new(vec![foreign_source]), &[])
             .unwrap_err()
             .kind,
         InputErrorKind::Malformed
@@ -637,7 +664,7 @@ fn source_and_action_handles_cannot_cross_execution_epochs() {
     assert_eq!(
         second
             .inputs
-            .submit(vec![foreign_action], &[])
+            .submit(InputBatch::new(vec![foreign_action]), &[])
             .unwrap_err()
             .kind,
         InputErrorKind::Malformed
@@ -652,7 +679,7 @@ fn source_and_action_handles_cannot_cross_execution_epochs() {
     );
     second
         .inputs
-        .submit(vec![sample(&second, 0, 1, 0)], &[])
+        .submit(InputBatch::new(vec![sample(&second, 0, 1, 0)]), &[])
         .unwrap();
 }
 
@@ -691,7 +718,9 @@ fn coherent_input_does_not_require_idle_nontarget_to_republish() {
     }
     // Only Enclave 7 receives a batch. Enclave 10 remains in wait(), where a
     // FederateResume wake is consumed without publishing another idle candidate.
-    h.inputs.submit(vec![sample(&h, 0, 1, 0)], &[]).unwrap();
+    h.inputs
+        .submit(InputBatch::new(vec![sample(&h, 0, 1, 0)]), &[])
+        .unwrap();
     drain(&h);
     let mut state = h.inputs.0.coordination.lock().unwrap();
     state
@@ -763,7 +792,10 @@ fn coherent_input_releases_target_with_unaffected_waiting_port() {
                 panic!("unaffected port did not publish its initial candidate");
             }
             inputs
-                .submit(vec![observation], &[(source, PhysicalInstant(11))])
+                .submit(
+                    InputBatch::new(vec![observation]),
+                    &[(source, PhysicalInstant(11))],
+                )
                 .unwrap();
             scope.spawn(move || {
                 let batch = matches!(
@@ -815,35 +847,39 @@ fn retained_batches_reclaim_complete_batches_without_releasing_partial_batches()
     for (sequence, time) in [(1, 10), (2, 20)] {
         let mut observation = sample(&h, 0, sequence, time);
         observation.values.push(InputValue::new(&h.action(1), 7));
-        h.inputs.submit(vec![observation], &[]).unwrap();
+        h.inputs
+            .submit(InputBatch::new(vec![observation]), &[])
+            .unwrap();
     }
     drain(&h);
     h.complete(0, Tag::new(Duration::nanoseconds(10), 0));
     assert_eq!(
         h.inputs
-            .submit(vec![sample(&h, 0, 3, 30)], &[])
+            .submit(InputBatch::new(vec![sample(&h, 0, 3, 30)]), &[])
             .unwrap_err()
             .kind,
         InputErrorKind::Overflow
     );
     h.complete(1, Tag::new(Duration::nanoseconds(10), 0));
-    h.inputs.submit(vec![sample(&h, 0, 3, 30)], &[]).unwrap();
+    h.inputs
+        .submit(InputBatch::new(vec![sample(&h, 0, 3, 30)]), &[])
+        .unwrap();
     assert_eq!(h.inputs.0.state.lock().unwrap().retained.len(), 2);
     h.complete(0, Tag::new(Duration::nanoseconds(20), 0));
-    h.inputs.submit(vec![], &[]).unwrap();
+    h.inputs.submit(InputBatch::new(vec![]), &[]).unwrap();
     assert_eq!(h.inputs.0.state.lock().unwrap().retained.len(), 2);
     h.complete(1, Tag::new(Duration::nanoseconds(20), 0));
-    h.inputs.submit(vec![], &[]).unwrap();
+    h.inputs.submit(InputBatch::new(vec![]), &[]).unwrap();
     assert_eq!(h.inputs.0.state.lock().unwrap().retained.len(), 1);
     h.complete(0, Tag::new(Duration::nanoseconds(30), 0));
-    h.inputs.submit(vec![], &[]).unwrap();
+    h.inputs.submit(InputBatch::new(vec![]), &[]).unwrap();
     assert_eq!(h.inputs.0.state.lock().unwrap().retained.len(), 0);
 }
 
 /// Retention storage reuses previously grown capacity across batch turnover.
 #[test]
 fn retained_batch_turnover_does_not_allocate() {
-    let mut ledger = RetainedBatches::new();
+    let mut ledger = RetainedBatches::new(2, 2);
     let reservation = |enclave, nanoseconds| Reservation {
         action: CompiledPhysicalAction::new(enclave_key(enclave), ActionIndex::new(0)),
         tag: Tag::new(Duration::nanoseconds(nanoseconds), 0),
@@ -871,7 +907,9 @@ fn source_batch_preserves_compiled_action_identity() {
     let h = harness(&[false, false], 2, 3, 8);
     let mut observation = sample(&h, 1, 1, 0);
     observation.values.push(InputValue::new(&h.action(3), 7u32));
-    h.inputs.submit(vec![observation], &[]).unwrap();
+    h.inputs
+        .submit(InputBatch::new(vec![observation]), &[])
+        .unwrap();
     for (rx, expected) in h.rx.iter().zip([42u32, 7]) {
         let Some(AsyncEvent::PhysicalBatch(batch)) = rx.try_recv().unwrap() else {
             panic!("source admission must publish a batch to each destination");
@@ -882,5 +920,104 @@ fn source_batch_preserves_compiled_action_identity() {
         assert_eq!(tag, Tag::new(Duration::nanoseconds(3), 0));
         assert_eq!(*value.downcast::<u32>().ok().unwrap(), expected);
         assert!(values.next().is_none());
+    }
+}
+
+/// Admission does not allocate buffers on first publication or after batch reclamation.
+#[test]
+fn submission_reuses_initialized_and_caller_owned_buffers() {
+    for enclaves in [1, 8, 16] {
+        let h = harness(&[false], enclaves, 0, 8);
+        h.clock.advance_to(PhysicalInstant(100)).unwrap();
+        for turn in 0..3 {
+            let batch = (2 * turn..2 * turn + 2)
+                .map(|time| {
+                    let mut observation = sample(&h, 0, time, time);
+                    observation.values = (0..enclaves)
+                        .map(|slot| InputValue::new(&h.action(slot), 42u32))
+                        .collect();
+                    observation
+                })
+                .collect();
+            let batch = InputBatch::new(batch);
+            crate::clock::ALLOCATIONS.with(|count| count.set(Some(0)));
+            let result = h.inputs.submit(batch, &[]);
+            let allocations = crate::clock::ALLOCATIONS.with(|count| count.replace(None).unwrap());
+            assert_eq!(result.unwrap().tags.len(), 2 * enclaves);
+            assert_eq!(allocations, 0, "enclaves={enclaves}, turn={turn}");
+            drain(&h);
+            for enclave in 0..enclaves {
+                h.complete(
+                    enclave,
+                    PhysicalInstant(2 * turn + 1)
+                        .to_tag(Duration::ZERO)
+                        .unwrap(),
+                );
+            }
+        }
+    }
+}
+
+/// Progress uses no admission buffers beyond the hosted coordinator's notification.
+#[test]
+fn progress_submission_only_allocates_for_coordinator_notification() {
+    // Measure the real notification paths separately from admission storage.
+    let baseline = harness(&[true], 2, 0, 8);
+    crate::clock::ALLOCATIONS.with(|count| count.set(Some(0)));
+    baseline.inputs.0.abort.input_progress();
+    baseline.inputs.wake_schedulers();
+    let notification_allocations =
+        crate::clock::ALLOCATIONS.with(|count| count.replace(None).unwrap());
+    for sources in [1, 16, 64] {
+        let h = harness(&vec![true; sources], 2, 0, 8);
+        // Initialize platform mutex backing storage without submitting input.
+        h.clock.now().unwrap();
+        h.inputs.horizon();
+        let progress: Vec<_> = (0..sources)
+            .map(|source| (h.source(source), PhysicalInstant(1)))
+            .collect();
+        crate::clock::ALLOCATIONS.with(|count| count.set(Some(0)));
+        let result = h.inputs.submit(InputBatch::new(Vec::new()), &progress);
+        let allocations = crate::clock::ALLOCATIONS.with(|count| count.replace(None).unwrap());
+        assert!(result.unwrap().tags.is_empty());
+        assert_eq!(allocations, notification_allocations, "sources={sources}");
+    }
+}
+
+/// Rejection discards tentative sequence and frontier updates before the next submission.
+#[test]
+fn rejected_batch_does_not_leak_tentative_source_updates() {
+    for reject_progress in [false, true] {
+        let h = harness(&[false, false], 1, 0, 8);
+        h.clock.advance_to(PhysicalInstant(10)).unwrap();
+        let mut observations = vec![sample(&h, 0, 1, 1)];
+        let progress = if reject_progress {
+            vec![
+                (h.source(0), PhysicalInstant(5)),
+                (h.source(99), PhysicalInstant(1)),
+            ]
+        } else {
+            let mut invalid = sample(&h, 1, 1, 1);
+            invalid.epoch = ExecutionEpoch(0);
+            observations.push(invalid);
+            vec![]
+        };
+        assert_eq!(
+            h.inputs
+                .submit(InputBatch::new(observations), &progress)
+                .unwrap_err()
+                .kind,
+            InputErrorKind::Malformed
+        );
+        assert!(h.rx[0].try_recv().unwrap().is_none());
+        // Retry the staged sequence and use a frontier below the discarded one.
+        let receipt = h
+            .inputs
+            .submit(
+                InputBatch::new(vec![sample(&h, 0, 1, 1)]),
+                &[(h.source(0), PhysicalInstant(2))],
+            )
+            .unwrap();
+        assert_eq!(receipt.tags, [Tag::new(Duration::nanoseconds(1), 0)]);
     }
 }

@@ -1465,14 +1465,12 @@ mod stats_tests {
     #[test]
     fn dropped_live_spawn_closure_closes_peers_before_state_drop() {
         use crate::initialization::live::CloseMailboxes;
-        use crate::CommonContext;
         struct CheckPeer(crate::SendContext);
         impl Drop for CheckPeer {
             fn drop(&mut self) {
                 assert_eq!(
-                    self.0
-                        .try_schedule_async(AsyncEvent::shutdown(Duration::ZERO)),
-                    Some(false),
+                    self.0.try_shutdown(None),
+                    Err(crate::TryShutdownError::Closed),
                     "all peers must close before state joins"
                 );
             }

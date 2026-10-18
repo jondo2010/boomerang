@@ -656,15 +656,10 @@ fn initializer_failure_and_panic_release_previously_initialized_workers() {
                     move |init| {
                         readers.lock().unwrap().push(init.source()?.clock());
                         let mut send = init.send_context();
-                        while send.try_schedule_async(AsyncEvent::Shutdown {
-                            delay: Duration::ZERO,
-                        }) == Some(true)
-                        {}
+                        while send.try_shutdown(None).is_ok() {}
                         assert_eq!(
-                            send.try_schedule_async(AsyncEvent::Shutdown {
-                                delay: Duration::ZERO
-                            }),
-                            None
+                            send.try_shutdown(None),
+                            Err(boomerang_runtime::TryShutdownError::Full)
                         );
                         let worker = std::thread::spawn(move || send.schedule_shutdown(None));
                         Ok(InitializationWorker {
@@ -767,9 +762,7 @@ fn initializer_local_worker_guard_cancels_on_error_and_panic() {
                                         while !worker_stop
                                             .load(std::sync::atomic::Ordering::Acquire)
                                         {
-                                            let _ = send.try_schedule_async(AsyncEvent::Shutdown {
-                                                delay: Duration::ZERO,
-                                            });
+                                            let _ = send.try_shutdown(None);
                                             std::thread::yield_now();
                                         }
                                     })),

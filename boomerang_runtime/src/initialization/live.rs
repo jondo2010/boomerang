@@ -184,9 +184,8 @@ mod tests {
     impl Drop for ReturnedGuard {
         fn drop(&mut self) {
             assert_eq!(
-                self.send
-                    .try_schedule_async(crate::AsyncEvent::shutdown(crate::Duration::ZERO)),
-                Some(false)
+                self.send.try_shutdown(None),
+                Err(crate::TryShutdownError::Closed)
             );
             self.dropped.fetch_add(1, Ordering::SeqCst);
         }

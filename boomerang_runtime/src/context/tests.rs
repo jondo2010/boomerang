@@ -329,11 +329,15 @@ fn prepared_full_retry_retains_payload_allocation_and_time() {
     };
     let action = Action::<Payload>::new(
         "input",
-        ActionKey::new(0),
+        ActionKey::new(3),
         Some(Duration::milliseconds(7)),
         false,
     );
     let action = AsyncActionRef::<Payload>::try_from(DynActionRef(&action)).unwrap();
+    // A handle can be cloned even when its payload cannot be cloned.
+    let cloned = action.clone();
+    drop(action);
+    let action = cloned;
     send.prepare_action(&action, Payload(Box::new(1)), None)
         .unwrap()
         .try_send()
@@ -354,9 +358,18 @@ fn prepared_full_retry_retains_payload_allocation_and_time() {
     }
     rx.recv().unwrap();
     prepared.try_send().unwrap();
-    let AsyncEvent::Physical { time, value, .. } = rx.recv().unwrap() else {
+    let AsyncEvent::Physical {
+        time,
+        value,
+        target,
+    } = rx.recv().unwrap()
+    else {
         panic!("physical input")
     };
+    assert_eq!(
+        target,
+        crate::event::AsyncEventTarget::Action(ActionKey::new(3))
+    );
     let payload = value.downcast::<Payload>().ok().unwrap();
     assert_eq!(payload.0.as_ref() as *const u32, allocation);
     assert_eq!(*payload.0, 42);

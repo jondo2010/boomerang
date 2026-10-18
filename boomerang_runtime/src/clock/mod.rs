@@ -3,7 +3,7 @@
 //! # Clock boundary
 //!
 //! The scheduler uses one selected-clock handle for time reads and interruptible
-//! deadline waits. Host waits use the system timer; manual waits register a
+//! deadline waits. Host waits use the host monotonic clock; manual waits register a
 //! deadline against shared externally advanced time. Scheduling, action storage,
 //! and input admission remain outside the clock implementation.
 //!
@@ -24,15 +24,16 @@
 //! mailbox wake capacity prevents startup.
 //!
 //! The manual implementation owns synchronized time, terminal failure, and wake
-//! registration. The host implementation owns system-timer waiting and a shared
+//! registration. The host implementation owns monotonic deadline waits and a shared
 //! host origin, allocated once per Enclave. Send contexts created during graph
 //! construction share that origin; reads return [`PhysicalClockError::NotStarted`]
 //! until execution binds it. Bulk live execution binds every participant to one
 //! origin before spawning workers; compiled execution does so after construction
 //! and connection setup. Individual scheduler startup binds its origin once.
 //! Without `hosted-manual-clock`, there is no manual state, dispatch branch, deadline
-//! registry, or optional entropy dependency. Cloning and reading an initialized
-//! clock do not allocate.
+//! registry. Execution identities use host entropy when either hosted feature is enabled.
+//! With `hosted-source-input`, source admission can read the host clock without
+//! manual clock support. Cloning and reading an initialized clock do not allocate.
 //!
 //! # Scheduler integration
 //!
@@ -52,7 +53,7 @@
 //! [`crate::Context::try_get_logical_time`] projects a logical tag into the same
 //! coordinates with range checking; logical scheduling itself retains its wider
 //! signed duration range.
-//! Supervision, transport liveness, and observation timing use host-monotonic
+//! Supervision, transport liveness, and observation timing use host monotonic
 //! time independently of the selected clock.
 
 mod host;
@@ -97,7 +98,7 @@ pub(crate) struct WaitContext<'a, 'coordination> {
 pub(crate) enum ExecutionClock {
     /// Host origin bound once at execution startup; clones share the same origin.
     HostMonotonic(Arc<OnceLock<Instant>>),
-    /// One participant in a shared manual-clock execution.
+    /// One participant in a shared manual clock execution.
     #[cfg(feature = "hosted-manual-clock")]
     Manual {
         /// Shared time, execution identity and deadline registry.
@@ -181,6 +182,78 @@ impl ExecutionClock {
         self.now()?.checked_add(delay)
     }
 }
+/// Read-only access to the selected execution timeline and its identity.
+/// Cloning this capability grants no authority to advance a manual clock.
+#[cfg(any(feature = "hosted-source-input", feature = "hosted-manual-clock"))]
+#[derive(Clone, Debug)]
+pub struct SelectedClock {
+    /// Shared selected timeline.
+    clock: ExecutionClock,
+    /// Stable domain selected by deployment policy; the host clock uses domain zero.
+    domain: PhysicalClockDomainId,
+    /// Fresh identity for this execution.
+    epoch: ExecutionEpoch,
+    /// Execution-scoped terminal state, independent of the host clock scheduling path.
+    closed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+#[cfg(any(feature = "hosted-source-input", feature = "hosted-manual-clock"))]
+impl SelectedClock {
+    /// Creates a host clock execution identity after binding its shared origin.
+    pub(crate) fn host_monotonic(clock: ExecutionClock) -> Result<Self, PhysicalClockError> {
+        let mut bytes = [0; 16];
+        getrandom::fill(&mut bytes).map_err(|_| PhysicalClockError::EntropyUnavailable)?;
+        Ok(Self {
+            clock,
+            domain: PhysicalClockDomainId(0),
+            epoch: ExecutionEpoch(u128::from_le_bytes(bytes)),
+            closed: Default::default(),
+        })
+    }
+    /// Stable configured physical domain.
+    pub fn domain(&self) -> PhysicalClockDomainId {
+        self.domain
+    }
+    /// Identity of this particular execution.
+    pub fn epoch(&self) -> ExecutionEpoch {
+        self.epoch
+    }
+    /// Reads the selected physical time without advancing it.
+    pub fn now(&self) -> Result<PhysicalInstant, PhysicalClockError> {
+        if self.closed.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(PhysicalClockError::Closed);
+        }
+        self.clock.now()
+    }
+    /// Closes all read capabilities for this execution before owned workers are joined.
+    pub(crate) fn finish_run(&self) {
+        self.closed
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+}
+#[cfg(feature = "hosted-manual-clock")]
+impl From<ManualClock> for SelectedClock {
+    fn from(clock: ManualClock) -> Self {
+        Self {
+            domain: clock.domain(),
+            epoch: clock.epoch(),
+            clock: ExecutionClock::manual(clock, 0),
+            closed: Default::default(),
+        }
+    }
+}
+#[cfg(any(feature = "hosted-source-input", feature = "hosted-manual-clock"))]
+impl PhysicalClock for SelectedClock {
+    fn domain(&self) -> PhysicalClockDomainId {
+        self.domain()
+    }
+    fn epoch(&self) -> ExecutionEpoch {
+        self.epoch()
+    }
+    fn now(&self) -> Result<PhysicalInstant, PhysicalClockError> {
+        self.now()
+    }
+}
+
 /// Result of physical synchronization, including scheduler interruption or termination.
 pub(crate) enum ClockWaitResult {
     /// The requested physical deadline elapsed normally.

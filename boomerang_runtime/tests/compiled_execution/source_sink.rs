@@ -1,7 +1,7 @@
 //! Shared typed source/sink image fixtures for local routes and isolated backends.
 use super::*;
 
-/// Bounds the native epoch by bracketing a selected-clock read with host reads.
+/// Check the host clock origin with host time readings before and after the execution clock reading.
 /// Tests can verify the actual shared origin without exposing it through Context.
 fn sample_host_origin(context: &Context) -> (Instant, Instant) {
     let before = Instant::now();

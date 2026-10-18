@@ -490,3 +490,115 @@ fn physical_actions_at_frozen_time_preserve_microsteps_and_every_value() {
         );
     }
 }
+
+/// Clock access depends on the declaration, without requiring an input admission service.
+#[test]
+fn clock_only_initialization_checks_capabilities_without_input_sources() {
+    use boomerang_runtime::initialization::{InitializationError, StateCapabilities};
+    let clock = ManualClock::new(PhysicalClockDomainId(7)).unwrap();
+    let mut bindings = FederateBindings::new().with_manual_clock(clock.domain(), clock.clone());
+    for index in 0..2 {
+        bindings = bindings.bind_enclave(
+            EnclaveIndex::new(index),
+            EnclaveBindings::new()
+                .bind_state_with_capabilities(
+                    BindingSlotIndex::new(0),
+                    StateCapabilities {
+                        clock_control: index == 0,
+                        ..Default::default()
+                    },
+                    move |init| {
+                        if index == 0 {
+                            let control = init.clock_control()?;
+                            assert_eq!(control.domain(), PhysicalClockDomainId(7));
+                            assert_eq!(control.now()?, PhysicalInstant(0));
+                        } else {
+                            assert!(matches!(
+                                init.clock_control(),
+                                Err(InitializationError::InvalidCapabilities)
+                            ));
+                        }
+                        #[cfg(feature = "hosted-source-input")]
+                        assert!(matches!(
+                            init.source(),
+                            Err(InitializationError::InvalidCapabilities)
+                        ));
+                        #[cfg(feature = "hosted-source-input")]
+                        assert!(matches!(
+                            init.source_action::<u32>(ActionIndex::new(1)),
+                            Err(InitializationError::InvalidCapabilities)
+                        ));
+                        let mut state = initialize_counter();
+                        state.count = 17;
+                        Ok(state)
+                    },
+                )
+                .bind_reaction(BindingSlotIndex::new(1), |_, _, _, _| Ok(())),
+        );
+    }
+    let result = execute_owned_federate(
+        CLOCK_DEPLOYMENT,
+        FederateIndex::new(0),
+        bindings,
+        Config::default()
+            .with_fast_forward(true)
+            .with_timeout(Duration::nanoseconds(1)),
+    )
+    .unwrap();
+    for index in 0..2 {
+        let state = result
+            .enclave(EnclaveIndex::new(index))
+            .unwrap()
+            .state::<CounterState>(StateSlotIndex::new(0))
+            .unwrap();
+        assert_eq!(state.count, 17);
+    }
+}
+
+/// Invalid clock-writer declarations fail before any initializer runs.
+#[test]
+fn clock_writer_preflight_rejects_missing_clock_and_multiple_writers() {
+    use boomerang_runtime::initialization::StateCapabilities;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    for selected in [false, true] {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut bindings = FederateBindings::new();
+        if selected {
+            let clock = ManualClock::new(PhysicalClockDomainId(7)).unwrap();
+            bindings = bindings.with_manual_clock(clock.domain(), clock);
+        }
+        for index in 0..2 {
+            let calls = calls.clone();
+            bindings = bindings.bind_enclave(
+                EnclaveIndex::new(index),
+                EnclaveBindings::new()
+                    .bind_state_with_capabilities(
+                        BindingSlotIndex::new(0),
+                        StateCapabilities {
+                            clock_control: selected || index == 1,
+                            ..Default::default()
+                        },
+                        move |_| {
+                            calls.fetch_add(1, Ordering::SeqCst);
+                            Ok(initialize_counter())
+                        },
+                    )
+                    .bind_reaction(BindingSlotIndex::new(1), |_, _, _, _| Ok(())),
+            );
+        }
+        assert!(matches!(
+            execute_owned_federate(
+                CLOCK_DEPLOYMENT,
+                FederateIndex::new(0),
+                bindings,
+                Config::default()
+            ),
+            Err(ExecuteOwnedFederateError::EnclaveInitialization { .. })
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+}

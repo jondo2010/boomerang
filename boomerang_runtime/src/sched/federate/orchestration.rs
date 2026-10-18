@@ -22,10 +22,7 @@ use crate::{image::EnclaveIndex, AsyncEvent, Tag};
 
 /// Returns whether one asynchronous event introduces executable or terminal scheduler work.
 fn revises_candidate(event: &AsyncEvent) -> bool {
-    matches!(
-        event,
-        AsyncEvent::Logical { .. } | AsyncEvent::Physical { .. } | AsyncEvent::Shutdown { .. }
-    )
+    event.revises_candidate()
 }
 
 /// Terminal coordinator reason consumed by a scheduler wake path.
@@ -56,7 +53,7 @@ pub(crate) enum FederateIdleWait {
 /// Result of requesting permission to process one compiled scheduler tag.
 #[derive(Debug)]
 pub(crate) enum FederateTagAcquisition {
-    /// The requested logical tag may proceed to wall-clock synchronization.
+    /// The requested logical tag may proceed to physical-time pacing.
     Granted,
     /// New scheduler work invalidated the candidate before it was granted.
     Interrupted(AsyncEvent),
@@ -85,6 +82,18 @@ pub(crate) enum FederateControlAuthorization {
 
 /// Scheduler-facing coordination port without a backend or transport type.
 pub(crate) trait FederateSchedulerCoordination {
+    /// Whether input progress requires a logical-horizon candidate even with no application work.
+    #[cfg(feature = "hosted-source-input")]
+    fn requires_horizon_candidate(&self) -> bool {
+        false
+    }
+
+    /// Reserves the final execution boundary after physical pacing.
+    #[cfg(feature = "hosted-source-input")]
+    fn begin_tag(&mut self, _tag: Tag) -> bool {
+        true
+    }
+
     /// Reports work observed before the scheduler can publish its revised candidate.
     fn active(&mut self);
 
@@ -130,6 +139,9 @@ pub(crate) trait FederateSchedulerCoordination {
 
 /// Participant-to-coordinator messages that retain only typed state inputs and legacy requests.
 enum CoordinatorReport {
+    /// A changed cached input frontier can release retained backend authority.
+    #[cfg(feature = "hosted-source-input")]
+    InputProgress,
     /// One scheduler-originated pure-state message.
     Scheduler(
         /// Typed scheduler message stamped by the participant.
@@ -205,6 +217,11 @@ pub(crate) struct FederateAbortHandle {
 }
 
 impl FederateAbortHandle {
+    /// Makes an input-cap increase actionable on the existing coordinator.
+    #[cfg(feature = "hosted-source-input")]
+    pub(crate) fn input_progress(&self) {
+        let _ = self.report_tx.send(CoordinatorReport::InputProgress);
+    }
     /// Requests idempotent Federate-wide abortion without blocking the supervising thread.
     pub(crate) fn abort(&self) {
         let _ = self
@@ -215,7 +232,8 @@ impl FederateAbortHandle {
     }
 }
 
-/// Coordinator that exclusively owns the pure state and backend on its dedicated worker thread.
+/// Coordinator that drives state transitions and owns the backend on its dedicated worker thread.
+/// Hosted input admission shares the coordinator state to serialize publication with execution.
 ///
 /// Construction returns this value to the supervisor, which moves it into exactly one coordinator
 /// thread before any scheduler is started.
@@ -227,7 +245,7 @@ pub(crate) struct FederateCoordinator<B: FederateCoordinationBackend> {
     /// Per-participant scheduler wake senders closed only after a terminal command is queued.
     events: TinySecondaryMap<EnclaveIndex, crate::Sender<AsyncEvent>>,
     /// Authoritative candidate, phase, completion, and terminal state.
-    state: FederateCoordinationState,
+    pub(crate) state: super::state::CoordinationStateCell,
     /// Publication awaiting a fresh mailbox observation from every participant.
     pending_publication: Option<FederatePublication>,
     /// Independent monotonic publication-fence generation.
@@ -257,7 +275,7 @@ impl<B: FederateCoordinationBackend> FederateCoordinator<B> {
     pub(crate) fn run(mut self) -> CoordinatorExit {
         CoordinatorExit {
             coordination_result: self.run_loop(),
-            first_failed_participant: self.state.first_failure(),
+            first_failed_participant: self.state.read().first_failure(),
         }
     }
 
@@ -299,6 +317,11 @@ impl<B: FederateCoordinationBackend> FederateCoordinator<B> {
         report: CoordinatorReport,
     ) -> Result<bool, FederateCoordinationError> {
         match report {
+            #[cfg(feature = "hosted-source-input")]
+            CoordinatorReport::InputProgress => {
+                let actions = self.state.lock().input_progress()?;
+                self.execute_actions(actions)
+            }
             CoordinatorReport::PublicationObserved {
                 enclave,
                 generation,
@@ -312,9 +335,10 @@ impl<B: FederateCoordinationBackend> FederateCoordinator<B> {
                         .all(|observed| *observed == generation)
                     {
                         if let Some(publication) = self.pending_publication.take() {
-                            if publication.revision() == self.state.revision() {
+                            if publication.revision() == self.state.read().revision() {
                                 self.backend.publish(publication)?;
-                                let actions = self.state.handle_publication_sent(publication)?;
+                                let actions =
+                                    self.state.lock().handle_publication_sent(publication)?;
                                 return self.execute_actions(actions);
                             }
                         }
@@ -323,7 +347,7 @@ impl<B: FederateCoordinationBackend> FederateCoordinator<B> {
                 Ok(false)
             }
             CoordinatorReport::Scheduler(message) => {
-                let actions = self.state.handle_scheduler(message)?;
+                let actions = self.state.lock().handle_scheduler(message)?;
                 self.execute_actions(actions)
             }
             CoordinatorReport::Observation {
@@ -331,14 +355,15 @@ impl<B: FederateCoordinationBackend> FederateCoordinator<B> {
                 revision,
                 observation,
             } => {
-                let actions = self
-                    .state
-                    .handle_observation(enclave, revision, observation)?;
+                let actions =
+                    self.state
+                        .lock()
+                        .handle_observation(enclave, revision, observation)?;
                 self.execute_actions(actions)
             }
             CoordinatorReport::LogicalHorizon { enclave, tag } => {
                 self.require_participant(enclave)?;
-                let _ = self.state.stop();
+                let _ = self.state.lock().stop();
                 self.stop_backend_once()?;
                 self.send_available(ParticipantCommand::LogicalHorizon(tag));
                 Ok(true)
@@ -349,6 +374,7 @@ impl<B: FederateCoordinationBackend> FederateCoordinator<B> {
     /// Validates a compiled identity before an adapter-only terminal request.
     fn require_participant(&self, enclave: EnclaveIndex) -> Result<(), FederateCoordinationError> {
         self.state
+            .read()
             .candidate(enclave)
             .is_some()
             .then_some(())
@@ -410,18 +436,19 @@ impl<B: FederateCoordinationBackend> FederateCoordinator<B> {
         timeout: StdDuration,
     ) -> Result<bool, FederateCoordinationError> {
         if let Some(acquisition) = self.backend.progress(timeout)? {
-            let actions = self.state.handle_acquisition(acquisition)?;
+            let actions = self.state.lock().handle_acquisition(acquisition)?;
             if self.execute_actions(actions)? {
                 return Ok(true);
             }
         }
-        if let Some(revision) = self
+        let idle_revision = self
             .state
+            .read()
             .idle_confirmation_revision()
-            .filter(|_| self.pending_publication.is_none())
-        {
+            .filter(|_| self.pending_publication.is_none());
+        if let Some(revision) = idle_revision {
             if self.backend.confirm_idle(revision)? {
-                let actions = self.state.handle_idle_confirmation(revision);
+                let actions = self.state.lock().handle_idle_confirmation(revision);
                 return self.execute_actions(actions);
             }
         }
@@ -486,6 +513,7 @@ impl<B: FederateCoordinationBackend> FederateCoordinator<B> {
     fn abort_after_error(&mut self) {
         let _ = self
             .state
+            .lock()
             .handle_scheduler(SchedulerMessage::Failed { enclave: None });
         self.terminate_available(ParticipantCommand::Action(CoordinationAction::Abort));
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.stop_backend_once()));
@@ -525,6 +553,9 @@ impl<B: FederateCoordinationBackend> Drop for FederateCoordinator<B> {
 ///
 /// The stored compiled Enclave identity keeps its channel traffic associated with that scheduler.
 pub(crate) struct EnclaveCoordinationPort {
+    /// Actual coordinator state shared only for hosted final execution fencing.
+    #[cfg(feature = "hosted-source-input")]
+    state: std::sync::Arc<std::sync::Mutex<FederateCoordinationState>>,
     /// Compiled identity stamped onto every state message.
     enclave: EnclaveIndex,
     /// Shared participant-report sender.
@@ -552,6 +583,12 @@ pub(crate) struct EnclaveCoordinationPort {
 }
 
 impl EnclaveCoordinationPort {
+    /// Final hosted execution boundary, serialized with coherent action publication.
+    #[cfg(feature = "hosted-source-input")]
+    fn begin_input_tag(&self, tag: Tag) -> bool {
+        self.state.lock().unwrap().begin_tag(self.enclave, tag)
+    }
+
     /// Retains one broadcast Federate grant without allowing the horizon to regress.
     fn advance_horizon(&mut self, tag: Tag) {
         self.grant_horizon = Some(self.grant_horizon.map_or(tag, |current| current.max(tag)));
@@ -693,6 +730,16 @@ impl EnclaveCoordinationPort {
 
 impl FederateSchedulerCoordination for EnclaveCoordinationPort {
     /// Reports work without inventing a candidate tag.
+    #[cfg(feature = "hosted-source-input")]
+    fn begin_tag(&mut self, tag: Tag) -> bool {
+        self.begin_input_tag(tag)
+    }
+
+    #[cfg(feature = "hosted-source-input")]
+    fn requires_horizon_candidate(&self) -> bool {
+        self.state.lock().unwrap().input_horizon.is_some()
+    }
+
     fn active(&mut self) {
         self.report_infallible(CoordinatorReport::Scheduler(SchedulerMessage::Active {
             enclave: self.enclave,
@@ -998,6 +1045,7 @@ impl<B: FederateCoordinationBackend> FederateCoordinationParts<B> {
             participants.iter().map(|(enclave, _, _)| *enclave),
             lifecycle,
         )?;
+        let state = super::state::CoordinationStateCell::new(state);
         let (report_tx, report_rx) = mpsc::channel();
         let mut commands = TinySecondaryMap::new();
         let mut publication_observed = TinySecondaryMap::new();
@@ -1011,6 +1059,8 @@ impl<B: FederateCoordinationBackend> FederateCoordinationParts<B> {
             ports.insert(
                 enclave,
                 EnclaveCoordinationPort {
+                    #[cfg(feature = "hosted-source-input")]
+                    state: state.shared(),
                     enclave,
                     report_tx: report_tx.clone(),
                     command_rx,
@@ -1248,7 +1298,7 @@ mod tests {
                 generation: coordinator.publication_generation,
             })
             .unwrap();
-        let revision = coordinator.state.revision();
+        let revision = coordinator.state.read().revision();
         for observation in [
             Observation::Probed,
             Observation::Parked,
@@ -1265,11 +1315,11 @@ mod tests {
         assert!(!coordinator.progress_backend(StdDuration::ZERO).unwrap());
         assert_eq!(coordinator.backend.confirmations, 1);
         assert_eq!(coordinator.backend.progresses, 1);
-        assert!(!coordinator.state.is_stopped());
+        assert!(!coordinator.state.read().is_stopped());
         coordinator.backend.accepted = true;
         assert!(!coordinator.progress_backend(StdDuration::ZERO).unwrap());
         assert_eq!(coordinator.backend.confirmations, 2);
-        assert_eq!(coordinator.state.phase(), CoordinationPhase::Probing);
+        assert_eq!(coordinator.state.read().phase(), CoordinationPhase::Probing);
         assert!(matches!(
             participant.wait().unwrap(),
             FederateIdleWait::Interrupted(AsyncEvent::Shutdown { .. })
@@ -1277,8 +1327,8 @@ mod tests {
         while let Ok(report) = coordinator.report_rx.try_recv() {
             assert!(!coordinator.handle_report(report).unwrap());
         }
-        assert_eq!(coordinator.state.phase(), CoordinationPhase::Active);
-        assert!(!coordinator.state.is_stopped());
+        assert_eq!(coordinator.state.read().phase(), CoordinationPhase::Active);
+        assert!(!coordinator.state.read().is_stopped());
     }
 
     /// Catches discarded authority errors and cleanup overwriting the first failure.
@@ -1422,15 +1472,17 @@ mod tests {
         parts
             .coordinator
             .state
+            .lock()
             .handle_scheduler(SchedulerMessage::Publish {
                 enclave,
                 next_event: Some(Tag::ZERO),
             })
             .unwrap();
-        let revision = parts.coordinator.state.revision();
+        let revision = parts.coordinator.state.read().revision();
         parts
             .coordinator
             .state
+            .lock()
             .handle_acquisition(FederateAcquisition::new(revision, Tag::FOREVER))
             .unwrap();
         let next = Tag::new(Duration::nanoseconds(1), 0);
@@ -1607,6 +1659,11 @@ mod tests {
     ) -> (EnclaveCoordinationPort, crate::Sender<AsyncEvent>) {
         let (event_tx, event_rx) = kanal::unbounded();
         let participant = EnclaveCoordinationPort {
+            #[cfg(feature = "hosted-source-input")]
+            state: std::sync::Arc::new(std::sync::Mutex::new(
+                super::FederateCoordinationState::new([enclave], LifecyclePolicy::KeepAlive)
+                    .unwrap(),
+            )),
             enclave,
             report_tx,
             command_rx,

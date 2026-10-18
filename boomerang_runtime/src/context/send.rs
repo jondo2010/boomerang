@@ -176,6 +176,7 @@ impl SendContext {
     /// An absent requested delay uses zero. A clock or arithmetic error returns without sending an event.
     /// Retries keep the prepared timestamp, even if physical time advances.
     /// The scheduler can adjust the logical tag if execution has passed that time.
+    /// For source-owned actions, use `crate::input::InputSourceHandle::submit`.
     ///
     /// # Panics
     /// Panics if `action` is a logical action.

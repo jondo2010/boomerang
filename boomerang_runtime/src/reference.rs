@@ -222,6 +222,8 @@ pub(crate) const fn runtime_enclave_key(enclave: EnclaveIndex) -> crate::Enclave
 /// compiled Federate's shared coordination.
 #[derive(Default)]
 pub struct FederateBindings<'binding> {
+    #[cfg(feature = "hosted-source-input")]
+    physical_inputs: Option<crate::input::InputConfig>,
     #[cfg(feature = "hosted-manual-clock")]
     manual_clock: Option<(
         crate::clock::PhysicalClockDomainId,
@@ -238,7 +240,15 @@ pub struct FederateBindings<'binding> {
 }
 
 impl<'binding> FederateBindings<'binding> {
-    /// Selects one external clock for every Enclave. Domain and single-use checks run before initialization.
+    /// Declares independent physical input policy; component initializers receive capabilities.
+    #[cfg(feature = "hosted-source-input")]
+    pub fn with_physical_inputs(mut self, config: crate::input::InputConfig) -> Self {
+        self.physical_inputs = Some(config);
+        self
+    }
+
+    /// Select a manual clock for every Enclave.
+    /// The runtime checks the domain and exclusive use before initialization.
     #[cfg(feature = "hosted-manual-clock")]
     pub fn with_manual_clock(
         mut self,
@@ -370,7 +380,7 @@ struct PreparedFederate<'image> {
 pub struct FederateExecution {
     /// Per-Enclave results keyed by deployment-wide canonical Enclave index.
     enclaves: TinySecondaryMap<EnclaveIndex, EnclaveExecution>,
-    /// Host monotonic origin used for native pacing and run-time diagnostics.
+    /// Host monotonic origin used for host monotonic pacing and run-time diagnostics.
     origin: Instant,
     /// Scheduler-local work counters summed across successful Enclave executions.
     stats: Stats,
@@ -394,7 +404,7 @@ impl FederateExecution {
         self.enclaves.get(enclave)
     }
 
-    /// Returns the host monotonic origin used for native pacing and diagnostics.
+    /// Returns the host monotonic origin used for host monotonic pacing and diagnostics.
     /// Manual physical time has its own integer epoch and is not derived from this value.
     pub const fn origin(&self) -> Instant {
         self.origin
@@ -414,8 +424,12 @@ impl FederateExecution {
 /// Failure while preflighting, initializing, or executing one owned compiled Federate.
 #[derive(Debug, thiserror::Error)]
 pub enum ExecuteOwnedFederateError {
+    /// Hosted input declaration, driver, or required source failed.
+    #[cfg(feature = "hosted-source-input")]
+    #[error(transparent)]
+    PhysicalInput(#[from] crate::input::InputError),
     /// Selected physical clock failed validation or terminated during execution.
-    #[cfg(feature = "hosted-manual-clock")]
+    #[cfg(any(feature = "hosted-source-input", feature = "hosted-manual-clock"))]
     #[error(transparent)]
     PhysicalClock(#[from] crate::clock::PhysicalClockError),
     /// The deployment root or one nested image was structurally invalid.
@@ -687,6 +701,83 @@ fn latch_coordinator_result(
 fn request_federate_shutdown(senders: &[crate::Sender<AsyncEvent>]) {
     for sender in senders {
         let _ = sender.close();
+    }
+}
+
+/// Closes shared run resources before state-owned worker guards can be dropped.
+#[derive(Clone)]
+struct RunShutdown {
+    /// Existing Federate cancellation authority.
+    abort: crate::sched::federate::FederateAbortHandle,
+    /// Scheduler mailboxes that must reject retained asynchronous handles.
+    senders: Vec<crate::Sender<AsyncEvent>>,
+    /// Source admission closes independently of selected time policy.
+    #[cfg(feature = "hosted-source-input")]
+    inputs: Option<crate::input::InputAdmission>,
+    /// Optional manual clock whose waiters require terminal wakeup.
+    #[cfg(feature = "hosted-manual-clock")]
+    clock: Option<crate::clock::ManualClock>,
+    /// Read capabilities close even when the selected timeline uses the host clock.
+    #[cfg(any(feature = "hosted-source-input", feature = "hosted-manual-clock"))]
+    selected_clock: crate::clock::SelectedClock,
+    /// Causal clock failure observed before teardown closes handles.
+    #[cfg(feature = "hosted-manual-clock")]
+    clock_failure: std::sync::Arc<std::sync::OnceLock<Option<crate::clock::PhysicalClockError>>>,
+}
+impl RunShutdown {
+    /// Idempotently closes capabilities and wakes all runtime/application waiters.
+    fn close(&self) {
+        #[cfg(any(feature = "hosted-source-input", feature = "hosted-manual-clock"))]
+        self.selected_clock.finish_run();
+        #[cfg(feature = "hosted-source-input")]
+        if let Some(inputs) = &self.inputs {
+            let _ = inputs.finish();
+        }
+        #[cfg(feature = "hosted-manual-clock")]
+        if let Some(clock) = &self.clock {
+            self.clock_failure.get_or_init(|| clock.now().err());
+            clock.finish_run();
+        }
+        self.abort.abort();
+        request_federate_shutdown(&self.senders);
+    }
+}
+/// Closes execution capabilities on every return or unwind before owned states drop.
+struct CloseRunOnDrop(RunShutdown);
+impl Drop for CloseRunOnDrop {
+    fn drop(&mut self) {
+        self.0.close();
+    }
+}
+/// Owns storage across scoped thread creation, including OS failure dropping its closure.
+struct WorkerStorage<'image> {
+    /// Taken only after successful scheduler completion.
+    storage: Option<OwnedStorage<'image>>,
+    /// Teardown runs before the storage field's state guards are destroyed.
+    shutdown: RunShutdown,
+}
+impl<'image> std::ops::Deref for WorkerStorage<'image> {
+    type Target = OwnedStorage<'image>;
+    fn deref(&self) -> &Self::Target {
+        self.storage.as_ref().expect("live storage")
+    }
+}
+impl std::ops::DerefMut for WorkerStorage<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.storage.as_mut().expect("live storage")
+    }
+}
+impl WorkerStorage<'_> {
+    /// Returns successful state ownership without closing peers still executing.
+    fn into_states(mut self) -> TinyMap<crate::image::StateSlotIndex, StoredState> {
+        self.storage.take().expect("live storage").into_states()
+    }
+}
+impl Drop for WorkerStorage<'_> {
+    fn drop(&mut self) {
+        if self.storage.is_some() {
+            self.shutdown.close();
+        }
     }
 }
 
@@ -1044,6 +1135,17 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
     mut fail_spawn: impl FnMut(Option<EnclaveIndex>) -> bool,
 ) -> Result<FederateExecution, ExecuteOwnedFederateError> {
     let observations = prepare_observations(&prepared.images, observations)?;
+    #[cfg(feature = "hosted-source-input")]
+    let lifecycle = if lifecycle == LifecyclePolicy::TerminateWhenIdle
+        && bindings
+            .physical_inputs
+            .as_ref()
+            .is_some_and(|config| config.sources.values().any(|source| source.required))
+    {
+        LifecyclePolicy::KeepAlive
+    } else {
+        lifecycle
+    };
     #[cfg(feature = "hosted-manual-clock")]
     if bindings.manual_clock.is_some()
         && prepared
@@ -1055,10 +1157,73 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
     }
     #[cfg(feature = "hosted-manual-clock")]
     let clock_run = crate::clock::ClockRun::new(bindings.manual_clock.as_ref())?;
+    #[cfg(feature = "hosted-source-input")]
+    let input_targets = bindings
+        .physical_inputs
+        .as_ref()
+        .map(|config| config.validate(&prepared.images))
+        .transpose()?;
+    #[cfg(feature = "hosted-manual-clock")]
+    {
+        let mut writers = 0;
+        for (enclave, owned) in bindings.enclaves.iter() {
+            writers += owned
+                .validate_clock_capabilities(
+                    &prepared.images[enclave],
+                    bindings.manual_clock.is_some(),
+                )
+                .map_err(|source| ExecuteOwnedFederateError::EnclaveInitialization {
+                    enclave,
+                    source,
+                })?;
+            if writers > 1 {
+                return Err(ExecuteOwnedFederateError::EnclaveInitialization {
+                    enclave,
+                    source: crate::initialization::InitializationError::InvalidCapabilities.into(),
+                });
+            }
+        }
+    }
+    #[cfg(feature = "hosted-source-input")]
+    {
+        let mut claimed = std::collections::BTreeSet::new();
+        for (enclave, owned) in bindings.enclaves.iter() {
+            let sources = owned.validate_source_capabilities(
+                &prepared.images[enclave],
+                enclave,
+                bindings.physical_inputs.as_ref(),
+            )?;
+            for source in sources {
+                if !claimed.insert(source) {
+                    return Err(crate::input::InputError::configuration_error().into());
+                }
+            }
+        }
+        if let Some(config) = &bindings.physical_inputs {
+            if config.sources.keys().any(|key| !claimed.contains(&key)) {
+                return Err(crate::input::InputError::configuration_error().into());
+            }
+        }
+    }
+    for (enclave, owned) in bindings.enclaves.iter() {
+        owned
+            .validate_ordinary_capabilities(&prepared.images[enclave])
+            .map_err(|source| ExecuteOwnedFederateError::EnclaveInitialization {
+                enclave,
+                source,
+            })?;
+    }
+    let deferred_initialization = bindings
+        .enclaves
+        .values()
+        .any(EnclaveBindings::has_capabilities);
+
     let PreparedFederate { images, endpoints } = prepared;
     let FederateBindings {
         enclaves,
         duplicate_enclaves: _,
+        #[cfg(feature = "hosted-source-input")]
+        physical_inputs,
         routes,
         ..
     } = bindings;
@@ -1084,7 +1249,11 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
             enclave = enclave.as_u32(), enclave_id = image.enclave_id().as_str());
         let _span = span.enter();
         let enclave_key = runtime_enclave_key(enclave);
-        let storage = match OwnedStorage::new_for_enclave(image, owned, enclave_key) {
+        let storage = match if deferred_initialization {
+            OwnedStorage::prepare_for_enclave(image, owned, enclave_key)
+        } else {
+            OwnedStorage::new_for_enclave(image, owned, enclave_key)
+        } {
             Ok(storage) => storage,
             Err(source) => {
                 storage_phase.failed("initialization");
@@ -1093,8 +1262,9 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
         };
         storages.push((enclave, storage));
     }
-    storage_phase.completed();
-
+    if !deferred_initialization {
+        storage_phase.completed();
+    }
     let mut route_phase = ConstructionPhase::started("routes");
     let event_senders = storages
         .iter()
@@ -1205,6 +1375,83 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
     for (_, storage) in &storages {
         storage.initialize_clock(origin);
     }
+    #[cfg(any(feature = "hosted-source-input", feature = "hosted-manual-clock"))]
+    let selected_clock = {
+        let host_clock = || {
+            let clock = storages
+                .first()
+                .expect("validated nonempty Federate")
+                .1
+                .scheduler_send_context()
+                .clock;
+            crate::clock::SelectedClock::host_monotonic(clock)
+        };
+        #[cfg(feature = "hosted-manual-clock")]
+        {
+            match &clock_run.0 {
+                Some(clock) => clock.clone().into(),
+                None => host_clock()?,
+            }
+        }
+        #[cfg(not(feature = "hosted-manual-clock"))]
+        host_clock()?
+    };
+    #[cfg(feature = "hosted-source-input")]
+    let inputs = physical_inputs.map(|config| {
+        crate::input::InputAdmission::new(
+            config,
+            input_targets.unwrap(),
+            selected_clock.clone(),
+            storages
+                .iter()
+                .map(|(key, storage)| (*key, storage.scheduler_event_tx()))
+                .collect(),
+            coordinator.state.shared(),
+            abort_handle.clone(),
+        )
+    });
+    let shutdown = RunShutdown {
+        abort: abort_handle.clone(),
+        senders: event_senders.clone(),
+        #[cfg(feature = "hosted-source-input")]
+        inputs: inputs.clone(),
+        #[cfg(feature = "hosted-manual-clock")]
+        clock: clock_run.0.clone(),
+        #[cfg(feature = "hosted-manual-clock")]
+        clock_failure: Default::default(),
+        #[cfg(any(feature = "hosted-source-input", feature = "hosted-manual-clock"))]
+        selected_clock,
+    };
+    let _cleanup = CloseRunOnDrop(shutdown.clone());
+    for (enclave, storage) in &mut storages {
+        let initialized = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            storage.initialize_states(
+                Some(*enclave),
+                #[cfg(feature = "hosted-source-input")]
+                inputs.as_ref(),
+                #[cfg(feature = "hosted-manual-clock")]
+                clock_run.0.as_ref(),
+            )
+        }));
+        match initialized {
+            Ok(Ok(())) => {}
+            Ok(Err(source)) => {
+                storage_phase.failed("initialization");
+                shutdown.close();
+                return Err(ExecuteOwnedFederateError::EnclaveInitialization {
+                    enclave: *enclave,
+                    source,
+                });
+            }
+            Err(payload) => {
+                shutdown.close();
+                std::panic::resume_unwind(payload);
+            }
+        }
+    }
+    if deferred_initialization {
+        storage_phase.completed();
+    }
     let dispatch = tracing::dispatcher::get_default(Clone::clone);
     let parent_span = tracing::Span::current();
     let mut worker_phase = ConstructionPhase::started("workers");
@@ -1232,20 +1479,18 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
             Err(source) => {
                 worker_phase.failed("spawn");
                 drop(participants);
-                request_federate_shutdown(&event_senders);
+                shutdown.close();
                 return (
                     TinySecondaryMap::with_capacity(enclave_count),
                     Some(ExecuteOwnedFederateError::CoordinatorThreadSpawn { source }),
                 );
             }
         };
-        let abort = || {
-            abort_handle.abort();
-        };
+        let abort = || shutdown.close();
         let mut handles = Vec::with_capacity(enclave_count);
         let mut failure = None;
         let mut participant_ports = participants.into_iter();
-        for ((enclave, mut storage), (coordination_enclave, coordination)) in
+        for ((enclave, storage), (coordination_enclave, coordination)) in
             storages.into_iter().zip(coordinations)
         {
             assert_eq!(
@@ -1262,6 +1507,10 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
                 enclave, participant_enclave,
                 "compiled coordination port must retain its deployment-global Enclave identity"
             );
+            let mut storage = WorkerStorage {
+                storage: Some(storage),
+                shutdown: shutdown.clone(),
+            };
             let spawned = if fail_spawn(Some(enclave)) {
                 Err(std::io::Error::other(
                     "injected scoped thread spawn failure",
@@ -1386,9 +1635,22 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
         (results, failure)
     });
 
+    // Results now own returned states; close their capabilities before any early return.
+    shutdown.close();
     #[cfg(feature = "hosted-manual-clock")]
     if let Some(clock) = &clock_run.0 {
-        clock.now()?;
+        if let Some(error) = shutdown
+            .clock_failure
+            .get()
+            .copied()
+            .unwrap_or_else(|| clock.now().err())
+        {
+            return Err(error.into());
+        }
+    }
+    #[cfg(feature = "hosted-source-input")]
+    if let Some(inputs) = &inputs {
+        inputs.finish()?;
     }
     if let Some(error) = failure {
         Err(error)
@@ -1469,6 +1731,9 @@ pub fn execute_owned<'image>(
         tracing::warn!(target: "boomerang::runtime",
             event = "runtime.preflight.rejected", owner = "enclave", reason = "binding");
         return Err(error.into());
+    }
+    if bindings.has_capabilities() {
+        return Err(OwnedStorageError::MissingInitializationContext.into());
     }
     tracing::debug!(target: "boomerang::runtime",
         event = "runtime.preflight.completed", owner = "enclave");
@@ -2234,5 +2499,303 @@ mod scoped_spawn_tests {
                     if message == "injected coordinator panic"
             ));
         });
+    }
+
+    /// Two distinct state slots used by preflight and initializer-mapping regressions.
+    fn two_state_image() -> EnclaveImage<'static> {
+        const REACTORS: [ReactorImage; 2] = [
+            ReactorImage::new(
+                BindingSlotIndex::new(0),
+                StateSlotIndex::new(0),
+                ScopeIndex::new(0),
+                IndexSpan::new(0, 0),
+                None,
+                None,
+            ),
+            ReactorImage::new(
+                BindingSlotIndex::new(1),
+                StateSlotIndex::new(1),
+                ScopeIndex::new(1),
+                IndexSpan::new(0, 0),
+                None,
+                None,
+            ),
+        ];
+        const SCOPES: [ScopeImage; 2] = [
+            ScopeImage::new(
+                None,
+                ReactorIndex::new(0),
+                None,
+                SliceRange::new(0, 1),
+                SliceRange::new(0, 0),
+                SliceRange::new(0, 0),
+                SliceRange::new(0, 0),
+                SliceRange::new(0, 0),
+                SliceRange::new(0, 0),
+            ),
+            ScopeImage::new(
+                None,
+                ReactorIndex::new(1),
+                None,
+                SliceRange::new(1, 1),
+                SliceRange::new(0, 0),
+                SliceRange::new(0, 0),
+                SliceRange::new(0, 0),
+                SliceRange::new(0, 0),
+                SliceRange::new(0, 0),
+            ),
+        ];
+        const REQUIRED: [RequiredBindingImage; 2] = [
+            RequiredBindingImage::new(BindingSlotId::new("first"), BindingKind::StateInitializer),
+            RequiredBindingImage::new(BindingSlotId::new("second"), BindingKind::StateInitializer),
+        ];
+        EnclaveImage {
+            reactors: TinyMapRef::from_slice(&REACTORS),
+            scopes: TinyMapRef::from_slice(&SCOPES),
+            scope_descendants: &const { [ScopeIndex::new(0), ScopeIndex::new(1)] },
+            required_bindings: TinyMapRef::from_slice(&REQUIRED),
+            storage_bounds: &const { StorageBounds::new(2, 0, 2, 0, 0, 0) },
+            ..state_only_image("standalone")
+        }
+    }
+
+    #[test]
+    fn shared_and_unused_state_bindings_preserve_state_slots() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        fn counted() -> usize {
+            CALLS.fetch_add(1, Ordering::SeqCst)
+        }
+        let mut image = two_state_image();
+        let reactors = [
+            ReactorImage::new(
+                BindingSlotIndex::new(0),
+                StateSlotIndex::new(0),
+                ScopeIndex::new(0),
+                IndexSpan::new(0, 0),
+                None,
+                None,
+            ),
+            ReactorImage::new(
+                BindingSlotIndex::new(0),
+                StateSlotIndex::new(1),
+                ScopeIndex::new(1),
+                IndexSpan::new(0, 0),
+                None,
+                None,
+            ),
+        ];
+        image.reactors = TinyMapRef::from_slice(&reactors);
+        let result = execute_owned(
+            &image,
+            EnclaveBindings::new()
+                .bind_state(BindingSlotIndex::new(0), counted)
+                .bind_state(BindingSlotIndex::new(1), || {
+                    panic!("unused initializer must not run")
+                }),
+            Config::default().with_fast_forward(true),
+        )
+        .unwrap();
+        assert_eq!(CALLS.load(Ordering::SeqCst), 2);
+        assert_eq!(result.state::<usize>(StateSlotIndex::new(0)).unwrap(), &0);
+        assert_eq!(result.state::<usize>(StateSlotIndex::new(1)).unwrap(), &1);
+    }
+
+    /// Standalone storage cannot provide execution-scoped capability context.
+    #[test]
+    fn standalone_capabilities_reject_before_any_initializer() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        fn counted() {
+            CALLS.fetch_add(1, Ordering::SeqCst);
+        }
+        let image = two_state_image();
+        for execute in [false, true] {
+            CALLS.store(0, Ordering::SeqCst);
+            let bindings = EnclaveBindings::new()
+                .bind_state(BindingSlotIndex::new(0), counted)
+                .bind_state_with_capabilities(BindingSlotIndex::new(1), Default::default(), |_| {
+                    Ok(())
+                });
+            if execute {
+                assert!(execute_owned(&image, bindings, Config::default()).is_err());
+            } else {
+                assert!(
+                    OwnedStorage::new(EnclaveImageView::new(image.clone()).unwrap(), bindings)
+                        .is_err()
+                );
+            }
+            assert_eq!(
+                CALLS.load(Ordering::SeqCst),
+                0,
+                "all unsupported capabilities must reject before ordinary state effects"
+            );
+        }
+    }
+
+    /// Reports whether teardown closed the manual reader before dropping state.
+    #[cfg(feature = "hosted-manual-clock")]
+    struct ClockWorker {
+        worker: Option<std::thread::JoinHandle<bool>>,
+        result: mpsc::Sender<bool>,
+    }
+    #[cfg(feature = "hosted-manual-clock")]
+    impl Drop for ClockWorker {
+        fn drop(&mut self) {
+            self.result
+                .send(self.worker.take().unwrap().join().unwrap())
+                .unwrap();
+        }
+    }
+    #[cfg(feature = "hosted-manual-clock")]
+    fn clock_worker(clock: crate::clock::ManualClock, result: mpsc::Sender<bool>) -> ClockWorker {
+        ClockWorker {
+            result,
+            worker: Some(std::thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(1);
+                while clock.now().is_ok() {
+                    if Instant::now() >= deadline {
+                        return false;
+                    }
+                    std::thread::yield_now();
+                }
+                true
+            })),
+        }
+    }
+    /// A coordinator-only stop failure must close handles before transferred states drop.
+    #[cfg(feature = "hosted-manual-clock")]
+    #[test]
+    fn coordinator_stop_failure_closes_before_returned_states_drop() {
+        struct StopFailure(LocalFederateCoordinationBackend);
+        impl FederateCoordinationBackend for StopFailure {
+            fn publish(
+                &mut self,
+                publication: FederatePublication,
+            ) -> Result<(), FederateCoordinationError> {
+                self.0.publish(publication)
+            }
+            fn progress(
+                &mut self,
+                timeout: Duration,
+            ) -> Result<Option<FederateAcquisition>, FederateCoordinationError> {
+                self.0.progress(timeout)
+            }
+            fn complete(
+                &mut self,
+                completion: FederateCompletion,
+            ) -> Result<(), FederateCoordinationError> {
+                self.0.complete(completion)
+            }
+            fn stop(&mut self) -> Result<(), FederateCoordinationError> {
+                Err(FederateCoordinationError::BackendStop {
+                    message: "injected stop failure".into(),
+                })
+            }
+        }
+        let clock = crate::clock::ManualClock::new(crate::clock::PhysicalClockDomainId(7)).unwrap();
+        let (result, received) = mpsc::channel();
+        let bindings = bindings().with_manual_clock(clock.domain(), clock.clone());
+        // Rebuild the first binding without duplicating an existing state slot.
+        let mut bindings = FederateBindings {
+            enclaves: bindings
+                .enclaves
+                .into_iter()
+                .filter(|(index, _)| *index != EnclaveIndex::new(0))
+                .collect(),
+            ..bindings
+        };
+        bindings = bindings.bind_enclave(
+            EnclaveIndex::new(0),
+            EnclaveBindings::new().bind_state_with_capabilities(
+                BindingSlotIndex::new(0),
+                crate::initialization::StateCapabilities {
+                    clock_control: true,
+                    ..Default::default()
+                },
+                move |init| Ok(clock_worker(init.clock_control()?, result.clone())),
+            ),
+        );
+        let prepared =
+            preflight_owned_federate(DEPLOYMENT, FederateIndex::new(0), &bindings).unwrap();
+        let error = execute_prepared_federate(
+            prepared,
+            bindings,
+            Config::default().with_fast_forward(true),
+            &[],
+            LifecyclePolicy::TerminateWhenIdle,
+            |_| Ok(StopFailure(LocalFederateCoordinationBackend::default())),
+            |_| false,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                ExecuteOwnedFederateError::FederateCoordination {
+                    source: FederateCoordinationError::BackendStop { .. }
+                }
+            ),
+            "{error:?}"
+        );
+        assert!(
+            received.recv().unwrap(),
+            "state dropped before execution clock closed"
+        );
+    }
+
+    /// The captured storage envelope closes handles when an OS spawn drops its closure.
+    #[cfg(feature = "hosted-manual-clock")]
+    #[test]
+    fn dropped_spawn_closure_closes_before_state_guard() {
+        let clock = crate::clock::ManualClock::new(crate::clock::PhysicalClockDomainId(7)).unwrap();
+        let (result, received) = mpsc::channel();
+        let mut storage = OwnedStorage::prepare_for_enclave(
+            EnclaveImageView::new(state_only_image("worker")).unwrap(),
+            EnclaveBindings::new().bind_state_with_capabilities(
+                BindingSlotIndex::new(0),
+                crate::initialization::StateCapabilities {
+                    clock_control: true,
+                    ..Default::default()
+                },
+                move |init| Ok(clock_worker(init.clock_control()?, result.clone())),
+            ),
+            EnclaveKey::default(),
+        )
+        .unwrap();
+        let parts = build_federate_coordination(
+            &[EnclaveIndex::new(0)],
+            [(
+                EnclaveIndex::new(0),
+                storage.scheduler_event_tx(),
+                storage.scheduler_event_rx(),
+            )],
+            LifecyclePolicy::TerminateWhenIdle,
+            LocalFederateCoordinationBackend::default(),
+        )
+        .unwrap();
+        let shutdown = RunShutdown {
+            abort: parts.abort_handle,
+            senders: vec![storage.scheduler_event_tx()],
+            #[cfg(feature = "hosted-source-input")]
+            inputs: None,
+            clock: Some(clock.clone()),
+            selected_clock: clock.clone().into(),
+            clock_failure: Default::default(),
+        };
+        storage
+            .initialize_states(
+                Some(EnclaveIndex::new(0)),
+                #[cfg(feature = "hosted-source-input")]
+                None,
+                Some(&clock),
+            )
+            .unwrap();
+        let worker = WorkerStorage {
+            storage: Some(storage),
+            shutdown,
+        };
+        let closure = move || drop(worker);
+        drop(closure);
+        assert!(received.recv().unwrap());
     }
 }

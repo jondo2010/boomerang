@@ -93,7 +93,7 @@ fn registration_racing_advance_retains_one_wake_and_reuses_slot() {
     }
 }
 
-/// Checks conversion bounds, selected-clock action ordering, and native policy fallback.
+/// Checks conversion bounds, selected-clock action ordering, and host clock selection.
 #[test]
 fn checked_conversions_and_physical_actions_use_selected_time() {
     assert_eq!(
@@ -242,10 +242,10 @@ fn clock_steady_state_allocates_nothing_at_two_and_sixteen_enclaves() {
             .collect();
         let capacity = clock.0.state.lock().unwrap().slots.capacity();
         let start = std::time::Instant::now();
-        let native = ExecutionClock::host_monotonic(start);
+        let host_clock = ExecutionClock::host_monotonic(start);
         ALLOCATIONS.with(|n| n.set(Some(0)));
         for step in 0..10_000 {
-            std::hint::black_box(native.clone())
+            std::hint::black_box(host_clock.clone())
                 .now_after(std::time::Duration::ZERO)
                 .unwrap();
             std::hint::black_box(ExecutionClock::manual(clock.clone(), 0));
@@ -287,4 +287,23 @@ fn run_cleanup_retains_failure() {
     assert_eq!(clock.now(), Err(PhysicalClockError::Closed));
     let state = clock.0.state.lock().unwrap();
     assert!(state.slots.is_empty() && state.abort.is_none());
+}
+
+/// Finished executions reject retained writes but distinguish reuse from explicit driver closure.
+#[test]
+fn finished_run_closes_reads_and_preserves_reuse_diagnostics() {
+    let clock = clock();
+    clock.claim(clock.domain()).unwrap();
+    clock.finish_run();
+    assert_eq!(clock.now(), Err(PhysicalClockError::Closed));
+    assert_eq!(
+        clock.advance_to(PhysicalInstant(1)),
+        Err(PhysicalClockError::Closed)
+    );
+    assert_eq!(
+        clock.claim(clock.domain()),
+        Err(PhysicalClockError::AlreadyUsed)
+    );
+    clock.close();
+    assert_eq!(clock.claim(clock.domain()), Err(PhysicalClockError::Closed));
 }

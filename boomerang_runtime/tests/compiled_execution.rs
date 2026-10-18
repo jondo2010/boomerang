@@ -408,3 +408,7 @@ use timers::PERIODIC_ACTIONS;
 #[cfg(feature = "hosted-manual-clock")]
 #[path = "compiled_execution/physical_clock.rs"]
 mod physical_clock;
+
+#[cfg(feature = "hosted-source-input")]
+#[path = "compiled_execution/physical_input.rs"]
+mod physical_input;

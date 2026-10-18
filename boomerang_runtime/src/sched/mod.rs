@@ -46,6 +46,13 @@ use crate::{
 /// Failure while starting or running a set of local enclave schedulers.
 #[derive(Debug, thiserror::Error)]
 pub enum ExecuteEnclavesError {
+    /// Capability validation or state construction failed before tagged execution.
+    #[error("initializer for enclave {enclave} failed: {source}")]
+    Initialization {
+        enclave: EnclaveKey,
+        #[source]
+        source: crate::initialization::StateInitializationError,
+    },
     #[error("failed to spawn scheduler thread for enclave {enclave}: {source}")]
     ThreadSpawn {
         enclave: EnclaveKey,
@@ -65,7 +72,7 @@ pub enum ExecuteEnclavesError {
 }
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// Whether to skip wall-clock synchronization (execute as fast as possible)
+    /// Whether to skip physical-time pacing (execute as fast as possible)
     pub fast_forward: bool,
     /// Whether to keep the scheduler alive for any possible asynchronous events.
     /// If `false`, the scheduler will terminate when there are no more events to process.
@@ -205,6 +212,14 @@ impl ExecutionStorage<ReactionGraph> for Pin<Box<Store>> {
 
     fn action_from_runtime(&self, key: ActionKey) -> ActionKey {
         key
+    }
+
+    #[cfg(feature = "hosted-source-input")]
+    fn action_from_compiled(
+        &self,
+        _action: crate::image::ActionIndex,
+    ) -> Result<ActionKey, Self::Error> {
+        Err(RuntimeError::SourceInputUnsupported)
     }
 
     fn push_action_value(&mut self, action: ActionKey, tag: Tag, value: Box<dyn ReactorData>) {
@@ -479,6 +494,9 @@ enum LiveSchedulerState {
 
 #[derive(Debug)]
 pub struct Scheduler {
+    /// Declared first so mailbox closure precedes state destruction on early drop.
+    mailbox: crate::initialization::live::CloseMailboxes,
+
     /// Execution timeline shared with this Enclave's send and reaction contexts.
     clock: crate::clock::ExecutionClock,
     /// The enclave key
@@ -534,6 +552,25 @@ impl Scheduler {
         config: Config,
         observation: Option<crate::ObservationHandle>,
     ) -> Self {
+        Self::try_new(key, enclave, config, observation)
+            .expect("live reactor initialization failed")
+    }
+
+    /// Creates a scheduler after validating and initializing its typed input capabilities.
+    /// The infallible `new` compatibility wrapper panics on initialization errors.
+    pub fn try_new(
+        key: EnclaveKey,
+        mut enclave: Enclave,
+        config: Config,
+        observation: Option<crate::ObservationHandle>,
+    ) -> Result<Self, crate::initialization::StateInitializationError> {
+        use crate::initialization::live;
+        let close = live::CloseMailboxes(vec![enclave.event_tx.clone()]);
+        live::preflight(&enclave)?;
+        if live::has_initializers(&enclave) {
+            enclave.clock.initialize(std::time::Instant::now());
+            live::initialize(&mut enclave, key)?;
+        }
         let Enclave {
             clock,
             env,
@@ -550,7 +587,8 @@ impl Scheduler {
         let reaction_capacity = env.reactions.len();
         let reaction_set_limits = graph.reaction_limits();
         // Build contexts for each reaction
-        let contexts = build_reaction_contexts(key, &graph, clock.clone(), event_tx, shutdown_rx);
+        let contexts =
+            build_reaction_contexts(key, &graph, clock.clone(), event_tx.clone(), shutdown_rx);
 
         let store = Store::new(env, contexts, &graph);
         let has_modal_scopes = graph.has_modal_scopes();
@@ -576,7 +614,8 @@ impl Scheduler {
             .map(|(enclave_key, downstream_ref)| (enclave_key, downstream_ref.send_ctx))
             .collect();
 
-        Self {
+        Ok(Self {
+            mailbox: close,
             clock,
             key,
             config,
@@ -597,7 +636,7 @@ impl Scheduler {
             has_modal_scopes,
             state: LiveSchedulerState::NotStarted,
             observation,
-        }
+        })
     }
 
     /// Borrow the live scheduler fields as the two capability concerns and concrete coordination.
@@ -605,6 +644,7 @@ impl Scheduler {
         self.events
             .set_event_queue_observation_enabled(self.observation.is_some());
         let Self {
+            mailbox: _,
             clock,
             key,
             config,
@@ -777,46 +817,119 @@ pub fn execute_enclaves(
     enclaves: impl Iterator<Item = (EnclaveKey, Enclave)> + Send,
     config: Config,
 ) -> Result<tinymap::TinySecondaryMap<EnclaveKey, Env>, ExecuteEnclavesError> {
-    let schedulers = enclaves.filter_map(move |(enclave_key, enclave)| {
-        if enclave.env.reactions.is_empty() {
-            // If there are no reactions, there is nothing to do
-            tracing::debug!(target: "boomerang::runtime",
-                event = "runtime.scheduler.skipped", enclave = enclave_key.as_u32(),
-                reason = "no_reactions",
-            );
-            None
-        } else {
-            Some(Scheduler::new(enclave_key, enclave, config.clone(), None))
+    use crate::initialization::live;
+    let mut enclaves: Vec<_> = enclaves.collect();
+    let close = live::CloseMailboxes(
+        enclaves
+            .iter()
+            .map(|(_, enclave)| enclave.event_tx.clone())
+            .collect(),
+    );
+    for (key, enclave) in &enclaves {
+        live::preflight(enclave).map_err(|source| ExecuteEnclavesError::Initialization {
+            enclave: *key,
+            source: Box::new(source),
+        })?;
+    }
+    if enclaves
+        .iter()
+        .any(|(_, enclave)| live::has_initializers(enclave))
+    {
+        let origin = std::time::Instant::now();
+        for (_, enclave) in &enclaves {
+            enclave.clock.initialize(origin);
         }
-    });
+        for (key, enclave) in &mut enclaves {
+            live::initialize(enclave, *key).map_err(|source| {
+                ExecuteEnclavesError::Initialization {
+                    enclave: *key,
+                    source,
+                }
+            })?;
+        }
+    }
+    let schedulers = enclaves
+        .into_iter()
+        .filter_map(move |(enclave_key, enclave)| {
+            if enclave.env.reactions.is_empty() {
+                let _ = enclave.event_tx.close();
+                // If there are no reactions, there is nothing to do
+                tracing::debug!(target: "boomerang::runtime",
+                    event = "runtime.scheduler.skipped", enclave = enclave_key.as_u32(),
+                    reason = "no_reactions",
+                );
+                None
+            } else {
+                Some(Scheduler::new(enclave_key, enclave, config.clone(), None))
+            }
+        });
 
-    execute_scheduler_threads(schedulers)
+    let result = execute_scheduler_threads(schedulers);
+    close.close();
+    result
+}
+
+/// Owns cancellation before its scheduler, including a dropped OS-spawn closure.
+struct SchedulerWorker {
+    close: crate::initialization::live::CloseMailboxes,
+    scheduler: Option<Scheduler>,
+}
+
+impl SchedulerWorker {
+    /// Consumes the complete envelope so closure capture cannot separate its fields.
+    fn run(mut self) -> (EnclaveKey, Env, Result<(), RuntimeError>) {
+        let result = self.scheduler.as_mut().unwrap().try_event_loop();
+        if result.is_err() {
+            self.close.close();
+        }
+        let sched = self.scheduler.take().unwrap();
+        self.close.0.clear();
+        (sched.key, sched.into_env(), result)
+    }
+}
+/// Packages the whole worker envelope, preserving close-before-state drop order.
+fn scheduler_task(
+    worker: SchedulerWorker,
+) -> impl FnOnce() -> (EnclaveKey, Env, Result<(), RuntimeError>) {
+    move || worker.run()
 }
 
 fn execute_scheduler_threads(
     schedulers: impl Iterator<Item = Scheduler>,
 ) -> Result<tinymap::TinySecondaryMap<EnclaveKey, Env>, ExecuteEnclavesError> {
+    use crate::initialization::live::CloseMailboxes;
     let mut schedulers: Vec<_> = schedulers.collect();
+    let close = CloseMailboxes(
+        schedulers
+            .iter()
+            .flat_map(|scheduler| scheduler.mailbox.0.iter().cloned())
+            .collect(),
+    );
     let origin = std::time::Instant::now();
     for scheduler in &mut schedulers {
         scheduler.prepare_clock(origin);
     }
     let mut handles = Vec::new();
-    for mut sched in schedulers {
-        let enclave = sched.key;
-        let handle = std::thread::Builder::new()
-            .name(sched.key.to_string())
-            .spawn(move || {
-                let result = sched.try_event_loop();
-                (sched.key, sched.into_env(), result)
-            })
-            .map_err(|source| ExecuteEnclavesError::ThreadSpawn { enclave, source })?;
-        handles.push((enclave, handle));
-    }
-
-    let mut envs = tinymap::TinySecondaryMap::new();
     let mut first_error = None;
-
+    for sched in schedulers {
+        let enclave = sched.key;
+        let worker = SchedulerWorker {
+            close: close.clone(),
+            scheduler: Some(sched),
+        };
+        match std::thread::Builder::new()
+            .name(enclave.to_string())
+            .spawn(scheduler_task(worker))
+        {
+            Ok(handle) => handles.push((enclave, handle)),
+            Err(source) => {
+                close.close();
+                first_error = Some(ExecuteEnclavesError::ThreadSpawn { enclave, source });
+                break;
+            }
+        }
+    }
+    let mut envs = tinymap::TinySecondaryMap::new();
     for (enclave, handle) in handles {
         match handle.join() {
             Ok((key, env, Ok(()))) => {
@@ -836,7 +949,7 @@ fn execute_scheduler_threads(
             }
         }
     }
-
+    close.close();
     match first_error {
         Some(error) => Err(error),
         None => Ok(envs),
@@ -915,7 +1028,7 @@ mod tests {
 
     /// A sender created during graph construction must not timestamp against an arbitrary origin.
     #[test]
-    fn native_send_context_requires_startup_and_shares_the_started_clock() {
+    fn host_clock_send_context_requires_startup_and_shares_the_started_clock() {
         use crate::clock::{PhysicalClockError, PhysicalInstant};
         use crate::CommonContext;
         let (mut enclave, _) = enclave_recording_start_origin(Arc::new(Mutex::new(None)));
@@ -1070,9 +1183,9 @@ mod tests {
         assert_eq!(observation.snapshot(sampled_at).unwrap(), snapshot);
     }
 
-    /// Equal-time native observations retain every value; unrepresentable admission fails the run.
+    /// Equal-time host clock observations retain every value; unrepresentable admission fails the run.
     #[test]
-    fn native_physical_admission_preserves_values_and_propagates_overflow() {
+    fn host_clock_physical_admission_preserves_values_and_propagates_overflow() {
         use crate::{Action, ActionRef, AsyncEventTarget};
         for overflow in [false, true] {
             let seen = Arc::new(Mutex::new(Vec::new()));
@@ -1167,6 +1280,35 @@ mod tests {
         assert!(!scheduler.try_next().unwrap());
         scheduler.startup();
         assert_eq!(observation.snapshot(sampled_at).unwrap(), snapshot);
+    }
+
+    /// Source batches cannot address a live graph with compiled action indices.
+    #[test]
+    #[cfg(feature = "hosted-source-input")]
+    fn live_scheduler_rejects_source_batches() {
+        let enclave = Enclave::default();
+        let event_tx = enclave.event_tx.clone();
+        let mut scheduler = Scheduler::new(
+            EnclaveKey::from(0),
+            enclave,
+            Config::default().with_fast_forward(true),
+            None,
+        );
+        scheduler.startup();
+        event_tx
+            .send(AsyncEvent::PhysicalBatch(crate::input::InputBatchEvent {
+                values: vec![(
+                    Tag::ZERO,
+                    crate::image::ActionIndex::new(0),
+                    Box::new(42_u32),
+                )],
+            }))
+            .unwrap();
+        assert!(matches!(
+            scheduler.try_next(),
+            Err(RuntimeError::SourceInputUnsupported)
+        ));
+        assert!(!scheduler.try_next().unwrap());
     }
 
     #[test]
@@ -1319,5 +1461,39 @@ mod stats_tests {
         assert_eq!(aggregate.processed_events(), usize::MAX);
         assert_eq!(aggregate.set_ports(), usize::MAX);
         assert_eq!(aggregate.scheduled_actions(), usize::MAX);
+    }
+    #[test]
+    fn dropped_live_spawn_closure_closes_peers_before_state_drop() {
+        use crate::initialization::live::CloseMailboxes;
+        use crate::CommonContext;
+        struct CheckPeer(crate::SendContext);
+        impl Drop for CheckPeer {
+            fn drop(&mut self) {
+                assert_eq!(
+                    self.0
+                        .try_schedule_async(AsyncEvent::shutdown(Duration::ZERO)),
+                    Some(false),
+                    "all peers must close before state joins"
+                );
+            }
+        }
+        let peer = Enclave::with_event_q_size(1);
+        let mut enclave = Enclave::with_event_q_size(1);
+        enclave.insert_reactor(
+            crate::Reactor::new(
+                "guard",
+                CheckPeer(peer.create_send_context(EnclaveKey::new(1))),
+            )
+            .boxed(),
+            None,
+        );
+        let close = CloseMailboxes(vec![enclave.event_tx.clone(), peer.event_tx.clone()]);
+        let scheduler = Scheduler::new(EnclaveKey::new(0), enclave, Config::default(), None);
+        let worker = SchedulerWorker {
+            close,
+            scheduler: Some(scheduler),
+        };
+        let spawn_task = scheduler_task(worker);
+        drop(spawn_task);
     }
 }

@@ -90,6 +90,8 @@ impl<T: ReactorData> ActionCommon<T> for ActionRef<'_, T> {
 /// Preparation captures selected physical time plus the action's delay. The
 /// scheduler adjusts late timestamps and assigns distinct microsteps as needed.
 /// This contract works with host monotonic or manual time and does not report source progress.
+/// For timestamp-preserving source admission, use `input::SourceAction`
+/// with the `hosted-source-input` feature on a separate physical action.
 /// It is the asynchronous version of [`ActionRef`].
 pub struct AsyncActionRef<T: ReactorData = ()> {
     name: String,

@@ -21,7 +21,7 @@ mod reactor;
 pub mod tests;
 
 mod macro_support;
-pub use macro_support::{Reactor, ReactorPorts};
+pub use macro_support::{CapabilityReactor, Reactor, ReactorPorts};
 
 pub mod plantuml;
 

@@ -418,13 +418,13 @@ impl Assembly {
         for (assembly_reactor_key, reactor) in self.reactor_specs.drain() {
             let partition_key = partition_map[assembly_reactor_key];
             let enclave_key = runtime_assembly.aliases.enclave_aliases[partition_key];
-            let mut enclaves = runtime_assembly.enclaves.as_mut();
-            let enclave = &mut enclaves[enclave_key];
             let bank_info = reactor.bank_info.clone();
             let scope_mode = reactor.scope_mode;
             let reactor_fqn = &reactor_fqns[assembly_reactor_key];
-            let runtime_reactor_key =
-                enclave.insert_reactor(reactor.into_runtime(reactor_fqn), bank_info);
+            let reactor = reactor.into_runtime(reactor_fqn, runtime_assembly)?;
+            let mut enclaves = runtime_assembly.enclaves.as_mut();
+            let enclave = &mut enclaves[enclave_key];
+            let runtime_reactor_key = enclave.insert_reactor(reactor, bank_info);
             runtime_assembly
                 .aliases
                 .reactor_scope_modes

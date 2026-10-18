@@ -21,13 +21,13 @@ fn main() {
             "controller",
             "vehicle.controller",
             "Controller",
-            "5d653759745efef472762f00cd6ecbf0654f58f4f98c5a71758ab413b374c42f",
+            "acc9d9b0812169096b3e222048e5fb9bcacc97e5a6bcffe7f20dc7f38a8e5ba1",
         ),
         (
             "sensor",
             "vehicle.sensor",
             "Sensor",
-            "fd8927818c1f722adab20ec868c920758153f21fdb26f46781495c38dc2623a1",
+            "60c2feb91f253dbe4898fa5bf092d8921ec8f20cede8c74c2edb9d9a47fe369b",
         ),
     ] {
         println!(

@@ -1,7 +1,8 @@
-//! Own the terminal mode and the thread that feeds the keyboard physical action.
+//! Terminal mode and worker thread for the keyboard physical action.
 
 use boomerang::runtime::{
-    AsyncActionRef, PreparedAction, SendContext, TrySendError, TryShutdownError,
+    context::{PreparedAction, SendContext, TrySendError, TryShutdownError},
+    AsyncActionRef,
 };
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
@@ -24,48 +25,59 @@ pub struct KeyboardInput {
 }
 
 impl KeyboardInput {
-    pub fn start(&mut self, send_ctx: SendContext, action: AsyncActionRef<KeyEvent>) {
-        terminal::enable_raw_mode().expect("keyboard input requires a terminal");
-        self.raw_terminal = true;
-        self.stop_requested.store(false, Ordering::Relaxed);
-        let stop_requested = self.stop_requested.clone();
-        self.thread = Some(std::thread::spawn(move || {
-            let result = (|| -> std::io::Result<()> {
-                while !stop_requested.load(Ordering::Relaxed) {
-                    if !event::poll(Duration::from_millis(50))? {
-                        continue;
-                    }
-                    let Event::Key(key) = event::read()? else {
-                        continue;
-                    };
-                    if key.kind == KeyEventKind::Release {
-                        continue;
-                    }
-                    match (key.code, key.modifiers) {
-                        (KeyCode::Char('c'), modifiers)
-                            if modifiers.contains(KeyModifiers::CONTROL) =>
-                        {
-                            request_shutdown_until_stopped(&send_ctx, &stop_requested);
-                            break;
-                        }
-                        (KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down, _) => {
-                            let prepared = send_ctx
-                                .prepare_action(&action, key, None)
-                                .map_err(std::io::Error::other)?;
-                            if !send_until_stopped(prepared, &stop_requested) {
-                                break;
+    pub fn start(send_ctx: SendContext, action: AsyncActionRef<KeyEvent>) -> std::io::Result<Self> {
+        terminal::enable_raw_mode()?;
+        let mut input = Self {
+            raw_terminal: true,
+            stop_requested: Arc::new(AtomicBool::new(false)),
+            thread: None,
+        };
+        let stop_requested = input.stop_requested.clone();
+        input.thread = Some(
+            std::thread::Builder::new()
+                .name("keyboard-input".into())
+                .spawn(move || {
+                    let result = (|| -> std::io::Result<()> {
+                        while !stop_requested.load(Ordering::Relaxed) {
+                            if !event::poll(Duration::from_millis(50))? {
+                                continue;
+                            }
+                            let Event::Key(key) = event::read()? else {
+                                continue;
+                            };
+                            if key.kind == KeyEventKind::Release {
+                                continue;
+                            }
+                            match (key.code, key.modifiers) {
+                                (KeyCode::Char('c'), modifiers)
+                                    if modifiers.contains(KeyModifiers::CONTROL) =>
+                                {
+                                    request_shutdown_until_stopped(&send_ctx, &stop_requested);
+                                    break;
+                                }
+                                (
+                                    KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down,
+                                    _,
+                                ) => {
+                                    let prepared = send_ctx
+                                        .prepare_action(&action, key, None)
+                                        .map_err(std::io::Error::other)?;
+                                    if !send_until_stopped(prepared, &stop_requested) {
+                                        break;
+                                    }
+                                }
+                                _ => {}
                             }
                         }
-                        _ => {}
+                        Ok(())
+                    })();
+                    if let Err(error) = result {
+                        tracing::error!(%error, "keyboard input failed");
+                        request_shutdown_until_stopped(&send_ctx, &stop_requested);
                     }
-                }
-                Ok(())
-            })();
-            if let Err(error) = result {
-                tracing::error!(%error, "keyboard input failed");
-                request_shutdown_until_stopped(&send_ctx, &stop_requested);
-            }
-        }));
+                })?,
+        );
+        Ok(input)
     }
 
     pub fn stop(&mut self) {
@@ -80,6 +92,7 @@ impl KeyboardInput {
     }
 }
 
+/// Retry delivery of a key without changing its prepared timestamp or payload.
 fn send_until_stopped(mut prepared: PreparedAction<KeyEvent>, stop_requested: &AtomicBool) -> bool {
     while !stop_requested.load(Ordering::Relaxed) {
         match prepared.try_send() {

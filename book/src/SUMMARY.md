@@ -6,5 +6,7 @@
 - [Modal Reactors](./modal-reactors.md)
 - [Recording and Replay](./replay.md)
 - [Static Federation](./static-federation.md)
-- [Hosted Physical Clocks](./hosted-physical-clocks.md)
+- [Reactor Initialization](./reactor-initialization.md)
+- [External Inputs](./external-inputs.md)
+- [Physical Clocks](./hosted-physical-clocks.md)
 - [Glossary](./glossary.md)

@@ -65,23 +65,113 @@ pub(super) fn render_tracing_init(
     }
 }
 
-/// Renders clock creation, the selected payload driver call, and Federate clock binding.
-fn render_physical_clock(
-    clock: &crate::manifest::ExternalClock,
-    alias: &str,
-) -> Result<TokenStream> {
+/// Create the manual clock and bind it to the Federate.
+fn render_physical_clock(clock: &crate::manifest::ExternalClock) -> TokenStream {
     let domain = clock.domain;
-    let driver: syn::Path = syn::parse_str(&format!(
-        "{}::{}",
-        alias.split("::").next().expect("payload crate alias"),
-        clock.entry
-    ))?;
-    Ok(quote! {
+    quote! {
         let clock_domain = boomerang_runtime::clock::PhysicalClockDomainId(#domain);
-        let physical_clock = boomerang_runtime::clock::ManualClock::new(clock_domain)?;
-        let _physical_clock_driver = #driver(physical_clock.clone())?;
-        let bindings = bindings.with_manual_clock(clock_domain, physical_clock);
-    })
+        let manual_clock = boomerang_runtime::clock::ManualClock::new(clock_domain)?;
+        let bindings = bindings.with_manual_clock(clock_domain, manual_clock);
+    }
+}
+
+/// Resolves source policy once against original compiled action rows.
+fn render_physical_inputs(
+    inputs: &crate::manifest::PhysicalInputs,
+    slice: &FederateSlice<'_>,
+    driver: &DriverOutput,
+) -> Result<TokenStream> {
+    let max_values = inputs.max_batch_values;
+    let max_batches = inputs.max_staged_batches;
+    let mut sources = Vec::new();
+    let mut owned = Vec::new();
+    let mut policy_owners = std::collections::BTreeSet::new();
+    for (id, source) in &inputs.sources {
+        if !policy_owners.insert(&source.component) {
+            bail!(
+                "component '{}' has duplicate physical source policies",
+                source.component
+            )
+        }
+        let required = source.required;
+        let mut actions = Vec::new();
+        let mut owners = 0;
+        for (offset, enclave) in slice.enclaves().iter().enumerate() {
+            for binding in enclave.required_bindings().iter() {
+                let RequiredBinding::State {
+                    component,
+                    reactor,
+                    implementation,
+                } = binding
+                else {
+                    continue;
+                };
+                if component.to_string() != source.component {
+                    continue;
+                }
+                let descriptor = driver
+                    .bindings()
+                    .iter()
+                    .find(|binding| binding.implementation() == implementation)
+                    .expect("selected component descriptor")
+                    .descriptor();
+                let Some(capabilities) = descriptor
+                    .reactor_slots()
+                    .iter()
+                    .find(|slot| &slot.id == reactor)
+                    .and_then(|slot| slot.capabilities.as_ref())
+                    .filter(|capabilities| capabilities.source.is_some())
+                else {
+                    continue;
+                };
+                owners += 1;
+                for action in &capabilities.actions {
+                    let (slot, _) = enclave.required_bindings().iter().enumerate().find(|(_, binding)| matches!(binding, RequiredBinding::Action { component: owner, action: candidate, .. } if owner == component && candidate == action)).ok_or_else(|| anyhow!("physical source '{id}' refers to missing action '{action}'"))?;
+                    let action = enclave.with_image(|image| -> Result<_> {
+                        let slot =
+                            boomerang_runtime::image::BindingSlotIndex::new(u32::try_from(slot)?);
+                        let (index, action) = image
+                            .actions
+                            .iter()
+                            .find(|(_, action)| action.binding() == Some(slot))
+                            .ok_or_else(|| {
+                                anyhow!("physical source '{id}' binding is not an action")
+                            })?;
+                        if !matches!(
+                            action.timing(),
+                            ActionTiming::Standard {
+                                domain: TimingDomain::Physical,
+                                ..
+                            }
+                        ) {
+                            bail!("physical source '{id}' binding is not a physical action")
+                        }
+                        Ok(index)
+                    })?;
+                    let enclave_index = u32::try_from(
+                        slice
+                            .enclave_range()
+                            .start()
+                            .checked_add(offset)
+                            .ok_or_else(|| anyhow!("Enclave index overflow"))?,
+                    )?;
+                    if owned.contains(&(enclave_index, action)) {
+                        bail!("physical source '{id}' duplicates action ownership")
+                    }
+                    owned.push((enclave_index, action));
+                    let action = action.as_u32();
+                    actions.push(quote!(boomerang_runtime::input::CompiledPhysicalAction::new(EnclaveIndex::new(#enclave_index), ActionIndex::new(#action))));
+                }
+            }
+        }
+        if owners != 1 || actions.is_empty() {
+            bail!("physical source '{id}' must have one declared component owner and at least one physical action")
+        }
+        sources.push(quote!(boomerang_runtime::input::InputSource { id: #id.into(), required: #required, actions: vec![#(#actions),*] }));
+    }
+    Ok(
+        quote!(let bindings = bindings.with_physical_inputs(boomerang_runtime::input::InputConfig { max_batch_values: #max_values, max_staged_batches: #max_batches, sources: [#(#sources),*].into_iter().collect() });),
+    )
 }
 
 /// Validates and deterministically formats one complete generated Rust file.
@@ -92,7 +182,8 @@ pub(crate) fn format_rust(tokens: TokenStream) -> Result<String> {
 
 /// Renders one complete static launcher source file from validated compiler output.
 pub(super) struct LauncherInstrumentation {
-    pub(super) physical_clock: Option<(crate::manifest::ExternalClock, String)>,
+    pub(super) physical_clock: Option<crate::manifest::ExternalClock>,
+    pub(super) physical_inputs: Option<crate::manifest::PhysicalInputs>,
     pub(super) tracing: TokenStream,
     pub(super) telemetry: TelemetryBackend,
 }
@@ -110,14 +201,18 @@ pub(super) fn render_launcher(
         tracing,
         telemetry,
         physical_clock,
+        physical_inputs,
     } = instrumentation;
     let fingerprint = super::fingerprints::with_physical_clock(
         super::fingerprints::federate_image(slice, driver.bindings())?,
-        physical_clock.as_ref().map(|(clock, _)| clock),
+        physical_clock.as_ref(),
     )?;
-    let clock_binding = physical_clock
+    let fingerprint =
+        super::fingerprints::with_physical_inputs(fingerprint, physical_inputs.as_ref())?;
+    let clock_binding = physical_clock.as_ref().map(render_physical_clock);
+    let input_binding = physical_inputs
         .as_ref()
-        .map(|(clock, alias)| render_physical_clock(clock, alias))
+        .map(|inputs| render_physical_inputs(inputs, slice, driver))
         .transpose()?;
     let fingerprint_bytes = fingerprint.as_bytes().iter();
     let distributed = coordination.is_some();
@@ -137,6 +232,7 @@ pub(super) fn render_launcher(
         aliases,
         route_bindings,
         distributed,
+        (physical_inputs.as_ref(), physical_clock.is_some()),
     )?;
     let timeout = execution.logical_horizon.map_or_else(
         || quote!(None),
@@ -213,6 +309,7 @@ pub(super) fn render_launcher(
         quote! {
             let bindings = generated_bindings();
             #clock_binding
+        #input_binding
             let execution = boomerang_runtime::execute_owned_federate_slice_with_observations(
                 FEDERATE, &FEDERATE_VIEW, bindings, #config,
                 &telemetry_observations,
@@ -238,7 +335,7 @@ pub(super) fn render_launcher(
 
         fn generated_state<'a, T: ReactorData>(
             state: &'a mut dyn ReactorData,
-            _initializer: fn() -> T,
+            _state_type: boomerang_runtime::PayloadType<T>,
         ) -> &'a mut T {
             state
                 .downcast_mut::<T>()
@@ -501,7 +598,41 @@ fn render_bindings(
     aliases: &BTreeMap<String, String>,
     route_bindings: RouteBindings,
     distributed: bool,
+    physical: (Option<&crate::manifest::PhysicalInputs>, bool),
 ) -> Result<TokenStream> {
+    let (inputs, manual) = physical;
+    let writers = enclaves
+        .iter()
+        .flat_map(|enclave| enclave.required_bindings().iter())
+        .filter(|binding| {
+            let RequiredBinding::State {
+                reactor,
+                implementation,
+                ..
+            } = binding
+            else {
+                return false;
+            };
+            driver
+                .bindings()
+                .iter()
+                .find(|binding| binding.implementation() == implementation)
+                .expect("selected descriptor")
+                .descriptor()
+                .reactor_slots()
+                .iter()
+                .any(|slot| {
+                    &slot.id == reactor
+                        && slot
+                            .capabilities
+                            .as_ref()
+                            .is_some_and(|caps| caps.clock_control)
+                })
+        })
+        .count();
+    if writers > 1 {
+        bail!("manual clock control must have one component owner");
+    }
     let mut enclave_bindings = Vec::with_capacity(enclaves.len());
     for (enclave_offset, enclave) in enclaves.iter().enumerate() {
         let enclave_index = u32::try_from(
@@ -512,7 +643,9 @@ fn render_bindings(
         let enclave_index = proc_macro2::Literal::u32_unsuffixed(enclave_index);
         let mut bindings = TokenStream::new();
         for (slot, binding) in enclave.required_bindings().iter().enumerate() {
-            bindings.extend(render_binding(driver, aliases, slot, binding)?);
+            bindings.extend(render_binding(
+                driver, aliases, slot, binding, enclave, inputs, manual,
+            )?);
         }
         enclave_bindings.push(quote!(
             .bind_enclave(
@@ -623,6 +756,9 @@ fn render_binding(
     aliases: &BTreeMap<String, String>,
     slot: usize,
     binding: &RequiredBinding,
+    enclave: &OwnedEnclaveImage,
+    inputs: Option<&crate::manifest::PhysicalInputs>,
+    manual: bool,
 ) -> Result<TokenStream> {
     let slot = u32::try_from(slot).context("generated binding slot exceeds u32 range")?;
     let slot = proc_macro2::Literal::u32_unsuffixed(slot);
@@ -639,9 +775,71 @@ fn render_binding(
         .ok_or_else(|| anyhow!("missing generated alias for implementation '{implementation}'"))?;
     let path = binding_path(alias, &symbol)?;
     match binding {
-        RequiredBinding::State { .. } => Ok(quote!(
-            .bind_state(BindingSlotIndex::new(#slot), #path)
-        )),
+        RequiredBinding::State {
+            component, reactor, ..
+        } => {
+            let descriptor = driver
+                .bindings()
+                .iter()
+                .find(|binding| binding.implementation().as_str() == implementation)
+                .expect("selected descriptor")
+                .descriptor();
+            let declaration = descriptor
+                .reactor_slots()
+                .iter()
+                .find(|slot| &slot.id == reactor)
+                .expect("state reactor descriptor");
+            let Some(required) = &declaration.capabilities else {
+                return Ok(quote!(.bind_state(BindingSlotIndex::new(#slot), #path)));
+            };
+            if required.clock_control && !manual {
+                bail!("component '{component}' requires a selected manual clock")
+            }
+            let clock_control = required.clock_control;
+            let source = if let Some(source) = &required.source {
+                let (index, _) = inputs
+                    .and_then(|inputs| {
+                        inputs
+                            .sources
+                            .iter()
+                            .enumerate()
+                            .find_map(|(index, (_, policy))| {
+                                (policy.component == component.to_string())
+                                    .then_some((index, policy))
+                            })
+                    })
+                    .ok_or_else(|| {
+                        anyhow!("component '{component}' requires physical source '{source}'")
+                    })?;
+                let index = u32::try_from(index)?;
+                quote!(source: Some(boomerang_runtime::input::SourceKey::new(#index)),)
+            } else {
+                quote!()
+            };
+            let mut action_rows = Vec::new();
+            let mut requirements = Vec::new();
+            for action in &required.actions {
+                let (action_slot, action_binding) = enclave.required_bindings().iter().enumerate().find(|(_, binding)| matches!(binding, RequiredBinding::Action { component: owner, action: candidate, .. } if owner == component && candidate == action)).ok_or_else(|| anyhow!("initializer action '{action}' missing from component '{component}'"))?;
+                let payload = binding_path(alias, &action_binding.symbol())?;
+                let row = enclave.with_image(|image| {
+                    let slot = boomerang_runtime::image::BindingSlotIndex::new(
+                        u32::try_from(action_slot).expect("compiled binding index"),
+                    );
+                    image
+                        .actions
+                        .iter()
+                        .find_map(|(row, action)| {
+                            (action.binding() == Some(slot)).then_some(row.as_u32())
+                        })
+                        .expect("action binding has image row")
+                });
+                action_rows.push(quote!(ActionIndex::new(#row)));
+                requirements.push(quote!(boomerang_runtime::initialization::ActionCapability::new(ActionIndex::new(#row), #payload)));
+            }
+            Ok(
+                quote!(.bind_state_with_capabilities(BindingSlotIndex::new(#slot), boomerang_runtime::initialization::StateCapabilities { #source actions: vec![#(#requirements),*], clock_control: #clock_control, ..Default::default() }, |context| #path(context, &[#(#action_rows),*]))),
+            )
+        }
         RequiredBinding::Port { .. } => Ok(quote!(
             .bind_port(BindingSlotIndex::new(#slot), #path)
         )),
@@ -759,7 +957,7 @@ fn render_reaction_binding(
     } else {
         format_ident!("_mode_effect")
     };
-    let state = binding_path(alias, state_symbol)?;
+    let state = binding_path(alias, &format!("type_{state_symbol}"))?;
     let reaction = binding_path(alias, reaction_symbol)?;
     let immutable_partition = render_partition(quote!(refs.ports.partition()?), &immutable_ports);
     let mutable_partition =
@@ -769,7 +967,7 @@ fn render_reaction_binding(
         .bind_reaction(
             BindingSlotIndex::new(#slot),
             |ctx, state, refs, #mode_effect| {
-                let state = generated_state(state, #state);
+                let state = generated_state(state, #state());
                 #immutable_partition
                 #mutable_partition
                 #action_partition

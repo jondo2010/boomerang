@@ -79,6 +79,28 @@ fn diagram_output_path(name: &str, extension: &str) -> anyhow::Result<PathBuf> {
     Ok(path)
 }
 
+/// Builds and runs a capability-aware reactor with pre-start typed initialization.
+/// All declared input capabilities are validated before application initialization.
+pub fn build_and_test_reactor_initialized<S: runtime::ReactorData, R: Reactor<S>>(
+    reactor: R,
+    name: &str,
+    config: runtime::Config,
+) -> anyhow::Result<(R::Ports, Vec<runtime::Env>)> {
+    let mut assembly = Assembly::new();
+    let ports = reactor.build_initialized(
+        name,
+        None,
+        None,
+        None,
+        boomerang::builder::ReactorPlacement::Local,
+        &mut assembly,
+    )?;
+    assembly.validate_reactions()?;
+    let runtime_assembly = assembly.into_runtime_assembly(&config)?;
+    let envs = runtime::execute_enclaves(runtime_assembly.into_enclaves(), config)?;
+    Ok((ports, envs.into_iter().map(|(_, env)| env).collect()))
+}
+
 pub fn build_and_test_reactor<S: runtime::ReactorData, R: Reactor<S>>(
     reactor: R,
     name: &str,

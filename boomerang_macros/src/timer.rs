@@ -9,8 +9,8 @@ use syn::{parse::Parse, Ident};
 /// timer! { <name>(<offset>, <period>) };
 /// ```
 ///
-/// The <offset>, which is optional, specifies the (logical) time interval between when the program starts executing and the first timer event.
-/// The <period>, which is also optional, specifies the time interval between timer events.
+/// The `offset`, which is optional, specifies the (logical) time interval between when the program starts executing and the first timer event.
+/// The `period`, which is also optional, specifies the time interval between timer events.
 /// If no period is given, then the timer event occurs only once. If neither an offset nor a period is specified, then
 /// one timer event occurs at program start, simultaneous with the startup event.
 ///

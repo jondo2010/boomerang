@@ -70,6 +70,7 @@ members = [
     "boomerang_tinymap",
     "tracing-bounded",
     "cargo-boomerang",
+    "examples/physical-input",
     "examples/snake",
     "examples/snake/game",
     "examples/snake/keyboard",

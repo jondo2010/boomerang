@@ -3,8 +3,9 @@
 /// Descriptor fingerprint generated independently by the host-side fixture.
 const EXPECTED_FINGERPRINT: boomerang::runtime::binding::DescriptorFingerprint =
     boomerang::runtime::binding::DescriptorFingerprint::new([
-        173, 248, 107, 207, 105, 80, 159, 129, 225, 21, 134, 108, 49, 224, 42, 183, 112, 195,
-        43, 150, 102, 68, 163, 191, 240, 50, 132, 133, 213, 59, 136, 241,
+        0xfb, 0x3a, 0x9c, 0xf2, 0x2e, 0x1b, 0x7b, 0x33, 0x9e, 0xb8, 0x63, 0xc2, 0x02, 0x48, 0xa2,
+        0xc3, 0x4e, 0x95, 0x98, 0x3d, 0xa3, 0xd4, 0x6c, 0x96, 0xb0, 0x12, 0x4e, 0x6d, 0x69, 0x9c,
+        0xc6, 0x2d,
     ]);
 const _: () = boomerang::runtime::binding::assert_descriptor_fingerprint(
     EXPECTED_FINGERPRINT,

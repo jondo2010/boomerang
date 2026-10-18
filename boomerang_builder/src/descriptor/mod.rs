@@ -48,11 +48,27 @@ pub type PlacementGroupSlotId = BindingSlotId<PlacementGroupSlotMarker>;
 /// Stable implementation-local Enclave slot identity.
 pub type EnclaveSlotId = BindingSlotId<EnclaveSlotMarker>;
 
+/// Hosted capabilities requested by one component's state initializer.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "host-interchange", derive(Deserialize, Serialize))]
+#[cfg_attr(feature = "host-interchange", serde(deny_unknown_fields))]
+pub struct InitializerCapabilities {
+    /// Component-local source capability label; deployment policies bind each instance.
+    pub source: Option<String>,
+    /// Existing implementation-local physical action slots in declared field order.
+    pub actions: Vec<ActionSlotId>,
+    /// Explicit manual clock write authority.
+    pub clock_control: bool,
+}
+
 /// Stable reactor slot and its structural parent.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "host-interchange", derive(Deserialize, Serialize))]
 #[cfg_attr(feature = "host-interchange", serde(deny_unknown_fields))]
 pub struct ReactorSlot {
+    /// Optional hosted state initialization capabilities.
+    #[cfg_attr(feature = "host-interchange", serde(default))]
+    pub capabilities: Option<InitializerCapabilities>,
     /// Stable implementation-local identity.
     pub id: ReactorSlotId,
     /// Optional parent reactor slot.
@@ -350,6 +366,14 @@ impl DescriptorFingerprintInput {
 /// Invalid structure supplied while constructing a component descriptor.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum DescriptorBuildError {
+    /// An initializer declaration has invalid source or action ownership.
+    #[error("invalid initializer capabilities for `{reactor}`: {reason}")]
+    InvalidCapabilities {
+        /// Owning reactor identity.
+        reactor: String,
+        /// Structural validation reason.
+        reason: &'static str,
+    },
     /// Two slots in the same binding category have the same identity.
     #[error("duplicate {kind} slot `{id}`")]
     DuplicateSlot {
@@ -516,6 +540,40 @@ impl ComponentDescriptor {
                         slot.id.to_string(),
                         "reactor",
                         parent.to_string(),
+                    ));
+                }
+            }
+        }
+        let mut source_owners = std::collections::BTreeSet::new();
+        for slot in &reactor_slots {
+            let Some(capabilities) = &slot.capabilities else {
+                continue;
+            };
+            let invalid = |reason| DescriptorBuildError::InvalidCapabilities {
+                reactor: slot.id.to_string(),
+                reason,
+            };
+            if let Some(source) = &capabilities.source {
+                if source.is_empty()
+                    || source.trim() != source
+                    || source.chars().any(char::is_control)
+                    || !source_owners.insert(source)
+                {
+                    return Err(invalid("source must be nonempty and uniquely owned"));
+                }
+                if capabilities.actions.is_empty() {
+                    return Err(invalid("source must declare at least one action"));
+                }
+            }
+            let mut actions = std::collections::BTreeSet::new();
+            for action in &capabilities.actions {
+                if !actions.insert(action)
+                    || !action_slots
+                        .iter()
+                        .any(|candidate| &candidate.id == action && candidate.reactor == slot.id)
+                {
+                    return Err(invalid(
+                        "actions must be unique slots owned by the initializer reactor",
                     ));
                 }
             }
@@ -724,6 +782,7 @@ mod tests {
 
     fn reactor() -> ReactorSlot {
         ReactorSlot {
+            capabilities: None,
             id: ReactorSlotId::new("Root").unwrap(),
             parent: None,
         }
@@ -884,7 +943,7 @@ mod tests {
                 ));
             };
         }
-        dangling!("reactor", reactors: vec![ReactorSlot { id: ReactorSlotId::new("Root").unwrap(), parent: Some(missing_reactor.clone()) }]);
+        dangling!("reactor", reactors: vec![ReactorSlot { capabilities: None, id: ReactorSlotId::new("Root").unwrap(), parent: Some(missing_reactor.clone()) }]);
         dangling!("port", ports: vec![PortSlot { id: PortSlotId::new("Root/p").unwrap(), reactor: missing_reactor.clone(), direction: PortDirection::Input }]);
         dangling!("action", actions: vec![ActionSlot { id: ActionSlotId::new("Root/a").unwrap(), reactor: missing_reactor.clone() }]);
         dangling!("reaction", reactions: vec![ReactionSlot { id: ReactionSlotId::new("Root/r").unwrap(), reactor: missing_reactor.clone() }]);
@@ -893,5 +952,28 @@ mod tests {
         dangling!("mode", modes: vec![ModeSlot { id: ModeSlotId::new("Root/m").unwrap(), reactor: ReactorSlotId::new("Root").unwrap(), parent: Some(ModeSlotId::new("Root/missing").unwrap()), initial: false }]);
         dangling!("placement group", groups: vec![DescriptorPlacementGroup { id: PlacementGroupSlotId::new("group").unwrap(), parent: Some(PlacementGroupSlotId::new("missing").unwrap()) }]);
         dangling!("Enclave", enclaves: vec![DescriptorEnclave { id: EnclaveSlotId::new("enclave").unwrap(), root: missing_reactor }]);
+    }
+    #[test]
+    fn initializer_capabilities_reject_missing_or_duplicate_action_slots() {
+        for actions in [
+            vec![ActionSlotId::new("Root/missing").unwrap()],
+            vec![ActionSlotId::new("Root/sample").unwrap(); 2],
+        ] {
+            let mut root = reactor();
+            root.capabilities = Some(InitializerCapabilities {
+                source: Some("plant".into()),
+                actions,
+                clock_control: false,
+            });
+            assert!(build_parts(Parts {
+                reactors: vec![root],
+                actions: vec![ActionSlot {
+                    id: ActionSlotId::new("Root/sample").unwrap(),
+                    reactor: ReactorSlotId::new("Root").unwrap()
+                }],
+                ..Parts::default()
+            })
+            .is_err());
+        }
     }
 }

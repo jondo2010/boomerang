@@ -449,24 +449,36 @@ pub(crate) fn generate_analyzed_launcher(
     let slice = analyzed.compiled.federate_slice(federate_index)?;
     let distributed = coordination.is_some();
     let aliases = payload_aliases(&analyzed.resolved, &analyzed.driver, slice.enclaves())?;
+    let hosted_capabilities = configuration.physical_clock.is_some()
+        || configuration.physical_inputs.is_some()
+        || analyzed.driver.bindings().iter().any(|binding| {
+            aliases.contains_key(binding.implementation().as_str())
+                && binding
+                    .descriptor()
+                    .reactor_slots()
+                    .iter()
+                    .any(|slot| slot.capabilities.is_some())
+        });
+    if hosted_capabilities
+        && (distributed
+            || configuration.runtime != "std"
+            || configuration.target_json.is_some()
+            || configuration
+                .target
+                .as_ref()
+                .is_some_and(|target| target != &target_lexicon::HOST.to_string()))
+    {
+        bail!("component capabilities require one local hosted std Federate on the host target");
+    }
     let manifest = render_manifest(
         &analyzed.resolved,
         &aliases,
         distributed,
         capabilities,
         configuration.physical_clock.is_some(),
+        configuration.physical_inputs.is_some(),
     )?;
-    let physical_clock = configuration
-        .physical_clock
-        .as_ref()
-        .map(|clock| {
-            let binding = &analyzed.resolved.deployment().bindings[&clock.binding];
-            let alias = aliases.get(&binding.implementation_id()).ok_or_else(|| {
-                anyhow!("physical clock driver binding is not selected by this Federate")
-            })?;
-            Ok::<_, anyhow::Error>((clock.clone(), alias.clone()))
-        })
-        .transpose()?;
+    let physical_clock = configuration.physical_clock.clone();
     let execution = analyzed
         .resolved
         .deployment()
@@ -480,6 +492,7 @@ pub(crate) fn generate_analyzed_launcher(
         &execution,
         rust::LauncherInstrumentation {
             physical_clock,
+            physical_inputs: configuration.physical_inputs.clone(),
             tracing: rust::render_tracing_init(
                 analyzed.resolved.deployment().tracing,
                 configuration.bounded_tracing.as_ref(),
@@ -852,20 +865,20 @@ fn render_manifest(
     aliases: &BTreeMap<String, String>,
     distributed: bool,
     capabilities: LauncherCapabilities,
-    external_clock: bool,
+    manual_clock: bool,
+    source_input: bool,
 ) -> Result<String> {
+    let mut runtime_features = Vec::new();
+    if manual_clock {
+        runtime_features.push("hosted-manual-clock".into());
+    }
+    if source_input {
+        runtime_features.push("hosted-source-input".into());
+    }
     let mut dependencies = BTreeMap::new();
     dependencies.insert(
         String::from("boomerang_runtime"),
-        dependency(
-            resolved.runtime(),
-            false,
-            if external_clock {
-                vec!["external-clock".into()]
-            } else {
-                Vec::new()
-            },
-        )?,
+        dependency(resolved.runtime(), false, runtime_features)?,
     );
     dependencies.insert(
         String::from("boomerang_federated"),
@@ -1090,11 +1103,13 @@ pub(crate) fn federate_image_fingerprint(
     federate: boomerang_runtime::image::FederateIndex,
 ) -> Result<blake3::Hash> {
     let slice = analyzed.compiled.federate_slice(federate)?;
-    fingerprints::with_physical_clock(
-        fingerprints::federate_image(&slice, analyzed.driver.bindings())?,
-        analyzed.resolved.deployment().federates[slice.id().as_str()]
-            .physical_clock
-            .as_ref(),
+    let policy = &analyzed.resolved.deployment().federates[slice.id().as_str()];
+    fingerprints::with_physical_inputs(
+        fingerprints::with_physical_clock(
+            fingerprints::federate_image(&slice, analyzed.driver.bindings())?,
+            policy.physical_clock.as_ref(),
+        )?,
+        policy.physical_inputs.as_ref(),
     )
 }
 
@@ -1165,6 +1180,7 @@ pub(crate) fn generate_analyzed_rti(
     let selected = analyzed.resolved.deployment().rti.as_ref();
     let configuration = ResolvedFederate {
         physical_clock: None,
+        physical_inputs: None,
         bounded_tracing: analyzed
             .resolved
             .deployment()
@@ -1184,6 +1200,7 @@ pub(crate) fn generate_analyzed_rti(
         &aliases,
         true,
         LauncherCapabilities { hosted: true },
+        false,
         false,
     )?;
     let init_tracing = rust::render_tracing_init(
@@ -1237,6 +1254,41 @@ mod tests {
     use std::{collections::BTreeMap, ffi::OsStr, path::Path};
 
     #[test]
+    fn generated_manifest_selects_independent_hosted_features() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/workspace");
+        let resolved = crate::workspace::resolve_workspace(workspace, "production").unwrap();
+        for (manual, inputs, expected) in [
+            (false, false, vec![]),
+            (true, false, vec!["hosted-manual-clock"]),
+            (false, true, vec!["hosted-source-input"]),
+            (
+                true,
+                true,
+                vec!["hosted-manual-clock", "hosted-source-input"],
+            ),
+        ] {
+            let manifest = super::render_manifest(
+                &resolved,
+                &BTreeMap::new(),
+                false,
+                super::LauncherCapabilities { hosted: true },
+                manual,
+                inputs,
+            )
+            .unwrap()
+            .parse::<toml::Table>()
+            .unwrap();
+            let features = manifest["dependencies"]["boomerang_runtime"]["features"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|feature| feature.as_str().unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(features, expected, "manual={manual}, inputs={inputs}");
+        }
+    }
+
+    #[test]
     fn payload_features_include_only_named_components_selected_for_this_federate() {
         let bindings = BTreeMap::from([
             (
@@ -1274,6 +1326,7 @@ mod tests {
     fn metadata_reconciliation_preserves_federate_toolchain_and_cargo_config() {
         let federate = ResolvedFederate {
             physical_clock: None,
+            physical_inputs: None,
             bounded_tracing: None,
             groups: Vec::new(),
             target: None,
@@ -1330,6 +1383,7 @@ mod tests {
         let identity = |target_json: &Path, cargo_config: &Path, cargo| {
             let federate = ResolvedFederate {
                 physical_clock: None,
+                physical_inputs: None,
                 bounded_tracing: None,
                 groups: Vec::new(),
                 target: None,
@@ -1370,6 +1424,7 @@ mod tests {
         let identity = |target: Option<String>| {
             let federate = ResolvedFederate {
                 physical_clock: None,
+                physical_inputs: None,
                 bounded_tracing: None,
                 groups: Vec::new(),
                 target,

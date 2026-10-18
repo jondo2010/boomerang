@@ -6,6 +6,23 @@ use crate::{
 
 pub trait Reactor<State: runtime::ReactorData = ()>: Sized {
     type Ports;
+    /// Builds using a declared capability initializer instead of caller-supplied state.
+    /// Unsupported reactors reject before executing any initializer.
+    #[allow(clippy::too_many_arguments)]
+    fn build_initialized(
+        &self,
+        name: &str,
+        parent: Option<AssemblyReactorKey>,
+        scope_mode: Option<AssemblyModeKey>,
+        bank_info: Option<runtime::BankInfo>,
+        placement: ReactorPlacement,
+        assembly: &mut Assembly,
+    ) -> Result<Self::Ports, AssemblyError> {
+        let _ = (name, parent, scope_mode, bank_info, placement, assembly);
+        Err(AssemblyError::InconsistentAssemblyState {
+            what: "reactor has no capability initializer".into(),
+        })
+    }
     #[allow(clippy::too_many_arguments)]
     fn build(
         &self,
@@ -160,5 +177,57 @@ impl<S: runtime::ReactorData> ReactorContext<'_, S> {
         reactors
             .try_into()
             .map_err(|_| AssemblyError::InternalError("Error converting Vec to array".to_owned()))
+    }
+}
+
+/// Generated reactor adapter supporting supplied or deferred state construction.
+pub struct CapabilityReactor<F>(pub F);
+impl<F, S, P> Reactor<S> for CapabilityReactor<F>
+where
+    S: runtime::ReactorData,
+    F: Fn(
+            &str,
+            Option<S>,
+            Option<AssemblyReactorKey>,
+            Option<AssemblyModeKey>,
+            Option<runtime::BankInfo>,
+            ReactorPlacement,
+            &mut Assembly,
+        ) -> Result<P, AssemblyError>
+        + 'static,
+{
+    type Ports = P;
+    fn build_with_placement(
+        &self,
+        name: &str,
+        state: S,
+        parent: Option<AssemblyReactorKey>,
+        scope_mode: Option<AssemblyModeKey>,
+        bank_info: Option<runtime::BankInfo>,
+        placement: ReactorPlacement,
+        assembly: &mut Assembly,
+    ) -> Result<P, AssemblyError> {
+        (self.0)(
+            name,
+            Some(state),
+            parent,
+            scope_mode,
+            bank_info,
+            placement,
+            assembly,
+        )
+    }
+    fn build_initialized(
+        &self,
+        name: &str,
+        parent: Option<AssemblyReactorKey>,
+        scope_mode: Option<AssemblyModeKey>,
+        bank_info: Option<runtime::BankInfo>,
+        placement: ReactorPlacement,
+        assembly: &mut Assembly,
+    ) -> Result<P, AssemblyError> {
+        (self.0)(
+            name, None, parent, scope_mode, bank_info, placement, assembly,
+        )
     }
 }

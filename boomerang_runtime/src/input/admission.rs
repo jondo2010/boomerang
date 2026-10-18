@@ -1,14 +1,33 @@
 //! Source protocol validation and batch publication.
 //!
-//! The coordinator owns validation, source progress, and publication state.
-//! The coordinator owns execution authority and publication fences.
-//! A partially published batch stops execution before admission requests an abort.
-//! Required-source protocol errors, overflow, and disconnection also abort execution.
+//! See the parent [`input`](super) module for the complete path to scheduler execution.
+//! The coordinator owns `AdmissionProcessor` and `FederateCoordinationState`.
+//! It processes source updates, publication, and execution permits on one thread.
 //!
-//! Producers lease one bounded request lane. Owned batches carry their progress.
-//! The coordinator replies through one reusable channel, separate from scheduler
-//! command and final-permit replies. The report-queue wake can allocate; this
-//! transport does not make complete submissions allocation-free.
+//! # Request ownership
+//!
+//! Each `InputAdmission` clone refers to the same service.
+//! A caller takes the single lease token before it sends a request.
+//! The request channel holds one owned request. The caller then reports `InputReady`
+//! through the coordinator report channel and waits for the admission reply.
+//! The lease prevents another caller from taking this reply.
+//! The caller returns the token after it receives the result or an error.
+//!
+//! Requests own their batches and progress buffers. Admission reuses its validation
+//! storage and its request and reply channels. The coordinator report channel can
+//! allocate when a caller sends `InputReady`. Complete submissions are not allocation-free.
+//! Admission replies, scheduler commands, and final execution permits use separate channels.
+//!
+//! # Failure and shutdown
+//!
+//! A partially published batch blocks new input execution permits and requests an abort.
+//! Admission does not withdraw messages already sent. Existing final permits remain valid.
+//! Required-source protocol errors, overflow, and disconnection also request an abort.
+//!
+//! Shutdown closes the lease and request channels to release waiting callers.
+//! The processor owns the only admission reply sender.
+//! Dropping this sender releases a caller waiting for a reply, but preserves a queued receipt.
+//! The coordinator drops the processor before backend cleanup can join producer threads.
 
 use super::{
     retention::{Reservation, RetainedBatches},

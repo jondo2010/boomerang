@@ -40,10 +40,11 @@ fn AsyncCallback() -> impl Reactor {
                 // Schedule twice. If the action is not physical, these should get consolidated into a single action
                 // triggering. If it is, then they cause two separate triggerings with close but not equal time stamps.
                 for _ in 0..2 {
-                    let accepted = send_ctx
-                        .try_schedule_action_async(&a, 0, None)
-                        .expect("physical action scheduling failed");
-                    if !accepted {
+                    let sent = send_ctx
+                        .prepare_action(&a, 0, None)
+                        .expect("physical action preparation failed")
+                        .send();
+                    if sent.is_err() {
                         // The final callback may complete after the logical shutdown timeout.
                         assert!(send_ctx.is_shutdown(), "scheduler rejected a live callback");
                         break;

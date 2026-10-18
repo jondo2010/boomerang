@@ -397,7 +397,7 @@ pub mod tests {
             reaction_key,
             Context::new(
                 EnclaveKey::default(),
-                crate::clock::RuntimeClock::native(std::time::Instant::now()),
+                crate::clock::ExecutionClock::host_monotonic(std::time::Instant::now()),
                 None,
                 event_tx,
                 shutdown_rx,
@@ -447,7 +447,7 @@ pub mod tests {
             ReactionKey::from(1),
             Context::new(
                 EnclaveKey::default(),
-                crate::clock::RuntimeClock::native(std::time::Instant::now()),
+                crate::clock::ExecutionClock::host_monotonic(std::time::Instant::now()),
                 None,
                 event_tx,
                 shutdown_rx,

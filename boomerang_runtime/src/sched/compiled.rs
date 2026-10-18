@@ -256,7 +256,7 @@ pub(crate) fn run_owned_scheduler_with_coordination_and_observation(
     let mut transition_buffer = Vec::with_capacity(reaction_capacity);
     let mut outcomes = (0..reaction_capacity).map(|_| Default::default()).collect();
 
-    let clock = storage.scheduler_send_context().physical_clock;
+    let clock = storage.scheduler_send_context().clock;
     SchedulerCore {
         clock,
         key,
@@ -617,11 +617,11 @@ mod tests {
     }
 
     /// Checks that failure during event pumping prevents a subsequent execution grant.
-    #[cfg(feature = "external-clock")]
+    #[cfg(feature = "hosted-manual-clock")]
     #[test]
     fn physical_failure_during_pump_stops_before_fast_forward_grant() {
+        use crate::clock::ExecutionClock;
         use crate::clock::ManualClock;
-        use crate::clock::RuntimeClock;
         use crate::clock::{PhysicalClockDomainId, PhysicalClockError};
         /// Latches clock overflow when a queued test payload is discarded.
         #[derive(Debug)]
@@ -635,7 +635,7 @@ mod tests {
         let mut storage = build_storage(Arc::clone(&calls), false);
         let origin = std::time::Instant::now();
         let clock = ManualClock::new(PhysicalClockDomainId(7)).unwrap();
-        storage.set_physical_clock(RuntimeClock::manual(clock.clone(), 0));
+        storage.set_clock(ExecutionClock::manual(clock.clone(), 0));
         assert!(storage
             .scheduler_event_tx()
             .try_send(AsyncEvent::Logical {
@@ -697,7 +697,7 @@ mod tests {
         dependencies.add_upstream(
             upstream,
             SendContext {
-                physical_clock: Default::default(),
+                clock: Default::default(),
                 enclave_key: upstream,
                 async_tx: upstream_tx,
                 shutdown_rx: upstream_shutdown_rx,
@@ -775,7 +775,7 @@ mod tests {
         dependencies.add_upstream(
             upstream,
             SendContext {
-                physical_clock: Default::default(),
+                clock: Default::default(),
                 enclave_key: upstream,
                 async_tx: upstream_tx,
                 shutdown_rx: upstream_shutdown_rx,
@@ -860,7 +860,7 @@ mod tests {
         dependencies.add_upstream(
             upstream,
             SendContext {
-                physical_clock: Default::default(),
+                clock: Default::default(),
                 enclave_key: upstream,
                 async_tx: upstream_tx,
                 shutdown_rx: upstream_shutdown_rx,
@@ -910,7 +910,7 @@ mod tests {
         dependencies.add_upstream(
             upstream,
             SendContext {
-                physical_clock: Default::default(),
+                clock: Default::default(),
                 enclave_key: upstream,
                 async_tx: upstream_tx,
                 shutdown_rx: upstream_shutdown_rx,
@@ -968,7 +968,7 @@ mod tests {
         dependencies.add_upstream(
             upstream,
             SendContext {
-                physical_clock: Default::default(),
+                clock: Default::default(),
                 enclave_key: upstream,
                 async_tx: upstream_tx,
                 shutdown_rx: upstream_shutdown_rx,

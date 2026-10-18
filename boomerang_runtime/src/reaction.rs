@@ -1,8 +1,8 @@
 use std::{fmt::Debug, sync::RwLock};
 
 use crate::{
-    ActionCommon, ActionRef, AsyncActionRef, BaseReactor, CommonContext, Context, Duration,
-    InputRef, OutputRef, ReactionRefs, ReactionRefsExtract, ReactorData, SendContext,
+    ActionCommon, ActionRef, AsyncActionRef, BaseReactor, Context, Duration, InputRef, OutputRef,
+    ReactionRefs, ReactionRefsExtract, ReactorData, SendContext,
 };
 
 tinymap::key_type! { pub ReactionKey }
@@ -155,18 +155,28 @@ impl<'store, T: ReactorData + Clone> ReactionFn<'store> for EnclaveSenderReactio
                     current_tag.delay(delay)
                 };
 
-                self.remote_context
-                    .schedule_external(crate::event::AsyncEvent::Logical {
+                let _ = self
+                    .remote_context
+                    .send_event(crate::event::AsyncEvent::Logical {
                         tag,
                         target: crate::AsyncEventTarget::Action(self.remote_action_ref.key()),
                         value: Box::new(value.clone()),
                     });
-            } else if let Err(error) = self.remote_context.try_schedule_action_async(
-                &self.remote_action_ref,
-                value.clone(),
-                self.delay,
-            ) {
-                tracing::error!(%error, "Failed to schedule physical Enclave connection");
+            } else {
+                match self.remote_context.prepare_action(
+                    &self.remote_action_ref,
+                    value.clone(),
+                    self.delay,
+                ) {
+                    Ok(pending) => {
+                        if let Err(error) = pending.send() {
+                            tracing::error!(%error, "Failed to send physical Enclave connection");
+                        }
+                    }
+                    Err(error) => {
+                        tracing::error!(%error, "Failed to prepare physical Enclave connection")
+                    }
+                }
             }
         } else {
             tracing::warn!("Port is empty, skipping event send");

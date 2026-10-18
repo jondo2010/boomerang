@@ -10,12 +10,12 @@ use super::{
     Config, Stats,
 };
 use crate::{
-    clock::{ClockWaitResult, RuntimeClock, WaitContext},
+    clock::{ClockWaitResult, ExecutionClock, WaitContext},
     event::{AsyncEvent, AsyncEventTarget},
     keepalive,
     key_set::KeySetView,
-    ActionKey, CommonContext, Duration, EnclaveKey, Level, ReactionSetLimits, ReactorData,
-    RuntimeError, SchedulerPhase, SendContext, Tag, TransitionKind,
+    ActionKey, Duration, EnclaveKey, Level, ReactionSetLimits, ReactorData, RuntimeError,
+    SchedulerPhase, SendContext, Tag, TransitionKind,
 };
 
 /// Immutable normalized schedule addressed by one exact family of dense key types.
@@ -177,7 +177,7 @@ where
     /// Enclave whose logical time this invocation advances.
     pub(super) key: EnclaveKey,
     /// Selected execution timeline, including the shared native origin.
-    pub(super) clock: RuntimeClock,
+    pub(super) clock: ExecutionClock,
     /// Existing live scheduler configuration.
     pub(super) config: &'a Config,
     /// Optional snapshot-only scheduler observation state.
@@ -530,7 +530,7 @@ where
     fn release_tag_downstream(&self, current_tag: Tag) {
         for (key, ctx) in self.downstream_enclaves.iter() {
             let event = AsyncEvent::release(self.key, current_tag);
-            if !ctx.schedule_external(event) && self.shutdown_tag.is_none() {
+            if ctx.send_event(event).is_err() && self.shutdown_tag.is_none() {
                 tracing::warn!(target: "boomerang::runtime",
                     event = "runtime.scheduler.release_failed", enclave = self.key.as_u32(),
                     downstream = key.as_u32(), reason = "downstream_closed",

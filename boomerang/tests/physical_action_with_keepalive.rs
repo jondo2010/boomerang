@@ -11,9 +11,11 @@ fn Main(#[state] success: bool) -> impl Reactor {
             let act = act.to_async();
             std::thread::spawn(move || {
                 std::thread::sleep(std::time::Duration::from_millis(20));
-                assert!(send_ctx
-                    .try_schedule_action_async(&act, 434, None)
-                    .expect("physical action scheduling failed"));
+                send_ctx
+                    .prepare_action(&act, 434, None)
+                    .expect("physical action preparation failed")
+                    .send()
+                    .expect("physical action send failed");
             });
         })
         .finish()?;

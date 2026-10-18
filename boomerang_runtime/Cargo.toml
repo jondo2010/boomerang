@@ -15,7 +15,10 @@ exclude.workspace = true
 default = []
 
 ## Hosted externally advanced Federate physical clock
-external-clock = ["dep:getrandom"]
+hosted-manual-clock = ["dep:getrandom"]
+
+## Compatibility alias for hosted manual time
+external-clock = ["hosted-manual-clock"]
 
 ## Prepare runtime-owned workers for an installed native bounded subscriber
 bounded-tracing = ["dep:tracing-bounded"]

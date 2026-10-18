@@ -222,8 +222,8 @@ pub(crate) const fn runtime_enclave_key(enclave: EnclaveIndex) -> crate::Enclave
 /// compiled Federate's shared coordination.
 #[derive(Default)]
 pub struct FederateBindings<'binding> {
-    #[cfg(feature = "external-clock")]
-    physical_clock: Option<(
+    #[cfg(feature = "hosted-manual-clock")]
+    manual_clock: Option<(
         crate::clock::PhysicalClockDomainId,
         crate::clock::ManualClock,
     )>,
@@ -239,13 +239,13 @@ pub struct FederateBindings<'binding> {
 
 impl<'binding> FederateBindings<'binding> {
     /// Selects one external clock for every Enclave. Domain and single-use checks run before initialization.
-    #[cfg(feature = "external-clock")]
-    pub fn with_physical_clock(
+    #[cfg(feature = "hosted-manual-clock")]
+    pub fn with_manual_clock(
         mut self,
         domain: crate::clock::PhysicalClockDomainId,
         clock: crate::clock::ManualClock,
     ) -> Self {
-        self.physical_clock = Some((domain, clock));
+        self.manual_clock = Some((domain, clock));
         self
     }
 
@@ -415,7 +415,7 @@ impl FederateExecution {
 #[derive(Debug, thiserror::Error)]
 pub enum ExecuteOwnedFederateError {
     /// Selected physical clock failed validation or terminated during execution.
-    #[cfg(feature = "external-clock")]
+    #[cfg(feature = "hosted-manual-clock")]
     #[error(transparent)]
     PhysicalClock(#[from] crate::clock::PhysicalClockError),
     /// The deployment root or one nested image was structurally invalid.
@@ -1044,8 +1044,8 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
     mut fail_spawn: impl FnMut(Option<EnclaveIndex>) -> bool,
 ) -> Result<FederateExecution, ExecuteOwnedFederateError> {
     let observations = prepare_observations(&prepared.images, observations)?;
-    #[cfg(feature = "external-clock")]
-    if bindings.physical_clock.is_some()
+    #[cfg(feature = "hosted-manual-clock")]
+    if bindings.manual_clock.is_some()
         && prepared
             .images
             .values()
@@ -1053,8 +1053,8 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
     {
         return Err(crate::clock::PhysicalClockError::WakeCapacity.into());
     }
-    #[cfg(feature = "external-clock")]
-    let clock_run = crate::clock::ClockRun::new(bindings.physical_clock.as_ref())?;
+    #[cfg(feature = "hosted-manual-clock")]
+    let clock_run = crate::clock::ClockRun::new(bindings.manual_clock.as_ref())?;
     let PreparedFederate { images, endpoints } = prepared;
     let FederateBindings {
         enclaves,
@@ -1195,11 +1195,11 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
     };
     backend_phase.completed();
     let origin = Instant::now();
-    #[cfg(feature = "external-clock")]
+    #[cfg(feature = "hosted-manual-clock")]
     if let Some(clock) = &clock_run.0 {
         clock.attach(&event_senders, abort_handle.clone())?;
         for (slot, (_, storage)) in storages.iter_mut().enumerate() {
-            storage.set_physical_clock(crate::clock::RuntimeClock::manual(clock.clone(), slot));
+            storage.set_clock(crate::clock::ExecutionClock::manual(clock.clone(), slot));
         }
     }
     for (_, storage) in &storages {
@@ -1386,7 +1386,7 @@ fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
         (results, failure)
     });
 
-    #[cfg(feature = "external-clock")]
+    #[cfg(feature = "hosted-manual-clock")]
     if let Some(clock) = &clock_run.0 {
         clock.now()?;
     }
@@ -2190,7 +2190,7 @@ mod scoped_spawn_tests {
         dependencies.add_upstream(
             upstream,
             SendContext {
-                physical_clock: Default::default(),
+                clock: Default::default(),
                 enclave_key: upstream,
                 async_tx: upstream_tx,
                 shutdown_rx: upstream_shutdown_rx,

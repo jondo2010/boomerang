@@ -1,7 +1,7 @@
 //! Manual-clock protocol, conversion, and allocation regression tests.
 
 use super::*;
-use crate::clock::RuntimeClock;
+use crate::clock::ExecutionClock;
 
 /// Creates an independent manual clock in the shared test domain.
 fn clock() -> ManualClock {
@@ -122,12 +122,12 @@ fn checked_conversions_and_physical_actions_use_selected_time() {
     let (_shutdown, shutdown_rx) = crate::keepalive::channel();
     let mut ctx = Context::new(
         crate::EnclaveKey::from(0),
-        RuntimeClock::manual(clock.clone(), 0),
+        ExecutionClock::manual(clock.clone(), 0),
         None,
         tx,
         shutdown_rx,
     );
-    ctx.physical_clock = RuntimeClock::manual(clock.clone(), 0);
+    ctx.clock = ExecutionClock::manual(clock.clone(), 0);
     let mut action = Action::<u32>::new(
         "physical",
         ActionKey::from(0),
@@ -149,7 +149,10 @@ fn checked_conversions_and_physical_actions_use_selected_time() {
     let expected = PhysicalInstant(42);
     assert_eq!(ctx.try_get_physical_time().unwrap(), expected);
     assert_eq!(sender.try_get_physical_time().unwrap(), expected);
-    ctx.try_schedule_action_async(&action, 2, Some(Duration::nanoseconds(3)))
+    sender
+        .prepare_action(&action, 2, Some(Duration::nanoseconds(3)))
+        .unwrap()
+        .send()
         .unwrap();
     assert!(
         matches!(rx.recv().unwrap(), AsyncEvent::Physical { time, .. } if time == PhysicalInstant(47))
@@ -173,8 +176,8 @@ fn checked_conversions_and_physical_actions_use_selected_time() {
     );
     assert_eq!(ctx.trigger_res.scheduled_actions.len(), scheduled);
     assert_eq!(
-        sender.try_schedule_action_async(&action, 3, None),
-        Err(PhysicalClockError::Overflow)
+        sender.prepare_action(&action, 3, None).unwrap_err(),
+        PhysicalClockError::Overflow
     );
     assert!(rx.try_recv().unwrap().is_none());
     clock.close();
@@ -189,7 +192,7 @@ fn checked_conversions_and_physical_actions_use_selected_time() {
             PhysicalClockError::Closed
         ))
     );
-    ctx.physical_clock = RuntimeClock::native(origin);
+    ctx.clock = ExecutionClock::host_monotonic(origin);
     ctx.try_schedule_action(&mut action, 5, None).unwrap();
     let tag = ctx.trigger_res.scheduled_actions.last().unwrap().1;
     assert_eq!(action.get_value_at(tag), Some(&5));
@@ -204,7 +207,7 @@ fn checked_conversions_and_physical_actions_use_selected_time() {
 
 /// Counts allocations on the measuring test thread while delegating to System.
 struct CountingAllocator;
-thread_local! { static ALLOCATIONS: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) }; }
+thread_local! { pub(crate) static ALLOCATIONS: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) }; }
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator;
 unsafe impl std::alloc::GlobalAlloc for CountingAllocator {
@@ -235,17 +238,17 @@ fn clock_steady_state_allocates_nothing_at_two_and_sixteen_enclaves() {
             })
             .collect();
         let adapters: Vec<_> = (0..count)
-            .map(|slot| RuntimeClock::manual(clock.clone(), slot))
+            .map(|slot| ExecutionClock::manual(clock.clone(), slot))
             .collect();
         let capacity = clock.0.state.lock().unwrap().slots.capacity();
         let start = std::time::Instant::now();
-        let native = RuntimeClock::native(start);
+        let native = ExecutionClock::host_monotonic(start);
         ALLOCATIONS.with(|n| n.set(Some(0)));
         for step in 0..10_000 {
             std::hint::black_box(native.clone())
                 .now_after(std::time::Duration::ZERO)
                 .unwrap();
-            std::hint::black_box(RuntimeClock::manual(clock.clone(), 0));
+            std::hint::black_box(ExecutionClock::manual(clock.clone(), 0));
             for adapter in &adapters {
                 assert!(!adapter.failed());
                 adapter.clone().now().unwrap();

@@ -25,7 +25,7 @@ use std::{
 };
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 /// Shared identity and synchronized state for a single manual-clock execution.
 struct ManualClockInner {

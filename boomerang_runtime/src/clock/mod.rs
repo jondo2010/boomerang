@@ -3,7 +3,7 @@
 //! # Clock boundary
 //!
 //! The scheduler uses one selected-clock handle for time reads and interruptible
-//! deadline waits. Native waits use the system timer; manual waits register a
+//! deadline waits. Host waits use the system timer; manual waits register a
 //! deadline against shared externally advanced time. Scheduling, action storage,
 //! and input admission remain outside the clock implementation.
 //!
@@ -16,21 +16,21 @@
 //!
 //! # Hosted state and lifetime
 //!
-//! With `external-clock`, a compiled local Federate can select a `ManualClock`
-//! through `FederateBindings::with_physical_clock`. All Enclaves share
+//! With `hosted-manual-clock`, a compiled local Federate can select a `ManualClock`
+//! through `FederateBindings::with_manual_clock`. All Enclaves share
 //! the same clock and random execution epoch. The run claims the clock once,
 //! attaches bounded deadline slots, and detaches them during cleanup; the claim
 //! remains consumed. Domain mismatch, reuse, terminal failure, or insufficient
 //! mailbox wake capacity prevents startup.
 //!
 //! The manual implementation owns synchronized time, terminal failure, and wake
-//! registration. The native implementation owns system-timer waiting and a shared
+//! registration. The host implementation owns system-timer waiting and a shared
 //! host origin, allocated once per Enclave. Send contexts created during graph
 //! construction share that origin; reads return [`PhysicalClockError::NotStarted`]
 //! until execution binds it. Bulk live execution binds every participant to one
 //! origin before spawning workers; compiled execution does so after construction
 //! and connection setup. Individual scheduler startup binds its origin once.
-//! Without `external-clock`, there is no manual state, dispatch branch, deadline
+//! Without `hosted-manual-clock`, there is no manual state, dispatch branch, deadline
 //! registry, or optional entropy dependency. Cloning and reading an initialized
 //! clock do not allocate.
 //!
@@ -55,9 +55,9 @@
 //! Supervision, transport liveness, and observation timing use host-monotonic
 //! time independently of the selected clock.
 
-#[cfg(feature = "external-clock")]
+mod host;
+#[cfg(feature = "hosted-manual-clock")]
 mod manual;
-mod native;
 mod time;
 use crate::{
     sched::federate::{
@@ -65,7 +65,9 @@ use crate::{
     },
     AsyncEvent, Duration, EnclaveKey, Tag,
 };
-#[cfg(feature = "external-clock")]
+#[cfg(all(test, feature = "hosted-manual-clock"))]
+pub(crate) use manual::tests::ALLOCATIONS;
+#[cfg(feature = "hosted-manual-clock")]
 pub use manual::{ClockRun, ManualClock};
 
 use std::{
@@ -92,11 +94,11 @@ pub(crate) struct WaitContext<'a, 'coordination> {
 
 /// Selected physical clock shared by an Enclave and its pre-start send contexts.
 #[derive(Clone, Debug)]
-pub(crate) enum RuntimeClock {
+pub(crate) enum ExecutionClock {
     /// Host origin bound once at execution startup; clones share the same origin.
-    Native(Arc<OnceLock<Instant>>),
+    HostMonotonic(Arc<OnceLock<Instant>>),
     /// One participant in a shared manual-clock execution.
-    #[cfg(feature = "external-clock")]
+    #[cfg(feature = "hosted-manual-clock")]
     Manual {
         /// Shared time, execution identity and deadline registry.
         clock: manual::ManualClock,
@@ -105,41 +107,41 @@ pub(crate) enum RuntimeClock {
     },
 }
 
-impl Default for RuntimeClock {
+impl Default for ExecutionClock {
     fn default() -> Self {
-        Self::Native(Arc::new(OnceLock::new()))
+        Self::HostMonotonic(Arc::new(OnceLock::new()))
     }
 }
 
-impl RuntimeClock {
-    /// Binds native time once and returns the origin actually used for host pacing.
+impl ExecutionClock {
+    /// Binds host monotonic time once and returns the origin actually used for host pacing.
     /// Manual time is already bound to its execution epoch and ignores this host origin.
     pub(crate) fn initialize(&self, origin: Instant) -> Instant {
         match self {
-            Self::Native(shared) => *shared.get_or_init(|| origin),
-            #[cfg(feature = "external-clock")]
+            Self::HostMonotonic(shared) => *shared.get_or_init(|| origin),
+            #[cfg(feature = "hosted-manual-clock")]
             Self::Manual { .. } => origin,
         }
     }
 
-    /// Creates an initialized native clock for isolated context tests.
+    /// Creates an initialized host monotonic clock for isolated context tests.
     #[cfg(test)]
-    pub(crate) fn native(origin: Instant) -> Self {
+    pub(crate) fn host_monotonic(origin: Instant) -> Self {
         let clock = Self::default();
         clock.initialize(origin);
         clock
     }
 
     /// Binds one participant without another allocation.
-    #[cfg(feature = "external-clock")]
+    #[cfg(feature = "hosted-manual-clock")]
     pub(crate) fn manual(clock: manual::ManualClock, slot: usize) -> Self {
         Self::Manual { clock, slot }
     }
     /// Reports retained clock failure, including during logical fast-forward.
     pub(crate) fn failed(&self) -> bool {
         match self {
-            Self::Native(_) => false,
-            #[cfg(feature = "external-clock")]
+            Self::HostMonotonic(_) => false,
+            #[cfg(feature = "hosted-manual-clock")]
             Self::Manual { clock, .. } => clock.now().is_err(),
         }
     }
@@ -150,15 +152,15 @@ impl RuntimeClock {
         wait: &mut WaitContext<'_, '_>,
     ) -> Result<ClockWaitResult, FederateCoordinationError> {
         match self {
-            Self::Native(_) => native::wait_native(tag, wait),
-            #[cfg(feature = "external-clock")]
+            Self::HostMonotonic(_) => host::wait_host_monotonic(tag, wait),
+            #[cfg(feature = "hosted-manual-clock")]
             Self::Manual { clock, slot, .. } => clock.wait_until(*slot, tag, wait),
         }
     }
     /// Reads the selected execution timeline without converting manual time to host time.
     pub(crate) fn now(&self) -> Result<PhysicalInstant, PhysicalClockError> {
         match self {
-            Self::Native(origin) => {
+            Self::HostMonotonic(origin) => {
                 let origin = *origin.get().ok_or(PhysicalClockError::NotStarted)?;
                 PhysicalInstant::from_duration(
                     Instant::now()
@@ -166,7 +168,7 @@ impl RuntimeClock {
                         .ok_or(PhysicalClockError::Overflow)?,
                 )
             }
-            #[cfg(feature = "external-clock")]
+            #[cfg(feature = "hosted-manual-clock")]
             Self::Manual { clock, .. } => clock.now(),
         }
     }

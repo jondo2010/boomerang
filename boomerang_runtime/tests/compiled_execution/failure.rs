@@ -77,10 +77,23 @@ fn competing_panic_after_route_failure(
     _refs: ReactionRefs<'_>,
     _mode_effect: Option<CompiledModeEffectRef>,
 ) -> Result<(), ReactionBindingError> {
+    let sender = context.make_send_context();
+    let started = Instant::now();
     COMPETING_PANIC_READY.store(true, Ordering::SeqCst);
-    assert!(!context.schedule_external(AsyncEvent::Shutdown {
-        delay: Duration::ZERO,
-    }));
+    // The source can now fail. Wait for its abort before raising the competing panic.
+    loop {
+        match sender.try_shutdown(None) {
+            Err(boomerang_runtime::TryShutdownError::Closed) => break,
+            Err(boomerang_runtime::TryShutdownError::Full) => {
+                assert!(
+                    started.elapsed() < owned_federate_watchdog_timeout(),
+                    "route failure did not close the peer mailbox"
+                );
+                std::thread::yield_now();
+            }
+            Ok(()) => panic!("the zero-capacity mailbox accepted a shutdown request"),
+        }
+    }
     panic!("competing scheduler panic");
 }
 

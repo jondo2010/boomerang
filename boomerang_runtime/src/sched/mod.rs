@@ -265,6 +265,9 @@ impl ExecutionStorage<ReactionGraph> for Pin<Box<Store>> {
         tag: Tag,
         outcomes: &mut [ReactionOutcome<ActionKey, ModeKey>],
     ) -> Result<(), Self::Error> {
+        for outcome in outcomes.iter_mut() {
+            outcome.clear();
+        }
         // SAFETY: reactions in one dependency level have disjoint mutable runtime state.
         let contexts = unsafe { Store::iter_borrow_storage(self, reactions.iter().copied()) };
 
@@ -274,16 +277,34 @@ impl ExecutionStorage<ReactionGraph> for Pin<Box<Store>> {
             let results = contexts
                 .enumerate()
                 .par_bridge()
-                .map(|(index, context)| (index, context.trigger(tag)))
+                .map(|(index, context)| {
+                    let declared = context.reaction.external_effect;
+                    (index, declared, context.trigger(tag))
+                })
                 .collect::<Vec<_>>();
-            for (index, result) in results {
+            // All parallel invocations have returned; retain every actual result before validation.
+            for &(index, _, result) in &results {
                 copy_live_outcome(&mut outcomes[index], result);
+            }
+            for (index, declared, (output, _)) in results {
+                if !output.is_valid(declared) {
+                    return Err(RuntimeError::OutputContract {
+                        reaction: reactions[index],
+                        output,
+                    });
+                }
             }
         }
 
         #[cfg(not(feature = "parallel"))]
-        for (outcome, context) in outcomes.iter_mut().zip(contexts) {
-            copy_live_outcome(outcome, context.trigger(tag));
+        for ((&reaction, outcome), context) in reactions.iter().zip(outcomes).zip(contexts) {
+            let declared = context.reaction.external_effect;
+            let result = context.trigger(tag);
+            let output = result.0;
+            copy_live_outcome(outcome, result);
+            if !output.is_valid(declared) {
+                return Err(RuntimeError::OutputContract { reaction, output });
+            }
         }
 
         Ok(())
@@ -299,7 +320,11 @@ impl ExecutionStorage<ReactionGraph> for Pin<Box<Store>> {
 }
 
 /// Copies one live trigger result into reusable key-generic scheduler scratch.
-fn copy_live_outcome(outcome: &mut ReactionOutcome<ActionKey, ModeKey>, result: &TriggerRes) {
+fn copy_live_outcome(
+    outcome: &mut ReactionOutcome<ActionKey, ModeKey>,
+    (output, result): (crate::OutputOutcome, &TriggerRes),
+) {
+    outcome.output = Some(output);
     outcome.scheduled_actions.clear();
     outcome
         .scheduled_actions
@@ -567,6 +592,15 @@ impl Scheduler {
         use crate::initialization::live;
         let close = live::CloseMailboxes(vec![enclave.event_tx.clone()]);
         live::preflight(&enclave)?;
+        if config.fast_forward
+            && enclave
+                .env
+                .reactions
+                .values()
+                .any(|reaction| reaction.external_effect)
+        {
+            return Err(Box::new(RuntimeError::ExternalEffectFastForward));
+        }
         if live::has_initializers(&enclave) {
             enclave.clock.initialize(std::time::Instant::now());
             live::initialize(&mut enclave, key)?;
@@ -758,6 +792,10 @@ impl Scheduler {
     /// Process the reactions at this tag in increasing order of level.
     ///
     /// Reactions at a level N may trigger further reactions at levels M>N.
+    ///
+    /// # Panics
+    ///
+    /// Panics if reaction execution fails.
     pub fn process_tag(
         &mut self,
         tag: Tag,
@@ -766,7 +804,7 @@ impl Scheduler {
     ) {
         self.core()
             .process_tag(tag, reaction_view, terminal, &[])
-            .expect("live reaction invocation is infallible");
+            .expect("live reaction execution failed");
     }
 
     /// Consume the scheduler and return the `Env` instance.

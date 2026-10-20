@@ -50,7 +50,7 @@ impl<'a> From<&'a mut ReactionTriggerCtxPtrs> for ReactionTriggerCtx<'a> {
 
 impl<'a> ReactionTriggerCtx<'a> {
     /// Trigger the reaction with the given context and state.
-    pub(crate) fn trigger(self, tag: Tag) -> &'a TriggerRes {
+    pub(crate) fn trigger(self, tag: Tag) -> (crate::OutputOutcome, &'a TriggerRes) {
         if let Some(Deadline { deadline, handler }) = self.reaction.deadline.as_ref() {
             let lag = self
                 .context
@@ -73,9 +73,9 @@ impl<'a> ReactionTriggerCtx<'a> {
             actions: self.actions,
         };
 
-        self.reaction.body.trigger(self.context, self.reactor, refs);
+        let output = self.reaction.body.trigger(self.context, self.reactor, refs);
 
-        &self.context.trigger_res
+        (output, &self.context.trigger_res)
     }
 }
 
@@ -423,6 +423,81 @@ pub mod tests {
         .collect();
 
         Store::new(env, contexts, reaction_graph)
+    }
+
+    /// Dropping an explicit outcome in either live closure adapter loses a device failure.
+    #[test]
+    fn output_outcomes_survive_live_adapters_with_scheduled_effects() {
+        use crate::{
+            reaction::FnRefsAdapter,
+            sched::core::{ExecutionStorage, ReactionOutcome},
+            BoxedReactionFn, CommonContext, Duration, OutputFault, OutputOutcome,
+        };
+
+        let expected = OutputOutcome::Failed(OutputFault::Device);
+        let callbacks: [(BoxedReactionFn, OutputOutcome); 4] = [
+            (
+                Box::new(
+                    |ctx: &mut Context, _: &mut dyn BaseReactor, _: ReactionRefs<'_>| {
+                        ctx.schedule_shutdown(Some(Duration::nanoseconds(3)));
+                    },
+                ),
+                OutputOutcome::NotReported,
+            ),
+            (
+                Box::new(
+                    move |ctx: &mut Context, _: &mut dyn BaseReactor, _: ReactionRefs<'_>| {
+                        ctx.schedule_shutdown(Some(Duration::nanoseconds(3)));
+                        expected
+                    },
+                ),
+                expected,
+            ),
+            (
+                Box::new(FnRefsAdapter::new(
+                    (),
+                    |ctx: &mut Context, _: &mut (), ()| {
+                        ctx.schedule_shutdown(Some(Duration::nanoseconds(3)));
+                    },
+                )),
+                OutputOutcome::NotReported,
+            ),
+            (
+                Box::new(FnRefsAdapter::new(
+                    (),
+                    move |ctx: &mut Context, _: &mut (), ()| {
+                        ctx.schedule_shutdown(Some(Duration::nanoseconds(3)));
+                        expected
+                    },
+                )),
+                expected,
+            ),
+        ];
+        let tag = Tag::new(Duration::nanoseconds(7), 2);
+        for (callback, expected) in callbacks {
+            let (mut env, graph) = crate::env::tests::create_dummy_env();
+            let reaction = env.reactions.keys().next().unwrap();
+            env.reactions[reaction].body = callback;
+            let mut store = create_dummy_store(env, &graph);
+            let context = unsafe { store.iter_borrow_storage([reaction].into_iter()) }
+                .next()
+                .unwrap();
+            let (output, effects) = context.trigger(tag);
+            assert_eq!(output, expected);
+            assert_eq!(
+                effects.scheduled_shutdown,
+                Some(Tag::new(Duration::nanoseconds(10), 0))
+            );
+
+            let mut normalized = [ReactionOutcome::default()];
+            let result = store.execute_reactions(&[reaction], tag, &mut normalized);
+            assert_eq!(result.is_ok(), expected == OutputOutcome::NotReported);
+            assert_eq!(normalized[0].output, Some(expected));
+            assert_eq!(
+                normalized[0].scheduled_shutdown,
+                Some(Tag::new(Duration::nanoseconds(10), 0))
+            );
+        }
     }
 
     #[test]

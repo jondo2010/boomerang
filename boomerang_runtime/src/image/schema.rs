@@ -427,6 +427,8 @@ impl PortImage {
 /// An immutable reaction scheduler record.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReactionImage {
+    /// Declared external-effect callback.
+    external_effect: bool,
     /// Dense reactor that owns the reaction.
     reactor: ReactorIndex,
     /// Static execution scope containing the reaction.
@@ -470,7 +472,19 @@ impl ReactionImage {
             actions,
             enabled_modes,
             mode_effect: None,
+            external_effect: false,
         }
+    }
+
+    /// Declares whether the callback performs an external effect.
+    pub const fn with_external_effect(mut self, external_effect: bool) -> Self {
+        self.external_effect = external_effect;
+        self
+    }
+
+    /// Returns whether the callback declares an external effect.
+    pub const fn external_effect(&self) -> bool {
+        self.external_effect
     }
 
     /// Attaches the reaction's canonical compiled mode transition effect.

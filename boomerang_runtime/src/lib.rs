@@ -18,6 +18,7 @@ pub mod input;
 pub mod keepalive;
 mod key_set;
 mod observation;
+pub mod output;
 pub mod port;
 pub mod reaction;
 mod reactor;
@@ -53,6 +54,7 @@ pub use boundary::{
 };
 pub use kanal::{Receiver, Sender};
 pub use key_set::KeySetLimits as ReactionSetLimits;
+pub use output::{OutputFault, OutputOutcome};
 pub use port::{DynPortRef, DynPortRefMut, *};
 pub use reaction::{
     BoxedReactionFn, ConnectionReceiverReactionFn, ConnectionSenderReactionFn, Deadline,
@@ -94,6 +96,17 @@ impl<T: ReactorData> PayloadType<T> {
 
 #[derive(thiserror::Error, Debug)]
 pub enum RuntimeError {
+    /// Fast-forward execution has no physical release rule for direct effects.
+    #[error("external effects require paced execution; fast-forward is unsupported")]
+    ExternalEffectFastForward,
+    /// A callback returned an outcome inconsistent with its declared effect or failed.
+    #[error("reaction {reaction} returned invalid or failed output {output:?}")]
+    OutputContract {
+        /// Executed reaction identity.
+        reaction: ReactionKey,
+        /// Actual result, including a possible partial device failure.
+        output: OutputOutcome,
+    },
     /// Physical-time or microstep conversion exceeded its supported range.
     #[error(transparent)]
     PhysicalClock(#[from] crate::clock::PhysicalClockError),

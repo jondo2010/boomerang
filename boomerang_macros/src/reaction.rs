@@ -287,6 +287,7 @@ impl Model {
         &self,
         tokens: &mut proc_macro2::TokenStream,
         descriptor_slot: Option<proc_macro2::TokenStream>,
+        external_effect: bool,
     ) {
         let name = self.name.as_ref().map_or_else(
             || quote::quote! { None },
@@ -312,6 +313,13 @@ impl Model {
                 .with_descriptor_slot(#descriptor_slot)
             });
         }
+
+        let return_type = if external_effect {
+            reaction.append_all(quote!(.with_external_effect(true)));
+            quote!(::boomerang::runtime::OutputOutcome)
+        } else {
+            quote!(())
+        };
 
         // Add appropriate trigger methods based on trigger type
         for trigger in triggers {
@@ -390,7 +398,7 @@ impl Model {
                     #(mut #trigger_args,)*
                     #(mut #uses_args,)*
                     #(mut #effects_args,)*
-                )| #code
+                )| -> #return_type #code
             )
             .finish()?;
         });
@@ -401,7 +409,7 @@ impl Model {
 
 impl ToTokens for Model {
     fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
-        self.to_tokens_with_descriptor_slot(tokens, None);
+        self.to_tokens_with_descriptor_slot(tokens, None, false);
     }
 }
 

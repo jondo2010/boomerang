@@ -94,6 +94,8 @@ pub(crate) trait Schedule {
 /// One normalized reaction result retained in reusable scheduler scratch.
 #[derive(Debug)]
 pub(crate) struct ReactionOutcome<A, M> {
+    /// Returned output; None means no invocation result was retained for this scratch slot.
+    pub(crate) output: Option<crate::OutputOutcome>,
     /// Typed actions scheduled by the reaction.
     pub(crate) scheduled_actions: Vec<(A, Tag)>,
     /// Earliest shutdown requested by the reaction, if any.
@@ -105,10 +107,21 @@ pub(crate) struct ReactionOutcome<A, M> {
 impl<A, M> Default for ReactionOutcome<A, M> {
     fn default() -> Self {
         Self {
+            output: None,
             scheduled_actions: Vec::new(),
             scheduled_shutdown: None,
             scheduled_mode: None,
         }
+    }
+}
+
+impl<A, M> ReactionOutcome<A, M> {
+    /// Clears reusable scratch before an invocation batch, retaining allocated action capacity.
+    pub(crate) fn clear(&mut self) {
+        self.output = None;
+        self.scheduled_actions.clear();
+        self.scheduled_shutdown = None;
+        self.scheduled_mode = None;
     }
 }
 

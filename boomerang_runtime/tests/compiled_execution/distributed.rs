@@ -322,7 +322,12 @@ fn slice_preserves_codec_and_submission_failures_through_scheduler_cleanup() {
             match error {
                 ExecuteOwnedFederateError::EnclaveExecution { enclave, source } => {
                     assert_eq!(enclave, EnclaveIndex::new(5));
-                    match source {
+                    let OwnedStorageError::AfterReactionOutput { output, source, .. } = source
+                    else {
+                        panic!("expected a retained output with the route failure");
+                    };
+                    assert_eq!(output, boomerang_runtime::OutputOutcome::NotReported);
+                    match *source {
                         OwnedStorageError::ExternalRouteEncoding { boundary, source }
                             if reject_codec =>
                         {

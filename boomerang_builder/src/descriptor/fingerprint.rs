@@ -144,6 +144,7 @@ impl ComponentDescriptor {
         writer.u8(REACTION_SLOTS);
         writer.u64(u64::try_from(self.reaction_slots.len()).expect("slot count exceeds u64"));
         for slot in &self.reaction_slots {
+            writer.u8(u8::from(slot.external_effect));
             writer.slot_id(&slot.id);
             writer.slot_id(&slot.reactor);
         }
@@ -365,6 +366,7 @@ mod tests {
                 reactor: root.clone(),
             }],
             reactions: vec![ReactionSlot {
+                external_effect: false,
                 id: reaction.clone(),
                 reactor: root.clone(),
             }],
@@ -523,6 +525,14 @@ mod tests {
             fingerprint,
             complete_descriptor_with_macro_abi(COMPONENT_DESCRIPTOR_MACRO_ABI + 1).fingerprint(),
         );
+    }
+
+    #[test]
+    fn descriptor_fingerprint_changes_with_external_effect_declaration() {
+        let mut input = complete_descriptor(InputOrder::Forward);
+        let ordinary = input.fingerprint();
+        input.reaction_slots[0].external_effect = true;
+        assert_ne!(ordinary, input.fingerprint());
     }
 
     #[test]

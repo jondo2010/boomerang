@@ -91,6 +91,8 @@ pub struct ActionSlot {
 /// Stable reaction slot owned by one reactor slot.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReactionSlot {
+    /// Whether the reaction performs a declared external effect.
+    pub external_effect: bool,
     /// Stable implementation-local identity.
     pub id: ReactionSlotId,
     /// Owning reactor slot.
@@ -732,6 +734,7 @@ mod tests {
         let descriptor = build_parts(Parts {
             reactors: vec![reactor()],
             reactions: vec![ReactionSlot {
+                external_effect: false,
                 id: relation.reaction.clone(),
                 reactor: root.clone(),
             }],
@@ -798,6 +801,7 @@ mod tests {
         ));
 
         let reaction = ReactionSlot {
+            external_effect: false,
             id: ReactionSlotId::new("Root/reaction").unwrap(),
             reactor: ReactorSlotId::new("Root").unwrap(),
         };
@@ -836,7 +840,7 @@ mod tests {
         dangling!("reactor", reactors: vec![ReactorSlot { capabilities: None, id: ReactorSlotId::new("Root").unwrap(), parent: Some(missing_reactor.clone()) }]);
         dangling!("port", ports: vec![PortSlot { id: PortSlotId::new("Root/p").unwrap(), reactor: missing_reactor.clone(), direction: PortDirection::Input }]);
         dangling!("action", actions: vec![ActionSlot { id: ActionSlotId::new("Root/a").unwrap(), reactor: missing_reactor.clone() }]);
-        dangling!("reaction", reactions: vec![ReactionSlot { id: ReactionSlotId::new("Root/r").unwrap(), reactor: missing_reactor.clone() }]);
+        dangling!("reaction", reactions: vec![ReactionSlot { external_effect: false, id: ReactionSlotId::new("Root/r").unwrap(), reactor: missing_reactor.clone() }]);
         dangling!("mode", modes: vec![ModeSlot { id: ModeSlotId::new("Root/m").unwrap(), reactor: missing_reactor.clone(), parent: None, initial: false }]);
         dangling!("state", states: vec![StateSlot { id: StateSlotId::new("Root/s").unwrap(), reactor: missing_reactor.clone() }]);
         dangling!("mode", modes: vec![ModeSlot { id: ModeSlotId::new("Root/m").unwrap(), reactor: ReactorSlotId::new("Root").unwrap(), parent: Some(ModeSlotId::new("Root/missing").unwrap()), initial: false }]);

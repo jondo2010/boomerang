@@ -86,6 +86,7 @@ pub fn descriptor() -> ComponentDescriptor {
         owners
             .iter()
             .map(|owner| ReactionSlot {
+                external_effect: false,
                 id: ReactionSlotId::new(format!("{owner}/start")).unwrap(),
                 reactor: owner.clone(),
             })

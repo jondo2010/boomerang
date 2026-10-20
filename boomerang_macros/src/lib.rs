@@ -71,6 +71,26 @@ pub fn reactor_ports(
 /// action payload type. Both attributes accept an optional `min_delay = <duration>`, where a
 /// positive duration includes a unit (for example, `10 msec`) and zero may be written as `0`.
 ///
+/// ### Declare external effects
+///
+/// Use `#[reactor(external_effects = [Apply, Stop])]` to declare named reactions
+/// that can operate a device directly. Each name must be local and unique.
+/// These bodies must return `boomerang::runtime::OutputOutcome` on every normal
+/// return path. Return `Unchanged` when no operation is needed, `Committed` after
+/// the binding's declared acceptance point, or `Failed(OutputFault::Device)` on
+/// failure. Commitment proves physical application only when the binding says so.
+/// Ordinary bodies can keep returning `()`, which converts to `NotReported`.
+/// A declared effect cannot return `NotReported`. An ordinary reaction cannot
+/// report an external result without a declaration. The runtime rejects these
+/// invalid reports and fails execution on a reported device failure.
+///
+/// A reactor can declare multiple effects. Each reactor instance has a distinct
+/// boundary. A parent does not inherit child effects. Existing dependencies
+/// order operations; the declaration does not make device operations atomic.
+/// Declared effects require paced execution. Fast-forward is rejected before
+/// invocation. This API does not yet provide completion observers, time closure,
+/// pending operations, or controlled simulator advancement.
+///
 /// ### Using your own `state` struct
 ///
 /// By default the macro will generate a state struct definition for you (e.g., `MyComponentState`) consisting of all

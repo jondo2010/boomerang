@@ -50,6 +50,15 @@ fn descriptor_with_root(
     bounds: DescriptorBounds,
     root: &str,
 ) -> ComponentDescriptor {
+    descriptor_with_external_effects(contract, bounds, root, false)
+}
+
+fn descriptor_with_external_effects(
+    contract: &str,
+    bounds: DescriptorBounds,
+    root: &str,
+    external_effect: bool,
+) -> ComponentDescriptor {
     let reactions = match contract {
         "controller.v1" => [
             "emit",
@@ -114,6 +123,7 @@ fn descriptor_with_root(
         reactions
             .iter()
             .map(|reaction| ReactionSlot {
+                external_effect,
                 id: ReactionSlotId::new(format!("{root}/{reaction}")).unwrap(),
                 reactor: reactor.clone(),
             })

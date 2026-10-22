@@ -137,6 +137,38 @@ impl CargoBuild {
         compilation: &Compilation,
         directives: &mut impl Write,
     ) -> Result<PathBuf, CompilationError> {
+        self.publish(directives, || {
+            if compilation.target() != &self.target {
+                return Err(CompilationError::new(
+                    Stage::Target,
+                    DiagnosticCode::TargetMismatch,
+                    "compilation target context differs from Cargo target context",
+                ));
+            }
+            compilation.compile().map(|output| output.source)
+        })
+    }
+
+    /// Compile target-neutral coordination definitions and publish `OUT_DIR/boomerang.rs`.
+    ///
+    /// The RTI package owns this adapter's target context; no member target is selected.
+    /// Publication, rerun directives, and stale-output removal match [`Self::compile`].
+    pub fn compile_coordination(
+        &self,
+        inputs: crate::DeploymentInputs,
+        directives: &mut impl Write,
+    ) -> Result<PathBuf, CompilationError> {
+        self.publish(directives, || {
+            inputs.compile_coordination().map(|output| output.source)
+        })
+    }
+
+    /// Publish either compilation path with one atomic-write and invalidation policy.
+    fn publish(
+        &self,
+        directives: &mut impl Write,
+        generate: impl FnOnce() -> Result<String, CompilationError>,
+    ) -> Result<PathBuf, CompilationError> {
         let destination = self.output.join("boomerang.rs");
         let result = (|| {
             for file in &self.files {
@@ -145,18 +177,11 @@ impl CargoBuild {
             for name in &self.environment {
                 writeln!(directives, "cargo:rerun-if-env-changed={name}").map_err(io_error)?;
             }
-            if compilation.target() != &self.target {
-                return Err(CompilationError::new(
-                    Stage::Target,
-                    DiagnosticCode::TargetMismatch,
-                    "compilation target context differs from Cargo target context",
-                ));
-            }
-            let output = compilation.compile()?;
+            let source = generate()?;
             fs::create_dir_all(&self.output).map_err(io_error)?;
             if fs::symlink_metadata(&destination)
                 .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
-                && fs::read(&destination).is_ok_and(|previous| previous == output.source.as_bytes())
+                && fs::read(&destination).is_ok_and(|previous| previous == source.as_bytes())
             {
                 return Ok(destination.clone());
             }
@@ -164,9 +189,7 @@ impl CargoBuild {
                 .prefix(".boomerang-")
                 .tempfile_in(&self.output)
                 .map_err(io_error)?;
-            temporary
-                .write_all(output.source.as_bytes())
-                .map_err(io_error)?;
+            temporary.write_all(source.as_bytes()).map_err(io_error)?;
             temporary.as_file().sync_all().map_err(io_error)?;
             temporary
                 .persist(&destination)

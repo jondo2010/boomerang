@@ -20,7 +20,6 @@
 //! byte blob or generate byte-offset identity ranges.
 
 mod fingerprints;
-mod rti;
 mod rust;
 pub(crate) use rust::format_rust;
 
@@ -1125,7 +1124,7 @@ fn require_success(phase: &'static str, output: &Output) -> Result<()> {
 }
 
 /// Bundle protocol identity for the canonical framed channel used by hosted deployments.
-pub(crate) const HOSTED_PROTOCOL: &str = "boomerang.canonical.v1";
+pub(crate) use boomerang_codegen::coordination::HOSTED_PROTOCOL;
 
 /// Validates the selected hosted projection before writing any generated source.
 fn validate_coordination(analyzed: &AnalyzedDeployment) -> Result<bool> {
@@ -1208,38 +1207,14 @@ pub(crate) fn wire_profile(
 fn generated_coordination(
     analyzed: &AnalyzedDeployment,
 ) -> Result<Option<proc_macro2::TokenStream>> {
-    let Some(identity) = coordination_identity(analyzed)? else {
+    if !validate_coordination(analyzed)? {
         return Ok(None);
-    };
-    let image = rti::render_coordination(&analyzed.compiled)?;
-    let bytes = identity.as_bytes().iter();
-    let mapping = fingerprints::mapping(&analyzed.compiled)?;
-    let mapping_bytes = mapping.as_bytes().iter();
-    Ok(Some(quote::quote! {
-        #image
-        /// Shared semantic compatibility claim; local image and artifact claims are distinct.
-        pub const WIRE_COORDINATION_FINGERPRINT: boomerang_federated::wire::CoordinationFingerprint =
-            boomerang_federated::wire::CoordinationFingerprint::new([#(#bytes),*]);
-        const COORDINATION_IDENTITY: boomerang_central_rti::compiled::CoordinationIdentity =
-            WIRE_COORDINATION_FINGERPRINT;
-        /// Exact dense table mapping shared by the closed roster.
-        pub const WIRE_MAPPING: [u8; 32] = [#(#mapping_bytes),*];
-        /// Baseline canonical codec with the declared route profile's encoded-message bound.
-        pub type WirePayloadCodec<T> = boomerang_federated::wire::PostcardCodec<T, {boomerang_federated::wire::MAX_PAYLOAD_BYTES}>;
-        /// Binds portable admission directly to the generated typed RTI image.
-        pub fn wire_contract() -> boomerang_federated::wire::Contract<'static, FederateIndex, RtiRouteIndex, RtiRouteImage<'static>> {
-            boomerang_federated::wire::Contract::new(WIRE_COORDINATION_FINGERPRINT, WIRE_MAPPING,
-                COORDINATION_MEMBERS, *COORDINATION_IMAGE.routes(), |route| (route.source(), route.target()))
-        }
-        /// Creates the exact baseline handshake for a member of the generated roster.
-        pub fn wire_handshake(member: FederateIndex) -> Option<boomerang_federated::wire::Handshake<'static>> {
-            use boomerang_federated::wire::*;
-            COORDINATION_MEMBERS.get(member).map(|member| Handshake {
-                protocol: PROTOCOL_VERSION, codec: CODEC_VERSION, coordination: WIRE_COORDINATION_FINGERPRINT,
-                epoch: 0, incarnation: 0, mapping: WIRE_MAPPING, member,
-            })
-        }
-    }))
+    }
+    boomerang_codegen::coordination::render_definitions(
+        &analyzed.compiled,
+        analyzed.driver.topology(),
+    )
+    .map(Some)
 }
 
 /// Generates the payload-free coordinator only when canonical lowering selects central RTI.
@@ -1282,7 +1257,6 @@ pub(crate) fn generate_analyzed_rti(
     );
     let source = rust::format_rust(quote::quote! {
         use boomerang_runtime::image::*;
-        use tinymap::{TinyMapRef, SliceRange};
         #coordination
         fn main() -> Result<(), Box<dyn std::error::Error>> {
             use std::io::Write;

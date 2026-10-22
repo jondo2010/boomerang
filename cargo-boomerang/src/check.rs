@@ -22,7 +22,7 @@ use crate::{
     ResolvedWorkspace,
 };
 
-pub(crate) const COMPILER_SCHEMA: u32 = 1;
+pub(crate) use boomerang_codegen::coordination::COMPILER_SCHEMA;
 
 /// Runs the complete host-side check pipeline and returns the published report path.
 pub fn check(workspace: impl AsRef<Path>, deployment_name: &str) -> Result<PathBuf> {

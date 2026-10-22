@@ -9,6 +9,7 @@
 //! The default feature set is empty.
 //! Enable `cargo-build` on the build dependency to publish generated source through Cargo's `OUT_DIR`.
 //! The target application requires `boomerang_runtime`, `boomerang_tinymap` under the alias `tinymap`, and its selected component payloads.
+//! Central RTI target packages also require `boomerang_central_rti` and `boomerang_federated`.
 //! Keep `boomerang_builder` and `boomerang_codegen` in build dependencies unless application code uses their APIs directly.
 //!
 //! Use Cargo resolver 2 or newer to isolate build dependencies from normal dependencies.
@@ -136,7 +137,13 @@
 //! [`render::BindingConfiguration`] maps component instances to installed physical source keys and records manual-clock installation.
 //! Install the matching runtime physical-input configuration and clock before execution.
 //! For distributed coordination, `generated_bindings` accepts RTI client bindings and a sink and returns a `Result`.
-//! The application owns coordination images and RTI process startup.
+//! Central RTI compilations also expose immutable coordination tables, identity, codec, and wire admission helpers.
+//! [`DeploymentInputs::compile_coordination`] emits these definitions without local scheduler tables or payload bindings.
+//! This target-neutral API uses the same builder validation and lowering as selected-federate compilation.
+//! Each RTI package owns its Cargo target and toolchain independently from the member targets.
+//! [`coordination::coordination_fingerprint`] identifies shared semantics; local image and artifact fingerprints remain distinct.
+//! The application owns RTI process startup and runtime configuration.
+//! With `cargo-build`, `cargo_build::CargoBuild::compile_coordination` publishes the same fixed `OUT_DIR/boomerang.rs` file.
 //!
 //! # Diagnostics
 //!
@@ -146,6 +153,7 @@
 #[cfg(feature = "cargo-build")]
 pub mod cargo_build;
 mod compilation;
+pub mod coordination;
 mod diagnostic;
 pub mod render;
 pub use compilation::*;

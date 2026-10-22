@@ -29,6 +29,21 @@ pub struct DeploymentInputs {
     pub bindings: Vec<ImplementationBinding>,
 }
 impl DeploymentInputs {
+    /// Compile target-neutral central RTI definitions from explicit deployment inputs.
+    ///
+    /// Builder validation and lowering own deployment semantics.
+    /// Boundary hashing uses the original topology without serialization or discovery.
+    /// This API selects no member target. The RTI package owns its target and toolchain.
+    /// Local coordination returns a render-stage error.
+    pub fn compile_coordination(self) -> Result<CoordinationCompilationOutput, CompilationError> {
+        let topology = self.topology.clone();
+        let name = self.configuration.name.clone();
+        let image = self.lower()?;
+        let tokens = coordination::render_definitions(&image, &topology)
+            .map_err(|e| CompilationError::render(e, &name))?;
+        let source = render::format_rust(tokens).map_err(|e| CompilationError::render(e, &name))?;
+        Ok(CoordinationCompilationOutput { image, source })
+    }
     /// Use the builder's canonical semantic validation, lowering, and image validation.
     pub fn lower(self) -> Result<OwnedCompiledDeployment, CompilationError> {
         let config = self.configuration;
@@ -108,6 +123,14 @@ pub struct CompilationOutput {
     /// Owned, validated deployment image containing all configured federates.
     pub image: OwnedCompiledDeployment,
     /// Formatted Rust tables and binding definitions for the selected federate.
+    pub source: String,
+}
+/// Owned validated deployment image and target-neutral coordination source.
+#[derive(Debug)]
+pub struct CoordinationCompilationOutput {
+    /// Complete validated deployment image used by the mechanical RTI projection.
+    pub image: OwnedCompiledDeployment,
+    /// Formatted coordination tables and wire definitions without payload bindings or execution.
     pub source: String,
 }
 impl Compilation {
@@ -261,8 +284,19 @@ impl Compilation {
             self.configuration.coordination,
             CoordinationSelection::Distributed { .. }
         );
-        let tokens = render::render_definitions(&slice, &selected, &options)
+        let mut tokens = render::render_definitions(&slice, &selected, &options)
             .map_err(|e| CompilationError::render(e, name))?;
+        if image.with_coordination(|projection| {
+            matches!(
+                projection,
+                boomerang_runtime::image::CoordinationProjection::CentralRti(_)
+            )
+        }) {
+            tokens.extend(
+                coordination::render_definitions(&image, &self.topology)
+                    .map_err(|e| CompilationError::render(e, name))?,
+            );
+        }
         let source = render::format_rust(tokens).map_err(|e| CompilationError::render(e, name))?;
         Ok(CompilationOutput { image, source })
     }

@@ -298,3 +298,23 @@ fn physical_source_declarations_change_fingerprint() {
         with_physical_inputs(base, Some(&clock(true, 3))).unwrap()
     );
 }
+
+/// Freezes the legacy canonical digests before their shared implementation moves.
+#[test]
+fn legacy_identity_oracles() {
+    let (topology, _, compiled) = fixture(1, 64, 0, "impl-a");
+    let actual = (
+        mapping(&compiled).unwrap().to_hex().to_string(),
+        coordination(&compiled, &topology)
+            .unwrap()
+            .to_hex()
+            .to_string(),
+    );
+    assert_eq!(
+        actual,
+        (
+            "b31ec155e50da6976eadaadda2be32cbaab89b148dfb1c3e4aef1e223d49546a".to_owned(),
+            "a87f8224897d1828de6c0c772c590a23655480c547570c887f9bbb91a72eacef".to_owned()
+        )
+    );
+}

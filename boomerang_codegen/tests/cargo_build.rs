@@ -141,3 +141,84 @@ fn owned_output_never_follows_an_escaping_symlink() {
         .file_type()
         .is_symlink());
 }
+
+#[path = "common/coordination.rs"]
+mod coordination_fixture;
+
+#[test]
+fn coordination_publication_preserves_bytes_directives_and_invalidates_stale_output() {
+    let inputs = || coordination_fixture::inputs(1, 0, "serde-json", false);
+    let dir = tempfile::tempdir().unwrap();
+    let mut adapter = CargoBuild::from_context(
+        dir.path(),
+        TargetContext::new("aarch64-apple-darwin").unwrap(),
+    )
+    .unwrap();
+    adapter.track_file("topology.rs").unwrap();
+    adapter.track_env("APP_VARIANT").unwrap();
+    fs::write(dir.path().join("unrelated"), "keep").unwrap();
+    let mut directives = Vec::new();
+    let path = adapter
+        .compile_coordination(inputs(), &mut directives)
+        .unwrap();
+    assert_eq!(path, dir.path().join("boomerang.rs"));
+    let source = fs::read(&path).unwrap();
+    let old_time = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+    fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(old_time))
+        .unwrap();
+    adapter
+        .compile_coordination(inputs(), &mut Vec::new())
+        .unwrap();
+    assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), old_time);
+    assert_eq!(fs::read(&path).unwrap(), source);
+    let lines = String::from_utf8(directives).unwrap();
+    for expected in [
+        "cargo:rerun-if-changed=topology.rs",
+        "cargo:rerun-if-env-changed=APP_VARIANT",
+        "cargo:rerun-if-env-changed=TARGET",
+    ] {
+        assert!(lines.lines().any(|line| line == expected));
+    }
+    adapter
+        .compile_coordination(
+            coordination_fixture::inputs(1, 1, "serde-json", false),
+            &mut Vec::new(),
+        )
+        .unwrap();
+    assert_ne!(fs::read(&path).unwrap(), source);
+    let mut invalid = inputs();
+    invalid.bindings.clear();
+    assert!(adapter
+        .compile_coordination(invalid, &mut Vec::new())
+        .is_err());
+    assert!(!path.exists());
+    assert_eq!(
+        fs::read_to_string(dir.path().join("unrelated")).unwrap(),
+        "keep"
+    );
+    adapter
+        .compile_coordination(inputs(), &mut Vec::new())
+        .unwrap();
+    assert_eq!(fs::read(&path).unwrap(), source);
+    assert!(fs::read_dir(dir.path()).unwrap().all(|entry| !entry
+        .unwrap()
+        .file_name()
+        .to_string_lossy()
+        .starts_with(".boomerang-")));
+    fs::remove_file(&path).unwrap();
+    fs::create_dir(&path).unwrap();
+    let mut invalid = inputs();
+    invalid.bindings.clear();
+    let error = adapter
+        .compile_coordination(invalid, &mut Vec::new())
+        .unwrap_err();
+    assert_eq!(error.diagnostic.stage, Stage::Publish);
+    assert_eq!(error.diagnostic.code, DiagnosticCode::Io);
+    assert!(error
+        .to_string()
+        .contains("stale output could not be removed"));
+}

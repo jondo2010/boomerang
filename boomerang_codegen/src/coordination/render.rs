@@ -25,7 +25,8 @@ pub(super) fn render_coordination(compiled: &OwnedCompiledDeployment) -> Result<
         };
         let tables = render_image(&image);
         Ok(quote! {
-            const COORDINATION_MEMBERS: IdentityTable<'static, FederateIndex> =
+            /// Stable member identities in canonical dense order.
+            pub const COORDINATION_MEMBERS: IdentityTable<'static, FederateIndex> =
                 TinyMapRef::from_slice(&[#(#identities),*]);
             #tables
         })
@@ -80,7 +81,8 @@ fn render_image(image: &RtiImage<'_>) -> TokenStream {
     let transport = image.transport_capabilities().values();
     let codec = image.codec_capabilities().values();
     quote! {
-        const COORDINATION_IMAGE: RtiImage<'static> = RtiImage::new(
+        /// Canonical central RTI tables borrowed by startup and wire admission.
+        pub const COORDINATION_IMAGE: RtiImage<'static> = RtiImage::new(
             TinyMapRef::from_slice(&[#(#members),*]),
             &[#(#dependencies),*],
             &[#(#downstream),*],

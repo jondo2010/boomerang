@@ -1128,37 +1128,10 @@ pub(crate) use boomerang_codegen::coordination::HOSTED_PROTOCOL;
 
 /// Validates the selected hosted projection before writing any generated source.
 fn validate_coordination(analyzed: &AnalyzedDeployment) -> Result<bool> {
-    use boomerang_runtime::image::*;
     for federate in analyzed.compiled.federates().values() {
         launcher_capabilities(federate.runtime().as_str())?;
     }
-    analyzed.compiled.with_coordination(|projection| {
-        let image = match projection {
-            CoordinationProjection::Local => return Ok(false),
-            CoordinationProjection::CentralRti(image) => image,
-        };
-        for (key, _) in image.routes().iter() {
-            if image.route_transport_capability(key) != "tcp"
-                || image.route_codec_capability(key) != "serde-json"
-                || image.route_transport_policy(key) != TransportPolicy::ReliableOrderedFramed
-                || image.route_codec_policy(key) != CodecPolicy::CanonicalBounded
-                || image.route_failure_policy(key) != BoundaryFailurePolicy::PropagateStop
-                || image.route_timing_policy(key) != TimingPolicy::BestEffort
-                || image.route_security_policy(key) != SecurityPolicy::None
-            {
-                bail!(
-                    "unsupported generated central-rti boundary configuration for '{}'",
-                    image.route_boundary(key).as_str()
-                );
-            }
-        }
-        for (key, _) in analyzed.compiled.federates().iter() {
-            if image.member_recovery_policy(key) != RecoveryPolicy::FailStop {
-                bail!("unsupported generated central-rti recovery policy");
-            }
-        }
-        Ok(true)
-    })
+    boomerang_codegen::coordination::validate_generated_backend(&analyzed.compiled)
 }
 
 /// Hashes shared boundary contracts and canonical coordination semantics with a protocol domain.

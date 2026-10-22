@@ -140,6 +140,11 @@
 //! Central RTI compilations also expose immutable coordination tables, identity, codec, and wire admission helpers.
 //! [`DeploymentInputs::compile_coordination`] emits these definitions without local scheduler tables or payload bindings.
 //! This target-neutral API uses the same builder validation and lowering as selected-federate compilation.
+//! Both compilation paths reject unsupported generated-backend capabilities before source publication.
+//! The generated central RTI backend requires `tcp` transport and `serde-json` payload capabilities.
+//! It requires reliable ordered framing, canonical bounded codecs, propagated stop, best-effort timing, no security, and fail-stop recovery.
+//! Runtime selection remains application policy; the CLI also validates its launcher runtime support.
+//! [`DeploymentInputs::lower`] and identity hashing remain independent of generated-backend capability restrictions.
 //! Each RTI package owns its Cargo target and toolchain independently from the member targets.
 //! [`coordination::coordination_fingerprint`] identifies shared semantics; local image and artifact fingerprints remain distinct.
 //! The application owns RTI process startup and runtime configuration.

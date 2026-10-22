@@ -6,7 +6,10 @@
 mod render;
 use anyhow::{Context, Result};
 use boomerang_builder::compiler::{ApplicationTopology, OwnedCompiledDeployment};
-use boomerang_runtime::image::{CoordinationProjection, RtiDependencyImage};
+use boomerang_runtime::image::{
+    BoundaryFailurePolicy, CodecPolicy, CoordinationProjection, RecoveryPolicy, RtiDependencyImage,
+    SecurityPolicy, TimingPolicy, TransportPolicy,
+};
 use proc_macro2::TokenStream;
 
 /// Compiler schema included in deployment reports and coordination identity.
@@ -162,6 +165,43 @@ pub fn coordination_fingerprint(
     })
 }
 
+/// Validates the capabilities implemented by generated central RTI definitions and bindings.
+///
+/// Returns `false` for local coordination and `true` for supported central RTI coordination.
+/// The generated backend uses TCP, bounded JSON payloads, and fail-stop recovery.
+/// Unsupported boundary errors retain the stable boundary identity.
+/// Runtime selection and launcher startup restrictions remain the caller's policy.
+/// Generic builder lowering and identity hashing do not call this validator.
+pub fn validate_generated_backend(compiled: &OwnedCompiledDeployment) -> Result<bool> {
+    compiled.with_coordination(|projection| {
+        let image = match projection {
+            CoordinationProjection::Local => return Ok(false),
+            CoordinationProjection::CentralRti(image) => image,
+        };
+        for (key, _) in image.routes().iter() {
+            if image.route_transport_capability(key) != "tcp"
+                || image.route_codec_capability(key) != "serde-json"
+                || image.route_transport_policy(key) != TransportPolicy::ReliableOrderedFramed
+                || image.route_codec_policy(key) != CodecPolicy::CanonicalBounded
+                || image.route_failure_policy(key) != BoundaryFailurePolicy::PropagateStop
+                || image.route_timing_policy(key) != TimingPolicy::BestEffort
+                || image.route_security_policy(key) != SecurityPolicy::None
+            {
+                anyhow::bail!(
+                    "unsupported generated central-rti boundary configuration for '{}'",
+                    image.route_boundary(key).as_str()
+                );
+            }
+        }
+        for (key, _) in compiled.federates().iter() {
+            if image.member_recovery_policy(key) != RecoveryPolicy::FailStop {
+                anyhow::bail!("unsupported generated central-rti recovery policy");
+            }
+        }
+        Ok(true)
+    })
+}
+
 /// Emit immutable central RTI tables, identity, codec, and wire admission definitions.
 ///
 /// The topology supplies boundary contract identities and versions for hashing.
@@ -169,10 +209,12 @@ pub fn coordination_fingerprint(
 /// An internal namespace prevents collisions with scheduler definition imports.
 /// This function emits no scheduler tables, payload bindings, startup, or execution.
 /// Local coordination returns an error.
+/// Unsupported generated-backend capabilities return an error before source emission.
 pub fn render_definitions(
     compiled: &OwnedCompiledDeployment,
     topology: &ApplicationTopology,
 ) -> Result<TokenStream> {
+    validate_generated_backend(compiled)?;
     let image = render::render_coordination(compiled)?;
     let identity = coordination_fingerprint(compiled, topology)?;
     let bytes = identity.as_bytes().iter();

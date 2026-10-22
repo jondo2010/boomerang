@@ -7,34 +7,7 @@ fn inputs() -> DeploymentInputs {
     fixture::inputs(1, 0, "serde-json", false)
 }
 
-fn selected(inputs: DeploymentInputs, member: &str) -> Compilation {
-    let mut compilation = Compilation::new(
-        inputs.topology,
-        inputs.configuration,
-        FederateId::new(member).unwrap(),
-        TargetContext::new("x86_64-unknown-linux-gnu").unwrap(),
-    );
-    for binding in inputs.bindings {
-        compilation
-            .register(
-                binding.implementation().clone(),
-                binding.descriptor().clone(),
-                PayloadExports::new(format!(
-                    "crate::{}::payload",
-                    binding.implementation().as_str().replace('-', "_")
-                ))
-                .unwrap(),
-            )
-            .unwrap();
-        compilation
-            .select(
-                binding.component().clone(),
-                binding.implementation().clone(),
-            )
-            .unwrap();
-    }
-    compilation
-}
+use fixture::selected;
 
 #[test]
 fn independent_members_and_coordinator_share_definitions() {
@@ -191,5 +164,48 @@ fn coordination_only_source_compiles_without_payload_dependencies() {
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn assert_unsupported(inputs: DeploymentInputs, coordinator: bool) {
+    let error = if coordinator {
+        inputs.compile_coordination().unwrap_err()
+    } else {
+        selected(inputs, "a").compile().unwrap_err()
+    };
+    assert_eq!(error.diagnostic.stage, Stage::Render);
+    assert_eq!(error.diagnostic.code, DiagnosticCode::Render);
+    assert_eq!(
+        error.diagnostic.message,
+        "unsupported generated central-rti boundary configuration for 'a-to-b'"
+    );
+}
+
+#[test]
+fn coordinator_rejects_unsupported_codec() {
+    assert_unsupported(fixture::with_capabilities("unsupported-codec", "tcp"), true);
+}
+
+#[test]
+fn coordinator_rejects_unsupported_transport() {
+    assert_unsupported(
+        fixture::with_capabilities("serde-json", "unsupported-transport"),
+        true,
+    );
+}
+
+#[test]
+fn member_rejects_unsupported_codec() {
+    assert_unsupported(
+        fixture::with_capabilities("unsupported-codec", "tcp"),
+        false,
+    );
+}
+
+#[test]
+fn member_rejects_unsupported_transport() {
+    assert_unsupported(
+        fixture::with_capabilities("serde-json", "unsupported-transport"),
+        false,
     );
 }

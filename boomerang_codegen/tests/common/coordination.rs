@@ -142,3 +142,46 @@ pub fn inputs(version: u64, delay: u64, codec: &str, reverse: bool) -> Deploymen
         bindings,
     }
 }
+
+pub fn selected(inputs: DeploymentInputs, member: &str) -> Compilation {
+    let mut compilation = Compilation::new(
+        inputs.topology,
+        inputs.configuration,
+        FederateId::new(member).unwrap(),
+        TargetContext::new("x86_64-unknown-linux-gnu").unwrap(),
+    );
+    for binding in inputs.bindings {
+        compilation
+            .register(
+                binding.implementation().clone(),
+                binding.descriptor().clone(),
+                PayloadExports::new(format!(
+                    "crate::{}::payload",
+                    binding.implementation().as_str().replace('-', "_")
+                ))
+                .unwrap(),
+            )
+            .unwrap();
+        compilation
+            .select(
+                binding.component().clone(),
+                binding.implementation().clone(),
+            )
+            .unwrap();
+    }
+    compilation
+}
+
+pub fn with_capabilities(codec: &str, transport: &str) -> DeploymentInputs {
+    let mut inputs = inputs(1, 0, codec, false);
+    let boundary = &inputs.configuration.boundaries[0];
+    inputs.configuration.boundaries[0] = BoundaryBinding::new(
+        boundary.boundary().clone(),
+        boundary.flow().clone(),
+        boundary.physical().clone(),
+        boundary.codec().clone(),
+        TransportCapabilityId::new(transport).unwrap(),
+        boundary.policies().clone(),
+    );
+    inputs
+}

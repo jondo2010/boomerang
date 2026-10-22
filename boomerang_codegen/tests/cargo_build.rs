@@ -222,3 +222,42 @@ fn coordination_publication_preserves_bytes_directives_and_invalidates_stale_out
         .to_string()
         .contains("stale output could not be removed"));
 }
+
+#[test]
+fn unsupported_native_capabilities_invalidate_member_and_coordinator_publication() {
+    for (codec, transport) in [
+        ("unsupported-codec", "tcp"),
+        ("serde-json", "unsupported-transport"),
+    ] {
+        for coordinator in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let adapter = CargoBuild::from_context(dir.path(), target()).unwrap();
+            let path = dir.path().join("boomerang.rs");
+            fs::write(&path, "stale success").unwrap();
+            fs::write(dir.path().join("unrelated"), "keep").unwrap();
+            let invalid = coordination_fixture::with_capabilities(codec, transport);
+            let error = if coordinator {
+                adapter
+                    .compile_coordination(invalid, &mut Vec::new())
+                    .unwrap_err()
+            } else {
+                adapter
+                    .compile(
+                        &coordination_fixture::selected(invalid, "a"),
+                        &mut Vec::new(),
+                    )
+                    .unwrap_err()
+            };
+            assert_eq!(error.diagnostic.stage, Stage::Render);
+            assert!(error.to_string().contains("a-to-b"));
+            assert!(
+                !path.exists(),
+                "unsupported capabilities retained stale source"
+            );
+            assert_eq!(
+                fs::read_to_string(dir.path().join("unrelated")).unwrap(),
+                "keep"
+            );
+        }
+    }
+}

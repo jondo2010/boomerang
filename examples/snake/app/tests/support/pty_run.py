@@ -94,8 +94,24 @@ def exercise(command):
         receive_until(lambda data: (8, 8) in head_positions(data), "initial game frame")
         raw = termios.tcgetattr(slave)
         assert not raw[3] & (termios.ECHO | termios.ICANON | termios.ISIG), "terminal is not raw"
+        receive_until(
+            lambda data: any(
+                row == 8 and column > 8 for row, column in head_positions(data)
+            ),
+            "rightward movement before input",
+        )
+        observed_frames = len(head_positions(bytes(output)))
+
+        def turned_up(data):
+            """Accept upward movement after any intervening rightward frames."""
+            positions = head_positions(data)[observed_frames - 1:]
+            return any(
+                next_row == row - 1 and next_column == column
+                for (row, column), (next_row, next_column) in zip(positions, positions[1:])
+            )
+
         os.write(master, b"\x1b[A")
-        receive_until(lambda data: (7, 8) in head_positions(data), "Up-arrow turn")
+        receive_until(turned_up, "Up-arrow turn")
         os.write(master, b"\x03")
         receive_until(lambda data: b"Game over! Your score was:" in data, "shutdown score")
         if exit_code is None:

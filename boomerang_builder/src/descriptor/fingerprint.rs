@@ -538,9 +538,7 @@ mod tests {
         assert_eq!(decoded.fingerprint(), EXPECTED_V1);
 
         let mut invalid: serde_json::Value = serde_json::from_slice(&wire).unwrap();
-        let reactors = invalid["canonical"]["reactor_slots"]
-            .as_array_mut()
-            .unwrap();
+        let reactors = invalid["reactor_slots"].as_array_mut().unwrap();
         reactors.push(reactors[0].clone());
         let error = serde_json::from_value::<ComponentDescriptor>(invalid).unwrap_err();
         assert!(

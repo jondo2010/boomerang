@@ -307,6 +307,7 @@ pub enum DescriptorBuildError {
 
 /// Canonically ordered, validated structural descriptor for one component implementation.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "host-interchange", derive(Serialize))]
 pub struct ComponentDescriptor {
     /// Stable external contract identity.
     contract_id: ContractId,
@@ -339,53 +340,6 @@ pub struct ComponentDescriptor {
 }
 
 #[cfg(feature = "host-interchange")]
-impl Serialize for ComponentDescriptor {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        // Preserve the host interchange envelope independently of the in-memory representation.
-        #[derive(Serialize)]
-        struct Canonical<'a> {
-            contract_id: &'a ContractId,
-            contract_version: &'a u64,
-            macro_abi: &'a u32,
-            reactor_slots: &'a [ReactorSlot],
-            port_slots: &'a [PortSlot],
-            action_slots: &'a [ActionSlot],
-            reaction_slots: &'a [ReactionSlot],
-            mode_slots: &'a [ModeSlot],
-            state_slots: &'a [StateSlot],
-            codec_slots: &'a [CodecSlot],
-            relationships: &'a [DescriptorRelationship],
-            placement_groups: &'a [DescriptorPlacementGroup],
-            enclaves: &'a [DescriptorEnclave],
-            bounds: &'a DescriptorBounds,
-        }
-        #[derive(Serialize)]
-        struct Envelope<'a> {
-            canonical: Canonical<'a>,
-        }
-        Envelope {
-            canonical: Canonical {
-                contract_id: &self.contract_id,
-                contract_version: &self.contract_version,
-                macro_abi: &self.macro_abi,
-                reactor_slots: &self.reactor_slots,
-                port_slots: &self.port_slots,
-                action_slots: &self.action_slots,
-                reaction_slots: &self.reaction_slots,
-                mode_slots: &self.mode_slots,
-                state_slots: &self.state_slots,
-                codec_slots: &self.codec_slots,
-                relationships: &self.relationships,
-                placement_groups: &self.placement_groups,
-                enclaves: &self.enclaves,
-                bounds: &self.bounds,
-            },
-        }
-        .serialize(serializer)
-    }
-}
-
-#[cfg(feature = "host-interchange")]
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct UncheckedDescriptor {
@@ -406,18 +360,11 @@ struct UncheckedDescriptor {
 }
 
 #[cfg(feature = "host-interchange")]
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct UncheckedComponentDescriptor {
-    canonical: UncheckedDescriptor,
-}
-
-#[cfg(feature = "host-interchange")]
 impl<'de> serde::Deserialize<'de> for ComponentDescriptor {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         use serde::de::Error;
 
-        let unchecked = UncheckedComponentDescriptor::deserialize(deserializer)?.canonical;
+        let unchecked = UncheckedDescriptor::deserialize(deserializer)?;
         Self::try_new(
             unchecked.contract_id,
             unchecked.contract_version,

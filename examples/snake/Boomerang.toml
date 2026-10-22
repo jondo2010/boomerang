@@ -6,8 +6,8 @@ entry = "snake::topology"
 
 [deployments.snake]
 telemetry = "hosted"
-bindings.snake = { package = "snake-game", component = "game" }
-bindings.keyboard = { package = "snake-keyboard", component = "keyboard" }
+bindings.snake = { package = "snake-game", component = "game", features = ["hosted"] }
+bindings.keyboard = { package = "snake-keyboard", component = "keyboard", features = ["hosted"] }
 
 federates.host = { groups = [
     "placement/keyboard",

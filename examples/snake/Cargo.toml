@@ -7,7 +7,12 @@ edition.workspace = true
 license.workspace = true
 readme = "README.md"
 
+[features]
+default = ["hosted"]
+hosted = ["boomerang/hosted", "snake-game/hosted", "snake-keyboard/hosted"]
+metadata = ["boomerang/hosted", "snake-game/metadata", "snake-keyboard/metadata"]
+
 [dependencies]
-boomerang = { workspace = true }
-snake-game = { path = "game" }
-snake-keyboard = { path = "keyboard" }
+boomerang = { path = "../../boomerang", default-features = false }
+snake-game = { path = "game", default-features = false }
+snake-keyboard = { path = "keyboard", default-features = false }

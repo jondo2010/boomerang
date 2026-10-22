@@ -5,6 +5,7 @@ use snake_keyboard::{display, keyboard};
 
 use boomerang::builder::compiler::{ApplicationTopology, TopologyAuthoringError, TopologyBuilder};
 
+/// Connect the keyboard and game in separate local placement groups.
 pub fn topology() -> Result<ApplicationTopology, TopologyAuthoringError> {
     let mut app = TopologyBuilder::new("application/keyboard/snake")?;
     let keyboard_enclave = app.enclave("keyboard")?;
@@ -17,6 +18,7 @@ pub fn topology() -> Result<ApplicationTopology, TopologyAuthoringError> {
     app.finish()
 }
 
+/// Connect the keyboard and arrow display in one placement group.
 pub fn keyboard_topology() -> Result<ApplicationTopology, TopologyAuthoringError> {
     let mut app = TopologyBuilder::new("application/display/keyboard")?;
     let enclave = app.enclave("keyboard")?;

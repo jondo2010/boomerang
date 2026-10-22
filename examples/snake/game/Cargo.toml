@@ -5,7 +5,13 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
+[features]
+default = ["hosted"]
+hosted = ["boomerang/hosted", "dep:rand"]
+metadata = ["boomerang/hosted"]
+payload = ["dep:rand"]
+
 [dependencies]
-boomerang = { path = "../../../boomerang" }
+boomerang = { path = "../../../boomerang", default-features = false }
 crossterm = "0.29"
-rand = "0.9"
+rand = { version = "0.9", optional = true }

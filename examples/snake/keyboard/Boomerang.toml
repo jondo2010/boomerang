@@ -5,8 +5,8 @@ package = "snake"
 entry = "snake::keyboard_topology"
 
 [deployments.keyboard]
-bindings.keyboard = { package = "snake-keyboard", component = "keyboard" }
-bindings.display = { package = "snake-keyboard", component = "display" }
+bindings.keyboard = { package = "snake-keyboard", component = "keyboard", features = ["hosted"] }
+bindings.display = { package = "snake-keyboard", component = "display", features = ["hosted"] }
 
 federates.host = { groups = [
     "placement/keyboard",

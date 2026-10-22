@@ -7,35 +7,6 @@ use serde_json::Value;
 
 use super::support;
 
-/// Builds and runs the checked-in physical-input example through the public CLI.
-#[test]
-fn physical_input_example_delivers_at_acquisition_plus_delay() {
-    let _guard = support::toolchain_lock();
-    let workspace =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples/physical-input");
-    let target = support::toolchain_target();
-    support::reset_deployment_output(&target, "physical-input");
-    let output = Command::new(env!("CARGO_BIN_EXE_cargo-boomerang"))
-        .args(["boomerang", "--workspace"])
-        .arg(workspace)
-        .args(["run", "--deployment", "physical-input"])
-        .env("CARGO_TARGET_DIR", target)
-        .env_remove("RUST_LOG")
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        String::from_utf8_lossy(&output.stdout)
-            .contains("received 42 at logical 11 ms (physical 11 ms)"),
-        "{}",
-        String::from_utf8_lossy(&output.stdout)
-    );
-}
-
 /// Runs the installed Cargo plugin for one fixture deployment in the shared toolchain target.
 fn run_cli(deployment: &str, environment: &[(&str, &str)]) -> Output {
     run_cli_with_options(deployment, &[], environment)

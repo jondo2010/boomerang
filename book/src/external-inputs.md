@@ -322,7 +322,7 @@ contains a component, deployment, and worker guard.
 Run this command from the repository root:
 
 ```sh
-cargo run -p cargo-boomerang -- boomerang --workspace examples/physical-input run --deployment physical-input
+cargo run -p physical-input
 ```
 
 Expected output:

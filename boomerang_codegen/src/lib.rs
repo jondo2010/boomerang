@@ -27,7 +27,7 @@
 //! From the repository root, run:
 //!
 //! ```sh
-//! cargo run --manifest-path boomerang_codegen/tests/fixtures/native/Cargo.toml --locked --offline
+//! cargo run --manifest-path boomerang_codegen/tests/fixtures/native/Cargo.toml --locked
 //! ```
 //!
 //! # Compilation contract

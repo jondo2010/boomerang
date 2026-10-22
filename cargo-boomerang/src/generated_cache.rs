@@ -49,8 +49,10 @@ impl RequestIdentity {
         manifest: &str,
         role: GeneratedRole,
     ) -> Result<(String, String)> {
-        // Keep the complete digest without descriptive prefixes that exceed MSVC object paths.
-        let binary = format!("{}{}", role.prefix(), self.lowercase_hex());
+        // rustc repeats the crate name in object filenames. Keep this artifact
+        // label short; immutable source paths and cache records retain the full
+        // request identity, and Cargo artifacts are matched by exact package ID.
+        let binary = format!("{}{}", role.prefix(), &self.lowercase_hex()[..32]);
         let mut manifest: toml::Table = toml::from_str(manifest)?;
         manifest["package"]
             .as_table_mut()
@@ -720,7 +722,7 @@ mod tests {
     #[test]
     fn generated_binary_names_leave_room_for_windows_linker_objects() {
         let identity = RequestIdentity(blake3::hash(b"binary identity"));
-        let deps = r"D:\a\boomerang\boomerang\target\tmp\cargo-boomerang-builds\toolchain\toolchain\b\stf69bf08eb5384f34f41fb9183d65caed\x86_64-pc-windows-msvc\debug\deps\";
+        let target = r"D:\a\_temp\boomerang-builds\toolchain\toolchain\b\stf69bf08eb5384f34f41fb9183d65caed\x86_64-pc-windows-msvc";
         let mut names = BTreeSet::new();
         for role in [
             GeneratedRole::Topology,
@@ -730,19 +732,23 @@ mod tests {
             let (manifest, name) = identity
                 .binary_manifest(std::str::from_utf8(MANIFEST).unwrap(), role)
                 .unwrap();
-            let object = format!(
-                "{deps}{}.0123456789abcdef-cgu.0.rcgu.o",
-                name.replace('-', "_")
-            );
-            assert!(
-                object.len() < 260,
-                "Windows object path is {} characters: {object}",
-                object.len()
-            );
-            assert!(
-                name.contains(&identity.lowercase_hex()),
-                "retain the complete request digest: {name}"
-            );
+            for profile in ["debug", "release"] {
+                let deps = format!(r"{target}\{profile}\deps");
+                // rustc repeats the crate name in non-incremental object files.
+                // The Cargo disambiguator and codegen-unit suffix both matter.
+                let stem = format!("{deps}\\{name}-0123456789abcdef");
+                for artifact in [
+                    format!("{stem}.{name}.fedcba9876543210-cgu.255.rcgu.o"),
+                    format!("{stem}.exe"),
+                    format!("{stem}.pdb"),
+                ] {
+                    assert!(
+                        artifact.len() < 260,
+                        "Windows artifact path is {} characters: {artifact}",
+                        artifact.len()
+                    );
+                }
+            }
             assert!(names.insert(name.clone()));
             let manifest: toml::Table = toml::from_str(&manifest).unwrap();
             assert_eq!(manifest["bin"][0]["name"].as_str(), Some(name.as_str()));

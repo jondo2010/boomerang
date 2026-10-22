@@ -682,7 +682,7 @@ fn launcher_request_identity(
     inputs.sort();
 
     let mut identity = RequestIdentityBuilder::new(GeneratedRole::Launcher);
-    identity.field("binary-name-format", Some(b"role-full-request-v1"));
+    identity.field("binary-name-format", Some(b"role-short-request-v2"));
     identity.field("facet", Some(b"payload"));
     identity.field(
         "facet-wrapper",

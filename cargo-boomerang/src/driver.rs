@@ -308,7 +308,7 @@ fn host_request_identity(
     wrapper_semantics: &[u8],
 ) -> RequestIdentity {
     let mut identity = RequestIdentityBuilder::new(role);
-    identity.field("binary-name-format", Some(b"role-full-request-v1"));
+    identity.field("binary-name-format", Some(b"role-short-request-v2"));
     identity.field("facet-wrapper", Some(wrapper_semantics));
     identity.field("manifest", Some(manifest));
     identity.field("source", Some(source));

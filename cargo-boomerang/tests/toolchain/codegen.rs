@@ -74,7 +74,7 @@ fn generated_single_federate_launcher_executes_typed_local_route_without_builder
     assert_eq!(
         quote::quote!(#federate_view).to_string(),
         quote::quote! {
-            static FEDERATE_VIEW: FederateImageView<'static> =
+            pub static FEDERATE_VIEW: FederateImageView<'static> =
                 match FederateImageView::new(FEDERATE_IMAGE, &ENCLAVE_IMAGES,) {
                     Ok(view) => view,
                     Err(_) => panic!("invalid generated Federate image"),

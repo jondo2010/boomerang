@@ -1,0 +1,250 @@
+use crate::{
+    render::{self, BindingConfiguration},
+    *,
+};
+use boomerang_builder::{compiler::*, ComponentDescriptor};
+use std::collections::{btree_map::Entry, BTreeMap};
+
+/// Explicit deployment choices, shared by native applications and CLI discovery.
+#[derive(Debug, Clone)]
+pub struct DeploymentConfiguration {
+    pub name: String,
+    pub placements: Vec<PlacementAssignment>,
+    pub federates: Vec<FederateConfig>,
+    pub coordination: CoordinationSelection,
+    pub boundaries: Vec<BoundaryBinding>,
+}
+/// Builder-owned topology and resolved implementation selections. No discovery policy.
+pub struct DeploymentInputs {
+    pub topology: ApplicationTopology,
+    pub configuration: DeploymentConfiguration,
+    pub bindings: Vec<ImplementationBinding>,
+}
+impl DeploymentInputs {
+    /// Use the builder's canonical semantic validation, lowering, and image validation.
+    pub fn lower(self) -> Result<OwnedCompiledDeployment, CompilationError> {
+        let config = self.configuration;
+        let resolved = ResolvedDeployment::new(
+            self.topology,
+            self.bindings,
+            config.placements,
+            config.federates,
+            config.coordination,
+            config.boundaries,
+        )
+        .map_err(|e| CompilationError::resolve(e, &config.name))?;
+        let image = resolved
+            .lower()
+            .map_err(|e| CompilationError::lower(e, &config.name))?;
+        image.validate().map_err(|e| {
+            CompilationError::new(Stage::Validate, DiagnosticCode::Validate, e.to_string())
+                .deployment(&config.name)
+                .cause(e)
+        })?;
+        Ok(image)
+    }
+}
+/// Target facts supplied by the caller; never inferred from host `cfg!` values.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetContext {
+    triple: TargetTriple,
+    cfg: BTreeMap<String, String>,
+}
+impl TargetContext {
+    pub fn new(triple: impl AsRef<str>) -> Result<Self, CompilationError> {
+        let triple = TargetTriple::new(triple.as_ref()).map_err(|e| {
+            CompilationError::new(Stage::Target, DiagnosticCode::InvalidInput, e.to_string())
+                .cause(e)
+        })?;
+        Ok(Self {
+            triple,
+            cfg: BTreeMap::new(),
+        })
+    }
+    pub fn triple(&self) -> &TargetTriple {
+        &self.triple
+    }
+    /// Captured `CARGO_CFG_*` facts. Interpretation remains the application's policy.
+    pub fn cfg(&self) -> &BTreeMap<String, String> {
+        &self.cfg
+    }
+    #[cfg(feature = "cargo-build")]
+    pub(crate) fn with_cfg(mut self, cfg: BTreeMap<String, String>) -> Self {
+        self.cfg = cfg;
+        self
+    }
+}
+/// Explicit pure compilation request. Registration and selection are separate operations.
+#[derive(Debug)]
+pub struct Compilation {
+    topology: ApplicationTopology,
+    configuration: DeploymentConfiguration,
+    federate: FederateId,
+    target: TargetContext,
+    registrations: BTreeMap<ImplementationId, ComponentRegistration>,
+    selections: BTreeMap<ComponentInstanceId, ImplementationId>,
+    bindings: BindingConfiguration,
+}
+/// Owned validated image and generated Rust for the selected federate.
+#[derive(Debug)]
+pub struct CompilationOutput {
+    pub image: OwnedCompiledDeployment,
+    pub source: String,
+}
+impl Compilation {
+    pub fn new(
+        topology: ApplicationTopology,
+        configuration: DeploymentConfiguration,
+        federate: FederateId,
+        target: TargetContext,
+    ) -> Self {
+        Self {
+            topology,
+            configuration,
+            federate,
+            target,
+            registrations: BTreeMap::new(),
+            selections: BTreeMap::new(),
+            bindings: BindingConfiguration::default(),
+        }
+    }
+    pub fn target(&self) -> &TargetContext {
+        &self.target
+    }
+    /// Configure capability source keys and whether the application installs a manual clock.
+    /// Distributed mode is derived from deployment coordination; the application owns startup.
+    pub fn binding_configuration(&mut self, configuration: BindingConfiguration) {
+        self.bindings = configuration;
+    }
+    pub fn register(
+        &mut self,
+        implementation: ImplementationId,
+        descriptor: ComponentDescriptor,
+        payload: PayloadExports,
+    ) -> Result<(), CompilationError> {
+        match self.registrations.entry(implementation.clone()) {
+            Entry::Vacant(entry) => {
+                entry.insert(ComponentRegistration {
+                    descriptor,
+                    payload,
+                });
+                Ok(())
+            }
+            Entry::Occupied(_) => Err(CompilationError::new(
+                Stage::Registration,
+                DiagnosticCode::DuplicateRegistration,
+                format!("duplicate implementation '{implementation}'"),
+            )
+            .deployment(&self.configuration.name)
+            .implementation(&implementation)),
+        }
+    }
+    pub fn select(
+        &mut self,
+        component: ComponentInstanceId,
+        implementation: ImplementationId,
+    ) -> Result<(), CompilationError> {
+        match self.selections.entry(component.clone()) {
+            Entry::Vacant(entry) => {
+                entry.insert(implementation);
+                Ok(())
+            }
+            Entry::Occupied(_) => Err(CompilationError::new(
+                Stage::Registration,
+                DiagnosticCode::DuplicateSelection,
+                format!("duplicate selection for '{component}'"),
+            )
+            .deployment(&self.configuration.name)
+            .component(&component)
+            .implementation(&implementation)),
+        }
+    }
+    /// Compile with no filesystem, environment, process, or publication effects.
+    pub fn compile(&self) -> Result<CompilationOutput, CompilationError> {
+        let name = &self.configuration.name;
+        let federate = self
+            .configuration
+            .federates
+            .iter()
+            .find(|f| f.id() == &self.federate)
+            .ok_or_else(|| {
+                CompilationError::new(
+                    Stage::Target,
+                    DiagnosticCode::MissingTarget,
+                    format!("missing federate '{}'", self.federate),
+                )
+                .deployment(name)
+            })?;
+        if federate.target() != self.target.triple() {
+            return Err(CompilationError::new(
+                Stage::Target,
+                DiagnosticCode::TargetMismatch,
+                format!(
+                    "federate '{}' targets '{}' but target context is '{}'",
+                    self.federate,
+                    federate.target(),
+                    self.target.triple()
+                ),
+            )
+            .deployment(name));
+        }
+        let mut bindings = Vec::new();
+        let mut selected = BTreeMap::new();
+        for (component, implementation) in &self.selections {
+            let registration = self.registrations.get(implementation).ok_or_else(|| {
+                CompilationError::new(
+                    Stage::Registration,
+                    DiagnosticCode::MissingRegistration,
+                    format!("component '{component}' selects unregistered implementation '{implementation}'"),
+                )
+                .deployment(name)
+                .component(component)
+                .implementation(implementation)
+            })?;
+            bindings.push(ImplementationBinding::new(
+                component.clone(),
+                implementation.clone(),
+                registration.descriptor.clone(),
+            ));
+            selected.insert(implementation.clone(), registration.clone());
+        }
+        let image = DeploymentInputs {
+            topology: self.topology.clone(),
+            configuration: self.configuration.clone(),
+            bindings,
+        }
+        .lower()?;
+        let (index, _) = image
+            .federates()
+            .iter()
+            .find(|(_, f)| f.id() == &self.federate)
+            .expect("validated federate selection");
+        let slice = image.federate_slice(index).map_err(|e| {
+            CompilationError::new(Stage::Render, DiagnosticCode::Render, e.to_string())
+                .deployment(name)
+                .cause(e)
+        })?;
+        // Only selected local implementations appear in this target's compatibility checks.
+        selected.retain(|id, _| {
+            slice
+                .enclaves()
+                .iter()
+                .flat_map(|e| e.required_bindings().iter())
+                .any(|b| match b {
+                    RequiredBinding::State { implementation, .. }
+                    | RequiredBinding::Reaction { implementation, .. }
+                    | RequiredBinding::Port { implementation, .. }
+                    | RequiredBinding::Action { implementation, .. } => implementation == id,
+                })
+        });
+        let mut options = self.bindings.clone();
+        options.distributed = matches!(
+            self.configuration.coordination,
+            CoordinationSelection::Distributed { .. }
+        );
+        let tokens = render::render_definitions(&slice, &selected, &options)
+            .map_err(|e| CompilationError::render(e, name))?;
+        let source = render::format_rust(tokens).map_err(|e| CompilationError::render(e, name))?;
+        Ok(CompilationOutput { image, source })
+    }
+}

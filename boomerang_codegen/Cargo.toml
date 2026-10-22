@@ -1,0 +1,26 @@
+[package]
+name = "boomerang_codegen"
+description = "Pure host compiler and Rust generation for Cargo-native Boomerang applications"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+cargo-build = ["dep:tempfile"]
+
+[dependencies]
+anyhow.workspace = true
+boomerang_builder = { workspace = true, features = ["descriptor-fingerprint"] }
+boomerang_runtime.workspace = true
+tinymap.workspace = true
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "3", features = ["full"] }
+prettyplease = "0.3"
+tempfile = { workspace = true, optional = true }
+
+[dev-dependencies]
+boomerang.workspace = true
+tempfile.workspace = true

@@ -11,7 +11,7 @@ use boomerang_builder::compiler::{
     BoundaryBinding, BoundaryId, BoundaryPolicies, CodecCapabilityId, CoordinationSelection,
     FederateConfig, FederateId, FlowId, ImplementationBinding, OwnedCompiledDeployment,
     PhysicalBoundaryId, PhysicalBoundaryMetadata, PlacementAssignment, PlacementGroupId,
-    ResolvedDeployment, RuntimeBackendId, TargetTriple, TransportCapabilityId,
+    RuntimeBackendId, TargetTriple, TransportCapabilityId,
 };
 use serde::{Deserialize, Serialize};
 
@@ -76,12 +76,7 @@ pub(crate) fn analyze(
         Phase::Validating,
         format_args!("deployment '{deployment_name}'"),
     )?;
-    let compiled = deployment
-        .lower()
-        .context("failed to lower resolved deployment")?;
-    compiled
-        .validate()
-        .context("failed to validate compiled deployment")?;
+    let compiled = deployment.lower()?;
     Ok(AnalyzedDeployment {
         resolved,
         driver,
@@ -93,7 +88,7 @@ pub(crate) fn analyze(
 fn build_resolved_deployment(
     resolved: &ResolvedWorkspace,
     driver: &DriverOutput,
-) -> Result<ResolvedDeployment> {
+) -> Result<boomerang_codegen::DeploymentInputs> {
     let bindings = driver.bindings().iter().map(|binding| {
         ImplementationBinding::new(
             binding.component().clone(),
@@ -170,15 +165,17 @@ fn build_resolved_deployment(
         })
         .collect::<Result<Vec<_>>>()?;
 
-    ResolvedDeployment::new(
-        driver.topology().clone(),
-        bindings,
-        placements,
-        federates,
-        coordination,
-        boundary_bindings,
-    )
-    .context("failed to resolve deployment selections")
+    Ok(boomerang_codegen::DeploymentInputs {
+        topology: driver.topology().clone(),
+        bindings: bindings.collect(),
+        configuration: boomerang_codegen::DeploymentConfiguration {
+            name: resolved.deployment_name().to_owned(),
+            placements,
+            federates,
+            coordination,
+            boundaries: boundary_bindings,
+        },
+    })
 }
 
 /// Versioned, deterministic result of a successful deployment check.

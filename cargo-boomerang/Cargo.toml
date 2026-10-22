@@ -19,7 +19,6 @@ cargo-config2.workspace = true
 fs2.workspace = true
 humantime.workspace = true
 clap = { version = "4.2", features = ["derive"] }
-prettyplease = "0.3"
 proc-macro2 = "1"
 quote = "1"
 serde = { workspace = true, features = ["derive"] }
@@ -33,6 +32,7 @@ tracing-bounded.workspace = true
 tracing-core.workspace = true
 syn = { version = "3", features = ["full"] }
 # Boomerang deps
+boomerang_codegen.workspace = true
 boomerang_builder = { workspace = true, features = [
     "descriptor-fingerprint",
     "host-interchange",

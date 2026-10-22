@@ -1,0 +1,25 @@
+[package]
+name = "codegen-native-consumer"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[features]
+default = ["payload"]
+payload = []
+missing-export = []
+fingerprint-mismatch = []
+abi-mismatch = []
+
+[dependencies]
+boomerang = { path = "../../../../boomerang", default-features = false }
+boomerang_runtime = { path = "../../../../boomerang_runtime" }
+tinymap = { package = "boomerang_tinymap", path = "../../../../boomerang_tinymap" }
+
+[build-dependencies]
+boomerang = { path = "../../../../boomerang" }
+boomerang_builder = { path = "../../../../boomerang_builder" }
+boomerang_codegen = { path = "../../..", features = ["cargo-build"] }
+
+[workspace]
+resolver = "2"

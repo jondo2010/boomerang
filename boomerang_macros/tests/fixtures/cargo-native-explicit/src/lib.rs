@@ -44,6 +44,7 @@ fn payload_preserves_owned_implementation_and_actual_compatibility() {
 pub type ParentValue = u32;
 #[derive(Debug)]
 pub struct ParentState {
+    /// Parent-module value retained by the relative-path payload state constructor.
     pub value: ParentValue,
 }
 fn initialize_parent() -> ParentState {

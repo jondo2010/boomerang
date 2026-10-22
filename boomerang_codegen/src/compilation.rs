@@ -8,16 +8,24 @@ use std::collections::{btree_map::Entry, BTreeMap};
 /// Explicit deployment choices, shared by native applications and CLI discovery.
 #[derive(Debug, Clone)]
 pub struct DeploymentConfiguration {
+    /// Deployment label attached to compilation diagnostics.
     pub name: String,
+    /// Assignments from stable placement-group identities to stable federate identities.
     pub placements: Vec<PlacementAssignment>,
+    /// Target, runtime backend, and recovery policy for each stable federate identity.
     pub federates: Vec<FederateConfig>,
+    /// Local or distributed coordination policy validated by the builder.
     pub coordination: CoordinationSelection,
+    /// Bindings from stable logical boundary identities to deployment transport capabilities.
     pub boundaries: Vec<BoundaryBinding>,
 }
 /// Builder-owned topology and resolved implementation selections. No discovery policy.
 pub struct DeploymentInputs {
+    /// Target-neutral application structure in stable component and slot identities.
     pub topology: ApplicationTopology,
+    /// Explicit deployment policy applied during builder resolution.
     pub configuration: DeploymentConfiguration,
+    /// Resolved component-instance selections with their implementation identities and descriptors.
     pub bindings: Vec<ImplementationBinding>,
 }
 impl DeploymentInputs {
@@ -47,7 +55,9 @@ impl DeploymentInputs {
 /// Target facts supplied by the caller; never inferred from host `cfg!` values.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TargetContext {
+    /// Application target triple checked against the selected federate's configured target.
     triple: TargetTriple,
+    /// Captured `CARGO_CFG_*` names and values retained without host-side interpretation.
     cfg: BTreeMap<String, String>,
 }
 impl TargetContext {
@@ -77,18 +87,27 @@ impl TargetContext {
 /// Explicit pure compilation request. Registration and selection are separate operations.
 #[derive(Debug)]
 pub struct Compilation {
+    /// Owned target-neutral application structure supplied to builder resolution.
     topology: ApplicationTopology,
+    /// Explicit deployment choices shared by all federates in the compiled image.
     configuration: DeploymentConfiguration,
+    /// Stable identity of the federate selected for Rust source generation.
     federate: FederateId,
+    /// Caller-supplied target facts checked before builder lowering.
     target: TargetContext,
+    /// Host descriptors and target export paths keyed by semantic implementation identity.
     registrations: BTreeMap<ImplementationId, ComponentRegistration>,
+    /// Explicit mapping from stable component-instance identity to registered implementation identity.
     selections: BTreeMap<ComponentInstanceId, ImplementationId>,
+    /// Application-installed runtime capabilities used by the generated binding constructor.
     bindings: BindingConfiguration,
 }
 /// Owned validated image and generated Rust for the selected federate.
 #[derive(Debug)]
 pub struct CompilationOutput {
+    /// Owned, validated deployment image containing all configured federates.
     pub image: OwnedCompiledDeployment,
+    /// Formatted Rust tables and binding definitions for the selected federate.
     pub source: String,
 }
 impl Compilation {

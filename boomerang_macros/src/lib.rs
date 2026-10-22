@@ -194,12 +194,14 @@ pub fn timer(s: proc_macro::TokenStream) -> proc_macro::TokenStream {
 ///
 /// The module must contain exactly one root `#[reactor]` declaration. Helper
 /// items remain ordinary owning-crate code and are omitted in metadata builds.
-/// The invoking package's additive `metadata` and `payload` features select compiled APIs in
-/// `module::__boomerang::{metadata,payload}`. Both may coexist; neither preserves hosted behavior.
-/// Metadata also provides `module::definition()` typed topology constructors. Declare these
-/// features in the component package and gate implementation-only dependencies behind payload.
-/// Use resolver 2 or newer to isolate build dependencies. For build scripts, prefer the explicit
-/// [`component_metadata!`] entry point so package payload features cannot select implementation.
+/// The invoking package's additive `metadata` and `payload` features select APIs in `module::__boomerang::{metadata,payload}`.
+/// Both features can coexist.
+/// Without either feature or legacy facet selection, the macro emits hosted APIs.
+/// Metadata also provides typed topology constructors through `module::definition()`.
+/// Declare these features in the component package.
+/// Gate implementation-only dependencies behind `payload`.
+/// Use resolver 2 or newer to isolate build dependencies.
+/// Use [`component_metadata!`] in build scripts to select metadata independently of package payload features.
 /// Code outside the declaration must follow the same host/target isolation rules.
 /// Legacy `boomerang_facet` selection remains supported, but cannot be mixed with public features.
 /// Root attributes other than documentation are rejected; put conditional and lint
@@ -217,16 +219,18 @@ pub fn component(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
 ///
 /// Accepts the same declaration as [`component!`], independently of package features.
 /// Parses but omits implementation imports, helper items, state initializers, and reaction bodies.
-/// Access the descriptor through `module::__boomerang::metadata::descriptor()` and construct
-/// topology with `module::definition()`. Structural port types must be host-available, using
-/// fully qualified paths for types supplied by portable dependencies. Implementation imports
-/// inside the declaration are intentionally omitted. Metadata requires `boomerang/hosted`;
-/// payload-only normal dependencies may use `default-features = false`.
+/// Access the descriptor through `module::__boomerang::metadata::descriptor()`.
+/// Construct topology with `module::definition()`.
+/// Structural port types must be available on the host.
+/// Use fully qualified paths for types from portable dependencies.
+/// Metadata emission omits implementation imports inside the declaration.
+/// Metadata requires `boomerang/hosted`.
+/// Use `default-features = false` for payload-only normal dependencies that require no hosted APIs.
 ///
 /// A shared source macro can invoke this entry point from a build script and
 /// [`component_payload!`] from the target. Explicit emission does not inspect package features.
-/// Do not invoke both entry points for the same module in one compilation; use [`component!`]
-/// with both package features or distinct enclosing modules.
+/// Do not invoke both entry points for the same module in one compilation.
+/// To emit both APIs, use [`component!`] with both package features or use distinct enclosing modules.
 ///
 /// ```
 /// use boomerang::component_metadata;
@@ -257,8 +261,8 @@ pub fn component_metadata(input: proc_macro::TokenStream) -> proc_macro::TokenSt
 
 /// Emits target payload bindings from the same inline declaration as [`component_metadata!`].
 ///
-/// Keeps implementation items in their owning module. Compatibility is derived from declaration
-/// semantics and exposed by `module::__boomerang::payload::binding_manifest()` without CLI inputs.
+/// Keeps implementation items in their owning module.
+/// The declaration determines compatibility information in `module::__boomerang::payload::binding_manifest()` without CLI inputs.
 /// This entry point selects payload even when the invoking package enables metadata features.
 #[proc_macro_error2::proc_macro_error]
 #[proc_macro]

@@ -1032,7 +1032,9 @@ enum PayloadEmission {
 /// Native definitions stay in the declaration's lexical scope. Stable public binding names are
 /// reexported from the nested namespace, preserving `self::`/`super::` paths without rewriting them.
 struct PayloadSymbols {
+    /// Selects owning-module definitions with stable public aliases for native emission.
     native: bool,
+    /// Public reexports that map implementation-local names to stable payload binding symbols.
     aliases: Vec<TokenStream>,
 }
 impl PayloadSymbols {
@@ -1050,7 +1052,9 @@ impl PayloadSymbols {
 
 /// Keep owning-module implementation declarations separate from the public binding namespace.
 struct PayloadOutput {
+    /// State types, capability contexts, and implementation definitions emitted in their owning scope.
     declarations: TokenStream,
+    /// Compatibility manifest and binding symbols emitted in the public payload namespace.
     exports: TokenStream,
 }
 impl PayloadOutput {
@@ -1422,6 +1426,7 @@ impl ArgsModel {
         // name of the generated Ports struct
         let ports_name = format_ident!("{name}Ports");
 
+        let reactor_name = ident_text(name);
         let state_args = args
             .iter()
             .filter_map(
@@ -1431,7 +1436,13 @@ impl ArgsModel {
                      name,
                      ty,
                  }| match kind {
-                    ArgKind::State { default: _ } => Some(quote! { #docs pub #name: #ty }),
+                    ArgKind::State { default: _ } => {
+                        let field_doc = format!(
+                            "State slot `{reactor_name}/{}` owned by this reactor instance.",
+                            ident_text(&name.ident)
+                        );
+                        Some(quote! { #[doc = #field_doc] #docs pub #name: #ty })
+                    }
                     _ => None,
                 },
             )
@@ -1707,7 +1718,16 @@ impl ArgsModel {
                             }
                         };
 
-                        Some(quote! { #docs pub #name: #field_ty })
+                        let direction = if matches!(kind, ArgKind::Input { .. }) {
+                            "input"
+                        } else {
+                            "output"
+                        };
+                        let field_doc = format!(
+                            "Typed {direction} port handle for `{reactor_name}/{}` owned by this reactor instance.",
+                            ident_text(&name.ident)
+                        );
+                        Some(quote! { #[doc = #field_doc] #docs pub #name: #field_ty })
                     }
                     _ => None,
                 },

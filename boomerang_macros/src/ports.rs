@@ -138,8 +138,15 @@ impl ToTokens for Model {
                 PortType::Output => quote!(::boomerang::builder::Output),
             };
 
+            let direction = match port_type {
+                PortType::Input => "input",
+                PortType::Output => "output",
+            };
+            let field_doc = format!(
+                "Typed {direction} port handle `{ident}` for connections to this reactor instance."
+            );
             // Determine if this is an array type and handle appropriately
-            match ty {
+            let declaration = match ty {
                 syn::Type::Array(array) => {
                     let element_type = &array.elem;
                     let len_expr = &array.len;
@@ -151,7 +158,8 @@ impl ToTokens for Model {
                 _ => {
                     quote!(#vis #ident: ::boomerang::builder::TypedPortKey<#ty, #dir, ::boomerang::builder::Contained>)
                 }
-            }
+            };
+            quote!(#[doc = #field_doc] #declaration)
         });
 
         // Generate implementation details as before

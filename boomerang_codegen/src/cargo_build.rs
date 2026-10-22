@@ -1,8 +1,9 @@
-//! Optional Cargo build-script integration. No nested Cargo invocation or discovery.
+//! Cargo build-script integration for the [crate-level workflow](crate).
 //!
-//! Construct with [`CargoBuild::from_env`], declare all files and environment variables
-//! used to construct your topology, and call [`CargoBuild::compile`] with stdout.
-//! The fixed output filename is `boomerang.rs`; applications include it under a module.
+//! Construct the adapter with [`CargoBuild::from_env`].
+//! Declare topology inputs with [`CargoBuild::track_file`] and [`CargoBuild::track_env`].
+//! Pass build-script stdout to [`CargoBuild::compile`] for Cargo rerun directives.
+//! Include `OUT_DIR/boomerang.rs` in an application module.
 use crate::{Compilation, CompilationError, DiagnosticCode, Stage, TargetContext};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -14,13 +15,19 @@ use std::{
 /// Owns only `OUT_DIR/boomerang.rs` and temporary files created for its publication.
 #[derive(Debug)]
 pub struct CargoBuild {
+    /// Cargo output directory that owns the final source file and publication temporaries.
     output: PathBuf,
+    /// Captured target triple and Cargo configuration facts required by the compilation.
     target: TargetContext,
+    /// Declared topology input paths emitted through Cargo rerun directives.
     files: BTreeSet<String>,
+    /// Target and application environment names emitted through Cargo rerun directives.
     environment: BTreeSet<String>,
 }
 impl CargoBuild {
-    /// Capture Cargo's target facts and output directory. Missing TARGET is an error.
+    /// Capture Cargo's target facts and output directory.
+    ///
+    /// Both `TARGET` and `OUT_DIR` are required.
     pub fn from_env() -> Result<Self, CompilationError> {
         let values = std::env::vars_os()
             .filter_map(|(key, value)| {
@@ -118,9 +125,13 @@ impl CargoBuild {
         self.environment.insert(name.into());
         Ok(())
     }
-    /// Compile, then atomically publish complete source. Identical bytes preserve mtime.
-    /// Any failure invalidates prior success output; unrelated OUT_DIR files survive.
-    /// Pass `&mut std::io::stdout()` from build.rs to emit Cargo rerun directives.
+    /// Compile the deployment and atomically publish complete source as `boomerang.rs`.
+    ///
+    /// The compilation must contain the adapter's complete target context.
+    /// Identical bytes preserve the final file's modification time.
+    /// On failure, remove prior final output. Return a publication error if removal fails.
+    /// Preserve unrelated files in `OUT_DIR`.
+    /// Pass `&mut std::io::stdout()` from `build.rs` to emit Cargo rerun directives.
     pub fn compile(
         &self,
         compilation: &Compilation,

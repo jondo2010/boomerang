@@ -33,18 +33,27 @@ pub enum DiagnosticCode {
 /// Stable compilation context independent of CLI presentation.
 #[derive(Debug, Clone)]
 pub struct Diagnostic {
+    /// Compiler or publication stage that produced the failure.
     pub stage: Stage,
+    /// Machine-readable classification independent of the diagnostic message.
     pub code: DiagnosticCode,
+    /// Caller-supplied deployment label, when the failing operation has deployment context.
     pub deployment: Option<String>,
+    /// Stable component-instance identity associated with the failure, when available.
     pub component: Option<ComponentInstanceId>,
+    /// Semantic implementation identity associated with the failure, when available.
     pub implementation: Option<ImplementationId>,
+    /// Failing runtime binding or logical boundary description, when available.
     pub binding: Option<String>,
+    /// Human-readable failure detail for display alongside the structured context.
     pub message: String,
 }
 /// Structured context plus the original builder or I/O error where available.
 #[derive(Debug)]
 pub struct CompilationError {
+    /// Owned structured diagnostic exposed to library callers and presentation adapters.
     pub diagnostic: Box<Diagnostic>,
+    /// Original builder, rendering, or I/O error retained for the error source chain.
     source: Option<Box<dyn std::error::Error + Send + Sync>>,
 }
 impl CompilationError {

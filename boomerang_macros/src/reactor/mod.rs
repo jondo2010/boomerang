@@ -9,9 +9,12 @@ use syn::{
 
 use crate::util::convert_from_snake_case;
 
+pub(crate) mod emission;
 mod init_context;
 mod semantic;
 mod topology;
+
+pub(crate) use emission::ComponentEmission;
 
 /// Top-level arguments for the `#[reactor]` macro.
 #[derive(attribute_derive::FromAttr)]
@@ -1360,14 +1363,6 @@ impl Parse for Model {
 
 pub struct ArgsModel(pub ReactorArgs, pub Model, pub bool);
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ComponentEmission {
-    Legacy,
-    Features,
-    Metadata,
-    Payload,
-}
-
 impl ToTokens for ArgsModel {
     fn to_tokens(&self, tokens: &mut TokenStream) {
         self.to_tokens_with_emission(tokens, ComponentEmission::Legacy);
@@ -1384,6 +1379,7 @@ impl ArgsModel {
             tokens.append_all(error.to_compile_error());
             return;
         }
+        let selection = emission::SelectionPolicy::new(emission);
         let descriptor = semantic::parse_descriptor(&self.0, &self.1);
         let descriptor_contents = match &descriptor {
             Ok(Some(descriptor)) => semantic::emit_descriptor(descriptor),
@@ -1403,9 +1399,6 @@ impl ArgsModel {
             topology::output(&self.0, &self.1)
         } else {
             TokenStream::new()
-        };
-        let conflict_output = quote! {
-            compile_error!("boomerang_facet cannot select both descriptor and payload");
         };
         let Self(
             reactor_args,
@@ -1551,10 +1544,7 @@ impl ArgsModel {
         } else {
             None
         };
-        let payload_output = if matches!(
-            emission,
-            ComponentEmission::Legacy | ComponentEmission::Features
-        ) {
+        let payload_output = if selection.needs_legacy_payload() {
             self::payload_output(
                 reactor_args,
                 &self.1,
@@ -1575,7 +1565,7 @@ impl ArgsModel {
         let PayloadOutput {
             declarations: native_payload_output,
             exports: native_payload_exports,
-        } = if emission != ComponentEmission::Legacy {
+        } = if selection.needs_native_payload() {
             self::payload_output(
                 reactor_args,
                 &self.1,
@@ -1929,132 +1919,23 @@ impl ArgsModel {
                 return;
             }
         };
-        let facet_module = format_ident!("__boomerang_facets_for_{name}");
-        let legacy_output = quote! {
-            #[allow(non_snake_case, unexpected_cfgs)]
-            mod #facet_module {
-                #[cfg(not(any(boomerang_facet = "descriptor", boomerang_facet = "payload")))]
-                macro_rules! hosted { ($($tokens:tt)*) => { $($tokens)* }; }
-                #[cfg(any(boomerang_facet = "descriptor", boomerang_facet = "payload"))]
-                macro_rules! hosted { ($($tokens:tt)*) => {} }
-                pub(super) use hosted;
-
-                #[cfg(all(boomerang_facet = "descriptor", not(boomerang_facet = "payload")))]
-                macro_rules! descriptor { ($($tokens:tt)*) => { $($tokens)* }; }
-                #[cfg(not(all(boomerang_facet = "descriptor", not(boomerang_facet = "payload"))))]
-                macro_rules! descriptor { ($($tokens:tt)*) => {} }
-                pub(super) use descriptor;
-
-                #[cfg(all(boomerang_facet = "descriptor", boomerang_facet = "payload"))]
-                macro_rules! conflict { ($($tokens:tt)*) => { $($tokens)* }; }
-                #[cfg(not(all(boomerang_facet = "descriptor", boomerang_facet = "payload")))]
-                macro_rules! conflict { ($($tokens:tt)*) => {} }
-                pub(super) use conflict;
-
-                #[cfg(all(boomerang_facet = "payload", not(boomerang_facet = "descriptor")))]
-                macro_rules! payload { ($($tokens:tt)*) => { $($tokens)* }; }
-                #[cfg(not(all(boomerang_facet = "payload", not(boomerang_facet = "descriptor"))))]
-                macro_rules! payload { ($($tokens:tt)*) => {} }
-                pub(super) use payload;
-            }
-
-            #facet_module::hosted! { #capability_declaration #output #topology_output }
-            #facet_module::descriptor! { #descriptor_output }
-            #facet_module::payload! { #payload_output }
-            #facet_module::conflict! { #conflict_output }
-        };
         let metadata_contents = if matches!(&descriptor, Ok(None)) {
             quote!(compile_error!("compiled component requires contract and contract_version metadata");)
         } else {
             descriptor_contents
         };
-        match emission {
-            ComponentEmission::Legacy => tokens.append_all(legacy_output),
-            ComponentEmission::Metadata => tokens.append_all(quote! {
-                pub mod __boomerang { pub mod metadata { #metadata_contents } }
-                #topology_output
-            }),
-            ComponentEmission::Payload => tokens.append_all(quote! {
-                #native_payload_output
-                pub mod __boomerang { pub mod payload {
-                    #[allow(unused_imports)]
-                    use super::super::*;
-                    #native_payload_exports
-                } }
-            }),
-            ComponentEmission::Features => {
-                let no_facets = quote!(not(any(
-                    boomerang_facet = "descriptor",
-                    boomerang_facet = "payload"
-                )));
-                let legacy = selected(
-                    name,
-                    "legacy",
-                    quote!(not(any(feature = "metadata", feature = "payload"))),
-                    legacy_output,
-                );
-                let payload = selected(
-                    name,
-                    "native_payload",
-                    quote!(all(#no_facets, feature = "payload")),
-                    native_payload_output,
-                );
-                let metadata = selected(
-                    name,
-                    "native_metadata",
-                    quote!(all(#no_facets, feature = "metadata")),
-                    topology_output,
-                );
-                let namespace = selected(
-                    name,
-                    "native_namespace",
-                    quote!(all(#no_facets, any(feature = "metadata", feature = "payload"))),
-                    quote! {
-                        pub mod __boomerang {
-                            #[cfg(feature = "metadata")]
-                            pub mod metadata { #metadata_contents }
-                            #[cfg(feature = "payload")]
-                            pub mod payload {
-                                #[allow(unused_imports)]
-                                use super::super::*;
-                                #native_payload_exports
-                            }
-                        }
-                    },
-                );
-                let conflict = selected(
-                    name,
-                    "native_conflict",
-                    quote!(all(not(#no_facets), any(feature = "metadata", feature = "payload"))),
-                    quote! {
-                        compile_error!("cannot combine boomerang_facet with component metadata/payload features");
-                    },
-                );
-                tokens.append_all(quote!(#legacy #payload #metadata #namespace #conflict));
-            }
-        }
-    }
-}
-
-/// Delay item expansion until rustc has selected the invoking package's features. Suppressing
-/// tokens with a macro also suppresses name resolution and implementation-only attributes.
-fn selected(
-    reactor: &Ident,
-    suffix: &str,
-    condition: TokenStream,
-    output: TokenStream,
-) -> TokenStream {
-    let selector = format_ident!("__boomerang_select_{}_{}", reactor, suffix);
-    quote! {
-        #[allow(non_snake_case, unexpected_cfgs)]
-        mod #selector {
-            #[cfg(#condition)]
-            macro_rules! emit { ($($tokens:tt)*) => { $($tokens)* }; }
-            #[cfg(not(#condition))]
-            macro_rules! emit { ($($tokens:tt)*) => {} }
-            pub(super) use emit;
-        }
-        #selector::emit! { #output }
+        tokens.append_all(selection.output(
+            name,
+            emission::ReactorOutput {
+                hosted: quote!(#capability_declaration #output #topology_output),
+                legacy_descriptor: descriptor_output,
+                legacy_payload: payload_output,
+                native_metadata: metadata_contents,
+                topology: topology_output,
+                native_payload: native_payload_output,
+                native_payload_exports,
+            },
+        ));
     }
 }
 

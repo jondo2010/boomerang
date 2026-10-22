@@ -13,6 +13,7 @@ pub fn expand(
             "component! requires an inline module",
         ));
     };
+    let selection = crate::reactor::emission::SelectionPolicy::new(emission);
     let mut reactor_found = false;
     let mut output = Vec::new();
     for item in items {
@@ -60,13 +61,13 @@ pub fn expand(
                     .to_tokens_with_emission(&mut reactor_output, emission);
                 output.push(reactor_output);
             } else {
-                output.push(helper(function.into_token_stream(), emission));
+                output.push(selection.helper(function.into_token_stream()));
             }
         } else if matches!(item, syn::Item::Use(_)) {
             // Imports used by hosted reactor expansion may disappear in payload mode.
-            output.push(helper(quote!(#[allow(unused_imports)] #item), emission));
+            output.push(selection.helper(quote!(#[allow(unused_imports)] #item)));
         } else {
-            output.push(helper(item.into_token_stream(), emission));
+            output.push(selection.helper(item.into_token_stream()));
         }
     }
     if !reactor_found {
@@ -89,23 +90,4 @@ pub fn expand(
             #(#output)*
         }
     })
-}
-
-fn helper(item: TokenStream, emission: crate::reactor::ComponentEmission) -> TokenStream {
-    use crate::reactor::ComponentEmission;
-    match emission {
-        ComponentEmission::Metadata => TokenStream::new(),
-        ComponentEmission::Payload => item,
-        ComponentEmission::Features => quote! {
-            #[cfg(any(
-                all(not(any(boomerang_facet = "descriptor", boomerang_facet = "payload")), feature = "payload"),
-                all(not(any(feature = "metadata", feature = "payload")), not(boomerang_facet = "descriptor"))
-            ))]
-            #item
-        },
-        ComponentEmission::Legacy => quote! {
-            #[cfg(not(boomerang_facet = "descriptor"))]
-            #item
-        },
-    }
 }

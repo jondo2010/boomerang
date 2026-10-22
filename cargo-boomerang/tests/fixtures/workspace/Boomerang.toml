@@ -12,9 +12,11 @@ features = ["simulated"]
 [deployments.production.bindings.controller]
 package = "vehicle-control"
 component = "controller"
+features = ["hosted"]
 [deployments.production.bindings.backup]
 package = "vehicle-control"
 component = "controller"
+features = ["hosted"]
 
 [deployments.production.federates.host]
 groups = ["placement/backup", "placement/controller", "placement/sensor"]
@@ -22,7 +24,7 @@ runtime = "std"
 recovery = "fail-stop"
 
 [deployments.sensor-slice]
-bindings = { sensor = { package = "sensor-host", component = "sensor", features = ["simulated", "natural-quiescence"] }, controller = { package = "vehicle-control", component = "controller" }, backup = { package = "vehicle-control", component = "controller" } }
+bindings = { sensor = { package = "sensor-host", component = "sensor", features = ["simulated", "natural-quiescence"] }, controller = { package = "vehicle-control", component = "controller", features = ["hosted"] }, backup = { package = "vehicle-control", component = "controller", features = ["hosted"] } }
 federates = { host = { groups = ["placement/backup", "placement/controller"], runtime = "std", recovery = "fail-stop" }, sensor = { groups = ["placement/sensor"], runtime = "std", recovery = "fail-stop", cargo-config = ".cargo/sensor-slice.toml" } }
 coordination = { backend = "central-rti" }
 rti = { target = "aarch64-unknown-linux-gnu" }

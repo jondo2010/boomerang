@@ -24,6 +24,12 @@ boomerang::component! {
                     assert_eq!(*command, Some(42));
                     #[cfg(feature = "runtime-failure")]
                     std::process::exit(42);
+                    #[cfg(feature = "timing-check")]
+                    {
+                        assert_eq!(ctx.get_tag().offset(), Duration::milliseconds(1));
+                        println!("sensor received command 42 at logical 1000000 ns");
+                    }
+                    #[cfg(not(feature = "timing-check"))]
                     println!("sensor received command 42");
                     #[cfg(not(feature = "natural-quiescence"))]
                     {

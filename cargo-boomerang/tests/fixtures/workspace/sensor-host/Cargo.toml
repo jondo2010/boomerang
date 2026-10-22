@@ -4,12 +4,17 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-simulated = []
-runtime-failure = []
+default = ["hosted"]
+hosted = ["boomerang/hosted"]
+metadata = ["boomerang/hosted"]
+payload = []
+simulated = ["hosted"]
+runtime-failure = ["hosted"]
 natural-quiescence = []
+timing-check = []
 
 [dependencies]
-boomerang = { path = "../../../../../boomerang" }
+boomerang = { path = "../../../../../boomerang", default-features = false }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(boomerang_facet, values("descriptor", "payload"))'] }

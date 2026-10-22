@@ -108,14 +108,6 @@ pub(crate) fn run_resolved_descriptor_driver(
     })
 }
 
-fn host_program_name(role: GeneratedRole) -> &'static str {
-    match role {
-        GeneratedRole::Topology => "boomerang-topology-driver",
-        GeneratedRole::Descriptor => "boomerang-descriptor-driver",
-        GeneratedRole::Launcher => unreachable!("target launchers use their own build path"),
-    }
-}
-
 fn run_host_stage(
     resolved: &ResolvedWorkspace,
     role: GeneratedRole,
@@ -179,16 +171,24 @@ fn build_host_program(
         &cargo_program,
         compiler_wrapper::CACHE_SEMANTICS,
     );
+    let compiler_wrappers = CompilerWrappers::resolve(application_workspace, None)?;
+    let (manifest, binary_name) = identity.binary_manifest(&generated_source.manifest, role)?;
     let request = GeneratedWorkspaceRequest {
         role,
         identity,
-        manifest: generated_source.manifest.as_bytes(),
+        compilation_identity: crate::generated_cache::compilation_identity(
+            role,
+            &cargo_program,
+            wrapper,
+            compiler_wrappers.rustc_wrapper(),
+        )
+        .finish(),
+        manifest: manifest.as_bytes(),
         source: generated_source.main.as_bytes(),
         source_lockfile: &resolved.lockfile().path,
         source_lock_digest: &resolved.lockfile().digest,
     };
     let log = std::cell::RefCell::new(String::new());
-    let compiler_wrappers = CompilerWrappers::resolve(application_workspace, None)?;
     let facet = if role == GeneratedRole::Descriptor {
         Facet::Descriptor
     } else {
@@ -256,12 +256,8 @@ fn build_host_program(
         let diagnostics = rendered_compiler_diagnostics(&build.stdout)?;
         retain_cargo_diagnostics(&mut log.borrow_mut(), &build, &diagnostics, output);
         require_success("build", &build, &log.borrow())?;
-        let (executable, count) = descriptor_artifact(
-            &build,
-            &package,
-            &generated.manifest_path(),
-            host_program_name(role),
-        )?;
+        let (executable, count) =
+            descriptor_artifact(&build, &package, &generated.manifest_path(), &binary_name)?;
         let (private, executable) = copy_private_artifact(&executable, target)?;
         Ok((executable, count, Some(private)))
     })?;
@@ -312,6 +308,7 @@ fn host_request_identity(
     wrapper_semantics: &[u8],
 ) -> RequestIdentity {
     let mut identity = RequestIdentityBuilder::new(role);
+    identity.field("binary-name-format", Some(b"role-full-request-v1"));
     identity.field("facet-wrapper", Some(wrapper_semantics));
     identity.field("manifest", Some(manifest));
     identity.field("source", Some(source));

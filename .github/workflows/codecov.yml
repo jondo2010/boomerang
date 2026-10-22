@@ -69,11 +69,12 @@ jobs:
         shell: bash
         run: |
           # Generated workspaces fall outside cargo-llvm-cov's object discovery.
-          # Use Cargo outputs; publication tests deliberately corrupt bundled copies.
+          # Collect every request-specific Cargo executable, not published copies:
+          # publication tests deliberately corrupt some bundled executables.
           objects=()
           while IFS= read -r -d '' launcher; do
             objects+=("-object=$launcher")
-          done < <(find target/llvm-cov-target/tmp -path '*/b/*' -type f -name boomerang-static-launcher -print0)
+          done < <(find target/llvm-cov-target/tmp -path '*/b/*/deps/l[0-9a-f]*-*' -type f -perm /111 -print0)
           test "${#objects[@]}" -gt 0
           LLVM_COV_FLAGS="${objects[*]}" cargo llvm-cov report --lcov --output-path lcov.info
 

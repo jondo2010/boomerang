@@ -92,6 +92,10 @@ fn generated_single_federate_launcher_executes_typed_local_route_without_builder
     let first_executable = std::fs::read(first.executable_path()).unwrap();
     let second = launcher.build_locked_offline().unwrap();
     assert_eq!(second.compiled_artifacts(), 0);
+    assert_eq!(
+        first.target_crates().collect::<Vec<_>>(),
+        second.target_crates().collect::<Vec<_>>()
+    );
     assert_ne!(second.executable_path(), first.executable_path());
     assert_eq!(
         blake3::hash(&std::fs::read(second.executable_path()).unwrap()),
@@ -100,13 +104,48 @@ fn generated_single_federate_launcher_executes_typed_local_route_without_builder
 
     launcher.run_locked_offline().unwrap();
     launcher.check_locked_offline().unwrap();
-    let payload_crates = support::launcher_payload_crates(first.executable_path());
+    let payload_crates = support::launcher_payload_crates(&first);
     for present in ["boomerang_runtime", "sensor_host", "vehicle_control"] {
         assert!(payload_crates.contains(present), "{payload_crates:?}");
     }
     assert!(
         !payload_crates.contains("boomerang_builder"),
         "{payload_crates:?}"
+    );
+
+    // Different generated code must reuse dependencies without running the wrong binary.
+    let _variant = support::fixture_variant("cache-variant", "production", |deployment| {
+        deployment.as_table_mut().unwrap().insert(
+            "execution".into(),
+            toml::toml! { fast-forward = true }.into(),
+        );
+    });
+    let variant = support::with_target_directory(target.path(), || {
+        cargo_boomerang::generate_launcher(&workspace, "cache-variant", "host").unwrap()
+    });
+    assert_ne!(launcher.source_path(), variant.source_path());
+    let variant_build = variant.build_locked_offline().unwrap();
+    assert!(variant_build.compiled_artifacts() < first.compiled_artifacts());
+    assert_ne!(
+        blake3::hash(&std::fs::read(variant_build.executable_path()).unwrap()),
+        blake3::hash(&first_executable),
+    );
+    variant.run_locked_offline().unwrap();
+    let revisited = launcher.build_locked_offline().unwrap();
+    assert_eq!(
+        blake3::hash(&std::fs::read(revisited.executable_path()).unwrap()),
+        blake3::hash(&first_executable),
+    );
+    assert_eq!(
+        std::fs::read(first.executable_path()).unwrap(),
+        first_executable
+    );
+    launcher.run_locked_offline().unwrap();
+    eprintln!(
+        "shared compilation artifacts: cold={}, variant={}, revisited={}",
+        first.compiled_artifacts(),
+        variant_build.compiled_artifacts(),
+        revisited.compiled_artifacts()
     );
 }
 
@@ -204,7 +243,7 @@ fn generated_launcher_rejects_unsupported_coordination_before_publication() {
         assert!(
             !target
                 .path()
-                .join("boomerang/generated/v1/launcher")
+                .join("boomerang/generated/v2/launcher")
                 .exists(),
             "{selection} wrote a generated launcher before validating coordination"
         );

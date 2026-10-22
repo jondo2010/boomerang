@@ -140,6 +140,7 @@ federates.host = { groups = ["placement/source"], runtime = "std", recovery = "f
         String::from_utf8_lossy(&lock.stderr)
     );
     let target = support::toolchain_target().join("named-components");
+    support::reset_deployment_output(&target, "demo");
     support::with_target_directory(&target, || {
         let bundle = cargo_boomerang::build(root, "demo").unwrap();
         let document: serde_json::Value =

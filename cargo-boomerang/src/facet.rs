@@ -15,6 +15,11 @@ pub(crate) struct CompilerWrappers {
 }
 
 impl CompilerWrappers {
+    /// Wrapper hidden from Cargo's compiler command when Boomerang chains it.
+    pub(crate) fn rustc_wrapper(&self) -> Option<&Path> {
+        self.rustc.as_deref()
+    }
+
     /// Resolves Cargo's hierarchy and environment, then applies an optional
     /// file-valued `--config` wrapper with Cargo's CLI precedence.
     pub(crate) fn resolve(cwd: &Path, explicit: Option<&Path>) -> Result<Self> {

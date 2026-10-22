@@ -62,7 +62,7 @@ jobs:
             toolchain: nightly
 
     runs-on: ${{ matrix.os }}
-    # The full toolchain suite builds fresh payload and descriptor fixtures.
+    # The full toolchain suite builds payload/descriptor fixtures with shared compilation caches.
     timeout-minutes: ${{ matrix.os == 'ubuntu-latest' && matrix.toolchain == 'stable' && 60 || 30 }}
 
     steps:
@@ -113,7 +113,7 @@ jobs:
 
       - name: discard disposable fixture builds before caching
         shell: bash
-        # Each test binary recreates these directories, so restoring them cannot help.
+        # Source fixtures are recreated; keep the separate cargo-boomerang-builds cache.
         run: rm -rf target/tmp/cargo-boomerang-fixtures
 
   miri:

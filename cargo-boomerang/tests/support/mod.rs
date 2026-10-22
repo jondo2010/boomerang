@@ -142,8 +142,13 @@ pub fn shared_target(lane: &str) -> PathBuf {
 pub fn toolchain_target() -> PathBuf {
     // Fixture sources are disposable, but compiled third-party dependencies should survive
     // another invocation of this test binary. Cold-cache tests use their own TempDir.
-    PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
-        .join("cargo-boomerang-builds")
+    // CI stores this outside rust-cache's target tree: its Cargo-aware pruning
+    // removes our ownership markers while retaining nested dependency artifacts.
+    std::env::var_os("BOOMERANG_TEST_BUILD_CACHE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("cargo-boomerang-builds")
+        })
         .join(env!("CARGO_CRATE_NAME"))
         .join("toolchain")
 }

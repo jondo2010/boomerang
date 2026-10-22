@@ -54,10 +54,7 @@ fn raw_identifiers_modes_and_anonymous_reactions_preserve_the_encoding_oracle() 
     #[cfg(feature = "metadata")]
     {
         let descriptor = oracle::__boomerang::metadata::descriptor();
-        assert_eq!(
-            descriptor.descriptor_fingerprint_input().fingerprint(),
-            EXPECTED
-        );
+        assert_eq!(descriptor.fingerprint(), EXPECTED);
         assert_eq!(descriptor.reaction_slots()[1].id.to_string(), "Match/#g0");
         assert_eq!(descriptor.state_slots()[0].id.to_string(), "Match/loop");
     }

@@ -1053,7 +1053,7 @@ fn payload_compile_inputs(
             .to_str()
             .ok_or_else(|| anyhow!("payload package path is not valid UTF-8"))?;
         let descriptor = binding.descriptor();
-        let fingerprint = descriptor.descriptor_fingerprint_input().fingerprint();
+        let fingerprint = descriptor.fingerprint();
         let fingerprint = hex(&fingerprint.to_bytes());
         for reactor in descriptor
             .reactor_slots()

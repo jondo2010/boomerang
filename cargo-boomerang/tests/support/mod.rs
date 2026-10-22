@@ -181,10 +181,7 @@ pub fn owned_reference_summary(deployment_name: &str) -> Value {
             implementation => panic!("unexpected fixture implementation {implementation}"),
         };
         assert_eq!(
-            binding
-                .descriptor()
-                .descriptor_fingerprint_input()
-                .fingerprint(),
+            binding.descriptor().fingerprint(),
             payload.descriptor_fingerprint(),
             "fixture-owned payload must match the analyzed descriptor"
         );

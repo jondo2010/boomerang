@@ -190,11 +190,7 @@ pub(super) fn federate_image(
                     binding.component().to_string(),
                     binding.implementation().as_str(),
                 ),
-                binding
-                    .descriptor()
-                    .descriptor_fingerprint_input()
-                    .fingerprint()
-                    .to_bytes(),
+                binding.descriptor().fingerprint().to_bytes(),
             );
         }
     }

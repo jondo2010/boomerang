@@ -11,10 +11,7 @@ fn main() {
         .component("root", controller::definition(), &enclave)
         .unwrap();
     topology.finish().unwrap();
-    let bytes = descriptor
-        .descriptor_fingerprint_input()
-        .fingerprint()
-        .to_bytes();
+    let bytes = descriptor.fingerprint().to_bytes();
     std::fs::write(std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap()).join("expected.rs"),
         format!("const EXPECTED: boomerang::runtime::binding::DescriptorFingerprint = boomerang::runtime::binding::DescriptorFingerprint::new({bytes:?});")).unwrap();
     println!("cargo:rerun-if-changed=declaration.rs");

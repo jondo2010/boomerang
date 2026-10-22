@@ -43,15 +43,9 @@ fn descriptors_are_scoped() {
     let second = parent::alternate::__boomerang::descriptor();
     assert_eq!(first.contract_id(), second.contract_id());
     assert_eq!(first.reactor_slots()[0].id, second.reactor_slots()[0].id);
-    assert_ne!(
-        first.descriptor_fingerprint_input().fingerprint(),
-        second.descriptor_fingerprint_input().fingerprint()
-    );
+    assert_ne!(first.fingerprint(), second.fingerprint());
     assert_eq!(
-        first
-            .descriptor_fingerprint_input()
-            .fingerprint()
-            .to_bytes(),
+        first.fingerprint().to_bytes(),
         [
             0xad, 0x5a, 0x07, 0x63, 0x9b, 0x3b, 0x64, 0x66, 0x5a, 0x94, 0xcf, 0xcd, 0xc6, 0xdb,
             0xcb, 0x1d, 0x84, 0x9c, 0xe0, 0xaf, 0xe9, 0x72, 0x38, 0x06, 0x60, 0x91, 0xef, 0xd2,
@@ -59,10 +53,7 @@ fn descriptors_are_scoped() {
         ]
     );
     assert_eq!(
-        second
-            .descriptor_fingerprint_input()
-            .fingerprint()
-            .to_bytes(),
+        second.fingerprint().to_bytes(),
         [
             0xb8, 0xa3, 0xca, 0xd8, 0x79, 0xb9, 0x33, 0x1e, 0xff, 0x9a, 0x58, 0x94, 0x59, 0x50,
             0x33, 0x59, 0x30, 0x57, 0x7a, 0x4a, 0xa0, 0x8a, 0xc6, 0xce, 0x0a, 0xc3, 0xa7, 0x93,

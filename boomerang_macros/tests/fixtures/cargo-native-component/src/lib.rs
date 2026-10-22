@@ -38,7 +38,6 @@ fn payload_initializers_are_executable() {
 fn coexisting_namespaces_share_canonical_compatibility() {
     assert_eq!(
         controller::__boomerang::metadata::descriptor()
-            .descriptor_fingerprint_input()
             .fingerprint(),
         controller::__boomerang::payload::binding_manifest().descriptor_fingerprint()
     );

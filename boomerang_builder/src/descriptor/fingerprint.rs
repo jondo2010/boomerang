@@ -85,7 +85,7 @@ impl CanonicalWriter {
     }
 }
 
-impl DescriptorFingerprintInput {
+impl ComponentDescriptor {
     /// Computes the versioned canonical fingerprint of this descriptor.
     pub fn fingerprint(&self) -> DescriptorFingerprint {
         let mut writer = CanonicalWriter::new();
@@ -240,9 +240,9 @@ mod tests {
     use super::*;
 
     const EXPECTED_V1: DescriptorFingerprint = DescriptorFingerprint::new([
-        0x26, 0x43, 0x66, 0xa9, 0x07, 0x35, 0x22, 0xd4, 0x84, 0x85, 0x6b, 0x52, 0xae, 0xbf,
-        0xd0, 0x57, 0x26, 0x2b, 0x64, 0x08, 0xf2, 0x5a, 0x45, 0x52, 0xc5, 0x5c, 0xd3, 0x78,
-        0xa3, 0xfd, 0x1a, 0xaf,
+        0x26, 0x43, 0x66, 0xa9, 0x07, 0x35, 0x22, 0xd4, 0x84, 0x85, 0x6b, 0x52, 0xae, 0xbf, 0xd0,
+        0x57, 0x26, 0x2b, 0x64, 0x08, 0xf2, 0x5a, 0x45, 0x52, 0xc5, 0x5c, 0xd3, 0x78, 0xa3, 0xfd,
+        0x1a, 0xaf,
     ]);
 
     /// Controls insertion order for the complete descriptor fixture.
@@ -508,53 +508,52 @@ mod tests {
         let left = descriptor_with_ports(&["z", "a"]);
         let right = descriptor_with_ports(&["a", "z"]);
         assert_eq!(left.port_slots()[0].id.to_string(), "Root/a");
-        assert_eq!(
-            left.descriptor_fingerprint_input(),
-            right.descriptor_fingerprint_input()
-        );
-        assert!(std::ptr::eq(
-            left.contract_id(),
-            left.descriptor_fingerprint_input().contract_id()
-        ));
-        assert!(std::ptr::eq(
-            left.port_slots(),
-            left.descriptor_fingerprint_input().port_slots()
-        ));
+        assert_eq!(left, right);
     }
 
     #[test]
     fn descriptor_fingerprint_is_canonical_and_semantically_sensitive() {
         let forward = complete_descriptor(InputOrder::Forward);
         let reversed = complete_descriptor(InputOrder::Reversed);
-        let fingerprint = forward.descriptor_fingerprint_input().fingerprint();
+        let fingerprint = forward.fingerprint();
         assert_eq!(fingerprint, EXPECTED_V1);
-        assert_eq!(
+        assert_eq!(fingerprint, reversed.fingerprint());
+        assert_ne!(
             fingerprint,
-            reversed.descriptor_fingerprint_input().fingerprint(),
+            complete_descriptor_with_contract_version(2).fingerprint(),
         );
         assert_ne!(
             fingerprint,
-            complete_descriptor_with_contract_version(2)
-                .descriptor_fingerprint_input()
-                .fingerprint(),
+            complete_descriptor_with_macro_abi(COMPONENT_DESCRIPTOR_MACRO_ABI + 1).fingerprint(),
         );
-        assert_ne!(
-            fingerprint,
-            complete_descriptor_with_macro_abi(COMPONENT_DESCRIPTOR_MACRO_ABI + 1)
-                .descriptor_fingerprint_input()
-                .fingerprint(),
+    }
+
+    #[cfg(feature = "host-interchange")]
+    #[test]
+    fn complete_descriptor_wire_round_trip_preserves_canonical_semantics() {
+        let descriptor = complete_descriptor(InputOrder::Forward);
+        let wire = serde_json::to_vec(&descriptor).unwrap();
+        let decoded: ComponentDescriptor = serde_json::from_slice(&wire).unwrap();
+        assert_eq!(decoded, descriptor);
+        assert_eq!(decoded.fingerprint(), EXPECTED_V1);
+
+        let mut invalid: serde_json::Value = serde_json::from_slice(&wire).unwrap();
+        let reactors = invalid["canonical"]["reactor_slots"]
+            .as_array_mut()
+            .unwrap();
+        reactors.push(reactors[0].clone());
+        let error = serde_json::from_value::<ComponentDescriptor>(invalid).unwrap_err();
+        assert!(
+            error.to_string().contains("duplicate reactor slot"),
+            "{error}"
         );
     }
 
     #[test]
     fn descriptor_fingerprint_changes_with_port_direction() {
         assert_ne!(
-            descriptor_with_port_direction(PortDirection::Input)
-                .descriptor_fingerprint_input()
-                .fingerprint(),
-            descriptor_with_port_direction(PortDirection::Output)
-                .descriptor_fingerprint_input()
-                .fingerprint(),
+            descriptor_with_port_direction(PortDirection::Input).fingerprint(),
+            descriptor_with_port_direction(PortDirection::Output).fingerprint(),
         );
     }
 }

@@ -379,10 +379,7 @@ fn render_compatibility_checks(
             continue;
         };
         let descriptor = binding.descriptor();
-        let bytes = descriptor
-            .descriptor_fingerprint_input()
-            .fingerprint()
-            .to_bytes();
+        let bytes = descriptor.fingerprint().to_bytes();
         let bytes = bytes.iter();
         let alias: syn::Path =
             syn::parse_str(alias).context("invalid generated component export path")?;

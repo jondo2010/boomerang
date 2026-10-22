@@ -1085,7 +1085,7 @@ fn payload_output(
     state_type: &syn::Path,
     state_struct: &Option<TokenStream>,
     state_impl: &Option<TokenStream>,
-    semantic: &syn::Result<Option<semantic::Descriptor>>,
+    semantic: &syn::Result<Option<boomerang_builder::ComponentDescriptor>>,
     emission: PayloadEmission,
 ) -> PayloadOutput {
     let descriptor = match semantic {
@@ -1131,7 +1131,7 @@ fn payload_output(
     let macro_abi = boomerang_runtime::binding::COMPONENT_DESCRIPTOR_MACRO_ABI;
     let macro_abi_key = boomerang_runtime::binding::PAYLOAD_MACRO_ABI_COMPILE_INPUT;
     let (fingerprint_declaration, binding_manifest) = if emission == PayloadEmission::Native {
-        let fingerprint = descriptor.fingerprint();
+        let fingerprint = descriptor.fingerprint().to_bytes();
         (
             TokenStream::new(),
             quote! {
@@ -1380,9 +1380,9 @@ impl ArgsModel {
             tokens.append_all(error.to_compile_error());
             return;
         }
-        let descriptor = semantic::Descriptor::parse(&self.0, &self.1);
+        let descriptor = semantic::parse_descriptor(&self.0, &self.1);
         let descriptor_contents = match &descriptor {
-            Ok(Some(descriptor)) => descriptor.output(),
+            Ok(Some(descriptor)) => semantic::emit_descriptor(descriptor),
             Ok(None) => TokenStream::new(),
             Err(error) => error.to_compile_error(),
         };

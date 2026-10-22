@@ -277,12 +277,7 @@ fn binding_records(analyzed: &crate::check::AnalyzedDeployment) -> Result<Vec<Bi
                 anyhow!("descriptor driver returned unresolved implementation '{implementation}'")
             })?;
         let descriptor = binding.descriptor();
-        let descriptor_hash = lowercase_hex(
-            &descriptor
-                .descriptor_fingerprint_input()
-                .fingerprint()
-                .to_bytes(),
-        );
+        let descriptor_hash = lowercase_hex(&descriptor.fingerprint().to_bytes());
         let package = PackageDocument {
             name: package.name.clone(),
             version: package.version.clone(),

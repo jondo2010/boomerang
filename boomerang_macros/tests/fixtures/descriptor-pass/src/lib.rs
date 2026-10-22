@@ -242,14 +242,7 @@ mod descriptor_tests {
             }
         );
         assert_eq!(
-            descriptor.descriptor_fingerprint_input().state_slots(),
-            descriptor.state_slots()
-        );
-        assert_eq!(
-            descriptor
-                .descriptor_fingerprint_input()
-                .fingerprint()
-                .to_bytes(),
+            descriptor.fingerprint().to_bytes(),
             [
                 0xfb, 0x3a, 0x9c, 0xf2, 0x2e, 0x1b, 0x7b, 0x33, 0x9e, 0xb8, 0x63, 0xc2, 0x02, 0x48,
                 0xa2, 0xc3, 0x4e, 0x95, 0x98, 0x3d, 0xa3, 0xd4, 0x6c, 0x96, 0xb0, 0x12, 0x4e, 0x6d,

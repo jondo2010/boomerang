@@ -242,6 +242,31 @@ mod stage_tests {
     use super::*;
 
     #[test]
+    fn descriptor_wire_envelope_preserves_fields_and_validates_input() {
+        // Literal legacy wire shape: flattening the in-memory descriptor must not change it.
+        let wire = serde_json::json!({ "canonical": {
+            "contract_id": "example.wire", "contract_version": 7, "macro_abi": 3,
+            "reactor_slots": [], "port_slots": [], "action_slots": [],
+            "reaction_slots": [], "mode_slots": [], "state_slots": [], "codec_slots": [],
+            "relationships": [], "placement_groups": [], "enclaves": [],
+            "bounds": { "queue_capacity": "Unknown", "payload_bytes": "Unknown",
+                "state_bytes": "Unknown", "scratch_bytes": "Unknown" }
+        }});
+        let descriptor: ComponentDescriptor = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(descriptor.contract_id().as_str(), "example.wire");
+        assert_eq!(descriptor.contract_version(), 7);
+        assert_eq!(serde_json::to_value(&descriptor).unwrap(), wire);
+
+        let mut invalid = wire.clone();
+        invalid["canonical"]["contract_id"] = serde_json::json!(" invalid ");
+        assert!(serde_json::from_value::<ComponentDescriptor>(invalid).is_err());
+        let mut unknown = wire.clone();
+        unknown["canonical"]["unexpected"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<ComponentDescriptor>(unknown).is_err());
+        assert!(serde_json::from_value::<ComponentDescriptor>(wire["canonical"].clone()).is_err());
+    }
+
+    #[test]
     fn stage_decoders_enforce_stage_schema_and_fields() {
         let mut bytes = Vec::new();
         encode_descriptor_output(&mut bytes, Vec::new()).unwrap();

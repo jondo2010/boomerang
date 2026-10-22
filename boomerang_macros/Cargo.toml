@@ -14,6 +14,7 @@ exclude.workspace = true
 [dependencies]
 attribute-derive = { version = "0.10", features = ["syn-full"] }
 boomerang_runtime.workspace = true
+boomerang_builder = { workspace = true, features = ["descriptor-fingerprint"] }
 convert_case = "0.10"
 proc-macro-error2 = { version = "2", default-features = false }
 proc-macro2 = "1.0"

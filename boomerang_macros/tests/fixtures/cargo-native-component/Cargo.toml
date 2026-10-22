@@ -1,0 +1,19 @@
+[package]
+name = "cargo-native-component"
+version = "0.0.0"
+edition = "2021"
+publish = false
+[features]
+default = ["boomerang/hosted", "dep:cargo-native-helper"]
+metadata = ["boomerang/hosted"]
+helper-sentinel = ["cargo-native-helper?/sentinel"]
+payload = ["dep:cargo-native-helper"]
+[dependencies]
+boomerang = { path = "../../../../boomerang", default-features = false }
+cargo-native-helper = { path = "../cargo-native-helper", optional = true }
+[dev-dependencies]
+boomerang_builder = { path = "../../../../boomerang_builder", features = ["descriptor-fingerprint"] }
+[lints.rust]
+unexpected_cfgs = { level = "deny", check-cfg = ['cfg(boomerang_facet, values("descriptor", "payload"))'] }
+[workspace]
+resolver = "2"

@@ -48,7 +48,7 @@ pub mod flatten_transposed;
 // Re-exports
 #[cfg(all(feature = "hosted", not(boomerang_facet = "payload")))]
 pub use boomerang_builder as builder;
-pub use boomerang_macros::component;
+pub use boomerang_macros::{component, component_metadata, component_payload};
 pub use boomerang_runtime as runtime;
 
 pub mod prelude {
@@ -65,7 +65,9 @@ pub mod prelude {
 
     pub use super::runtime::{self, action::ActionCommon, CommonContext, Duration, FromRefs, Tag};
 
-    pub use boomerang_macros::{component, reaction, reactor, reactor_ports, timer};
+    pub use boomerang_macros::{
+        component, component_metadata, component_payload, reaction, reactor, reactor_ports, timer,
+    };
 
     pub use crate::flatten_transposed::FlattenTransposedExt;
 }

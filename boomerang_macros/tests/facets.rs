@@ -253,7 +253,7 @@ fn payload_only_dependency_graph_excludes_builder() {
             "payload-launcher",
             "tree",
             &["payload"],
-            &["--no-default-features"],
+            &["--no-default-features", "--edges", "normal,no-proc-macro"],
         ),
         "payload-launcher",
     );
@@ -570,7 +570,7 @@ fn named_components_default_features_do_not_pull_builder_into_payload() {
         "named-components",
         "tree",
         &["payload"],
-        &["--edges", "normal", "--prefix", "none"],
+        &["--edges", "normal,no-proc-macro", "--prefix", "none"],
     );
     let output = run(cargo, "named-components");
     assert!(

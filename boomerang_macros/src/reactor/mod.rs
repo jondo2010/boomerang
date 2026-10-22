@@ -10,6 +10,7 @@ use syn::{
 use crate::util::convert_from_snake_case;
 
 mod init_context;
+mod semantic;
 mod topology;
 
 /// Top-level arguments for the `#[reactor]` macro.
@@ -42,7 +43,7 @@ struct DescriptorBoundsArgs {
     scratch_bytes: syn::LitInt,
 }
 
-/// Validated numeric descriptor bounds retained without a builder dependency.
+/// Validated numeric descriptor bounds from the declaration.
 struct DescriptorBoundsValues {
     queue_capacity: u64,
     payload_bytes: u64,
@@ -769,58 +770,6 @@ fn stable_path_tokens(segments: &[String]) -> TokenStream {
     }}
 }
 
-fn relationship_target(
-    reactor_name: &str,
-    port_names: &[String],
-    action_names: &[String],
-    mode_names: &[String],
-    path: &crate::reaction::PathOrIdent,
-) -> (TokenStream, bool) {
-    let path = path_segments(path);
-    let leaf = path.first().expect("paths are non-empty");
-    let mut slot_segments = vec![reactor_name.to_owned()];
-    slot_segments.extend(path.iter().cloned());
-    let slot = stable_path_tokens(&slot_segments);
-    if path.len() == 1 && mode_names.contains(leaf) {
-        (
-            quote! {
-                ::boomerang::builder::DescriptorRelationshipTarget::Mode(
-                    ::boomerang::builder::ModeSlotId::from_path(#slot),
-                )
-            },
-            true,
-        )
-    } else if path.len() == 1 && port_names.contains(leaf) {
-        (
-            quote! {
-                ::boomerang::builder::DescriptorRelationshipTarget::Port(
-                    ::boomerang::builder::PortSlotId::from_path(#slot),
-                )
-            },
-            false,
-        )
-    } else if path.len() == 1 && action_names.contains(leaf) {
-        (
-            quote! {
-                ::boomerang::builder::DescriptorRelationshipTarget::Action(
-                    ::boomerang::builder::ActionSlotId::from_path(#slot),
-                )
-            },
-            false,
-        )
-    } else {
-        (
-            quote! {
-                ::boomerang::builder::DescriptorRelationshipTarget::Lexical(
-                    #slot,
-                )
-            },
-            false,
-        )
-    }
-}
-
-/// Returns a canonical implementation-local binding symbol as a Rust identifier.
 fn required_binding_symbol(prefix: &str, segments: &[&str]) -> Ident {
     use std::fmt::Write as _;
 
@@ -923,6 +872,7 @@ fn payload_reaction_output(
     model: &Model,
     state_type: &syn::Path,
     mode_names: &[String],
+    symbols: &mut PayloadSymbols,
 ) -> syn::Result<Vec<TokenStream>> {
     let reactor_name = ident_text(&model.name);
     let store_lifetime = fresh_payload_lifetime(&model.generics);
@@ -935,6 +885,7 @@ fn payload_reaction_output(
             let reaction_name =
                 CanonicalReactionSlot::for_reaction(reaction, &mut next_generated).text();
             let symbol = required_binding_symbol("reaction_", &[&reactor_name, &reaction_name]);
+            let symbol = symbols.definition(&symbol);
             let export_doc = format!(
                 "Invokes payload reaction `{reactor_name}/{reaction_name}` with concrete references."
             );
@@ -1070,58 +1021,96 @@ fn payload_compile_inputs(
     Ok((bytes, fingerprint_key))
 }
 
-/// Generates the payload facet from host-provided compatibility values only.
+/// Selects self-derived native compatibility or the retained CLI-driven legacy protocol.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PayloadEmission {
+    LegacyReactor,
+    LegacyComponent,
+    Native,
+}
+
+/// Native definitions stay in the declaration's lexical scope. Stable public binding names are
+/// reexported from the nested namespace, preserving `self::`/`super::` paths without rewriting them.
+struct PayloadSymbols {
+    native: bool,
+    aliases: Vec<TokenStream>,
+}
+impl PayloadSymbols {
+    fn definition(&mut self, public: &Ident) -> Ident {
+        if !self.native {
+            return public.clone();
+        }
+        let implementation = format_ident!("__boomerang_payload_{public}");
+        self.aliases.push(quote! {
+            pub use super::super::#implementation as #public;
+        });
+        implementation
+    }
+}
+
+/// Keep owning-module implementation declarations separate from the public binding namespace.
+struct PayloadOutput {
+    declarations: TokenStream,
+    exports: TokenStream,
+}
+impl PayloadOutput {
+    fn diagnostic(declarations: TokenStream) -> Self {
+        Self {
+            declarations,
+            exports: TokenStream::new(),
+        }
+    }
+    fn legacy_output(self) -> TokenStream {
+        let Self {
+            declarations,
+            exports,
+        } = self;
+        if exports.is_empty() {
+            return declarations;
+        }
+        quote! {
+            #declarations
+            pub mod __boomerang {
+                #[allow(unused_imports)]
+                use super::*;
+                #exports
+            }
+        }
+    }
+}
+
 fn payload_output(
     reactor_args: &ReactorArgs,
     model: &Model,
     state_type: &syn::Path,
     state_struct: &Option<TokenStream>,
     state_impl: &Option<TokenStream>,
-    component: bool,
-) -> TokenStream {
-    if reactor_args.contract.is_none() && reactor_args.contract_version.is_none() {
-        return TokenStream::new();
-    }
-    let (Some(contract), Some(contract_version)) =
-        (&reactor_args.contract, &reactor_args.contract_version)
-    else {
-        return quote! {
-            compile_error!("deployment descriptor requires contract and contract_version metadata");
-        };
+    semantic: &syn::Result<Option<semantic::Descriptor>>,
+    emission: PayloadEmission,
+) -> PayloadOutput {
+    let descriptor = match semantic {
+        Ok(Some(descriptor)) => descriptor,
+        Ok(None) if emission != PayloadEmission::Native => {
+            return PayloadOutput::diagnostic(TokenStream::new())
+        }
+        Ok(None) => {
+            return PayloadOutput::diagnostic(
+                quote!(compile_error!("compiled component requires contract and contract_version metadata");),
+            )
+        }
+        Err(error) => return PayloadOutput::diagnostic(error.to_compile_error()),
     };
+    let contract = reactor_args.contract.as_ref().expect("validated contract");
+    let contract_version = reactor_args
+        .contract_version
+        .as_ref()
+        .expect("validated version")
+        .base10_parse::<u64>()
+        .expect("validated version fits u64");
     if reactor_args.state.is_some() && reactor_args.state_init.is_none() {
-        return quote! {
-            compile_error!("payload mode requires `state_init = path` with `state = T`");
-        };
-    }
-    let contract_text = contract.value();
-    if contract_text.is_empty()
-        || contract_text.trim() != contract_text
-        || contract_text.chars().any(char::is_control)
-    {
-        return syn::Error::new(
-            contract.span(),
-            "contract must be non-empty, contain no control characters, and have no surrounding whitespace",
-        )
-        .to_compile_error();
-    }
-    let Ok(contract_version) = contract_version.base10_parse::<u64>() else {
-        return syn::Error::new(contract_version.span(), "contract_version must fit in u64")
-            .to_compile_error();
-    };
-    if let Err(error) = reactor_args.descriptor_bounds() {
-        return error.to_compile_error();
-    }
-    if let Err(error) = model.body.validate_unique_reaction_names() {
-        return error.to_compile_error();
-    }
-    if let Err(error) = model.body.validate_unique_mode_names() {
-        return error.to_compile_error();
-    }
-    if let Some(span) = model.body.unsupported_span() {
-        return quote_spanned! {span =>
-            compile_error!("deployment descriptor requires reaction! syntax");
-        };
+        return PayloadOutput::diagnostic(
+            quote! { compile_error!("payload mode requires `state_init = path` with `state = T`"); },
+        );
     }
 
     let reactor_name = ident_text(&model.name);
@@ -1130,28 +1119,51 @@ fn payload_output(
         .modes()
         .map(|mode| ident_text(&mode.name))
         .collect::<Vec<_>>();
-    let reaction_exports = match payload_reaction_output(model, state_type, &mode_names) {
-        Ok(exports) => exports,
-        Err(error) => return error.to_compile_error(),
+    let mut symbols = PayloadSymbols {
+        native: emission == PayloadEmission::Native,
+        aliases: Vec::new(),
     };
+    let reaction_exports =
+        match payload_reaction_output(model, state_type, &mode_names, &mut symbols) {
+            Ok(exports) => exports,
+            Err(error) => return PayloadOutput::diagnostic(error.to_compile_error()),
+        };
     let macro_abi = boomerang_runtime::binding::COMPONENT_DESCRIPTOR_MACRO_ABI;
     let macro_abi_key = boomerang_runtime::binding::PAYLOAD_MACRO_ABI_COMPILE_INPUT;
-    let (fingerprint_declaration, binding_manifest) = if component {
+    let (fingerprint_declaration, binding_manifest) = if emission == PayloadEmission::Native {
+        let fingerprint = descriptor.fingerprint();
+        (
+            TokenStream::new(),
+            quote! {
+                /// Actual compatibility information derived from this component declaration.
+                pub const fn binding_manifest() -> ::boomerang::runtime::binding::BindingManifest {
+                    ::boomerang::runtime::binding::BindingManifest::new(
+                        ::boomerang::runtime::binding::DescriptorFingerprint::new([#(#fingerprint),*]),
+                        #macro_abi,
+                    )
+                }
+            },
+        )
+    } else if emission == PayloadEmission::LegacyComponent {
         let manifest_dir = match std::env::var_os("CARGO_MANIFEST_DIR")
             .and_then(|path| std::fs::canonicalize(path).ok())
         {
             Some(path) => path,
             None => {
-                return syn::Error::new(
-                    contract.span(),
-                    "missing canonical payload package directory",
+                return PayloadOutput::diagnostic(
+                    syn::Error::new(
+                        contract.span(),
+                        "missing canonical payload package directory",
+                    )
+                    .to_compile_error(),
                 )
-                .to_compile_error()
             }
         };
         let Some(manifest_dir) = manifest_dir.to_str() else {
-            return syn::Error::new(contract.span(), "payload package directory must be UTF-8")
-                .to_compile_error();
+            return PayloadOutput::diagnostic(
+                syn::Error::new(contract.span(), "payload package directory must be UTF-8")
+                    .to_compile_error(),
+            );
         };
         let key = boomerang_runtime::binding::component_payload_fingerprint_compile_inputs_key(
             manifest_dir,
@@ -1180,7 +1192,7 @@ fn payload_output(
         let (fingerprint, key) =
             match payload_compile_inputs(contract, contract_version, &reactor_name) {
                 Ok(inputs) => inputs,
-                Err(error) => return error.to_compile_error(),
+                Err(error) => return PayloadOutput::diagnostic(error.to_compile_error()),
             };
         (
             quote! { const _: &str = env!(#key); },
@@ -1196,36 +1208,43 @@ fn payload_output(
             },
         )
     };
-    let binding_exports = model.args.iter().filter_map(|arg| {
-        let name = ident_text(&arg.name.ident);
-        let (symbol, payload_type, kind) = match (&arg.kind, &arg.ty) {
-            (ArgKind::Input { .. } | ArgKind::Output { .. }, Type::Array(array)) => (
-                required_binding_symbol("port_", &[&reactor_name, &name]),
-                array.elem.as_ref(),
-                "port",
-            ),
-            (ArgKind::Input { .. } | ArgKind::Output { .. }, ty) => (
-                required_binding_symbol("port_", &[&reactor_name, &name]),
-                ty,
-                "port",
-            ),
-            (ArgKind::LogicalAction { .. } | ArgKind::PhysicalAction { .. }, ty) => (
-                required_binding_symbol("action_", &[&reactor_name, &name]),
-                ty,
-                "action",
-            ),
-            (ArgKind::State { .. } | ArgKind::Param { .. }, _) => return None,
-        };
-        let export_doc = format!("Identifies payload type for {kind} `{reactor_name}/{name}`.");
-        Some(quote! {
-            #[doc = #export_doc]
-            #[allow(non_upper_case_globals)]
-            pub const #symbol: ::boomerang::runtime::PayloadType<#payload_type> =
-                ::boomerang::runtime::PayloadType::new();
+    let binding_exports = model
+        .args
+        .iter()
+        .filter_map(|arg| {
+            let name = ident_text(&arg.name.ident);
+            let (symbol, payload_type, kind) = match (&arg.kind, &arg.ty) {
+                (ArgKind::Input { .. } | ArgKind::Output { .. }, Type::Array(array)) => (
+                    required_binding_symbol("port_", &[&reactor_name, &name]),
+                    array.elem.as_ref(),
+                    "port",
+                ),
+                (ArgKind::Input { .. } | ArgKind::Output { .. }, ty) => (
+                    required_binding_symbol("port_", &[&reactor_name, &name]),
+                    ty,
+                    "port",
+                ),
+                (ArgKind::LogicalAction { .. } | ArgKind::PhysicalAction { .. }, ty) => (
+                    required_binding_symbol("action_", &[&reactor_name, &name]),
+                    ty,
+                    "action",
+                ),
+                (ArgKind::State { .. } | ArgKind::Param { .. }, _) => return None,
+            };
+            let symbol = symbols.definition(&symbol);
+            let export_doc = format!("Identifies payload type for {kind} `{reactor_name}/{name}`.");
+            Some(quote! {
+                #[doc = #export_doc]
+                #[allow(non_upper_case_globals)]
+                pub const #symbol: ::boomerang::runtime::PayloadType<#payload_type> =
+                    ::boomerang::runtime::PayloadType::new();
+            })
         })
-    });
+        .collect::<Vec<_>>();
     let state_symbol = required_binding_symbol("state_", &[&reactor_name]);
     let state_type_symbol = format_ident!("type_{state_symbol}");
+    let state_symbol = symbols.definition(&state_symbol);
+    let state_type_symbol = symbols.definition(&state_type_symbol);
     let mut state_witness_generics = model.generics.clone();
     state_witness_generics
         .make_where_clause()
@@ -1234,12 +1253,12 @@ fn payload_output(
     let (state_type_generics, _, state_type_where) = state_witness_generics.split_for_impl();
     let capability_declaration = match init_context::declaration(reactor_args, model) {
         Ok(value) => value,
-        Err(error) => return error.to_compile_error(),
+        Err(error) => return PayloadOutput::diagnostic(error.to_compile_error()),
     };
     let state_initializer = if reactor_args.init_context.is_some() {
         match init_context::initializer(reactor_args, model, &state_symbol, state_type) {
             Ok(value) => value,
-            Err(error) => return error.to_compile_error(),
+            Err(error) => return PayloadOutput::diagnostic(error.to_compile_error()),
         }
     } else {
         let state_init = reactor_args.state_init.as_ref().map_or_else(
@@ -1254,372 +1273,39 @@ fn payload_output(
         }
     };
 
-    quote! {
-        #state_struct
-        #state_impl
-
-        #capability_declaration
-        #fingerprint_declaration
-        pub mod __boomerang {
-            #[allow(unused_imports)]
-            use super::*;
-
-            #binding_manifest
-
-            /// Identifies concrete state independently of its initialization signature.
-            #[allow(non_snake_case)]
-            pub fn #state_type_symbol #state_type_generics() -> ::boomerang::runtime::PayloadType<#state_type> #state_type_where { ::boomerang::runtime::PayloadType::new() }
-            #state_initializer
-
-            #(#binding_exports)*
-            #(#reaction_exports)*
-        }
-    }
-}
-
-fn descriptor_output(reactor_args: &ReactorArgs, model: &Model) -> TokenStream {
-    if reactor_args.contract.is_none() && reactor_args.contract_version.is_none() {
-        return TokenStream::new();
-    }
-    let (Some(contract), Some(contract_version)) =
-        (&reactor_args.contract, &reactor_args.contract_version)
-    else {
-        return quote! {
-            compile_error!("deployment descriptor requires contract and contract_version metadata");
-        };
+    let state_type_export = quote! {
+        /// Identifies concrete state independently of its initialization signature.
+        #[allow(non_snake_case)]
+        pub fn #state_type_symbol #state_type_generics() -> ::boomerang::runtime::PayloadType<#state_type> #state_type_where { ::boomerang::runtime::PayloadType::new() }
     };
-
-    let contract_text = contract.value();
-    if contract_text.is_empty()
-        || contract_text.trim() != contract_text
-        || contract_text.chars().any(char::is_control)
-    {
-        return syn::Error::new(
-            contract.span(),
-            "contract must be non-empty, contain no control characters, and have no surrounding whitespace",
-        )
-        .to_compile_error();
-    }
-    let contract_version = match contract_version.base10_parse::<u64>() {
-        Ok(contract_version) => contract_version,
-        Err(_) => {
-            return syn::Error::new(contract_version.span(), "contract_version must fit in u64")
-                .to_compile_error()
-        }
-    };
-    let bounds = match reactor_args.descriptor_bounds() {
-        Ok(bounds) => bounds,
-        Err(error) => return error.to_compile_error(),
-    };
-    let DescriptorBoundsValues {
-        queue_capacity,
-        payload_bytes,
-        state_bytes,
-        scratch_bytes,
-    } = bounds;
-
-    if let Err(error) = model.body.validate_unique_reaction_names() {
-        return error.to_compile_error();
-    }
-    if let Err(error) = model.body.validate_unique_mode_names() {
-        return error.to_compile_error();
-    }
-
-    if let Some(span) = model.body.unsupported_span() {
-        let diagnostic = quote_spanned! {span =>
-            compile_error!("deployment descriptor requires reaction! syntax");
-        };
-        return quote! {
-            #diagnostic
-        };
-    }
-
-    let name = &model.name;
-    let reactor_name = ident_text(name);
-    let reactor_path = stable_path_tokens(std::slice::from_ref(&reactor_name));
-    let capabilities = match init_context::descriptor(reactor_args, model) {
-        Ok(value) => value,
-        Err(error) => return error.to_compile_error(),
-    };
-    let reactor_slot = quote! {
-        ::boomerang::builder::ReactorSlot {
-            id: ::boomerang::builder::ReactorSlotId::from_path(#reactor_path),
-            parent: None,
-            capabilities: #capabilities,
-        }
-    };
-    let port_names = model
-        .args
-        .iter()
-        .filter_map(|arg| match arg.kind {
-            ArgKind::Input { .. } | ArgKind::Output { .. } => Some(ident_text(&arg.name.ident)),
-            ArgKind::LogicalAction { .. }
-            | ArgKind::PhysicalAction { .. }
-            | ArgKind::State { .. }
-            | ArgKind::Param { .. } => None,
-        })
-        .collect::<Vec<_>>();
-    let action_names = model
-        .args
-        .iter()
-        .filter_map(|arg| match arg.kind {
-            ArgKind::LogicalAction { .. } | ArgKind::PhysicalAction { .. } => {
-                Some(ident_text(&arg.name.ident))
-            }
-            ArgKind::Input { .. }
-            | ArgKind::Output { .. }
-            | ArgKind::State { .. }
-            | ArgKind::Param { .. } => None,
-        })
-        .collect::<Vec<_>>();
-    let port_slots = model.args.iter().filter_map(|arg| {
-        let direction = match arg.kind {
-            ArgKind::Input { .. } => quote!(::boomerang::builder::PortDirection::Input),
-            ArgKind::Output { .. } => {
-                quote!(::boomerang::builder::PortDirection::Output)
-            }
-            ArgKind::LogicalAction { .. }
-            | ArgKind::PhysicalAction { .. }
-            | ArgKind::State { .. }
-            | ArgKind::Param { .. } => return None,
-        };
-        let slot = stable_path_tokens(&[reactor_name.clone(), ident_text(&arg.name.ident)]);
-        let reactor_path = stable_path_tokens(std::slice::from_ref(&reactor_name));
-        Some(quote! {
-            ::boomerang::builder::PortSlot {
-                id: ::boomerang::builder::PortSlotId::from_path(#slot),
-                reactor: ::boomerang::builder::ReactorSlotId::from_path(#reactor_path),
-                direction: #direction,
-            }
-        })
-    });
-    let action_slots = action_names.iter().map(|action_name| {
-        let slot = stable_path_tokens(&[reactor_name.clone(), action_name.clone()]);
-        let reactor_path = stable_path_tokens(std::slice::from_ref(&reactor_name));
-        quote! {
-            ::boomerang::builder::ActionSlot {
-                id: ::boomerang::builder::ActionSlotId::from_path(#slot),
-                reactor: ::boomerang::builder::ReactorSlotId::from_path(#reactor_path),
-            }
-        }
-    });
-    let state_slots = model.args.iter().filter_map(|arg| {
-        if !matches!(arg.kind, ArgKind::State { .. }) {
-            return None;
-        }
-        let slot = stable_path_tokens(&[reactor_name.clone(), ident_text(&arg.name.ident)]);
-        let reactor_path = stable_path_tokens(std::slice::from_ref(&reactor_name));
-        Some(quote! {
-            ::boomerang::builder::StateSlot {
-                id: ::boomerang::builder::StateSlotId::from_path(#slot),
-                reactor: ::boomerang::builder::ReactorSlotId::from_path(#reactor_path),
-            }
-        })
-    });
-
-    let modes = model
-        .body
-        .items
-        .iter()
-        .filter_map(|item| match item {
-            BodyItem::Mode(mode) => Some(mode),
-            BodyItem::Tokens(_) | BodyItem::Reaction(_) => None,
-        })
-        .collect::<Vec<_>>();
-    let mode_names = modes
-        .iter()
-        .map(|mode| ident_text(&mode.name))
-        .collect::<Vec<_>>();
-    let mode_slots = modes.iter().map(|mode| {
-        let slot = stable_path_tokens(&[reactor_name.clone(), ident_text(&mode.name)]);
-        let reactor_path = stable_path_tokens(std::slice::from_ref(&reactor_name));
-        let initial = mode.initial;
-        quote! {
-            ::boomerang::builder::ModeSlot {
-                id: ::boomerang::builder::ModeSlotId::from_path(#slot),
-                reactor: ::boomerang::builder::ReactorSlotId::from_path(#reactor_path),
-                parent: None,
-                initial: #initial,
-            }
-        }
-    });
-
-    let mut reactions = Vec::new();
-    model.body.reactions(None, &mut reactions);
-    let mut reaction_slots = Vec::new();
-    let mut relationships = Vec::new();
-    let mut next_generated = 0;
-    for (scope, reaction) in reactions {
-        let reactor_path = stable_path_tokens(std::slice::from_ref(&reactor_name));
-        let reaction_slot = match CanonicalReactionSlot::for_reaction(reaction, &mut next_generated)
-        {
-            CanonicalReactionSlot::Named(name) => {
-                let path = stable_path_tokens(&[reactor_name.clone(), name]);
-                quote!(::boomerang::builder::ReactionSlotId::from_path(#path))
-            }
-            CanonicalReactionSlot::Generated(ordinal) => {
-                quote!(::boomerang::builder::ReactionSlotId::from_path(
-                    (#reactor_path).append_generated_ordinal(#ordinal)
-                ))
-            }
-        };
-        let owner_path = stable_path_tokens(std::slice::from_ref(&reactor_name));
-        reaction_slots.push(quote! {
-            ::boomerang::builder::ReactionSlot {
-                id: #reaction_slot,
-                reactor: ::boomerang::builder::ReactorSlotId::from_path(#owner_path),
+    let implementations = std::iter::once(state_type_export)
+        .chain(std::iter::once(state_initializer))
+        .chain(binding_exports)
+        .chain(reaction_exports)
+        .map(|definition| {
+            if emission == PayloadEmission::Native {
+                quote!(#[doc(hidden)] #definition)
+            } else {
+                definition
             }
         });
-
-        for (position, trigger) in reaction.triggers().iter().enumerate() {
-            let target = match trigger {
-                crate::reaction::TriggerType::Startup => quote! {
-                    ::boomerang::builder::DescriptorRelationshipTarget::Lifecycle(
-                        ::boomerang::builder::DescriptorLifecycle::Startup,
-                    )
-                },
-                crate::reaction::TriggerType::Shutdown => quote! {
-                    ::boomerang::builder::DescriptorRelationshipTarget::Lifecycle(
-                        ::boomerang::builder::DescriptorLifecycle::Shutdown,
-                    )
-                },
-                crate::reaction::TriggerType::Reset => quote! {
-                    ::boomerang::builder::DescriptorRelationshipTarget::Lifecycle(
-                        ::boomerang::builder::DescriptorLifecycle::Reset,
-                    )
-                },
-                crate::reaction::TriggerType::Regular(path) => {
-                    relationship_target(
-                        &reactor_name,
-                        &port_names,
-                        &action_names,
-                        &mode_names,
-                        path,
-                    )
-                    .0
-                }
-            };
-            relationships.push(relationship_tokens(
-                &reaction_slot,
-                quote!(::boomerang::builder::DescriptorRelationshipKind::Trigger),
-                target,
-                quote!(None),
-                position,
-            ));
+    let implementation_exports = quote! { #(#implementations)* };
+    let declarations = quote! {
+        #state_struct
+        #state_impl
+        #capability_declaration
+        #fingerprint_declaration
+    };
+    if emission == PayloadEmission::Native {
+        let aliases = symbols.aliases;
+        PayloadOutput {
+            declarations: quote! { #declarations #implementation_exports },
+            exports: quote! { #binding_manifest #(#aliases)* },
         }
-        for (position, path) in reaction.uses().iter().enumerate() {
-            let target =
-                relationship_target(&reactor_name, &port_names, &action_names, &mode_names, path).0;
-            relationships.push(relationship_tokens(
-                &reaction_slot,
-                quote!(::boomerang::builder::DescriptorRelationshipKind::Use),
-                target,
-                quote!(None),
-                position,
-            ));
-        }
-        for (position, effect) in reaction.effects().iter().enumerate() {
-            let path = match effect {
-                crate::reaction::EffectType::Regular(path)
-                | crate::reaction::EffectType::Reset(path)
-                | crate::reaction::EffectType::History(path) => path,
-            };
-            let (target, is_mode) =
-                relationship_target(&reactor_name, &port_names, &action_names, &mode_names, path);
-            let is_transition = matches!(
-                effect,
-                crate::reaction::EffectType::Reset(_) | crate::reaction::EffectType::History(_)
-            );
-            let kind = if is_mode || is_transition {
-                quote!(::boomerang::builder::DescriptorRelationshipKind::Mode)
-            } else {
-                quote!(::boomerang::builder::DescriptorRelationshipKind::Effect)
-            };
-            let transition = match effect {
-                crate::reaction::EffectType::History(_) => quote! {
-                    Some(::boomerang::builder::ModeTransitionKind::History)
-                },
-                crate::reaction::EffectType::Reset(_) => quote! {
-                    Some(::boomerang::builder::ModeTransitionKind::Reset)
-                },
-                crate::reaction::EffectType::Regular(_) if is_mode => quote! {
-                    Some(::boomerang::builder::ModeTransitionKind::Reset)
-                },
-                crate::reaction::EffectType::Regular(_) => quote!(None),
-            };
-            relationships.push(relationship_tokens(
-                &reaction_slot,
-                kind,
-                target,
-                transition,
-                position,
-            ));
-        }
-        if let Some(scope) = scope {
-            let mode_slot = stable_path_tokens(&[reactor_name.clone(), ident_text(&scope.name)]);
-            relationships.push(relationship_tokens(
-                &reaction_slot,
-                quote!(::boomerang::builder::DescriptorRelationshipKind::Scope),
-                quote! {
-                    ::boomerang::builder::DescriptorRelationshipTarget::Mode(
-                        ::boomerang::builder::ModeSlotId::from_path(#mode_slot),
-                    )
-                },
-                quote!(None),
-                0,
-            ));
-        }
-    }
-
-    quote! {
-        #[doc(hidden)]
-        const ONLY_ONE_DEPLOYMENT_REACTOR_PER_MODULE: () = ();
-
-        pub mod __boomerang {
-            /// Returns the canonical host-owned component descriptor.
-            pub fn descriptor() -> ::boomerang::builder::ComponentDescriptor {
-                ::boomerang::builder::ComponentDescriptor::__from_macro(
-                    #contract,
-                    #contract_version,
-                    ::boomerang::builder::COMPONENT_DESCRIPTOR_MACRO_ABI,
-                    vec![#reactor_slot],
-                    vec![#(#port_slots),*],
-                    vec![#(#action_slots),*],
-                    vec![#(#reaction_slots),*],
-                    vec![#(#mode_slots),*],
-                    vec![#(#state_slots),*],
-                    vec![],
-                    vec![#(#relationships),*],
-                    vec![],
-                    vec![],
-                    ::boomerang::builder::DescriptorBounds {
-                        queue_capacity: ::boomerang::builder::DescriptorBound::Known(#queue_capacity),
-                        payload_bytes: ::boomerang::builder::DescriptorBound::Known(#payload_bytes),
-                        state_bytes: ::boomerang::builder::DescriptorBound::Known(#state_bytes),
-                        scratch_bytes: ::boomerang::builder::DescriptorBound::Known(#scratch_bytes),
-                    },
-                )
-            }
-        }
-    }
-}
-
-fn relationship_tokens(
-    reaction_slot: &TokenStream,
-    kind: TokenStream,
-    target: TokenStream,
-    mode_transition: TokenStream,
-    declaration_position: usize,
-) -> TokenStream {
-    let declaration_position = u32::try_from(declaration_position)
-        .expect("reaction relationship count exceeds descriptor representation");
-    quote! {
-        ::boomerang::builder::DescriptorRelationship {
-            reaction: #reaction_slot,
-            kind: #kind,
-            target: #target,
-            mode_transition: #mode_transition,
-            declaration_position: #declaration_position,
+    } else {
+        PayloadOutput {
+            declarations,
+            exports: quote! { #binding_manifest #implementation_exports },
         }
     }
 }
@@ -1670,13 +1356,45 @@ impl Parse for Model {
 
 pub struct ArgsModel(pub ReactorArgs, pub Model, pub bool);
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ComponentEmission {
+    Legacy,
+    Features,
+    Metadata,
+    Payload,
+}
+
 impl ToTokens for ArgsModel {
     fn to_tokens(&self, tokens: &mut TokenStream) {
+        self.to_tokens_with_emission(tokens, ComponentEmission::Legacy);
+    }
+}
+
+impl ArgsModel {
+    pub(crate) fn to_tokens_with_emission(
+        &self,
+        tokens: &mut TokenStream,
+        emission: ComponentEmission,
+    ) {
         if let Err(error) = self.0.validate() {
             tokens.append_all(error.to_compile_error());
             return;
         }
-        let descriptor_output = descriptor_output(&self.0, &self.1);
+        let descriptor = semantic::Descriptor::parse(&self.0, &self.1);
+        let descriptor_contents = match &descriptor {
+            Ok(Some(descriptor)) => descriptor.output(),
+            Ok(None) => TokenStream::new(),
+            Err(error) => error.to_compile_error(),
+        };
+        let descriptor_output = if matches!(&descriptor, Ok(None)) {
+            TokenStream::new()
+        } else {
+            quote! {
+                #[doc(hidden)]
+                const ONLY_ONE_DEPLOYMENT_REACTOR_PER_MODULE: () = ();
+                pub mod __boomerang { #descriptor_contents }
+            }
+        };
         let topology_output = if self.2 {
             topology::output(&self.0, &self.1)
         } else {
@@ -1822,14 +1540,43 @@ impl ToTokens for ArgsModel {
         } else {
             None
         };
-        let payload_output = payload_output(
-            reactor_args,
-            &self.1,
-            &state_type_path,
-            &payload_state_struct,
-            &state_impl,
-            *component,
-        );
+        let payload_output = if matches!(
+            emission,
+            ComponentEmission::Legacy | ComponentEmission::Features
+        ) {
+            self::payload_output(
+                reactor_args,
+                &self.1,
+                &state_type_path,
+                &payload_state_struct,
+                &state_impl,
+                &descriptor,
+                if *component {
+                    PayloadEmission::LegacyComponent
+                } else {
+                    PayloadEmission::LegacyReactor
+                },
+            )
+            .legacy_output()
+        } else {
+            TokenStream::new()
+        };
+        let PayloadOutput {
+            declarations: native_payload_output,
+            exports: native_payload_exports,
+        } = if emission != ComponentEmission::Legacy {
+            self::payload_output(
+                reactor_args,
+                &self.1,
+                &state_type_path,
+                &payload_state_struct,
+                &state_impl,
+                &descriptor,
+                PayloadEmission::Native,
+            )
+        } else {
+            PayloadOutput::diagnostic(TokenStream::new())
+        };
 
         let port_idents = args
             .iter()
@@ -2163,7 +1910,7 @@ impl ToTokens for ArgsModel {
             }
         };
         let facet_module = format_ident!("__boomerang_facets_for_{name}");
-        tokens.append_all(quote! {
+        let legacy_output = quote! {
             #[allow(non_snake_case, unexpected_cfgs)]
             mod #facet_module {
                 #[cfg(not(any(boomerang_facet = "descriptor", boomerang_facet = "payload")))]
@@ -2195,7 +1942,99 @@ impl ToTokens for ArgsModel {
             #facet_module::descriptor! { #descriptor_output }
             #facet_module::payload! { #payload_output }
             #facet_module::conflict! { #conflict_output }
-        });
+        };
+        let metadata_contents = if matches!(&descriptor, Ok(None)) {
+            quote!(compile_error!("compiled component requires contract and contract_version metadata");)
+        } else {
+            descriptor_contents
+        };
+        match emission {
+            ComponentEmission::Legacy => tokens.append_all(legacy_output),
+            ComponentEmission::Metadata => tokens.append_all(quote! {
+                pub mod __boomerang { pub mod metadata { #metadata_contents } }
+                #topology_output
+            }),
+            ComponentEmission::Payload => tokens.append_all(quote! {
+                #native_payload_output
+                pub mod __boomerang { pub mod payload {
+                    #[allow(unused_imports)]
+                    use super::super::*;
+                    #native_payload_exports
+                } }
+            }),
+            ComponentEmission::Features => {
+                let no_facets = quote!(not(any(
+                    boomerang_facet = "descriptor",
+                    boomerang_facet = "payload"
+                )));
+                let legacy = selected(
+                    name,
+                    "legacy",
+                    quote!(not(any(feature = "metadata", feature = "payload"))),
+                    legacy_output,
+                );
+                let payload = selected(
+                    name,
+                    "native_payload",
+                    quote!(all(#no_facets, feature = "payload")),
+                    native_payload_output,
+                );
+                let metadata = selected(
+                    name,
+                    "native_metadata",
+                    quote!(all(#no_facets, feature = "metadata")),
+                    topology_output,
+                );
+                let namespace = selected(
+                    name,
+                    "native_namespace",
+                    quote!(all(#no_facets, any(feature = "metadata", feature = "payload"))),
+                    quote! {
+                        pub mod __boomerang {
+                            #[cfg(feature = "metadata")]
+                            pub mod metadata { #metadata_contents }
+                            #[cfg(feature = "payload")]
+                            pub mod payload {
+                                #[allow(unused_imports)]
+                                use super::super::*;
+                                #native_payload_exports
+                            }
+                        }
+                    },
+                );
+                let conflict = selected(
+                    name,
+                    "native_conflict",
+                    quote!(all(not(#no_facets), any(feature = "metadata", feature = "payload"))),
+                    quote! {
+                        compile_error!("cannot combine boomerang_facet with component metadata/payload features");
+                    },
+                );
+                tokens.append_all(quote!(#legacy #payload #metadata #namespace #conflict));
+            }
+        }
+    }
+}
+
+/// Delay item expansion until rustc has selected the invoking package's features. Suppressing
+/// tokens with a macro also suppresses name resolution and implementation-only attributes.
+fn selected(
+    reactor: &Ident,
+    suffix: &str,
+    condition: TokenStream,
+    output: TokenStream,
+) -> TokenStream {
+    let selector = format_ident!("__boomerang_select_{}_{}", reactor, suffix);
+    quote! {
+        #[allow(non_snake_case, unexpected_cfgs)]
+        mod #selector {
+            #[cfg(#condition)]
+            macro_rules! emit { ($($tokens:tt)*) => { $($tokens)* }; }
+            #[cfg(not(#condition))]
+            macro_rules! emit { ($($tokens:tt)*) => {} }
+            pub(super) use emit;
+        }
+        #selector::emit! { #output }
     }
 }
 

@@ -10,6 +10,7 @@ payload = []
 wasm-helper = ["dep:cargo-native-wasm-helper"]
 fingerprint-mismatch = []
 abi-mismatch = []
+incorrect-export-abi = []
 
 [dependencies]
 boomerang = { path = "../../../../boomerang", default-features = false }

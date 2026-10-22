@@ -230,3 +230,22 @@ fn cross_target_payload_keeps_builder_on_host_and_implementation_on_target() {
     assert!(!graph.contains("boomerang_builder"), "{graph}");
     assert!(!graph.contains("cargo-boomerang"), "{graph}");
 }
+
+#[test]
+fn normal_consumer_rejects_an_incorrectly_exported_macro_abi() {
+    // This keeps the normal consumer expectation, changing only the supplied actual ABI header.
+    let output = cargo(
+        "cargo-native-explicit",
+        "check",
+        &["--features", "incorrect-export-abi"],
+    );
+    assert!(
+        !output.status.success(),
+        "normal consumer accepted an incorrectly exported ABI 4"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("payload macro ABI mismatch"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

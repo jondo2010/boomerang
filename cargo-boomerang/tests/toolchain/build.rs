@@ -332,7 +332,7 @@ fn build_publishes_reuses_and_protects_a_fingerprinted_bundle() {
     })
     .unwrap();
     let built = launcher.build_locked_offline().unwrap();
-    let payload_crates = support::launcher_payload_crates(built.executable_path());
+    let payload_crates = support::launcher_payload_crates(&built);
     assert!(payload_crates.contains("sensor_host"));
     assert!(payload_crates.contains("vehicle_control"));
     assert!(
@@ -850,7 +850,7 @@ fn generated_central_deployment_publishes_isolated_artifacts_and_exchanges_tagge
         })
         .unwrap();
         let built = launcher.build_locked_offline().unwrap();
-        let payload_crates = support::launcher_payload_crates(built.executable_path());
+        let payload_crates = support::launcher_payload_crates(&built);
         for required in ["boomerang_runtime", &present.replace('-', "_")] {
             assert!(payload_crates.contains(required), "{payload_crates:?}");
         }

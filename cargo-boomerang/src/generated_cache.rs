@@ -11,7 +11,7 @@ use crate::bundle::rename_noreplace;
 use anyhow::{bail, ensure, Context, Result};
 use cargo_metadata::{Artifact, PackageId, TargetKind};
 use fs2::FileExt;
-const GENERATED_CACHE_SCHEMA: u32 = 1;
+const GENERATED_CACHE_SCHEMA: u32 = 2;
 /// The purpose of a generated Cargo workspace.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -24,6 +24,13 @@ pub(crate) enum GeneratedRole {
     Launcher,
 }
 impl GeneratedRole {
+    fn prefix(self) -> char {
+        match self {
+            Self::Topology => 't',
+            Self::Descriptor => 'd',
+            Self::Launcher => 'l',
+        }
+    }
     fn directory_name(self) -> &'static str {
         match self {
             Self::Topology => "topology",
@@ -36,15 +43,35 @@ impl GeneratedRole {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct RequestIdentity(blake3::Hash);
 impl RequestIdentity {
+    /// Names each generated executable independently while sharing dependency artifacts.
+    pub(crate) fn binary_manifest(
+        self,
+        manifest: &str,
+        role: GeneratedRole,
+    ) -> Result<(String, String)> {
+        // rustc repeats the crate name in object filenames. Keep this artifact
+        // label short; immutable source paths and cache records retain the full
+        // request identity, and Cargo artifacts are matched by exact package ID.
+        let binary = format!("{}{}", role.prefix(), &self.lowercase_hex()[..32]);
+        let mut manifest: toml::Table = toml::from_str(manifest)?;
+        manifest["package"]
+            .as_table_mut()
+            .context("generated package missing")?
+            .insert("autobins".into(), false.into());
+        manifest.insert(
+            "bin".into(),
+            toml::Value::Array(vec![toml::Value::Table(toml::Table::from_iter([
+                ("name".into(), binary.clone().into()),
+                ("path".into(), "src/main.rs".into()),
+            ]))]),
+        );
+        Ok((toml::to_string(&manifest)?, binary))
+    }
     fn lowercase_hex(self) -> String {
         self.0.to_hex().to_string()
     }
     fn short_target_name(self, role: GeneratedRole) -> String {
-        let prefix = match role {
-            GeneratedRole::Topology => 't',
-            GeneratedRole::Descriptor => 'd',
-            GeneratedRole::Launcher => 'l',
-        };
+        let prefix = role.prefix();
         format!("{prefix}{}", &self.lowercase_hex()[..32])
     }
 }
@@ -81,6 +108,8 @@ pub(crate) struct GeneratedWorkspaceRequest<'a> {
     pub(crate) role: GeneratedRole,
     /// Complete content identity derived from every cache-relevant input.
     pub(crate) identity: RequestIdentity,
+    /// Compiler context shared by requests with different generated sources.
+    pub(crate) compilation_identity: RequestIdentity,
     /// Exact generated `Cargo.toml` bytes to publish on a cache miss.
     pub(crate) manifest: &'a [u8],
     /// Exact generated `src/main.rs` bytes to publish on a cache miss.
@@ -108,8 +137,38 @@ struct CacheRecord {
     generated_lock_hash: String,
     /// BLAKE3 digest of the source-workspace lock snapshot.
     source_lock_hash: String,
-    /// Role-prefixed short target-directory locator.
-    target_locator: String,
+}
+
+/// Ownership of a mutable compilation cache, independent of any generated request.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct CompilationCacheRecord {
+    schema: u32,
+    role: GeneratedRole,
+    context: String,
+}
+
+/// Cargo tracks ordinary compiler arguments, dependency graphs and env!/option_env! inputs.
+/// Explicitly partition the state hidden behind our runtime-selected compiler wrapper.
+pub(crate) fn compilation_identity(
+    role: GeneratedRole,
+    cargo_program: &std::ffi::OsStr,
+    wrapper: &Path,
+    user_wrapper: Option<&Path>,
+) -> RequestIdentityBuilder {
+    let mut identity = RequestIdentityBuilder::new(role);
+    identity.field("cache-purpose", Some(b"shared-compilation-v1"));
+    identity.field("cargo-program", Some(cargo_program.as_encoded_bytes()));
+    identity.field("wrapper", Some(wrapper.as_os_str().as_encoded_bytes()));
+    identity.field(
+        "wrapper-semantics",
+        Some(crate::compiler_wrapper::CACHE_SEMANTICS),
+    );
+    identity.field(
+        "user-wrapper",
+        user_wrapper.map(|p| p.as_os_str().as_encoded_bytes()),
+    );
+    identity
 }
 #[derive(Debug)]
 /// Independently retained bytes and record used for later validation.
@@ -134,7 +193,6 @@ impl WorkspaceExpectations {
                 source_hash: blake3::hash(request.source).to_string(),
                 generated_lock_hash,
                 source_lock_hash: blake3::Hash::from(*request.source_lock_digest).to_string(),
-                target_locator: request.identity.short_target_name(request.role),
             },
         }
     }
@@ -148,6 +206,8 @@ pub(crate) struct GeneratedWorkspace {
     target_anchor: PathBuf,
     /// Independently retained integrity expectations.
     expectations: WorkspaceExpectations,
+    /// Validated ownership of the shared mutable Cargo target directory.
+    compilation: CompilationCacheRecord,
 }
 impl GeneratedWorkspace {
     /// Revalidates a published workspace and its locked Cargo graph.
@@ -166,8 +226,14 @@ impl GeneratedWorkspace {
         self.directory.join("Cargo.toml")
     }
     fn target_directory(&self) -> PathBuf {
-        let target_locator = &self.expectations.record.target_locator;
-        self.target_anchor.join("b").join(target_locator)
+        let identity = RequestIdentity(
+            blake3::Hash::from_hex(&self.compilation.context)
+                .expect("compilation context is a generated digest"),
+        );
+        self.target_anchor.join("b").join(format!(
+            "s{}",
+            identity.short_target_name(self.compilation.role)
+        ))
     }
     /// Serializes target-directory use and revalidates the published cache before an operation.
     pub(crate) fn with_locked_target<T>(
@@ -197,7 +263,7 @@ impl GeneratedWorkspace {
         {
             return Ok(());
         }
-        let marker = &self.expectations.record;
+        let marker = &self.compilation;
         let bytes = serde_json::to_vec(marker).context("failed to encode target marker")?;
         publish_staged(
             &parent,
@@ -209,7 +275,11 @@ impl GeneratedWorkspace {
             |directory, ()| {
                 let marker_path = directory.join(".boomerang-request");
                 validate_exact_directory(directory, &[".boomerang-request"], "target staging")?;
-                if read_cache_record(&marker_path, "generated target marker")? != *marker {
+                let actual: CompilationCacheRecord = serde_json::from_slice(&read_regular_file(
+                    &marker_path,
+                    "generated target marker",
+                )?)?;
+                if actual != *marker {
                     bail!("invalid target marker");
                 }
                 Ok(())
@@ -249,9 +319,9 @@ impl GeneratedWorkspace {
         );
         Ok(marker_path)
     }
-    fn validate_target_marker_record(&self, marker: CacheRecord) -> Result<()> {
-        let expected = &self.expectations.record;
-        if marker.request != expected.request {
+    fn validate_target_marker_record(&self, marker: CompilationCacheRecord) -> Result<()> {
+        let expected = &self.compilation;
+        if marker.context != expected.context {
             bail!("target locator collision");
         }
         ensure!(marker == *expected, "generated target marker is invalid");
@@ -527,8 +597,13 @@ pub(crate) fn resolve_generated_workspace<T>(
         fs::canonicalize(target_directory).context("failed to canonicalize target anchor")?;
     let role = request.role.directory_name();
     let parent =
-        prepare_managed_directories(&target_anchor, &["boomerang", "generated", "v1", role])?;
+        prepare_managed_directories(&target_anchor, &["boomerang", "generated", "v2", role])?;
     let final_directory = parent.join(&identity);
+    let compilation = CompilationCacheRecord {
+        schema: GENERATED_CACHE_SCHEMA,
+        role: request.role,
+        context: request.compilation_identity.lowercase_hex(),
+    };
     if final_directory
         .try_exists()
         .context("failed to inspect workspace")?
@@ -539,6 +614,7 @@ pub(crate) fn resolve_generated_workspace<T>(
             directory: final_directory,
             target_anchor,
             expectations,
+            compilation,
         };
         let graph = workspace.validate_published(&validate_graph)?;
         return Ok((workspace, graph));
@@ -572,6 +648,7 @@ pub(crate) fn resolve_generated_workspace<T>(
         directory: final_directory,
         target_anchor,
         expectations,
+        compilation,
     };
     let graph = workspace.validate_published(&validate_graph)?;
     Ok((workspace, graph))
@@ -614,6 +691,7 @@ mod tests {
             GeneratedWorkspaceRequest {
                 role: GeneratedRole::Descriptor,
                 identity: RequestIdentity(blake3::hash(b"cache fixture")),
+                compilation_identity: RequestIdentity(blake3::hash(b"fixture compiler context")),
                 manifest: MANIFEST,
                 source: SOURCE,
                 source_lockfile: self.source_lockfile.path(),
@@ -640,6 +718,112 @@ mod tests {
         let error = result.unwrap_err().to_string();
         assert!(error.contains(expected), "{error}");
         error
+    }
+    #[test]
+    fn generated_binary_names_leave_room_for_windows_linker_objects() {
+        let identity = RequestIdentity(blake3::hash(b"binary identity"));
+        let target = r"D:\a\_temp\boomerang-builds\toolchain\toolchain\b\stf69bf08eb5384f34f41fb9183d65caed\x86_64-pc-windows-msvc";
+        let mut names = BTreeSet::new();
+        for role in [
+            GeneratedRole::Topology,
+            GeneratedRole::Descriptor,
+            GeneratedRole::Launcher,
+        ] {
+            let (manifest, name) = identity
+                .binary_manifest(std::str::from_utf8(MANIFEST).unwrap(), role)
+                .unwrap();
+            for profile in ["debug", "release"] {
+                let deps = format!(r"{target}\{profile}\deps");
+                // rustc repeats the crate name in non-incremental object files.
+                // The Cargo disambiguator and codegen-unit suffix both matter.
+                let stem = format!("{deps}\\{name}-0123456789abcdef");
+                for artifact in [
+                    format!("{stem}.{name}.fedcba9876543210-cgu.255.rcgu.o"),
+                    format!("{stem}.exe"),
+                    format!("{stem}.pdb"),
+                ] {
+                    assert!(
+                        artifact.len() < 260,
+                        "Windows artifact path is {} characters: {artifact}",
+                        artifact.len()
+                    );
+                }
+            }
+            assert!(names.insert(name.clone()));
+            let manifest: toml::Table = toml::from_str(&manifest).unwrap();
+            assert_eq!(manifest["bin"][0]["name"].as_str(), Some(name.as_str()));
+            assert_eq!(manifest["package"]["autobins"].as_bool(), Some(false));
+        }
+    }
+    #[test]
+    fn distinct_requests_share_compilation_target_but_validate_their_own_sources() {
+        let (fixture, first) = CacheFixture::published();
+        let mut request = fixture.request();
+        request.identity = RequestIdentity(blake3::hash(b"another generated source"));
+        request.source = b"fn main() { println!(\"second\"); }\n";
+        let (second, ()) =
+            resolve_generated_workspace(fixture.target.path(), &request, |_| Ok(()), |_| Ok(()))
+                .unwrap();
+        assert_ne!(first.directory(), second.directory());
+        assert_eq!(first.target_directory(), second.target_directory());
+        first
+            .with_locked_target(|target| {
+                fs::write(target.join("dependency-cache"), b"reused")?;
+                Ok(())
+            })
+            .unwrap();
+        second
+            .with_locked_target(|target| {
+                assert_eq!(fs::read(target.join("dependency-cache"))?, b"reused");
+                Ok(())
+            })
+            .unwrap();
+        fs::write(second.directory().join("src/main.rs"), b"tampered").unwrap();
+        expect_error(
+            second.with_locked_target(|_| Ok(())),
+            "generated source differs",
+        );
+        first.with_locked_target(|_| Ok(())).unwrap();
+    }
+
+    #[test]
+    fn generated_roles_have_separate_compilation_targets() {
+        let (fixture, first) = CacheFixture::published();
+        let mut request = fixture.request();
+        request.role = GeneratedRole::Launcher;
+        let (second, ()) =
+            resolve_generated_workspace(fixture.target.path(), &request, |_| Ok(()), |_| Ok(()))
+                .unwrap();
+        assert_ne!(first.target_directory(), second.target_directory());
+    }
+    #[test]
+    fn compiler_contexts_have_separate_targets_for_the_same_sources() {
+        let (fixture, first) = CacheFixture::published();
+        let mut request = fixture.request();
+        request.compilation_identity = RequestIdentity(blake3::hash(b"different compiler context"));
+        let (second, ()) =
+            resolve_generated_workspace(fixture.target.path(), &request, |_| Ok(()), |_| Ok(()))
+                .unwrap();
+        assert_eq!(first.directory(), second.directory());
+        assert_ne!(first.target_directory(), second.target_directory());
+        first.with_locked_target(|_| Ok(())).unwrap();
+        second.with_locked_target(|_| Ok(())).unwrap();
+    }
+    #[test]
+    fn compilation_identity_tracks_hidden_wrappers_and_cargo_program() {
+        let identity = |cargo: &str, wrapper: &str, user: Option<&str>| {
+            compilation_identity(
+                GeneratedRole::Launcher,
+                cargo.as_ref(),
+                Path::new(wrapper),
+                user.map(Path::new),
+            )
+            .finish()
+        };
+        let first = identity("cargo", "wrapper", None);
+        assert_ne!(first, identity("other-cargo", "wrapper", None));
+        assert_ne!(first, identity("cargo", "other-wrapper", None));
+        assert_ne!(first, identity("cargo", "wrapper", Some("user-wrapper")));
     }
     #[test]
     fn workspace_validation_rejects_mutated_contents_and_entries() {
@@ -679,7 +863,7 @@ mod tests {
         let published = fixture
             .target
             .path()
-            .join("boomerang/generated/v1/descriptor")
+            .join("boomerang/generated/v2/descriptor")
             .join(fixture.request().identity.lowercase_hex());
         assert!(!published.exists());
 
@@ -776,8 +960,9 @@ mod tests {
         let (_fixture, workspace) = CacheFixture::published();
         workspace.with_locked_target(|_| Ok(())).unwrap();
         let marker_path = workspace.target_directory().join(".boomerang-request");
-        let mut marker = read_cache_record(&marker_path, "target marker").unwrap();
-        marker.request = "f".repeat(64);
+        let mut marker: CompilationCacheRecord =
+            serde_json::from_slice(&fs::read(&marker_path).unwrap()).unwrap();
+        marker.context = "f".repeat(64);
         fs::write(marker_path, serde_json::to_vec(&marker).unwrap()).unwrap();
         expect_error(
             workspace.with_locked_target(|_| Ok(())),
@@ -793,7 +978,12 @@ mod tests {
     }
     #[test]
     fn concurrent_target_users_wait_for_locked_marker_validation() {
-        let (_fixture, workspace) = CacheFixture::published();
+        let (fixture, workspace) = CacheFixture::published();
+        let mut request = fixture.request();
+        request.identity = RequestIdentity(blake3::hash(b"concurrent second request"));
+        let (other_workspace, ()) =
+            resolve_generated_workspace(fixture.target.path(), &request, |_| Ok(()), |_| Ok(()))
+                .unwrap();
         workspace.with_locked_target(|_| Ok(())).unwrap();
         let (locked_tx, locked_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
@@ -809,7 +999,7 @@ mod tests {
                 })
             });
             locked_rx.recv().unwrap();
-            let second_workspace = &workspace;
+            let second_workspace = &other_workspace;
             let second = scope.spawn(move || {
                 result_tx
                     .send(second_workspace.with_locked_target(|_| Ok(())))

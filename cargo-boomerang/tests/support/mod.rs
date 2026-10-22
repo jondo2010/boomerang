@@ -140,7 +140,17 @@ pub fn shared_target(lane: &str) -> PathBuf {
 }
 
 pub fn toolchain_target() -> PathBuf {
-    shared_target("toolchain")
+    // Fixture sources are disposable, but compiled third-party dependencies should survive
+    // another invocation of this test binary. Cold-cache tests use their own TempDir.
+    // CI stores this outside rust-cache's target tree: its Cargo-aware pruning
+    // removes our ownership markers while retaining nested dependency artifacts.
+    std::env::var_os("BOOMERANG_TEST_BUILD_CACHE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("cargo-boomerang-builds")
+        })
+        .join(env!("CARGO_CRATE_NAME"))
+        .join("toolchain")
 }
 
 pub fn reset_deployment_output(target: &Path, deployment: &str) {
@@ -347,33 +357,11 @@ pub fn with_target_directory<T>(target: &Path, operation: impl FnOnce() -> T) ->
 
 /// Inspect emitted target libraries from generated launcher builds, excluding host tooling builds.
 /// Unfiltered Cargo metadata also lists the facade's cfg-disabled hosted dependencies.
-pub fn launcher_payload_crates(executable: &Path) -> std::collections::BTreeSet<String> {
-    fn collect(directory: &Path, crates: &mut std::collections::BTreeSet<String>) {
-        for entry in std::fs::read_dir(directory).unwrap() {
-            let entry = entry.unwrap();
-            let path = entry.path();
-            if entry.file_type().unwrap().is_dir() {
-                collect(&path, crates);
-            } else if matches!(
-                path.extension().and_then(|value| value.to_str()),
-                Some("rlib" | "rmeta")
-            ) {
-                let filename = path.file_stem().unwrap().to_str().unwrap();
-                if let Some(name) = filename
-                    .strip_prefix("lib")
-                    .and_then(|value| value.split('-').next())
-                {
-                    crates.insert(name.to_owned());
-                }
-            }
-        }
-    }
-    // BuiltLauncher returns a private executable copy directly below its build target.
-    // Inspect only this launcher's explicit target tree, not host tooling or other builds.
-    let build_target = executable.parent().unwrap().parent().unwrap();
-    let payload = build_target.join(target_lexicon::HOST.to_string());
-    let mut crates = std::collections::BTreeSet::new();
-    collect(&payload, &mut crates);
+pub fn launcher_payload_crates(
+    built: &cargo_boomerang::BuiltLauncher,
+) -> std::collections::BTreeSet<String> {
+    let crates: std::collections::BTreeSet<String> =
+        built.target_crates().map(str::to_owned).collect();
     assert!(
         crates.contains("boomerang_runtime"),
         "no target runtime artifact found: {crates:?}"

@@ -65,6 +65,8 @@ pub struct GeneratedLauncher {
     output: crate::CommandOutput,
     /// Exact generated root package selected by locked Cargo metadata.
     package_id: PackageId,
+    /// Request-specific Cargo binary name, avoiding stale top-level executable reuse.
+    binary_name: String,
     /// Path to the generated Cargo manifest.
     manifest_path: PathBuf,
     /// Path to the generated Rust executable source.
@@ -147,6 +149,8 @@ pub struct BuiltLauncher {
     executable_path: PathBuf,
     /// Number of non-fresh Cargo compiler artifacts emitted by the build.
     compiled_artifacts: usize,
+    /// Target libraries in this build's Cargo artifact graph, including fresh artifacts.
+    target_crates: BTreeSet<String>,
 }
 
 impl BuiltLauncher {
@@ -158,6 +162,11 @@ impl BuiltLauncher {
     /// Returns the number of non-fresh Cargo compiler artifacts from this build.
     pub const fn compiled_artifacts(&self) -> usize {
         self.compiled_artifacts
+    }
+
+    /// Returns target library crate names used by this build, excluding cached unrelated crates.
+    pub fn target_crates(&self) -> impl Iterator<Item = &str> {
+        self.target_crates.iter().map(String::as_str)
     }
 }
 
@@ -189,6 +198,21 @@ impl GeneratedLauncher {
         require_success("locked offline launcher build", &output)?;
         let mut executable_paths = BTreeSet::new();
         let mut compiled_artifacts = 0;
+        let mut target_crates = BTreeSet::new();
+        let target_subdir = if let Some(target_json) = &self.federate.target_json {
+            Path::new(target_json)
+                .file_stem()
+                .context("target JSON has no file stem")?
+                .to_owned()
+        } else {
+            OsString::from(
+                self.federate
+                    .target
+                    .clone()
+                    .unwrap_or_else(|| target_lexicon::HOST.to_string()),
+            )
+        };
+        let target_root = target_dir.join(target_subdir);
         for message in Message::parse_stream(output.stdout.as_slice()) {
             let artifact = match message.context("failed to parse generated Cargo build message")? {
                 Message::CompilerArtifact(artifact) => artifact,
@@ -198,11 +222,17 @@ impl GeneratedLauncher {
                 _ => continue,
             };
             compiled_artifacts += usize::from(!artifact.fresh);
+            if artifact.filenames.iter().any(|filename| {
+                filename.as_std_path().starts_with(&target_root)
+                    && matches!(filename.extension(), Some("rlib" | "rmeta"))
+            }) {
+                target_crates.insert(artifact.target.name.replace('-', "_"));
+            }
             if !artifact_matches(
                 &artifact,
                 &self.package_id,
                 &self.manifest_path,
-                "boomerang-static-launcher",
+                &self.binary_name,
             )? {
                 continue;
             }
@@ -226,11 +256,17 @@ impl GeneratedLauncher {
             .into_iter()
             .next()
             .expect("exactly one generated executable was required");
-        let (_private_directory, executable_path) = copy_private_artifact(&executable, target_dir)?;
+        let (_private_directory, copied_path) = copy_private_artifact(&executable, target_dir)?;
+        let executable_path = copied_path.with_file_name(format!(
+            "boomerang-static-launcher{}",
+            std::env::consts::EXE_SUFFIX
+        ));
+        fs::rename(&copied_path, &executable_path).context("failed to name private launcher")?;
         Ok(BuiltLauncher {
             _private_directory,
             executable_path,
             compiled_artifacts,
+            target_crates,
         })
     }
 
@@ -547,9 +583,17 @@ fn prepare_launcher(
         &configured_files,
         &cargo_program,
     )?;
+    let (manifest, binary_name) = identity.binary_manifest(&manifest, GeneratedRole::Launcher)?;
     let request = GeneratedWorkspaceRequest {
         role: GeneratedRole::Launcher,
         identity,
+        compilation_identity: launcher_compilation_identity(
+            &configuration,
+            &configured_files,
+            &cargo_program,
+            &compiler_wrapper,
+            &compiler_wrappers,
+        ),
         manifest: manifest.as_bytes(),
         source: source.as_bytes(),
         source_lockfile: &analyzed.resolved.lockfile().path,
@@ -595,6 +639,7 @@ fn prepare_launcher(
         compiler_wrappers,
         output: *output,
         package_id,
+        binary_name,
         manifest_path,
         source_path,
         lockfile_path,
@@ -602,6 +647,25 @@ fn prepare_launcher(
         configured_files,
         federate: configuration,
     })
+}
+
+/// Partition compiler context without including generated sources, lockfiles or compatibility
+/// inputs: Cargo tracks those and can reuse their unaffected dependencies.
+fn launcher_compilation_identity(
+    federate: &ResolvedFederate,
+    configured_files: &ConfiguredFiles,
+    cargo_program: &OsStr,
+    wrapper: &Path,
+    wrappers: &crate::facet::CompilerWrappers,
+) -> RequestIdentity {
+    let mut identity = crate::generated_cache::compilation_identity(
+        GeneratedRole::Launcher,
+        cargo_program,
+        wrapper,
+        wrappers.rustc_wrapper(),
+    );
+    launcher_configuration_identity(&mut identity, federate, configured_files);
+    identity.finish()
 }
 
 /// Computes the canonical identity of one launcher request from all Cargo-relevant inputs.
@@ -618,6 +682,7 @@ fn launcher_request_identity(
     inputs.sort();
 
     let mut identity = RequestIdentityBuilder::new(GeneratedRole::Launcher);
+    identity.field("binary-name-format", Some(b"role-short-request-v2"));
     identity.field("facet", Some(b"payload"));
     identity.field(
         "facet-wrapper",
@@ -630,6 +695,16 @@ fn launcher_request_identity(
         identity.field("compile-input-key", Some(key.as_bytes()));
         identity.field("compile-input-value", Some(value.as_bytes()));
     }
+    launcher_configuration_identity(&mut identity, federate, configured_files);
+    identity.field("cargo-program", Some(cargo_program.as_encoded_bytes()));
+    Ok(identity.finish())
+}
+
+fn launcher_configuration_identity(
+    identity: &mut RequestIdentityBuilder,
+    federate: &ResolvedFederate,
+    configured_files: &ConfiguredFiles,
+) {
     let effective_target = federate.target_json.is_none().then(|| {
         federate
             .target
@@ -653,8 +728,6 @@ fn launcher_request_identity(
         );
         identity.field(label, file.as_ref().map(|(_, bytes)| bytes.as_slice()));
     }
-    identity.field("cargo-program", Some(cargo_program.as_encoded_bytes()));
-    Ok(identity.finish())
 }
 
 /// Canonicalizes and reads an optional configured file for lossless request identity encoding.
@@ -1247,11 +1320,11 @@ pub(crate) fn generate_analyzed_rti(
 mod tests {
     use super::{
         configured_metadata_arguments, configured_path_argument, launcher_capabilities,
-        launcher_command, launcher_request_identity, rendered_compiler_diagnostics,
-        selected_payload_features, ConfiguredFiles,
+        launcher_command, launcher_compilation_identity, launcher_request_identity,
+        rendered_compiler_diagnostics, selected_payload_features, ConfiguredFiles,
     };
     use crate::{manifest::Binding, RecoveryPolicy, ResolvedFederate};
-    use std::{collections::BTreeMap, ffi::OsStr, path::Path};
+    use std::{collections::BTreeMap, ffi::OsStr, fs, path::Path};
 
     #[test]
     fn generated_manifest_selects_independent_hosted_features() {
@@ -1452,6 +1525,59 @@ mod tests {
             identity(None),
             identity(Some(target_lexicon::HOST.to_string()))
         );
+    }
+
+    #[test]
+    fn compilation_context_tracks_launcher_configuration() {
+        let mut federate = ResolvedFederate {
+            physical_clock: None,
+            physical_inputs: None,
+            bounded_tracing: None,
+            groups: Vec::new(),
+            target: None,
+            toolchain: None,
+            profile: None,
+            runtime: "std".into(),
+            recovery: RecoveryPolicy::FailStop,
+            target_json: None,
+            cargo_config: None,
+        };
+        let context = |federate: &ResolvedFederate| {
+            launcher_compilation_identity(
+                federate,
+                &ConfiguredFiles::new(federate).unwrap(),
+                OsStr::new("cargo"),
+                Path::new("wrapper"),
+                &Default::default(),
+            )
+        };
+        let first = context(&federate);
+        federate.target = Some(target_lexicon::HOST.to_string());
+        assert_eq!(first, context(&federate));
+        federate.profile = Some("release".into());
+        assert_ne!(first, context(&federate));
+        federate.profile = None;
+        federate.toolchain = Some("nightly".into());
+        assert_ne!(first, context(&federate));
+        federate.toolchain = None;
+        federate.target = Some("wasm32-unknown-unknown".into());
+        assert_ne!(first, context(&federate));
+        federate.target = None;
+        let config = tempfile::NamedTempFile::new().unwrap();
+        fs::write(config.path(), b"[net]\noffline = true\n").unwrap();
+        federate.cargo_config = Some(config.path().to_path_buf());
+        let configured = context(&federate);
+        assert_ne!(first, configured);
+        fs::write(config.path(), b"[net]\noffline = false\n").unwrap();
+        assert_ne!(configured, context(&federate));
+        federate.cargo_config = None;
+        let target = tempfile::NamedTempFile::new().unwrap();
+        fs::write(target.path(), b"{}\n").unwrap();
+        federate.target_json = Some(target.path().to_path_buf());
+        let configured = context(&federate);
+        assert_ne!(first, configured);
+        fs::write(target.path(), b"{\"different\": true}\n").unwrap();
+        assert_ne!(configured, context(&federate));
     }
 
     #[test]

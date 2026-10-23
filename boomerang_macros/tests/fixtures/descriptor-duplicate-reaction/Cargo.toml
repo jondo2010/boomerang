@@ -5,6 +5,8 @@ edition = "2021"
 publish = false
 
 [features]
+metadata = []
+payload = []
 duplicate-mode = []
 
 [dependencies]

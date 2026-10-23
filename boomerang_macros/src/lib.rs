@@ -22,6 +22,8 @@ pub fn reactor_ports(
 ///
 /// The `#[reactor]` macro turns a plain Rust function into a reactor declaration. The reactor function takes
 /// any number of other arguments.
+/// Direct attributes always emit the hosted API.
+/// Use [`component!`] or explicit component macros for metadata and payload emission.
 ///
 /// Here’s how you would define and use a simple Boomerang reactor which has one input, a delay parameter, and a boolean state:
 /// ```rust,no_run
@@ -196,14 +198,13 @@ pub fn timer(s: proc_macro::TokenStream) -> proc_macro::TokenStream {
 /// items remain ordinary owning-crate code and are omitted in metadata builds.
 /// The invoking package's additive `metadata` and `payload` features select APIs in `module::__boomerang::{metadata,payload}`.
 /// Both features can coexist.
-/// Without either feature or legacy facet selection, the macro emits hosted APIs.
+/// Without either feature, the macro emits hosted APIs.
 /// Metadata also provides typed topology constructors through `module::definition()`.
 /// Declare these features in the component package.
 /// Gate implementation-only dependencies behind `payload`.
 /// Use resolver 2 or newer to isolate build dependencies.
 /// Use [`component_metadata!`] in build scripts to select metadata independently of package payload features.
 /// Code outside the declaration must follow the same host/target isolation rules.
-/// Legacy `boomerang_facet` selection remains supported, but cannot be mixed with public features.
 /// Root attributes other than documentation are rejected; put conditional and lint
 /// attributes on the component module instead.
 #[proc_macro_error2::proc_macro_error]

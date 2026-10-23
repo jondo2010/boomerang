@@ -959,92 +959,14 @@ fn payload_reaction_output(
         .collect()
 }
 
-/// Reads and validates the host-provided compatibility values for one payload facet.
-fn payload_compile_inputs(
-    contract: &syn::LitStr,
-    contract_version: u64,
-    reactor_root: &str,
-) -> syn::Result<([u8; 32], String)> {
-    use boomerang_runtime::binding::{
-        payload_fingerprint_compile_input_key, COMPONENT_DESCRIPTOR_MACRO_ABI,
-        PAYLOAD_MACRO_ABI_COMPILE_INPUT,
-    };
-    let error = |message| syn::Error::new(contract.span(), message);
-    let macro_abi = std::env::var(PAYLOAD_MACRO_ABI_COMPILE_INPUT).map_err(|_| {
-        error(format!(
-            "missing payload macro ABI compile input `{PAYLOAD_MACRO_ABI_COMPILE_INPUT}`"
-        ))
-    })?;
-    let invalid_abi = || error("payload macro ABI compile input must be a decimal u32".into());
-    if macro_abi.is_empty() || !macro_abi.bytes().all(|byte| byte.is_ascii_digit()) {
-        return Err(invalid_abi());
-    }
-    let macro_abi = macro_abi.parse::<u32>().map_err(|_| invalid_abi())?;
-    if macro_abi != COMPONENT_DESCRIPTOR_MACRO_ABI {
-        return Err(error(format!(
-                "payload macro ABI mismatch: expected {COMPONENT_DESCRIPTOR_MACRO_ABI}, received {macro_abi}"
-            )));
-    }
-    let manifest_dir = std::env::var_os("CARGO_MANIFEST_DIR")
-        .ok_or_else(|| error("missing `CARGO_MANIFEST_DIR` for payload compile input".into()))?;
-    let manifest_dir = std::fs::canonicalize(manifest_dir).map_err(|_| {
-        error("`CARGO_MANIFEST_DIR` must identify an existing payload package directory".into())
-    })?;
-    let manifest_dir = manifest_dir
-        .to_str()
-        .ok_or_else(|| error("canonical `CARGO_MANIFEST_DIR` must be valid UTF-8".into()))?;
-    let fingerprint_key = payload_fingerprint_compile_input_key(
-        manifest_dir,
-        &contract.value(),
-        contract_version,
-        reactor_root,
-    );
-    let fingerprint = std::env::var(&fingerprint_key).map_err(|_| {
-        error(format!(
-            "missing payload descriptor fingerprint compile input `{fingerprint_key}`"
-        ))
-    })?;
-    if fingerprint.len() != 64
-        || !fingerprint
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
-        return Err(error(
-            "payload descriptor fingerprint must be exactly 64 lowercase hex digits".into(),
-        ));
-    }
-    let mut bytes = [0u8; 32];
-    for (index, pair) in fingerprint.as_bytes().as_chunks::<2>().0.iter().enumerate() {
-        bytes[index] = u8::from_str_radix(
-            std::str::from_utf8(pair).expect("fingerprint characters are ASCII"),
-            16,
-        )
-        .expect("fingerprint characters were validated");
-    }
-    Ok((bytes, fingerprint_key))
-}
-
-/// Selects self-derived native compatibility or the retained CLI-driven legacy protocol.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum PayloadEmission {
-    LegacyReactor,
-    LegacyComponent,
-    Native,
-}
-
 /// Native definitions stay in the declaration's lexical scope. Stable public binding names are
 /// reexported from the nested namespace, preserving `self::`/`super::` paths without rewriting them.
 struct PayloadSymbols {
-    /// Selects owning-module definitions with stable public aliases for native emission.
-    native: bool,
     /// Public reexports that map implementation-local names to stable payload binding symbols.
     aliases: Vec<TokenStream>,
 }
 impl PayloadSymbols {
     fn definition(&mut self, public: &Ident) -> Ident {
-        if !self.native {
-            return public.clone();
-        }
         let implementation = format_ident!("__boomerang_payload_{public}");
         self.aliases.push(quote! {
             pub use super::super::#implementation as #public;
@@ -1067,23 +989,6 @@ impl PayloadOutput {
             exports: TokenStream::new(),
         }
     }
-    fn legacy_output(self) -> TokenStream {
-        let Self {
-            declarations,
-            exports,
-        } = self;
-        if exports.is_empty() {
-            return declarations;
-        }
-        quote! {
-            #declarations
-            pub mod __boomerang {
-                #[allow(unused_imports)]
-                use super::*;
-                #exports
-            }
-        }
-    }
 }
 
 fn payload_output(
@@ -1093,13 +998,9 @@ fn payload_output(
     state_struct: &Option<TokenStream>,
     state_impl: &Option<TokenStream>,
     semantic: &syn::Result<Option<boomerang_builder::ComponentDescriptor>>,
-    emission: PayloadEmission,
 ) -> PayloadOutput {
     let descriptor = match semantic {
         Ok(Some(descriptor)) => descriptor,
-        Ok(None) if emission != PayloadEmission::Native => {
-            return PayloadOutput::diagnostic(TokenStream::new())
-        }
         Ok(None) => {
             return PayloadOutput::diagnostic(
                 quote!(compile_error!("compiled component requires contract and contract_version metadata");),
@@ -1107,13 +1008,6 @@ fn payload_output(
         }
         Err(error) => return PayloadOutput::diagnostic(error.to_compile_error()),
     };
-    let contract = reactor_args.contract.as_ref().expect("validated contract");
-    let contract_version = reactor_args
-        .contract_version
-        .as_ref()
-        .expect("validated version")
-        .base10_parse::<u64>()
-        .expect("validated version fits u64");
     if reactor_args.state.is_some() && reactor_args.state_init.is_none() {
         return PayloadOutput::diagnostic(
             quote! { compile_error!("payload mode requires `state_init = path` with `state = T`"); },
@@ -1127,7 +1021,6 @@ fn payload_output(
         .map(|mode| ident_text(&mode.name))
         .collect::<Vec<_>>();
     let mut symbols = PayloadSymbols {
-        native: emission == PayloadEmission::Native,
         aliases: Vec::new(),
     };
     let reaction_exports =
@@ -1136,84 +1029,15 @@ fn payload_output(
             Err(error) => return PayloadOutput::diagnostic(error.to_compile_error()),
         };
     let macro_abi = boomerang_runtime::binding::COMPONENT_DESCRIPTOR_MACRO_ABI;
-    let macro_abi_key = boomerang_runtime::binding::PAYLOAD_MACRO_ABI_COMPILE_INPUT;
-    let (fingerprint_declaration, binding_manifest) = if emission == PayloadEmission::Native {
-        let fingerprint = descriptor.fingerprint().to_bytes();
-        (
-            TokenStream::new(),
-            quote! {
-                /// Actual compatibility information derived from this component declaration.
-                pub const fn binding_manifest() -> ::boomerang::runtime::binding::BindingManifest {
-                    ::boomerang::runtime::binding::BindingManifest::new(
-                        ::boomerang::runtime::binding::DescriptorFingerprint::new([#(#fingerprint),*]),
-                        #macro_abi,
-                    )
-                }
-            },
-        )
-    } else if emission == PayloadEmission::LegacyComponent {
-        let manifest_dir = match std::env::var_os("CARGO_MANIFEST_DIR")
-            .and_then(|path| std::fs::canonicalize(path).ok())
-        {
-            Some(path) => path,
-            None => {
-                return PayloadOutput::diagnostic(
-                    syn::Error::new(
-                        contract.span(),
-                        "missing canonical payload package directory",
-                    )
-                    .to_compile_error(),
-                )
-            }
-        };
-        let Some(manifest_dir) = manifest_dir.to_str() else {
-            return PayloadOutput::diagnostic(
-                syn::Error::new(contract.span(), "payload package directory must be UTF-8")
-                    .to_compile_error(),
-            );
-        };
-        let key = boomerang_runtime::binding::component_payload_fingerprint_compile_inputs_key(
-            manifest_dir,
-            &contract.value(),
-            contract_version,
-            &reactor_name,
-        );
-        (
-            quote! {
-                const __BOOMERANG_COMPONENT_INPUTS: ::core::option::Option<&str> = option_env!(#key);
-                const __BOOMERANG_COMPONENT_MODULE: &str = module_path!();
-            },
-            quote! {
-                /// Resolves this selected component's compatibility header.
-                /// Generated launchers call this function during const validation.
-                pub const fn binding_manifest() -> ::boomerang::runtime::binding::BindingManifest {
-                    ::boomerang::runtime::binding::component_payload_binding_manifest(
-                        super::__BOOMERANG_COMPONENT_INPUTS,
-                        super::__BOOMERANG_COMPONENT_MODULE,
-                        option_env!(#macro_abi_key),
-                    )
-                }
-            },
-        )
-    } else {
-        let (fingerprint, key) =
-            match payload_compile_inputs(contract, contract_version, &reactor_name) {
-                Ok(inputs) => inputs,
-                Err(error) => return PayloadOutput::diagnostic(error.to_compile_error()),
-            };
-        (
-            quote! { const _: &str = env!(#key); },
-            quote! {
-                #[doc(hidden)]
-                const _: () = ::boomerang::runtime::binding::validate_payload_macro_abi_compile_input(env!(#macro_abi_key));
-                /// Compatibility header for this legacy payload facet.
-                pub const BINDING_MANIFEST: ::boomerang::runtime::binding::BindingManifest =
-                    ::boomerang::runtime::binding::BindingManifest::new(
-                        ::boomerang::runtime::binding::DescriptorFingerprint::new([#(#fingerprint),*]),
-                        #macro_abi,
-                    );
-            },
-        )
+    let fingerprint = descriptor.fingerprint().to_bytes();
+    let binding_manifest = quote! {
+        /// Actual compatibility information derived from this component declaration.
+        pub const fn binding_manifest() -> ::boomerang::runtime::binding::BindingManifest {
+            ::boomerang::runtime::binding::BindingManifest::new(
+                ::boomerang::runtime::binding::DescriptorFingerprint::new([#(#fingerprint),*]),
+                #macro_abi,
+            )
+        }
     };
     let binding_exports = model
         .args
@@ -1289,31 +1113,16 @@ fn payload_output(
         .chain(std::iter::once(state_initializer))
         .chain(binding_exports)
         .chain(reaction_exports)
-        .map(|definition| {
-            if emission == PayloadEmission::Native {
-                quote!(#[doc(hidden)] #definition)
-            } else {
-                definition
-            }
-        });
-    let implementation_exports = quote! { #(#implementations)* };
-    let declarations = quote! {
-        #state_struct
-        #state_impl
-        #capability_declaration
-        #fingerprint_declaration
-    };
-    if emission == PayloadEmission::Native {
-        let aliases = symbols.aliases;
-        PayloadOutput {
-            declarations: quote! { #declarations #implementation_exports },
-            exports: quote! { #binding_manifest #(#aliases)* },
-        }
-    } else {
-        PayloadOutput {
-            declarations,
-            exports: quote! { #binding_manifest #implementation_exports },
-        }
+        .map(|definition| quote!(#[doc(hidden)] #definition));
+    let aliases = symbols.aliases;
+    PayloadOutput {
+        declarations: quote! {
+            #state_struct
+            #state_impl
+            #capability_declaration
+            #(#implementations)*
+        },
+        exports: quote! { #binding_manifest #(#aliases)* },
     }
 }
 
@@ -1365,7 +1174,7 @@ pub struct ArgsModel(pub ReactorArgs, pub Model, pub bool);
 
 impl ToTokens for ArgsModel {
     fn to_tokens(&self, tokens: &mut TokenStream) {
-        self.to_tokens_with_emission(tokens, ComponentEmission::Legacy);
+        self.to_tokens_with_emission(tokens, ComponentEmission::Hosted);
     }
 }
 
@@ -1386,15 +1195,6 @@ impl ArgsModel {
             Ok(None) => TokenStream::new(),
             Err(error) => error.to_compile_error(),
         };
-        let descriptor_output = if matches!(&descriptor, Ok(None)) {
-            TokenStream::new()
-        } else {
-            quote! {
-                #[doc(hidden)]
-                const ONLY_ONE_DEPLOYMENT_REACTOR_PER_MODULE: () = ();
-                pub mod __boomerang { #descriptor_contents }
-            }
-        };
         let topology_output = if self.2 {
             topology::output(&self.0, &self.1)
         } else {
@@ -1410,7 +1210,7 @@ impl ArgsModel {
                 args,
                 body,
             },
-            component,
+            _,
         ) = self;
 
         // Extract generics parts
@@ -1544,28 +1344,10 @@ impl ArgsModel {
         } else {
             None
         };
-        let payload_output = if selection.needs_legacy_payload() {
-            self::payload_output(
-                reactor_args,
-                &self.1,
-                &state_type_path,
-                &payload_state_struct,
-                &state_impl,
-                &descriptor,
-                if *component {
-                    PayloadEmission::LegacyComponent
-                } else {
-                    PayloadEmission::LegacyReactor
-                },
-            )
-            .legacy_output()
-        } else {
-            TokenStream::new()
-        };
         let PayloadOutput {
             declarations: native_payload_output,
             exports: native_payload_exports,
-        } = if selection.needs_native_payload() {
+        } = if selection.needs_payload() {
             self::payload_output(
                 reactor_args,
                 &self.1,
@@ -1573,7 +1355,6 @@ impl ArgsModel {
                 &payload_state_struct,
                 &state_impl,
                 &descriptor,
-                PayloadEmission::Native,
             )
         } else {
             PayloadOutput::diagnostic(TokenStream::new())
@@ -1928,8 +1709,6 @@ impl ArgsModel {
             name,
             emission::ReactorOutput {
                 hosted: quote!(#capability_declaration #output #topology_output),
-                legacy_descriptor: descriptor_output,
-                legacy_payload: payload_output,
                 native_metadata: metadata_contents,
                 topology: topology_output,
                 native_payload: native_payload_output,
@@ -1942,6 +1721,20 @@ impl ArgsModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn direct_reactor_emits_an_unconditional_hosted_constructor() {
+        let model = syn::parse_str::<Model>("pub fn Hosted() -> impl Reactor {}").unwrap();
+        let args = syn::parse_str::<ReactorArgs>("").unwrap();
+        let declaration = ArgsModel(args, model, false);
+        let output = syn::parse2::<syn::File>(quote!(#declaration)).unwrap();
+        assert!(
+            output.items.iter().any(|item| matches!(item,
+                syn::Item::Fn(function) if function.sig.ident == "Hosted"
+            )),
+            "direct reactors must expose the hosted constructor without a selector"
+        );
+    }
 
     #[test]
     fn parses_structural_mode_blocks() {

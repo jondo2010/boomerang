@@ -8,6 +8,12 @@ static FIXTURES: Mutex<()> = Mutex::new(());
 fn cargo(fixture: &str, command: &str, args: &[&str]) -> Output {
     let _lock = FIXTURES.lock().unwrap_or_else(|error| error.into_inner());
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    // Reuse each fixture group's existing target cache.
+    let target = if fixture.starts_with("cargo-native-") {
+        "../target/cargo-native-fixtures"
+    } else {
+        "../target/facet-fixtures"
+    };
     let fixture = root.join("tests/fixtures").join(fixture);
     let mut cargo = Command::new(env!("CARGO"));
     cargo
@@ -15,22 +21,11 @@ fn cargo(fixture: &str, command: &str, args: &[&str]) -> Output {
         .args(["--quiet", "--offline", "--manifest-path"])
         .arg(fixture.join("Cargo.toml"))
         .args(args)
-        .env(
-            "CARGO_TARGET_DIR",
-            root.join("../target/cargo-native-fixtures"),
-        )
+        .env("CARGO_TARGET_DIR", root.join(target))
         .env_remove("RUSTFLAGS")
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
         .env_remove("RUSTDOCFLAGS")
         .env_remove("CARGO_ENCODED_RUSTDOCFLAGS");
-    for (key, _) in std::env::vars_os() {
-        if key
-            .to_string_lossy()
-            .starts_with("BOOMERANG_PAYLOAD_INPUT_")
-        {
-            cargo.env_remove(key);
-        }
-    }
     let output = cargo.output().expect("Cargo starts");
     let _ = fs::remove_file(fixture.join("Cargo.lock"));
     output
@@ -63,35 +58,6 @@ fn component_feature_matrix_is_additive_and_preserves_hosted() {
         ));
     }
     success(cargo("cargo-native-unified", "test", &[]));
-}
-#[test]
-fn public_features_reject_legacy_facet_mixing() {
-    let _lock = FIXTURES.lock().unwrap_or_else(|error| error.into_inner());
-    // A command-local flag keeps the Cargo feature and legacy selection collision explicit.
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let output = Command::new(env!("CARGO"))
-        .args(["check", "--offline", "--manifest-path"])
-        .arg(root.join("tests/fixtures/cargo-native-component/Cargo.toml"))
-        .args(["--no-default-features", "--features", "metadata"])
-        .env(
-            "CARGO_TARGET_DIR",
-            root.join("../target/cargo-native-conflict"),
-        )
-        .env(
-            "CARGO_ENCODED_RUSTFLAGS",
-            "--cfg\x1fboomerang_facet=\"descriptor\"",
-        )
-        .env_remove("RUSTFLAGS")
-        .output()
-        .unwrap();
-    let _ = fs::remove_file(root.join("tests/fixtures/cargo-native-component/Cargo.lock"));
-    assert!(!output.status.success());
-    assert!(
-        String::from_utf8_lossy(&output.stderr)
-            .contains("cannot combine boomerang_facet with component metadata/payload features"),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
 }
 #[test]
 fn fingerprint_and_macro_abi_mismatches_are_const_errors() {
@@ -248,4 +214,144 @@ fn normal_consumer_rejects_an_incorrectly_exported_macro_abi() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn direct_hosted_reactors_preserve_metadata_free_state_and_feature_free_consumers() {
+    success(cargo("metadata-free", "test", &[]));
+    success(cargo("feature-free", "check", &[]));
+    success(cargo("descriptor-duplicate-reaction", "check", &[]));
+    success(cargo(
+        "descriptor-duplicate-reaction",
+        "check",
+        &["--features", "duplicate-mode"],
+    ));
+}
+
+#[test]
+fn native_payload_preserves_raw_names_reference_shapes_and_generic_initializers() {
+    for features in ["metadata", "payload"] {
+        success(cargo(
+            "descriptor-pass",
+            "test",
+            &["--no-default-features", "--features", features],
+        ));
+    }
+}
+
+#[test]
+fn native_components_keep_helpers_in_their_owning_modules() {
+    success(cargo("named-components", "test", &[]));
+    success(cargo(
+        "named-components",
+        "test",
+        &["--features", "metadata,sentinel"],
+    ));
+    success(cargo(
+        "named-components",
+        "test",
+        &["--no-default-features", "--features", "payload"],
+    ));
+    for features in ["sentinel", "payload,sentinel"] {
+        let error = failure("named-components", &["--features", features]);
+        assert!(error.contains("helper sentinel reached"), "{error}");
+        assert!(error.contains("reaction sentinel reached"), "{error}");
+    }
+}
+
+fn failure(fixture: &str, args: &[&str]) -> String {
+    let output = cargo(fixture, "check", args);
+    assert!(!output.status.success(), "{fixture} unexpectedly succeeded");
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+#[test]
+fn component_diagnostics_preserve_distinct_syntax_and_initialization_errors() {
+    for (fixture, features, expected) in [
+        (
+            "descriptor-rejects-body",
+            "metadata",
+            "deployment descriptor requires reaction! syntax",
+        ),
+        (
+            "descriptor-overflow",
+            "metadata",
+            "contract_version must fit in u64",
+        ),
+        (
+            "descriptor-invalid-contract",
+            "metadata",
+            "contract must be non-empty, contain no control characters",
+        ),
+        (
+            "descriptor-duplicate-reaction",
+            "metadata",
+            "duplicate reaction name",
+        ),
+        (
+            "descriptor-duplicate-reaction",
+            "payload,duplicate-mode",
+            "duplicate mode name",
+        ),
+        (
+            "descriptor-pass",
+            "payload,missing-state-init",
+            "payload mode requires `state_init = path` with `state = T`",
+        ),
+        (
+            "descriptor-pass",
+            "payload,payload-lexical-relation",
+            "payload mode supports only own ports, modes, and lifecycle relations",
+        ),
+        (
+            "state-init-without-state",
+            "payload",
+            "`state_init` requires `state = T`",
+        ),
+        (
+            "descriptor-pass",
+            "invalid-action-attribute",
+            "min_delay = <duration>",
+        ),
+        (
+            "descriptor-pass",
+            "invalid-action-duration",
+            "invalid action minimum delay",
+        ),
+        (
+            "descriptor-pass",
+            "action-delay-overflow",
+            "nanosecond range",
+        ),
+        (
+            "descriptor-pass",
+            "action-duration-unit-overflow",
+            "unit conversion",
+        ),
+        ("named-components", "duplicate", "defined multiple times"),
+        ("named-components", "invalid", "exactly one root #[reactor]"),
+        (
+            "named-components",
+            "multiple",
+            "exactly one root #[reactor]",
+        ),
+        (
+            "named-components",
+            "cfg-root",
+            "unsupported component root attribute",
+        ),
+        (
+            "named-components",
+            "cfg-attr-root",
+            "unsupported component root attribute",
+        ),
+        (
+            "named-components",
+            "deprecated-root",
+            "unsupported component root attribute",
+        ),
+    ] {
+        let error = failure(fixture, &["--features", features]);
+        assert!(error.contains(expected), "{fixture} ({features}): {error}");
+    }
 }

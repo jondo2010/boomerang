@@ -74,9 +74,9 @@ members = [
     "cargo-boomerang",
     "examples/physical-input",
     "examples/snake",
-    "examples/snake/app",
     "examples/snake/game",
     "examples/snake/keyboard",
+    "examples/snake/keyboard-app",
 ]
 resolver = "2"
 

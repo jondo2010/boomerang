@@ -1,6 +1,9 @@
 //! Compile host metadata into one local Snake Federate.
 
 use boomerang_builder::compiler::*;
+use snake_game::game;
+use snake_keyboard::keyboard;
+
 use boomerang_codegen::{
     cargo_build::CargoBuild, Compilation, DeploymentConfiguration, PayloadExports,
 };
@@ -29,12 +32,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         coordination: CoordinationSelection::Local,
         boundaries: vec![],
     };
-    let mut compilation = Compilation::new(
-        snake::topology()?,
-        configuration,
-        federate,
-        cargo.target().clone(),
-    );
+    let mut compilation =
+        Compilation::new(topology()?, configuration, federate, cargo.target().clone());
     for (component, descriptor, payload) in [
         (
             "snake",
@@ -57,4 +56,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     cargo.compile(&compilation, &mut std::io::stdout())?;
     Ok(())
+}
+
+/// Compose the application topology from component metadata.
+fn topology() -> Result<ApplicationTopology, TopologyAuthoringError> {
+    let mut app = TopologyBuilder::new("application/keyboard/snake")?;
+    let keyboard_enclave = app.enclave("keyboard")?;
+    let snake_enclave = app.enclave("snake")?;
+    let keyboard = app.component("keyboard", keyboard::definition(), &keyboard_enclave)?;
+    let snake = app.component("snake", game::definition(), &snake_enclave)?;
+    app.connect(&keyboard.key, &snake.key)?;
+    // Initialize the terminal before Snake renders and starts its game clock.
+    app.connect(&keyboard.ready, &snake.ready)?;
+    app.finish()
 }

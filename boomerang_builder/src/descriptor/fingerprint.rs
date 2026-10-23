@@ -528,25 +528,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "host-interchange")]
-    #[test]
-    fn complete_descriptor_wire_round_trip_preserves_canonical_semantics() {
-        let descriptor = complete_descriptor(InputOrder::Forward);
-        let wire = serde_json::to_vec(&descriptor).unwrap();
-        let decoded: ComponentDescriptor = serde_json::from_slice(&wire).unwrap();
-        assert_eq!(decoded, descriptor);
-        assert_eq!(decoded.fingerprint(), EXPECTED_V1);
-
-        let mut invalid: serde_json::Value = serde_json::from_slice(&wire).unwrap();
-        let reactors = invalid["reactor_slots"].as_array_mut().unwrap();
-        reactors.push(reactors[0].clone());
-        let error = serde_json::from_value::<ComponentDescriptor>(invalid).unwrap_err();
-        assert!(
-            error.to_string().contains("duplicate reactor slot"),
-            "{error}"
-        );
-    }
-
     #[test]
     fn descriptor_fingerprint_changes_with_port_direction() {
         assert_ne!(

@@ -1,7 +1,7 @@
 //! Shared coordination definitions and canonical channel identities.
 //!
 //! These functions consume validated builder output and explicit topology metadata.
-//! They preserve the CLI hash domains, protocol inputs, and canonical table order.
+//! They preserve versioned hash domains, protocol inputs, and canonical table order.
 //! Local scheduler images and artifact policy use separate fingerprints.
 mod render;
 use anyhow::{Context, Result};
@@ -93,7 +93,7 @@ pub fn coordination_fingerprint(
                     .component(reactor.component())
                     .context("missing boundary component")?;
                 contracts.push((
-                    edge.id(),
+                    edge.id().to_canonical_string(),
                     endpoint.to_string(),
                     component.id().to_string(),
                     component.contract().as_str(),

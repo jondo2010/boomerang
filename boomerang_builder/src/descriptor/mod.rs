@@ -1,8 +1,6 @@
 //! Canonical, validated component descriptor records owned by the host-side builder.
 
 use crate::compiler::{BindingSlotId, ContractId, ModeTransitionKind, PortDirection, StablePath};
-#[cfg(feature = "host-interchange")]
-use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "descriptor-fingerprint")]
 mod fingerprint;
@@ -50,8 +48,6 @@ pub type EnclaveSlotId = BindingSlotId<EnclaveSlotMarker>;
 
 /// Hosted capabilities requested by one component's state initializer.
 #[derive(Clone, Debug, Eq, PartialEq)]
-#[cfg_attr(feature = "host-interchange", derive(Deserialize, Serialize))]
-#[cfg_attr(feature = "host-interchange", serde(deny_unknown_fields))]
 pub struct InitializerCapabilities {
     /// Component-local source capability label; deployment policies bind each instance.
     pub source: Option<String>,
@@ -63,11 +59,8 @@ pub struct InitializerCapabilities {
 
 /// Stable reactor slot and its structural parent.
 #[derive(Clone, Debug, Eq, PartialEq)]
-#[cfg_attr(feature = "host-interchange", derive(Deserialize, Serialize))]
-#[cfg_attr(feature = "host-interchange", serde(deny_unknown_fields))]
 pub struct ReactorSlot {
     /// Optional hosted state initialization capabilities.
-    #[cfg_attr(feature = "host-interchange", serde(default))]
     pub capabilities: Option<InitializerCapabilities>,
     /// Stable implementation-local identity.
     pub id: ReactorSlotId,
@@ -77,8 +70,6 @@ pub struct ReactorSlot {
 
 /// Stable port slot owned by one reactor slot.
 #[derive(Clone, Debug, Eq, PartialEq)]
-#[cfg_attr(feature = "host-interchange", derive(Deserialize, Serialize))]
-#[cfg_attr(feature = "host-interchange", serde(deny_unknown_fields))]
 pub struct PortSlot {
     /// Stable implementation-local identity.
     pub id: PortSlotId,
@@ -90,8 +81,6 @@ pub struct PortSlot {
 
 /// Stable action slot owned by one reactor slot.
 #[derive(Clone, Debug, Eq, PartialEq)]
-#[cfg_attr(feature = "host-interchange", derive(Deserialize, Serialize))]
-#[cfg_attr(feature = "host-interchange", serde(deny_unknown_fields))]
 pub struct ActionSlot {
     /// Stable implementation-local identity.
     pub id: ActionSlotId,
@@ -101,8 +90,6 @@ pub struct ActionSlot {
 
 /// Stable reaction slot owned by one reactor slot.
 #[derive(Clone, Debug, Eq, PartialEq)]
-#[cfg_attr(feature = "host-interchange", derive(Deserialize, Serialize))]
-#[cfg_attr(feature = "host-interchange", serde(deny_unknown_fields))]
 pub struct ReactionSlot {
     /// Stable implementation-local identity.
     pub id: ReactionSlotId,
@@ -112,8 +99,6 @@ pub struct ReactionSlot {
 
 /// Stable mode slot owned by one reactor slot.
 #[derive(Clone, Debug, Eq, PartialEq)]
-#[cfg_attr(feature = "host-interchange", derive(Deserialize, Serialize))]
-#[cfg_attr(feature = "host-interchange", serde(deny_unknown_fields))]
 pub struct ModeSlot {
     /// Stable implementation-local identity.
     pub id: ModeSlotId,
@@ -127,8 +112,6 @@ pub struct ModeSlot {
 
 /// Stable state binding slot.
 #[derive(Clone, Debug, Eq, PartialEq)]
-#[cfg_attr(feature = "host-interchange", derive(Deserialize, Serialize))]
-#[cfg_attr(feature = "host-interchange", serde(deny_unknown_fields))]
 pub struct StateSlot {
     /// Stable implementation-local identity.
     pub id: StateSlotId,
@@ -138,8 +121,6 @@ pub struct StateSlot {
 
 /// Stable payload codec binding slot.
 #[derive(Clone, Debug, Eq, PartialEq)]
-#[cfg_attr(feature = "host-interchange", derive(Deserialize, Serialize))]
-#[cfg_attr(feature = "host-interchange", serde(deny_unknown_fields))]
 pub struct CodecSlot {
     /// Stable implementation-local identity.
     pub id: CodecSlotId,
@@ -147,7 +128,6 @@ pub struct CodecSlot {
 
 /// Source-observable lifecycle trigger.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-#[cfg_attr(feature = "host-interchange", derive(Deserialize, Serialize))]
 pub enum DescriptorLifecycle {
     /// Reactor startup.
     Startup,
@@ -159,7 +139,6 @@ pub enum DescriptorLifecycle {
 
 /// Stable target of a descriptor relationship.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-#[cfg_attr(feature = "host-interchange", derive(Deserialize, Serialize))]
 pub enum DescriptorRelationshipTarget {
     /// Stable port slot.
     Port(PortSlotId),
@@ -175,7 +154,6 @@ pub enum DescriptorRelationshipTarget {
 
 /// Semantic role of one reaction relationship.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-#[cfg_attr(feature = "host-interchange", derive(Deserialize, Serialize))]
 pub enum DescriptorRelationshipKind {
     /// Target triggers the reaction.
     Trigger,
@@ -191,8 +169,6 @@ pub enum DescriptorRelationshipKind {
 
 /// One canonical relationship from a reaction to a stable target.
 #[derive(Clone, Debug, Eq, PartialEq)]
-#[cfg_attr(feature = "host-interchange", derive(Deserialize, Serialize))]
-#[cfg_attr(feature = "host-interchange", serde(deny_unknown_fields))]
 pub struct DescriptorRelationship {
     /// Source reaction slot.
     pub reaction: ReactionSlotId,
@@ -208,8 +184,6 @@ pub struct DescriptorRelationship {
 
 /// Source-declared placement group visible to deployment selection.
 #[derive(Clone, Debug, Eq, PartialEq)]
-#[cfg_attr(feature = "host-interchange", derive(Deserialize, Serialize))]
-#[cfg_attr(feature = "host-interchange", serde(deny_unknown_fields))]
 pub struct DescriptorPlacementGroup {
     /// Stable placement-group identity.
     pub id: PlacementGroupSlotId,
@@ -219,8 +193,6 @@ pub struct DescriptorPlacementGroup {
 
 /// Source-declared scheduler and logical-time domain.
 #[derive(Clone, Debug, Eq, PartialEq)]
-#[cfg_attr(feature = "host-interchange", derive(Deserialize, Serialize))]
-#[cfg_attr(feature = "host-interchange", serde(deny_unknown_fields))]
 pub struct DescriptorEnclave {
     /// Stable Enclave identity.
     pub id: EnclaveSlotId,
@@ -230,7 +202,6 @@ pub struct DescriptorEnclave {
 
 /// A deployability bound that may not yet be expressed by source syntax.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[cfg_attr(feature = "host-interchange", derive(Deserialize, Serialize))]
 pub enum DescriptorBound {
     /// Source syntax did not declare this bound.
     Unknown,
@@ -240,8 +211,6 @@ pub enum DescriptorBound {
 
 /// Declared storage and queue bounds for one component implementation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[cfg_attr(feature = "host-interchange", derive(Deserialize, Serialize))]
-#[cfg_attr(feature = "host-interchange", serde(deny_unknown_fields))]
 pub struct DescriptorBounds {
     /// Maximum queued events.
     pub queue_capacity: DescriptorBound,
@@ -307,7 +276,6 @@ pub enum DescriptorBuildError {
 
 /// Canonically ordered, validated structural descriptor for one component implementation.
 #[derive(Clone, Debug, Eq, PartialEq)]
-#[cfg_attr(feature = "host-interchange", derive(Serialize))]
 pub struct ComponentDescriptor {
     /// Stable external contract identity.
     contract_id: ContractId,
@@ -337,52 +305,6 @@ pub struct ComponentDescriptor {
     enclaves: Box<[DescriptorEnclave]>,
     /// Declared resource bounds.
     bounds: DescriptorBounds,
-}
-
-#[cfg(feature = "host-interchange")]
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct UncheckedDescriptor {
-    contract_id: ContractId,
-    contract_version: u64,
-    macro_abi: u32,
-    reactor_slots: Vec<ReactorSlot>,
-    port_slots: Vec<PortSlot>,
-    action_slots: Vec<ActionSlot>,
-    reaction_slots: Vec<ReactionSlot>,
-    mode_slots: Vec<ModeSlot>,
-    state_slots: Vec<StateSlot>,
-    codec_slots: Vec<CodecSlot>,
-    relationships: Vec<DescriptorRelationship>,
-    placement_groups: Vec<DescriptorPlacementGroup>,
-    enclaves: Vec<DescriptorEnclave>,
-    bounds: DescriptorBounds,
-}
-
-#[cfg(feature = "host-interchange")]
-impl<'de> serde::Deserialize<'de> for ComponentDescriptor {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        use serde::de::Error;
-
-        let unchecked = UncheckedDescriptor::deserialize(deserializer)?;
-        Self::try_new(
-            unchecked.contract_id,
-            unchecked.contract_version,
-            unchecked.macro_abi,
-            unchecked.reactor_slots,
-            unchecked.port_slots,
-            unchecked.action_slots,
-            unchecked.reaction_slots,
-            unchecked.mode_slots,
-            unchecked.state_slots,
-            unchecked.codec_slots,
-            unchecked.relationships,
-            unchecked.placement_groups,
-            unchecked.enclaves,
-            unchecked.bounds,
-        )
-        .map_err(D::Error::custom)
-    }
 }
 
 impl ComponentDescriptor {

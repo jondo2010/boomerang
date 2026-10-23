@@ -1,4 +1,0 @@
-[workspace]
-members = ["sensor-host", "vehicle-control", "vehicle-topology"]
-exclude = ["outside-member"]
-resolver = "2"

@@ -45,8 +45,6 @@ jobs:
       - name: Check with Clippy
         run: |
           cargo clippy --workspace --all-targets --all-features -- -D warnings
-          RUSTFLAGS='--cfg boomerang_facet="payload"' cargo clippy -p boomerang --lib --no-default-features -- -D warnings
-          RUSTFLAGS='--cfg boomerang_facet="descriptor"' cargo clippy -p boomerang --lib --no-default-features --features hosted -- -D warnings
 
   test:
     strategy:
@@ -62,17 +60,14 @@ jobs:
             toolchain: nightly
 
     runs-on: ${{ matrix.os }}
-    # The full toolchain suite builds payload/descriptor fixtures with shared compilation caches.
+    # Native application fixtures compile their metadata and payload through Cargo.
     timeout-minutes: ${{ matrix.os == 'ubuntu-latest' && matrix.toolchain == 'stable' && 60 || 30 }}
 
     steps:
       - uses: actions/checkout@v7
       - name: Configure Cargo target directory
         shell: bash
-        # Keep generated manifests and markers out of Cargo-only cache pruning.
-        run: |
-          echo "CARGO_TARGET_DIR=target" >> "$GITHUB_ENV"
-          echo "BOOMERANG_TEST_BUILD_CACHE=${{ runner.temp }}/boomerang-builds" >> "$GITHUB_ENV"
+        run: echo "CARGO_TARGET_DIR=target" >> "$GITHUB_ENV"
       - name: fetch Rust
         uses: dtolnay/rust-toolchain@master
         with:
@@ -80,17 +75,15 @@ jobs:
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: . -> target
-          cache-directories: ${{ runner.temp }}/boomerang-builds
-          prefix-key: v1-generated-cache-layout
 
       - name: toolchain version
         run: cargo -vV
 
-      - name: prime generated-workspace dependency cache
+      - name: fetch dependencies
         run: cargo fetch
 
-      - name: test workspace except cargo-boomerang
-        run: cargo test --workspace --exclude cargo-boomerang --verbose
+      - name: test workspace
+        run: cargo test --workspace --verbose
 
       - name: test independent hosted runtime capabilities
         run: |
@@ -99,27 +92,8 @@ jobs:
           cargo test -p boomerang_runtime --no-default-features --features hosted-source-input
           cargo test -p boomerang_runtime --no-default-features --features external-clock
 
-      - name: test cargo-boomerang fast targets
-        run: >-
-          cargo test -p cargo-boomerang --lib --bin cargo-boomerang
-          --test manifest --test workspace --verbose
-
-      # Generated builds dominate runtime (23 minutes on Windows). Exercise the
-      # full suite once, and keep the CLI/owned-execution smoke test portable.
-      - name: test cargo-boomerang toolchain
-        if: matrix.os == 'ubuntu-latest' && matrix.toolchain == 'stable'
-        run: cargo test -p cargo-boomerang --all-features --test toolchain -- --test-threads=1
-
-      - name: smoke test cargo-boomerang toolchain
-        if: matrix.os != 'ubuntu-latest' || matrix.toolchain != 'stable'
-        run: >-
-          cargo test -p cargo-boomerang --test toolchain --
-          run::generated_monolith_cli_matches_owned_execution --exact
-
-      - name: discard disposable fixture builds before caching
-        shell: bash
-        # Source fixtures are recreated; keep the separate cargo-boomerang-builds cache.
-        run: rm -rf target/tmp/cargo-boomerang-fixtures
+      - name: test optional monitor tooling
+        run: cargo test -p cargo-boomerang --all-features --verbose
 
   miri:
     runs-on: ubuntu-latest

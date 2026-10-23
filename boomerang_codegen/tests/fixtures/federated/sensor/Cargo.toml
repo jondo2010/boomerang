@@ -4,12 +4,15 @@ version = "0.0.0"
 edition = "2021"
 publish = false
 
+[features]
+runtime-failure = ["sensor-host/runtime-failure"]
+
 [dependencies]
 boomerang_runtime.workspace = true
 boomerang_federated.workspace = true
 boomerang_central_rti.workspace = true
 tinymap.workspace = true
-sensor-host = { path = "../../../../../cargo-boomerang/tests/fixtures/workspace/sensor-host", default-features = false, features = ["payload", "natural-quiescence", "timing-check"] }
+sensor-host = { path = "../sensor-host", default-features = false, features = ["payload"] }
 
 [build-dependencies]
 boomerang_codegen.workspace = true

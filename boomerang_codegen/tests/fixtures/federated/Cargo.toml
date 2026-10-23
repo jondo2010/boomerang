@@ -1,5 +1,5 @@
 [workspace]
-members = ["deployment", "controller", "sensor", "rti"]
+members = ["deployment", "controller", "sensor", "rti", "sensor-host", "vehicle-control"]
 resolver = "2"
 
 [workspace.dependencies]

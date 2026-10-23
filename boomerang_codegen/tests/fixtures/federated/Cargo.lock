@@ -84,8 +84,6 @@ dependencies = [
  "document-features",
  "itertools",
  "petgraph",
- "serde",
- "serde_json",
  "slotmap",
  "thiserror",
  "tracing",

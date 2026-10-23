@@ -1,4 +1,5 @@
 //! Executes independently built ordinary Cargo federation applications.
+mod cargo_support;
 mod federation_support;
 
 #[test]

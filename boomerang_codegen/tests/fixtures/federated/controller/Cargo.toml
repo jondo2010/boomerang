@@ -9,7 +9,7 @@ boomerang_runtime.workspace = true
 boomerang_federated.workspace = true
 boomerang_central_rti.workspace = true
 tinymap.workspace = true
-vehicle-control = { path = "../../../../../cargo-boomerang/tests/fixtures/workspace/vehicle-control", default-features = false, features = ["payload"] }
+vehicle-control = { path = "../vehicle-control", default-features = false, features = ["payload"] }
 
 [build-dependencies]
 boomerang_codegen.workspace = true

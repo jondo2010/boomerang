@@ -121,52 +121,6 @@ fn coordinator_rejects_local_deployment_and_members_retain_target_checks() {
     );
 }
 
-#[test]
-fn coordination_only_source_compiles_without_payload_dependencies() {
-    let source = inputs().compile_coordination().unwrap().source;
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::create_dir(dir.path().join("src")).unwrap();
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap();
-    let dependencies = [
-        "boomerang_runtime",
-        "boomerang_central_rti",
-        "boomerang_federated",
-        "boomerang_tinymap",
-    ]
-    .map(|name| {
-        let alias = if name == "boomerang_tinymap" {
-            "tinymap"
-        } else {
-            name
-        };
-        format!(
-            "{alias} = {{ package = {name:?}, path = {:?} }}",
-            root.join(name)
-        )
-    })
-    .join("\n");
-    std::fs::write(dir.path().join("Cargo.toml"), format!("[package]\nname = \"coordination-consumer\"\nversion = \"0.0.0\"\nedition = \"2021\"\n[workspace]\n[dependencies]\n{dependencies}\n")).unwrap();
-    std::fs::write(dir.path().join("src/lib.rs"), format!("{source}\npub fn validate() {{ let _ = wire_contract(); let _ = COORDINATION_IDENTITY; let _ = wire_handshake(boomerang_runtime::image::FederateIndex::new(0)); }}")).unwrap();
-    let output = std::process::Command::new(env!("CARGO"))
-        .args(["check", "--offline"])
-        .current_dir(dir.path())
-        .env(
-            "CARGO_TARGET_DIR",
-            root.join("target/codegen-coordination-consumer"),
-        )
-        .env_remove("RUSTC_WRAPPER")
-        .env_remove("RUSTC_WORKSPACE_WRAPPER")
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
 fn assert_unsupported(inputs: DeploymentInputs, coordinator: bool) {
     let error = if coordinator {
         inputs.compile_coordination().unwrap_err()

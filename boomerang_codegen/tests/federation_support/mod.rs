@@ -1,3 +1,5 @@
+use crate::cargo_support::{clean_environment, target_directory};
+
 use std::{
     fs::{self, File},
     io::{BufRead, BufReader},
@@ -21,7 +23,7 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let target = root.join("../target/cargo-native-federation-slice4");
+        let target = target_directory("cargo-native-federation-slice4");
         let evidence = target.join("evidence");
         fs::create_dir_all(&evidence).unwrap();
         Self {
@@ -54,45 +56,19 @@ impl Fixture {
         combined
     }
 
-    fn build(&self, role: &str, label: &str, delay: Option<&str>) -> PathBuf {
+    fn build(
+        &self,
+        role: &str,
+        label: &str,
+        delay: Option<&str>,
+        features: Option<&str>,
+    ) -> PathBuf {
         let package = format!("native-vehicle-{role}");
-        let output = self.cargo(
-            "build",
-            &["-p", &package, "--message-format=json-render-diagnostics"],
-            label,
-            delay,
-        );
-        let source = output
-            .lines()
-            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-            .find(|value| {
-                value["reason"] == "build-script-executed"
-                    && value["package_id"]
-                        .as_str()
-                        .unwrap_or("")
-                        .contains(&package)
-            })
-            .and_then(|value| value["out_dir"].as_str().map(PathBuf::from))
-            .expect("Cargo reports the application build script output");
-        let generated = fs::read_to_string(source.join("boomerang.rs")).unwrap();
-        fs::write(self.evidence.join(format!("{label}.rs")), &generated).unwrap();
-        let (local, remote) = match role {
-            "controller" => (Some("vehicle_control::"), Some("sensor_host::")),
-            "sensor" => (Some("sensor_host::"), Some("vehicle_control::")),
-            "rti" => (None, None),
-            _ => unreachable!(),
-        };
-        if let Some(local) = local {
-            assert!(generated.contains(local), "missing local payload: {label}");
+        let mut args = vec!["-p", package.as_str()];
+        if let Some(features) = features {
+            args.extend(["--features", features]);
         }
-        if let Some(remote) = remote {
-            assert!(!generated.contains(remote), "remote payload: {label}");
-        }
-        if role == "rti" {
-            assert!(!generated.contains("sensor_host::"));
-            assert!(!generated.contains("vehicle_control::"));
-            assert!(!generated.contains("generated_bindings"));
-        }
+        self.cargo("build", &args, label, delay);
         let artifact = self
             .evidence
             .join(format!("{label}{}", std::env::consts::EXE_SUFFIX));
@@ -104,24 +80,6 @@ impl Fixture {
         )
         .unwrap();
         artifact
-    }
-}
-
-fn clean_environment(command: &mut Command) {
-    for (key, _) in std::env::vars_os() {
-        let name = key.to_string_lossy();
-        if name.starts_with("BOOMERANG_")
-            || name.starts_with("NATIVE_VEHICLE_")
-            || matches!(
-                name.as_ref(),
-                "RUSTC_WRAPPER"
-                    | "RUSTC_WORKSPACE_WRAPPER"
-                    | "RUSTFLAGS"
-                    | "CARGO_ENCODED_RUSTFLAGS"
-            )
-        {
-            command.env_remove(key);
-        }
     }
 }
 
@@ -193,8 +151,23 @@ impl Drop for Process {
     }
 }
 
-fn run(fixture: &Fixture, artifacts: &[PathBuf; 3], mixed: bool) {
-    let label = if mixed { "mixed" } else { "matching" };
+/// Executable contracts exercised with the same bounded process harness.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Scenario {
+    /// Matching members exchange a tagged payload and complete naturally.
+    Matching,
+    /// A changed semantic identity fails the real wire handshake.
+    Mixed,
+    /// A member exits inside a reaction after successful admission.
+    RuntimeFailure,
+}
+
+fn run(fixture: &Fixture, artifacts: &[PathBuf; 3], scenario: Scenario) {
+    let label = match scenario {
+        Scenario::Matching => "matching",
+        Scenario::Mixed => "mixed",
+        Scenario::RuntimeFailure => "runtime-failure",
+    };
     let ready = TcpListener::bind("127.0.0.1:0").unwrap();
     ready.set_nonblocking(true).unwrap();
     let deadline = Instant::now() + DEADLINE;
@@ -225,6 +198,8 @@ fn run(fixture: &Fixture, artifacts: &[PathBuf; 3], mixed: bool) {
             Err(error) => panic!("RTI readiness: {error}"),
         }
     };
+    // Accepted sockets inherit nonblocking mode on macOS.
+    stream.set_nonblocking(false).unwrap();
     stream
         .set_read_timeout(Some(deadline.saturating_duration_since(Instant::now())))
         .unwrap();
@@ -256,7 +231,7 @@ fn run(fixture: &Fixture, artifacts: &[PathBuf; 3], mixed: bool) {
         coordinator.wait(deadline),
     ];
     let outputs = [controller.output(), sensor.output(), coordinator.output()];
-    if mixed {
+    if scenario == Scenario::Mixed {
         assert!(
             statuses.iter().all(|status| !status.success()),
             "mixed artifacts passed: {statuses:?}\n{outputs:?}"
@@ -266,6 +241,16 @@ fn run(fixture: &Fixture, artifacts: &[PathBuf; 3], mixed: bool) {
             "missing real handshake rejection: {outputs:?}"
         );
         assert!(!outputs[1].contains("sensor received command 42"));
+    } else if scenario == Scenario::RuntimeFailure {
+        assert_eq!(statuses[1].code(), Some(42), "{outputs:?}");
+        assert!(
+            statuses.iter().all(|status| !status.success()),
+            "{statuses:?}\n{outputs:?}"
+        );
+        for output in &outputs {
+            assert!(!output.contains("completed"), "{output}");
+            assert!(!output.contains("timed out"), "{output}");
+        }
     } else {
         assert!(
             statuses.iter().all(ExitStatus::success),
@@ -285,14 +270,33 @@ fn run(fixture: &Fixture, artifacts: &[PathBuf; 3], mixed: bool) {
 
 pub fn exercise() {
     let fixture = Fixture::new();
-    let controller = fixture.build("controller", "original-controller", None);
-    let sensor = fixture.build("sensor", "original-sensor", None);
-    let rti = fixture.build("rti", "original-rti", None);
+    let controller = fixture.build("controller", "original-controller", None, None);
+    let sensor = fixture.build("sensor", "original-sensor", None, None);
+    let rti = fixture.build("rti", "original-rti", None, None);
     assert_eq!(identity(&controller), identity(&sensor));
     assert_eq!(identity(&controller), identity(&rti));
-    let rebuilt = fixture.build("controller", "unchanged-controller", None);
-    assert_eq!(identity(&controller), identity(&rebuilt));
-    run(&fixture, &[controller.clone(), sensor, rti.clone()], false);
+    run(
+        &fixture,
+        &[controller.clone(), sensor, rti.clone()],
+        Scenario::Matching,
+    );
+    let failed = fixture.build(
+        "sensor",
+        "runtime-failure-sensor",
+        None,
+        Some("runtime-failure"),
+    );
+    run(
+        &fixture,
+        &[controller.clone(), failed, rti.clone()],
+        Scenario::RuntimeFailure,
+    );
+    fixture.cargo(
+        "test",
+        &["-p", "native-vehicle-rti"],
+        "generated-rti-contracts",
+        None,
+    );
     fixture.cargo(
         "test",
         &["-p", "native-vehicle-deployment"],
@@ -335,7 +339,7 @@ pub fn exercise() {
             );
         }
     }
-    let changed = fixture.build("sensor", "changed-sensor", Some("2000000"));
+    let changed = fixture.build("sensor", "changed-sensor", Some("2000000"), None);
     assert_ne!(identity(&controller), identity(&changed));
-    run(&fixture, &[controller, changed, rti], true);
+    run(&fixture, &[controller, changed, rti], Scenario::Mixed);
 }

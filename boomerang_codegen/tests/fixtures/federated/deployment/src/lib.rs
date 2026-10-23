@@ -25,6 +25,10 @@
 //! The integration test uses ephemeral loopback ports and the RTI readiness protocol.
 //! It retains original artifacts before it rebuilds one member with a changed delay.
 //! The actual wire handshake rejects that mixed deployment.
+//! The same process harness runs the sensor's `runtime-failure` feature after successful admission.
+//! It checks exit code 42 and bounds failed peer and coordinator teardown.
+//! The checked-in RTI package tests its generated in-transit capacity through actual request handling.
+//! Generic wire codec and admission cases remain in `boomerang_federated` tests.
 
 use boomerang_builder::compiler::*;
 use boomerang_codegen::{

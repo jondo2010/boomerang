@@ -10,6 +10,7 @@ payload = []
 missing-export = []
 fingerprint-mismatch = []
 abi-mismatch = []
+source-input = ["boomerang_runtime/hosted-source-input"]
 
 [dependencies]
 boomerang = { path = "../../../../boomerang", default-features = false }

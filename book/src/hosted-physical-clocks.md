@@ -92,8 +92,7 @@ bounds. These measurements continue independently of manual clock advancement.
 ## Supported deployments and features
 
 Manual clock control requires compiled execution with one local hosted `std`
-Federate and one or more Enclaves. The toolchain rejects non-host targets,
-custom target JSON, and distributed manual clock configuration.
+Federate and one or more Enclaves. Distributed manual clock execution is unsupported.
 
 Enable the required features on the `boomerang_runtime` dependency of each
 payload package that uses these APIs:
@@ -105,10 +104,9 @@ payload package that uses these APIs:
 | Manual clock control without source admission | `hosted-manual-clock` |
 | Source admission with manual clock control | Both features |
 
-Generated launcher manifests select each feature independently from the
-Federate configuration. `external-clock` is a compatibility alias that enables
+Application manifests select each feature explicitly. `external-clock` is a compatibility alias that enables
 both features. Neither hosted feature is supported on constrained targets such
-as Pico. The toolchain rejects these target configurations.
+as Pico.
 
 The live builder and runner use the host monotonic clock.
 See the [clock API](https://docs.rs/boomerang_runtime/latest/boomerang_runtime/clock/index.html)

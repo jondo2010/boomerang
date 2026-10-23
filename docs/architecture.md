@@ -196,8 +196,8 @@ coordination. It does not depend on RTI wire types or distributed transport.
 tag conversions, and hosted and reference transports. It consumes `RtiImage`
 and runtime coordination interfaces without depending on the host compiler.
 
-`cargo-boomerang` selects and generates backend-specific artifacts and their
-package dependencies. The top-level `boomerang` facade re-exports application
+Application build scripts call `boomerang_codegen` to generate backend-specific
+Rust definitions. Application manifests declare their package dependencies. The top-level `boomerang` facade re-exports application
 and runtime interfaces; it does not select a central backend implicitly.
 
 ```mermaid
@@ -226,8 +226,8 @@ coordination backend; a one-Federate deployment selects none.
 
 Compiled Federate, boundary, and backend interfaces are always available. The
 central backend is opt-in through an explicit package dependency and a selected
-coordination projection. `cargo-boomerang` generates the required dependencies;
-there is no user-facing `federated` feature or backend feature-flag choreography.
+coordination projection. Application manifests declare the required dependencies.
+There is no user-facing `federated` feature.
 
 Replay is orthogonal to Federate placement. Concrete recording and replay
 containers may remain optional hosted capabilities.

@@ -163,32 +163,20 @@ only for initialization without a source.
 
 ### Configure the source
 
-Add a source policy to the Federate in `Boomerang.toml`:
+Configure source policies in application runtime code. The
+[physical-input example](https://github.com/jondo2010/boomerang/blob/main/examples/physical-input/src/main.rs) installs the
+runtime physical-input configuration and manual clock. Its
+[build script](https://github.com/jondo2010/boomerang/blob/main/examples/physical-input/build.rs) selects the matching
+component-to-source mapping through `BindingConfiguration`.
 
-```toml
-[deployments.production.federates.host.physical-inputs]
-max_batch_values = 16
-max_staged_batches = 8
-
-[deployments.production.federates.host.physical-inputs.sources.plant]
-component = "sensor"
-required = true
-```
-
-Here, `sensor` identifies the component instance. The compiler obtains the
-target actions from that component's declaration. You do not need to repeat
-action paths or Rust function signatures in the manifest.
-
-The table key `plant` identifies the deployment policy. The component's
-`source = "plant"` argument names its local capability. Each instance that
-declares a source has one source policy. To reuse the component, bind separate
-policy entries to separate component instances.
+The compiler obtains action endpoints from the component declaration. Each
+source policy identifies its component instance. Reused components require
+separate policies for their separate instances.
 
 Set `required = true` when source progress must limit logical execution.
 Set `required = false` for an optional source that does not limit execution.
 
-For host monotonic time, keep this source policy and omit `clock_control` and
-the `physical-clock` table. Read acquisition time through `init.source.clock()`.
+For host monotonic time, keep the default runtime clock. Read acquisition time through `init.source.clock()`.
 Enable `hosted-source-input` for this selection. Manual clock support is not needed.
 
 `max_batch_values` limits the number of values in one submission.
@@ -306,14 +294,13 @@ A required source's protocol error, overflow, or disconnection aborts execution.
 ## Supported deployments
 
 Ordinary sending works with the live builder and runner, and with generated
-local hosted launchers. It needs neither hosted runtime feature.
+local Cargo-native applications. It needs neither hosted runtime feature.
 
 Source admission requires compiled execution with one local hosted `std`
 Federate. Enable `hosted-source-input` on the runtime dependency of each payload
-package that uses source APIs. The generated launcher selects this feature from
-the source configuration. Source admission does not require `hosted-manual-clock`.
-The toolchain rejects non-host targets, custom target JSON, and distributed
-source configuration. This hosted feature is not supported on Pico.
+package that uses source APIs. Application manifests select these features explicitly.
+Source admission does not require `hosted-manual-clock`.
+This hosted source configuration supports local execution. It is not supported on Pico.
 
 ## Run the complete example
 

@@ -143,7 +143,7 @@
 //! Both compilation paths reject unsupported generated-backend capabilities before source publication.
 //! The generated central RTI backend requires `tcp` transport and `serde-json` payload capabilities.
 //! It requires reliable ordered framing, canonical bounded codecs, propagated stop, best-effort timing, no security, and fail-stop recovery.
-//! Runtime selection remains application policy; the CLI also validates its launcher runtime support.
+//! Runtime selection and startup validation remain application policy.
 //! [`DeploymentInputs::lower`] and identity hashing remain independent of generated-backend capability restrictions.
 //! Each RTI package owns its Cargo target and toolchain independently from the member targets.
 //! [`coordination::coordination_fingerprint`] identifies shared semantics; local image and artifact fingerprints remain distinct.

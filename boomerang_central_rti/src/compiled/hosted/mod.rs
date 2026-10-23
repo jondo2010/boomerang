@@ -3,6 +3,39 @@
 //! Exact echoed admission precedes typed routes. Tokio channels preserve FIFO order and
 //! reserve coordination capacity; asynchronous tasks own socket I/O, deadlines and draining.
 //! Synchronous scheduler owners alone wait for replies and join their transport workers.
+//!
+//! ## Transport contract
+//!
+//! TCP carries `boomerang.canonical.v1` frames with the portable Serde/Postcard
+//! envelope. Exact echoed admission must precede typed route traffic.
+//! Stable member identities resolve once during admission. Payload exchanges use
+//! typed route indices. The shared coordination digest covers canonical mappings,
+//! analyzed dependencies, boundary contracts, versions, and policies. Local image
+//! fingerprints remain separate. [`WireContract`] supplies the compiled tables.
+//!
+//! Callers configure a positive operation timeout through [`connect`] or
+//! [`Server::new`]. That timeout bounds admission, partial frames, stalled writes,
+//! and terminal flushing. Healthy inactive sessions can wait indefinitely.
+//! Complete frames have a 65,583-byte limit. Opaque payloads have a 65,535-byte limit.
+//! Each stage has sixteen channel entries. Payload permits limit queued payloads
+//! to twelve entries, reserving four entries for coordination traffic.
+//! Each transfer and writer retains at most one additional frame. Writers must
+//! flush before taking another frame. Framed buffers retain allocation capacity;
+//! record limits do not specify exact allocator overhead.
+//!
+//! Accepted traffic must remain FIFO. Completion and grants must not overtake
+//! preceding payloads. Synchronous submission must fail closed on queue exhaustion.
+//! Asynchronous transfers must await capacity within their original deadline.
+//! The link must preserve the original failure.
+//!
+//! Tokio tasks own socket I/O through framed readers and writers. Only synchronous
+//! scheduler owners wait on the reply bridge or join worker threads.
+//! Cancellation must close admission. One shared deadline must bound terminal
+//! output, receive draining, and task joins. TCP owns retransmission, ordering,
+//! duplicate suppression, and segmentation. This adapter adds framing validation
+//! and operation deadlines without a second retry protocol.
+//! Successful compiled execution requires RTI-authorized global quiescence.
+//! Unilateral early local shutdown is a fail-stop failure.
 use super::{
     CentralRtiError, CompiledRti, RtiDelivery, RtiReply, RtiReplySource, RtiRequest, RtiRequestSink,
 };

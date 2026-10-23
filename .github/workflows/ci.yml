@@ -85,6 +85,10 @@ jobs:
       - name: test workspace
         run: cargo test --workspace --verbose
 
+      - name: test prebuilt Cargo-native applications
+        shell: bash
+        run: bash boomerang_codegen/tests/run-applications.sh
+
       - name: test independent hosted runtime capabilities
         run: |
           cargo test -p boomerang_runtime --no-default-features

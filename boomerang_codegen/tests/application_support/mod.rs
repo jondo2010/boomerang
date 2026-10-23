@@ -1,5 +1,3 @@
-use crate::cargo_support::{clean_environment, target_directory};
-
 use std::{
     fs::{self, File},
     io::{BufRead, BufReader},
@@ -11,75 +9,37 @@ use std::{
 
 const DEADLINE: Duration = Duration::from_secs(20);
 
-/// Ordinary Cargo fixture paths and retained integration evidence.
-struct Fixture {
-    /// Standalone checked-in Cargo workspace.
-    workspace: PathBuf,
-    /// One ordinary target directory for the independent fixture builds.
-    target: PathBuf,
-    /// Retained build output, process output, and executable snapshots.
-    evidence: PathBuf,
+/// Remove application configuration inherited from the test environment.
+fn clean_environment(command: &mut Command) {
+    for (name, _) in std::env::vars_os() {
+        let key = name.to_string_lossy();
+        if key.starts_with("BOOMERANG_") || key.starts_with("NATIVE_VEHICLE_") {
+            command.env_remove(name);
+        }
+    }
 }
-impl Fixture {
-    fn new() -> Self {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let target = target_directory("cargo-native-federation-slice4");
-        let evidence = target.join("evidence");
-        fs::create_dir_all(&evidence).unwrap();
-        Self {
-            workspace: root.join("tests/fixtures/federated"),
-            target,
-            evidence,
-        }
-    }
 
-    fn cargo(&self, operation: &str, args: &[&str], label: &str, delay: Option<&str>) -> String {
-        let mut command = Command::new(env!("CARGO"));
-        command
-            .current_dir(&self.workspace)
-            .arg(operation)
-            .args(["--locked", "--offline"])
-            .args(args)
-            .env("CARGO_TARGET_DIR", &self.target);
-        clean_environment(&mut command);
-        if let Some(delay) = delay {
-            command.env("NATIVE_VEHICLE_DELAY_NS", delay);
-        }
-        let output = command.output().unwrap();
-        let combined = format!(
-            "{}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
+fn artifact(directory: &Path, name: &str) -> PathBuf {
+    let path = directory.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+    assert!(
+        path.is_file(),
+        "missing prebuilt executable: {}",
+        path.display()
+    );
+    path
+}
+
+/// Exercise both ordinary input and source admission through prebuilt applications.
+pub fn local(directory: &Path) {
+    for name in ["consumer", "consumer-source"] {
+        let mut process = Process::spawn(&artifact(directory, name), directory, name, &[]);
+        let status = process.wait(Instant::now() + DEADLINE);
+        let output = process.output();
+        assert!(status.success(), "{output}");
+        assert!(
+            output.contains("connected routing and initialized input"),
+            "{output}"
         );
-        fs::write(self.evidence.join(format!("{label}.log")), &combined).unwrap();
-        assert!(output.status.success(), "{label}: {combined}");
-        combined
-    }
-
-    fn build(
-        &self,
-        role: &str,
-        label: &str,
-        delay: Option<&str>,
-        features: Option<&str>,
-    ) -> PathBuf {
-        let package = format!("native-vehicle-{role}");
-        let mut args = vec!["-p", package.as_str()];
-        if let Some(features) = features {
-            args.extend(["--features", features]);
-        }
-        self.cargo("build", &args, label, delay);
-        let artifact = self
-            .evidence
-            .join(format!("{label}{}", std::env::consts::EXE_SUFFIX));
-        fs::copy(
-            self.target
-                .join("debug")
-                .join(format!("{package}{}", std::env::consts::EXE_SUFFIX)),
-            &artifact,
-        )
-        .unwrap();
-        artifact
     }
 }
 
@@ -162,7 +122,7 @@ enum Scenario {
     RuntimeFailure,
 }
 
-fn run(fixture: &Fixture, artifacts: &[PathBuf; 3], scenario: Scenario) {
+fn run(evidence: &Path, artifacts: &[PathBuf; 3], scenario: Scenario) {
     let label = match scenario {
         Scenario::Matching => "matching",
         Scenario::Mixed => "mixed",
@@ -173,7 +133,7 @@ fn run(fixture: &Fixture, artifacts: &[PathBuf; 3], scenario: Scenario) {
     let deadline = Instant::now() + DEADLINE;
     let mut coordinator = Process::spawn(
         &artifacts[2],
-        &fixture.evidence,
+        evidence,
         &format!("{label}-rti"),
         &[
             ("BOOMERANG_RTI_BIND", "127.0.0.1:0".into()),
@@ -215,16 +175,11 @@ fn run(fixture: &Fixture, artifacts: &[PathBuf; 3], scenario: Scenario) {
     let env = [("BOOMERANG_RTI_ADDRESS", address.to_string())];
     let mut controller = Process::spawn(
         &artifacts[0],
-        &fixture.evidence,
+        evidence,
         &format!("{label}-controller"),
         &env,
     );
-    let mut sensor = Process::spawn(
-        &artifacts[1],
-        &fixture.evidence,
-        &format!("{label}-sensor"),
-        &env,
-    );
+    let mut sensor = Process::spawn(&artifacts[1], evidence, &format!("{label}-sensor"), &env);
     let statuses = [
         controller.wait(deadline),
         sensor.wait(deadline),
@@ -268,78 +223,27 @@ fn run(fixture: &Fixture, artifacts: &[PathBuf; 3], scenario: Scenario) {
     }
 }
 
-pub fn exercise() {
-    let fixture = Fixture::new();
-    let controller = fixture.build("controller", "original-controller", None, None);
-    let sensor = fixture.build("sensor", "original-sensor", None, None);
-    let rti = fixture.build("rti", "original-rti", None, None);
+pub fn federation(directory: &Path) {
+    let controller = artifact(directory, "controller");
+    let sensor = artifact(directory, "sensor");
+    let rti = artifact(directory, "rti");
     assert_eq!(identity(&controller), identity(&sensor));
     assert_eq!(identity(&controller), identity(&rti));
     run(
-        &fixture,
+        directory,
         &[controller.clone(), sensor, rti.clone()],
         Scenario::Matching,
     );
-    let failed = fixture.build(
-        "sensor",
-        "runtime-failure-sensor",
-        None,
-        Some("runtime-failure"),
-    );
     run(
-        &fixture,
-        &[controller.clone(), failed, rti.clone()],
+        directory,
+        &[
+            controller.clone(),
+            artifact(directory, "sensor-failure"),
+            rti.clone(),
+        ],
         Scenario::RuntimeFailure,
     );
-    fixture.cargo(
-        "test",
-        &["-p", "native-vehicle-rti"],
-        "generated-rti-contracts",
-        None,
-    );
-    fixture.cargo(
-        "test",
-        &["-p", "native-vehicle-deployment"],
-        "heterogeneous-generation",
-        None,
-    );
-    for role in ["controller", "sensor", "rti"] {
-        let package = format!("native-vehicle-{role}");
-        let tree = fixture.cargo(
-            "tree",
-            &[
-                "-p",
-                &package,
-                "--edges",
-                "normal,no-proc-macro",
-                "--prefix",
-                "none",
-            ],
-            &format!("dependencies-{role}"),
-            None,
-        );
-        for forbidden in [
-            "boomerang_builder ",
-            "boomerang_codegen ",
-            "cargo-boomerang ",
-        ] {
-            assert!(
-                !tree.lines().any(|line| line.starts_with(forbidden)),
-                "{role} links {forbidden}: {tree}"
-            );
-        }
-        for (payload, allowed) in [
-            ("vehicle-control ", role == "controller"),
-            ("sensor-host ", role == "sensor"),
-        ] {
-            assert_eq!(
-                tree.lines().any(|line| line.starts_with(payload)),
-                allowed,
-                "{role}: {tree}"
-            );
-        }
-    }
-    let changed = fixture.build("sensor", "changed-sensor", Some("2000000"), None);
+    let changed = artifact(directory, "sensor-mixed");
     assert_ne!(identity(&controller), identity(&changed));
-    run(&fixture, &[controller, changed, rti], Scenario::Mixed);
+    run(directory, &[controller, changed, rti], Scenario::Mixed);
 }

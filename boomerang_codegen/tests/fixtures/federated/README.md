@@ -12,7 +12,7 @@ cargo test --locked -p native-vehicle-deployment
 Run the process integration test from the repository root:
 
 ```sh
-cargo test -p boomerang_codegen --test federation
+bash boomerang_codegen/tests/run-applications.sh
 ```
 
 Run `native-vehicle-rti` first. Set `BOOMERANG_RTI_ADDRESS` on both members to its reported address.

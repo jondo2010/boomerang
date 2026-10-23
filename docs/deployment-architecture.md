@@ -34,7 +34,7 @@ Its process integration test starts the RTI, connects the members, and checks
 payload exchange and failure handling:
 
 ```sh
-cargo test -p boomerang_codegen --test federation
+bash boomerang_codegen/tests/run-applications.sh
 ```
 
 Applications or external process tools own startup and shutdown.

@@ -32,7 +32,7 @@ Compiled contracts live in the crates that implement them:
 ```sh
 cargo test -p boomerang_runtime --test compiled_execution --offline
 cargo test -p boomerang_central_rti --test compiled_execution --offline
-cargo test -p boomerang_codegen --test federation --offline
+bash boomerang_codegen/tests/run-applications.sh
 ```
 
 The RTI crate also provides an in-memory transport for testing and reference

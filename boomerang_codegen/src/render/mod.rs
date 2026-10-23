@@ -1,5 +1,5 @@
 //! Shared source generation from validated builder models and explicit payload paths.
-//! CLI startup policy belongs to the CLI; these functions emit only definitions.
+//! Application entry points own startup policy; these functions emit only definitions.
 mod bindings;
 mod image;
 use crate::{ComponentRegistration, ManifestStyle};

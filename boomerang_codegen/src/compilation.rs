@@ -5,7 +5,7 @@ use crate::{
 use boomerang_builder::{compiler::*, ComponentDescriptor};
 use std::collections::{btree_map::Entry, BTreeMap};
 
-/// Explicit deployment choices, shared by native applications and CLI discovery.
+/// Explicit deployment choices shared by independently compiled application packages.
 #[derive(Debug, Clone)]
 pub struct DeploymentConfiguration {
     /// Deployment label attached to compilation diagnostics.

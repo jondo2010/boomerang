@@ -62,9 +62,9 @@
 //! # Ok::<(), boomerang_codegen::CompilationError>(())
 //! ```
 //!
-//! [`DeploymentInputs::lower`] accepts resolved implementation bindings for callers that already perform selection, including CLI discovery.
+//! [`DeploymentInputs::lower`] accepts resolved implementation bindings for callers that already perform selection.
 //! The [`render`] module consumes validated builder images, registrations keyed by implementation identity, and explicit [`render::BindingConfiguration`].
-//! [`PayloadExports::with_manifest`] adapts CLI payload export conventions.
+//! [`PayloadExports::with_manifest`] selects the compatibility manifest export convention explicitly.
 //! Use [`PayloadExports::new`] for Cargo-native payloads.
 //!
 //! # Build script
@@ -169,9 +169,9 @@ use boomerang_builder::ComponentDescriptor;
 /// How a payload namespace exports its runtime compatibility manifest.
 #[derive(Debug, Clone, Copy)]
 pub enum ManifestStyle {
-    /// Cargo-native and module legacy exports: `binding_manifest()`.
+    /// Function export: `binding_manifest()`.
     Function,
-    /// Legacy crate exports: `BINDING_MANIFEST`.
+    /// Constant export: `BINDING_MANIFEST`.
     Constant,
 }
 
@@ -189,7 +189,7 @@ impl PayloadExports {
     pub fn new(path: impl AsRef<str>) -> Result<Self, CompilationError> {
         Self::with_manifest(path, ManifestStyle::Function)
     }
-    /// Adapt an explicitly selected export convention, including legacy CLI payloads.
+    /// Select the compatibility manifest export convention for this payload namespace.
     pub fn with_manifest(
         path: impl AsRef<str>,
         manifest: ManifestStyle,

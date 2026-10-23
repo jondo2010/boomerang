@@ -1,51 +1,51 @@
-//! Hosted process policy shared by generated Boomerang launchers.
+//! Optional tracing setup for application processes.
+//!
+//! Enable `hosted-tracing` for a streaming formatter filtered by `RUST_LOG`.
+//! `init_tracing` leaves an existing global subscriber active.
+//! Retain its guard until all application workers stop so buffered output flushes.
+//!
+//! Enable `bounded-tracing` for native capture and shutdown JSON export.
+//! Pass capacities and exact-target filters through `BoundedTracingConfig`.
+//! Initialization fails if another global subscriber exists.
+//! Bounded filtering is independent of `RUST_LOG`.
+//! Reference and loss-counter ceilings are fixed at 1,024.
+//!
+//! Bounded export emits schema-v1 record and loss lines to stderr on guard drop.
+//! Records contain native fields and copied root-to-leaf scopes.
+//! Byte values use JSON arrays; 128-bit integers use decimal strings.
+//! Non-finite floats use an `f64_bits` object.
+//! Per-process record order describes commit order, not a distributed clock.
+//! Incomplete capture does not provide complete causal evidence.
+//! Abrupt process termination does not flush capture.
+//! Export errors print a diagnostic without replacing an application execution error.
+//!
+//! These Cargo features are additive. The application selects its initializer.
+//! Keep the guard alive through runtime execution and worker shutdown.
 
 #[cfg(feature = "hosted-tracing")]
 use std::io::IsTerminal as _;
-use std::io::Write as _;
 
 #[cfg(feature = "hosted-tracing")]
 use tracing_subscriber::filter::EnvFilter;
 #[cfg(feature = "bounded-tracing")]
 mod bounded;
-/// Native level filter used by generated bounded tracing initializers.
+/// Native level filter used by application bounded tracing initializers.
 #[cfg(feature = "bounded-tracing")]
 pub use tracing::level_filters::LevelFilter;
-/// Native setup configuration consumed by the bounded launcher initializer.
+/// Native setup configuration consumed by the bounded tracing initializer.
 #[cfg(feature = "bounded-tracing")]
 pub use tracing_bounded::Config as BoundedTracingConfig;
 #[cfg(feature = "test-tracing")]
 use tracing_subscriber::fmt::format::FmtSpan;
-
-/// Private protocol variable through which a supervisor requests a summary.
-pub const EXECUTION_SUMMARY_ENV: &str = "BOOMERANG_EXECUTION_SUMMARY_V1";
-
-/// Schema-v1 summary emitted through the private supervisor protocol.
-#[derive(serde::Serialize)]
-struct ExecutionSummaryDocumentV1<'a> {
-    /// Protocol schema version.
-    schema: u32,
-    /// Aggregate runtime scheduling counters.
-    stats: &'a boomerang_runtime::Stats,
-    /// Final logical tag reached by the Federate.
-    final_tag: FinalTagDocumentV1,
-}
-
-/// Schema-v1 final logical tag.
-#[derive(serde::Serialize)]
-struct FinalTagDocumentV1 {
-    /// Signed logical offset in nanoseconds.
-    offset_nanos: String,
-    /// Superdense microstep count.
-    microstep: String,
-}
 
 /// Keeps hosted tracing output alive and reports lines dropped by its bounded lossy queue.
 #[must_use = "retain this guard until hosted execution and shutdown are complete"]
 #[derive(Debug)]
 #[cfg(feature = "hosted-tracing")]
 pub struct TracingGuard {
+    /// Counts formatted lines dropped by the bounded output queue.
     error_counter: tracing_appender::non_blocking::ErrorCounter,
+    /// Flushes the output queue when application shutdown releases this guard.
     _worker: tracing_appender::non_blocking::WorkerGuard,
 }
 
@@ -74,7 +74,7 @@ fn non_blocking_writer(
     )
 }
 
-/// Installs off-by-default launcher tracing unless this process already has a subscriber.
+/// Installs off-by-default application tracing unless this process already has a subscriber.
 ///
 /// Retain the returned guard until shutdown so the final buffered events are flushed. An already
 /// installed subscriber remains active.
@@ -98,6 +98,7 @@ pub fn init_tracing() -> TracingGuard {
 #[must_use = "retain until execution and all workers have stopped"]
 #[cfg(feature = "bounded-tracing")]
 pub struct BoundedTracingGuard {
+    /// Owns capture and exports it after application worker shutdown.
     _guard: bounded::Guard,
 }
 
@@ -107,7 +108,7 @@ pub struct BoundedTracingGuard {
 /// It exports JSON lines to stderr when the guard drops, after workers stop.
 /// Installation fails if another global subscriber is installed.
 /// Storage capacities and filtering come from `config`; reference/loss ceilings
-/// remain fixed at 1,024 by the launcher policy.
+/// remain fixed at 1,024 by this adapter.
 #[cfg(feature = "bounded-tracing")]
 pub fn init_bounded_tracing(config: BoundedTracingConfig) -> std::io::Result<BoundedTracingGuard> {
     Ok(BoundedTracingGuard {
@@ -123,33 +124,6 @@ pub(crate) fn init_test_tracing_with_filter(filter: EnvFilter) {
         .with_span_events(FmtSpan::ENTER | FmtSpan::CLOSE)
         .with_test_writer()
         .try_init();
-}
-
-/// Writes the optional version-1 execution summary requested by a supervisor.
-pub fn write_execution_summary(
-    execution: &boomerang_runtime::FederateExecution,
-) -> std::io::Result<()> {
-    let Some(path) = std::env::var_os(EXECUTION_SUMMARY_ENV) else {
-        return Ok(());
-    };
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)?;
-    let document = ExecutionSummaryDocumentV1 {
-        schema: 1,
-        stats: execution.stats(),
-        final_tag: FinalTagDocumentV1 {
-            offset_nanos: execution
-                .final_tag()
-                .offset()
-                .whole_nanoseconds()
-                .to_string(),
-            microstep: execution.final_tag().microstep().to_string(),
-        },
-    };
-    serde_json::to_writer(&mut file, &document).map_err(std::io::Error::other)?;
-    writeln!(file)
 }
 
 #[cfg(test)]

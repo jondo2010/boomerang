@@ -4,7 +4,9 @@ use std::io::{self, Write};
 use tracing_bounded::{CaptureHandle, LossCount, OwnedField, ProducerGuard, Value};
 
 pub(super) struct Guard {
+    /// Retains bounded records and loss counters until shutdown export.
     capture: CaptureHandle,
+    /// Keeps the initial application thread registered for bounded capture.
     _producer: ProducerGuard,
 }
 

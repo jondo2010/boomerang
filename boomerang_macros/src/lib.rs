@@ -1,3 +1,31 @@
+//! Component emission and direct payload bindings.
+//!
+//! [`component!`] selects additive metadata and payload APIs through caller features.
+//! Without either feature, it emits dynamic construction APIs.
+//! [`component_metadata!`] and [`component_payload!`] select their output explicitly.
+//!
+//! # Payload ABI
+//!
+//! Payload emission exposes generated state structs and empty state aliases publicly,
+//! regardless of the source reactor's visibility. Generated state uses its `Default` implementation.
+//! Custom state types remain user-owned and must be accessible to the application.
+//! Payload emission requires `state_init = path` with `state = T`.
+//! Without `init_context`, the constructor has signature `fn() -> T`.
+//! The [`reactor`] documentation specifies context-aware initialization.
+//! `state_init` without `state` is invalid.
+//!
+//! Binding exports use `state_`, `reaction_`, `port_`, and `action_` prefixes for their descriptor slot kinds.
+//! Every non-ASCII-alphanumeric byte in the canonical UTF-8 slot path becomes lowercase `_hh`.
+//! This encoding preserves separators, raw identifiers, and Unicode names without hashing or collisions.
+//! Export paths use implementation-local slots rather than logical instance paths.
+//! Multiple logical instances reuse function exports while retaining separate runtime storage.
+//!
+//! `binding_manifest()` contains the structural descriptor fingerprint and macro ABI version.
+//! It contains no binding slots or function table.
+//! Generated applications check these values before binding direct typed exports.
+//! Structural fingerprints omit reaction bodies and initializer implementations.
+//! ABI compatibility does not guarantee equivalent reaction behavior.
+
 use quote::quote;
 
 mod component;

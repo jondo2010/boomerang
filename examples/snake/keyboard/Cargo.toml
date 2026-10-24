@@ -7,9 +7,9 @@ license.workspace = true
 publish = false
 
 [features]
-default = ["hosted"]
-hosted = ["boomerang/hosted"]
-metadata = ["boomerang/hosted"]
+default = ["dynamic"]
+dynamic = ["boomerang/builder"]
+metadata = ["boomerang/builder"]
 payload = []
 
 [dependencies]

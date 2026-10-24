@@ -5,8 +5,8 @@ edition = "2021"
 publish = false
 
 [features]
-default = ["boomerang/hosted"]
-metadata = ["boomerang/hosted"]
+default = ["boomerang/builder"]
+metadata = ["boomerang/builder"]
 payload = []
 action-delay-overflow = []
 action-duration-unit-overflow = []

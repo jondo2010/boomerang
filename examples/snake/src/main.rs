@@ -7,8 +7,8 @@
 //!
 //! `build.rs` declares the application topology directly.
 //! The build script selects metadata from the owning `snake-game` and `snake-keyboard` crates.
-//! Those additive component features enable the hosted builder API without the game implementation or terminal worker.
-//! The game enables its optional `rand` dependency only through `hosted` or `payload`.
+//! Those additive component features enable the builder API without the game implementation or terminal worker.
+//! The game enables its optional `rand` dependency only through `dynamic` or `payload`.
 //! Crossterm supplies portable key-event signature types in every component lane.
 //!
 //! `build.rs` uses `CargoBuild` to compile that metadata and publish Rust definitions in Cargo's `OUT_DIR`.

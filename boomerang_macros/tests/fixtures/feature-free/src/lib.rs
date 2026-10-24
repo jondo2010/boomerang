@@ -1,8 +1,8 @@
 use boomerang::prelude::*;
 
 #[reactor]
-pub fn Hosted() -> impl Reactor {}
+pub fn Dynamic() -> impl Reactor {}
 
-pub fn hosted_reactor_is_available() {
-    let _ = Hosted();
+pub fn dynamic_reactor_is_available() {
+    let _ = Dynamic();
 }

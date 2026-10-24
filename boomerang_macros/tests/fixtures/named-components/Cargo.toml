@@ -4,8 +4,8 @@ version = "0.0.0"
 edition = "2021"
 publish = false
 [features]
-default = ["boomerang/hosted"]
-metadata = ["boomerang/hosted"]
+default = ["boomerang/builder"]
+metadata = ["boomerang/builder"]
 payload = []
 sentinel = []
 duplicate = []

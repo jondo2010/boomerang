@@ -93,7 +93,7 @@ boomerang::component! {
     }
 }
 #[test]
-fn unsupported_topology_forms_keep_hosted_component_builds_functional() {
+fn unsupported_topology_forms_keep_dynamic_component_builds_functional() {
     let mut assembly = Assembly::new();
     let banked = banked::Root()
         .build("banked", (), None, None, None, false, &mut assembly)

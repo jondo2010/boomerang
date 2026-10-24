@@ -588,7 +588,7 @@ impl ReactorBody {
         self.body_tokens_with_descriptor_slots(None, &mut 0)
     }
 
-    /// Emits hosted body tokens while assigning descriptor reaction slots in source order.
+    /// Emits dynamic body tokens while assigning descriptor reaction slots in source order.
     fn body_tokens_with_descriptor_slots(
         &self,
         reactor_name: Option<&str>,
@@ -1174,7 +1174,7 @@ pub struct ArgsModel(pub ReactorArgs, pub Model, pub bool);
 
 impl ToTokens for ArgsModel {
     fn to_tokens(&self, tokens: &mut TokenStream) {
-        self.to_tokens_with_emission(tokens, ComponentEmission::Hosted);
+        self.to_tokens_with_emission(tokens, ComponentEmission::Dynamic);
     }
 }
 
@@ -1708,7 +1708,7 @@ impl ArgsModel {
         tokens.append_all(selection.output(
             name,
             emission::ReactorOutput {
-                hosted: quote!(#capability_declaration #output #topology_output),
+                dynamic: quote!(#capability_declaration #output #topology_output),
                 native_metadata: metadata_contents,
                 topology: topology_output,
                 native_payload: native_payload_output,
@@ -1723,16 +1723,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn direct_reactor_emits_an_unconditional_hosted_constructor() {
-        let model = syn::parse_str::<Model>("pub fn Hosted() -> impl Reactor {}").unwrap();
+    fn direct_reactor_emits_an_unconditional_dynamic_constructor() {
+        let model = syn::parse_str::<Model>("pub fn Dynamic() -> impl Reactor {}").unwrap();
         let args = syn::parse_str::<ReactorArgs>("").unwrap();
         let declaration = ArgsModel(args, model, false);
         let output = syn::parse2::<syn::File>(quote!(#declaration)).unwrap();
         assert!(
             output.items.iter().any(|item| matches!(item,
-                syn::Item::Fn(function) if function.sig.ident == "Hosted"
+                syn::Item::Fn(function) if function.sig.ident == "Dynamic"
             )),
-            "direct reactors must expose the hosted constructor without a selector"
+            "direct reactors must expose the dynamic constructor without a selector"
         );
     }
 

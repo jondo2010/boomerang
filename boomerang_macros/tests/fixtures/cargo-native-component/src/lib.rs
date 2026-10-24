@@ -44,7 +44,7 @@ fn coexisting_namespaces_share_canonical_compatibility() {
 }
 #[cfg(not(any(feature = "metadata", feature = "payload")))]
 #[test]
-fn neither_feature_preserves_hosted_api() {
+fn neither_feature_preserves_dynamic_api() {
     use boomerang::prelude::*;
     let mut assembly = Assembly::new();
     controller::Controller()

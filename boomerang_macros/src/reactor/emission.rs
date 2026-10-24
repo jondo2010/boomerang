@@ -13,9 +13,9 @@ use syn::Ident;
 /// Selector input supplied by a component macro or direct reactor attribute.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ComponentEmission {
-    /// Emit the hosted API for a direct reactor attribute.
-    Hosted,
-    /// Resolve additive caller features with hosted fallback.
+    /// Emit the dynamic API for a direct reactor attribute.
+    Dynamic,
+    /// Resolve additive caller features with dynamic fallback.
     Features,
     /// Emit native metadata independently of caller features.
     Metadata,
@@ -84,8 +84,8 @@ impl Selection {
 
 /// Output fragments from the existing parser and shared generators.
 pub(super) struct ReactorOutput {
-    /// Hosted reactor API, capability declarations, and topology constructors.
-    pub hosted: TokenStream,
+    /// Dynamic reactor API, capability declarations, and topology constructors.
+    pub dynamic: TokenStream,
     /// Native descriptor contents for the additive metadata namespace.
     pub native_metadata: TokenStream,
     /// Native typed topology constructors selected with metadata.
@@ -98,8 +98,8 @@ pub(super) struct ReactorOutput {
 
 /// Common output modes used for reactor output and implementation helpers.
 pub(crate) struct SelectionPolicy {
-    /// Hosted API selection, including the feature-free fallback.
-    hosted: Selection,
+    /// Dynamic API selection, including the feature-free fallback.
+    dynamic: Selection,
     /// Metadata selection, independent from additive payload selection.
     metadata: Selection,
     /// Payload selection, independent from additive metadata selection.
@@ -109,8 +109,8 @@ pub(crate) struct SelectionPolicy {
 impl SelectionPolicy {
     /// Convert selector inputs into the only table of caller-owned cfg predicates.
     pub(crate) fn new(input: ComponentEmission) -> Self {
-        let (hosted, metadata, payload) = match input {
-            ComponentEmission::Hosted => (Selection::Always, Selection::Never, Selection::Never),
+        let (dynamic, metadata, payload) = match input {
+            ComponentEmission::Dynamic => (Selection::Always, Selection::Never, Selection::Never),
             ComponentEmission::Features => (
                 Selection::Cfg {
                     predicate: quote!(not(any(feature = "metadata", feature = "payload"))),
@@ -126,15 +126,15 @@ impl SelectionPolicy {
             ComponentEmission::Payload => (Selection::Never, Selection::Never, Selection::Always),
         };
         Self {
-            hosted,
+            dynamic,
             metadata,
             payload,
         }
     }
 
-    /// Retain helpers exactly when a selected hosted or payload mode needs them.
+    /// Retain helpers exactly when a selected dynamic or payload mode needs them.
     pub(crate) fn helper(&self, item: TokenStream) -> TokenStream {
-        self.hosted.or(&self.payload).item(item)
+        self.dynamic.or(&self.payload).item(item)
     }
 
     /// Determine whether any caller configuration selects payload emission.
@@ -144,7 +144,7 @@ impl SelectionPolicy {
 
     /// Apply common selection to output fragments and their public namespaces.
     pub(super) fn output(&self, reactor: &Ident, output: ReactorOutput) -> TokenStream {
-        let hosted = self.hosted.output(reactor, "hosted", output.hosted);
+        let dynamic = self.dynamic.output(reactor, "dynamic", output.dynamic);
         let native_payload = self
             .payload
             .output(reactor, "native_payload", output.native_payload);
@@ -171,7 +171,7 @@ impl SelectionPolicy {
             },
         );
         quote! {
-            #hosted #native_payload #namespace #topology
+            #dynamic #native_payload #namespace #topology
         }
     }
 }

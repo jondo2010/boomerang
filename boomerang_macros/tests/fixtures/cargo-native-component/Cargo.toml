@@ -4,8 +4,8 @@ version = "0.0.0"
 edition = "2021"
 publish = false
 [features]
-default = ["boomerang/hosted", "dep:cargo-native-helper"]
-metadata = ["boomerang/hosted"]
+default = ["boomerang/builder", "dep:cargo-native-helper"]
+metadata = ["boomerang/builder"]
 helper-sentinel = ["cargo-native-helper?/sentinel"]
 payload = ["dep:cargo-native-helper"]
 [dependencies]

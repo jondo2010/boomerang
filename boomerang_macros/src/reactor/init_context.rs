@@ -96,7 +96,7 @@ fn generic_marker(model: &Model) -> (TokenStream, TokenStream) {
     )
 }
 
-/// Emits the public user-named argument structure in hosted and payload facets.
+/// Emits the public user-named argument structure in dynamic and payload facets.
 pub(super) fn declaration(args: &ReactorArgs, model: &Model) -> syn::Result<TokenStream> {
     let Some(capabilities) = &args.init_context else {
         return Ok(TokenStream::new());

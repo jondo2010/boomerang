@@ -48,7 +48,7 @@ fn explicit_host_metadata_and_target_payload_share_a_declaration_without_cli_inp
 }
 
 #[test]
-fn component_feature_matrix_is_additive_and_preserves_hosted() {
+fn component_feature_matrix_is_additive_and_preserves_dynamic() {
     success(cargo("cargo-native-component", "test", &[]));
     for features in ["metadata", "payload", "metadata,payload"] {
         success(cargo(
@@ -217,7 +217,7 @@ fn normal_consumer_rejects_an_incorrectly_exported_macro_abi() {
 }
 
 #[test]
-fn direct_hosted_reactors_preserve_metadata_free_state_and_feature_free_consumers() {
+fn direct_dynamic_reactors_preserve_metadata_free_state_and_feature_free_consumers() {
     success(cargo("metadata-free", "test", &[]));
     success(cargo("feature-free", "check", &[]));
     success(cargo("descriptor-duplicate-reaction", "check", &[]));

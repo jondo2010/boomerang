@@ -4,7 +4,7 @@ version = "0.0.0"
 edition = "2021"
 publish = false
 [features]
-metadata = ["boomerang/hosted"]
+metadata = ["boomerang/builder"]
 payload = []
 [dependencies]
 boomerang = { path = "../../../../boomerang", default-features = false }

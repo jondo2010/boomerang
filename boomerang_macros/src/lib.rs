@@ -22,7 +22,7 @@ pub fn reactor_ports(
 ///
 /// The `#[reactor]` macro turns a plain Rust function into a reactor declaration. The reactor function takes
 /// any number of other arguments.
-/// Direct attributes always emit the hosted API.
+/// Direct attributes always emit the dynamic construction API.
 /// Use [`component!`] or explicit component macros for metadata and payload emission.
 ///
 /// Here’s how you would define and use a simple Boomerang reactor which has one input, a delay parameter, and a boolean state:
@@ -198,7 +198,7 @@ pub fn timer(s: proc_macro::TokenStream) -> proc_macro::TokenStream {
 /// items remain ordinary owning-crate code and are omitted in metadata builds.
 /// The invoking package's additive `metadata` and `payload` features select APIs in `module::__boomerang::{metadata,payload}`.
 /// Both features can coexist.
-/// Without either feature, the macro emits hosted APIs.
+/// Without either feature, the macro emits dynamic construction APIs.
 /// Metadata also provides typed topology constructors through `module::definition()`.
 /// Declare these features in the component package.
 /// Gate implementation-only dependencies behind `payload`.
@@ -225,8 +225,8 @@ pub fn component(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
 /// Structural port types must be available on the host.
 /// Use fully qualified paths for types from portable dependencies.
 /// Metadata emission omits implementation imports inside the declaration.
-/// Metadata requires `boomerang/hosted`.
-/// Use `default-features = false` for payload-only normal dependencies that require no hosted APIs.
+/// Metadata requires `boomerang/builder`.
+/// Use `default-features = false` for payload-only normal dependencies that require no builder APIs.
 ///
 /// A shared source macro can invoke this entry point from a build script and
 /// [`component_payload!`] from the target. Explicit emission does not inspect package features.

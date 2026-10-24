@@ -14,7 +14,7 @@
 //! The compiler uses Cargo's target context to generate image tables, bindings, and compatibility checks.
 //! The Cargo adapter publishes generated source beneath `OUT_DIR`.
 //! `boomerang_builder` and `boomerang_codegen` are build dependencies.
-//! Target dependencies disable hosted reactor construction to exclude the builder.
+//! Target dependencies disable the `builder` feature to exclude the builder.
 //!
 //! # Shared declaration and runtime implementation: `src/components.rs`
 //!

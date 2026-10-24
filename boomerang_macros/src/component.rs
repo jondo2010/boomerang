@@ -64,7 +64,7 @@ pub fn expand(
                 output.push(selection.helper(function.into_token_stream()));
             }
         } else if matches!(item, syn::Item::Use(_)) {
-            // Imports used by hosted reactor expansion may disappear in payload mode.
+            // Imports used by dynamic reactor expansion may disappear in payload mode.
             output.push(selection.helper(quote!(#[allow(unused_imports)] #item)));
         } else {
             output.push(selection.helper(item.into_token_stream()));

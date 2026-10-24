@@ -11,10 +11,11 @@ repository.workspace = true
 categories.workspace = true
 
 [features]
-default = ["hosted"]
+default = ["builder"]
 
-## Hosted reactor construction and dynamic assembly support
-hosted = ["dep:boomerang_builder"]
+## Expose component metadata and dynamic reactor construction through `boomerang::builder`.
+## Disable this feature for compiled payload dependencies to exclude the builder.
+builder = ["dep:boomerang_builder"]
 
 # Support for serialization
 serde = ["boomerang_runtime/serde"]
@@ -24,7 +25,7 @@ parallel = ["boomerang_runtime/parallel"]
 
 
 ## Support for recording and replaying
-replay = ["hosted", "boomerang_runtime/replay", "boomerang_builder/replay"]
+replay = ["builder", "boomerang_runtime/replay", "boomerang_builder/replay"]
 
 [dependencies]
 document-features = { workspace = true }

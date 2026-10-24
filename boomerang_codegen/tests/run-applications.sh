@@ -39,29 +39,29 @@ federated=boomerang_codegen/tests/fixtures/federated/Cargo.toml
 native_target="$fixture_target/codegen-native-consumer"
 federated_target="$fixture_target/cargo-native-federation-slice4"
 
-CARGO_TARGET_DIR="$native_target" cargo build --locked --offline --manifest-path "$native"
+CARGO_TARGET_DIR="$native_target" cargo build --locked --manifest-path "$native"
 cp "$native_target/debug/codegen-native-consumer$suffix" "$executables/consumer$suffix"
-CARGO_TARGET_DIR="$native_target" cargo build --locked --offline --manifest-path "$native" --features source-input
+CARGO_TARGET_DIR="$native_target" cargo build --locked --manifest-path "$native" --features source-input
 cp "$native_target/debug/codegen-native-consumer$suffix" "$executables/consumer-source$suffix"
 
-CARGO_TARGET_DIR="$federated_target" cargo build --locked --offline --manifest-path "$federated" \
+CARGO_TARGET_DIR="$federated_target" cargo build --locked --manifest-path "$federated" \
   -p native-vehicle-controller -p native-vehicle-sensor -p native-vehicle-rti
 for role in controller sensor rti; do
   cp "$federated_target/debug/native-vehicle-$role$suffix" "$executables/$role$suffix"
 done
 # Generated-table and heterogeneous-target assertions run as ordinary crate tests.
-CARGO_TARGET_DIR="$federated_target" cargo test --locked --offline --manifest-path "$federated" \
+CARGO_TARGET_DIR="$federated_target" cargo test --locked --manifest-path "$federated" \
   -p native-vehicle-deployment -p native-vehicle-rti
-CARGO_TARGET_DIR="$federated_target" cargo build --locked --offline --manifest-path "$federated" \
+CARGO_TARGET_DIR="$federated_target" cargo build --locked --manifest-path "$federated" \
   -p native-vehicle-sensor --features runtime-failure
 cp "$federated_target/debug/native-vehicle-sensor$suffix" "$executables/sensor-failure$suffix"
-NATIVE_VEHICLE_DELAY_NS=2000000 CARGO_TARGET_DIR="$federated_target" cargo build --locked --offline \
+NATIVE_VEHICLE_DELAY_NS=2000000 CARGO_TARGET_DIR="$federated_target" cargo build --locked \
   --manifest-path "$federated" -p native-vehicle-sensor
 cp "$federated_target/debug/native-vehicle-sensor$suffix" "$executables/sensor-mixed$suffix"
 
 # Dependency isolation is a Cargo contract, independent of process execution.
 for role in controller sensor rti; do
-  CARGO_TARGET_DIR="$federated_target" cargo tree --locked --offline --color never --manifest-path "$federated" \
+  CARGO_TARGET_DIR="$federated_target" cargo tree --locked --color never --manifest-path "$federated" \
     -p "native-vehicle-$role" --edges normal,no-proc-macro --prefix none > "$executables/$role.dependencies"
   if grep -Eq '^(boomerang_builder|boomerang_codegen|cargo-boomerang) ' "$executables/$role.dependencies"; then
     echo "$role links a host compiler dependency" >&2; exit 1
@@ -76,4 +76,4 @@ for role in controller sensor rti; do
     fi
   done
 done
-cargo test -p boomerang_codegen --all-features --locked --offline --test applications -- --ignored
+cargo test -p boomerang_codegen --all-features --locked --test applications -- --ignored

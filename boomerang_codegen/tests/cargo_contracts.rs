@@ -50,7 +50,7 @@ fn cargo(command: &str, features: &[&str]) -> Output {
     let mut command_line = Command::new(env!("CARGO"));
     command_line
         .current_dir(root.join("tests/fixtures/native"))
-        .args([command, "--locked", "--offline"])
+        .args([command, "--locked"])
         .env(
             "CARGO_TARGET_DIR",
             target_directory("codegen-native-consumer"),

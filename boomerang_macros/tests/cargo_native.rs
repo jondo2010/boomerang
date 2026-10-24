@@ -18,7 +18,7 @@ fn cargo(fixture: &str, command: &str, args: &[&str]) -> Output {
     let mut cargo = Command::new(env!("CARGO"));
     cargo
         .arg(command)
-        .args(["--quiet", "--offline", "--manifest-path"])
+        .args(["--quiet", "--manifest-path"])
         .arg(fixture.join("Cargo.toml"))
         .args(args)
         .env("CARGO_TARGET_DIR", root.join(target))

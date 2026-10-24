@@ -6,17 +6,25 @@ pub mod game {
 mod support;
 
 use boomerang::prelude::*;
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::KeyCode;
 use support::*;
 
 pub struct SnakeState {
+    /// Body positions and current head.
     snake: CircularSnake,
+    /// Board cells for rendering and collision checks.
     grid: SnakeGrid,
+    /// Speed level that increases after each food item.
     tempo: u32,
+    /// Time reduction for each speed level.
     tempo_step: Duration,
+    /// Latest requested direction from the keyboard.
     pending_direction: Direction,
+    /// Current movement direction after reverse-turn checks.
     snake_direction: Direction,
+    /// Number of food items on the board.
     food_on_grid: u32,
+    /// Maximum number of food items on the board.
     max_food_on_grid: u32,
 }
 
@@ -43,7 +51,7 @@ impl Default for SnakeState {
     bounds(queue_capacity = 1024, payload_bytes = 32768, state_bytes = 16384, scratch_bytes = 16384)
 )]
 pub fn Snake(
-    #[input] key: KeyEvent,
+    #[input] key: crossterm::event::KeyEvent,
     #[input] ready: (),
     #[logical_action] screen_refresh: (),
     #[logical_action] manually_add_more_food: (),

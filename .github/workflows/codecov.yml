@@ -16,7 +16,7 @@ concurrency:
 jobs:
   coverage:
     runs-on: ubuntu-latest
-    # Instrumented toolchain fixtures need more time than the platform smoke tests.
+    # Native fixtures compile instrumented application binaries.
     timeout-minutes: 60
 
     env:
@@ -39,43 +39,24 @@ jobs:
         run: cargo fetch
 
       - name: Collect workspace coverage
-        run: >-
-          cargo llvm-cov --no-report --all-features --workspace
-          --exclude cargo-boomerang
+        run: cargo llvm-cov --no-report --all-features --workspace
 
-      - name: Collect cargo-boomerang fast coverage
-        run: >-
-          cargo llvm-cov --no-report -p cargo-boomerang --all-features
-          --lib --bin cargo-boomerang --test manifest --test workspace
-
-      - name: Collect cargo-boomerang toolchain coverage
-        run: >-
-          cargo llvm-cov --no-report -p cargo-boomerang --all-features
-          --test toolchain
-
-      # Exercise the tool-owned facet cfg values independently of Cargo features.
-      - name: Collect payload facet coverage
-        run: >-
-          RUSTFLAGS='--cfg boomerang_facet="payload"'
-          cargo llvm-cov --no-report -p boomerang --lib --no-default-features
-
-      - name: Collect descriptor facet coverage
-        run: >-
-          RUSTFLAGS='--cfg boomerang_facet="descriptor"'
-          cargo llvm-cov --no-report -p boomerang --lib --no-default-features
-          --features hosted
+      - name: Collect prebuilt application coverage
+        shell: bash
+        run: bash boomerang_codegen/tests/run-applications.sh --coverage
 
       - name: Generate LCOV report
         shell: bash
         run: |
-          # Generated workspaces fall outside cargo-llvm-cov's object discovery.
-          # Collect every request-specific Cargo executable, not published copies:
-          # publication tests deliberately corrupt some bundled executables.
+          # Fixture executables fall outside cargo-llvm-cov's object discovery.
+          # Include unit-test binaries and the exact application snapshots that ran.
           objects=()
-          while IFS= read -r -d '' launcher; do
-            objects+=("-object=$launcher")
-          done < <(find target/llvm-cov-target/tmp -path '*/b/*/deps/l[0-9a-f]*-*' -type f -perm /111 -print0)
-          test "${#objects[@]}" -gt 0
+          native_objects=0
+          while IFS= read -r -d '' executable; do
+            objects+=("-object=$executable")
+            native_objects=$((native_objects + 1))
+          done < <(find target/llvm-cov-target/native-fixtures \( -path '*/debug/deps/*' -o -path '*/executables/*' \) -type f -perm /111 ! -name '*.*' -print0)
+          test "$native_objects" -gt 0
           LLVM_COV_FLAGS="${objects[*]}" cargo llvm-cov report --lcov --output-path lcov.info
 
       - name: Upload coverage to Codecov

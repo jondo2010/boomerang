@@ -1,0 +1,14 @@
+[package]
+name = "sensor-host"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = ["dynamic"]
+dynamic = ["boomerang/builder"]
+metadata = ["boomerang/builder"]
+payload = []
+runtime-failure = []
+
+[dependencies]
+boomerang = { path = "../../../../../boomerang", default-features = false }

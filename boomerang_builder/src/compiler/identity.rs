@@ -16,44 +16,6 @@ use std::{
     str::FromStr,
 };
 
-#[cfg(feature = "host-interchange")]
-fn serialize_identity<T: fmt::Display, S: serde::Serializer>(
-    value: &T,
-    serializer: S,
-) -> Result<S::Ok, S::Error> {
-    serializer.collect_str(value)
-}
-
-#[cfg(feature = "host-interchange")]
-fn deserialize_identity<'de, T, D>(deserializer: D) -> Result<T, D::Error>
-where
-    T: FromStr,
-    T::Err: fmt::Display,
-    D: serde::Deserializer<'de>,
-{
-    use serde::Deserialize;
-    String::deserialize(deserializer)?
-        .parse()
-        .map_err(serde::de::Error::custom)
-}
-
-macro_rules! identity_serde {
-    ($type:ty) => {
-        #[cfg(feature = "host-interchange")]
-        impl serde::Serialize for $type {
-            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-                serialize_identity(self, serializer)
-            }
-        }
-        #[cfg(feature = "host-interchange")]
-        impl<'de> serde::Deserialize<'de> for $type {
-            fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-                deserialize_identity(deserializer)
-            }
-        }
-    };
-}
-
 /// Reports text that is not a canonical stable identity.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 #[error("invalid stable identity '{value}': {reason}")]
@@ -280,8 +242,6 @@ impl FromStr for StablePath {
     }
 }
 
-identity_serde!(StablePath);
-
 /// Validated stable non-hierarchical text.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct StableText(
@@ -339,7 +299,7 @@ macro_rules! text_id {
             type Err = InvalidStableId;
             fn from_str(value: &str) -> Result<Self, Self::Err> { Self::new(value) }
         }
-        identity_serde!($name);
+
     };
 }
 
@@ -385,7 +345,7 @@ macro_rules! path_id {
             type Target = StablePath;
             fn deref(&self) -> &Self::Target { &self.0 }
         }
-        identity_serde!($name);
+
     };
 }
 
@@ -560,20 +520,6 @@ impl<T> FromStr for BindingSlotId<T> {
     type Err = InvalidStableId;
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         Self::new(value)
-    }
-}
-
-#[cfg(feature = "host-interchange")]
-impl<T> serde::Serialize for BindingSlotId<T> {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serialize_identity(self, serializer)
-    }
-}
-
-#[cfg(feature = "host-interchange")]
-impl<'de, T> serde::Deserialize<'de> for BindingSlotId<T> {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        deserialize_identity(deserializer)
     }
 }
 

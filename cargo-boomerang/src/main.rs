@@ -1,13 +1,17 @@
-use std::path::PathBuf;
+//! Telemetry monitor for Boomerang applications.
+//!
+//! Build application packages with ordinary Cargo commands.
+//! Enable the `monitor` feature to receive telemetry with `cargo boomerang monitor`.
+
 #[cfg(feature = "monitor")]
 use std::{io::IsTerminal, net::SocketAddr, num::NonZeroUsize, time::Duration};
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 #[cfg(feature = "monitor")]
 use boomerang_monitor::{serve, serve_dashboard, MonitorOptions, ReceiverConfig};
-use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
-
-use cargo_boomerang::{ColorChoice, CommandOutput};
+#[cfg(not(feature = "monitor"))]
+use clap::CommandFactory;
+use clap::{Args, Parser, Subcommand};
 
 /// Cargo plugin entry point.
 #[derive(Parser)]
@@ -21,52 +25,25 @@ struct CargoCli {
 /// Installed Cargo plugins supported by this binary.
 #[derive(Subcommand)]
 enum CargoCommand {
-    /// Statically analyze a Boomerang deployment.
+    /// Receive telemetry from Boomerang applications.
+    ///
+    /// Build application packages with ordinary Cargo commands.
+    /// Enable the `monitor` Cargo feature to receive telemetry.
     Boomerang(BoomerangArgs),
 }
 
-/// Arguments accepted after `cargo boomerang`.
+/// Receive telemetry from Boomerang applications.
+///
+/// Build application packages with ordinary Cargo commands.
+/// Enable the `monitor` Cargo feature to receive telemetry.
 #[derive(Args)]
 struct BoomerangArgs {
-    /// Application workspace containing `Boomerang.toml` and `Cargo.toml`.
-    #[arg(long, default_value = ".", global = true)]
-    workspace: PathBuf,
-    /// Suppress cargo-boomerang progress without suppressing command results.
-    #[arg(short, long, global = true, conflicts_with = "verbose")]
-    quiet: bool,
-    /// Use verbose output for nested Cargo commands.
-    #[arg(short, long, global = true, action = ArgAction::Count)]
-    verbose: u8,
-    /// Control color in progress and nested Cargo diagnostics.
-    #[arg(long, global = true, value_enum)]
-    color: Option<CliColorChoice>,
-    /// Deployment-tool operation.
+    /// Telemetry operation. Enable the `monitor` Cargo feature to receive telemetry.
     #[command(subcommand)]
     command: BoomerangCommand,
 }
 
-/// Cargo-compatible color values accepted at the command line.
-#[derive(Clone, Copy, Debug, ValueEnum)]
-enum CliColorChoice {
-    /// Select color automatically from the output destination.
-    Auto,
-    /// Always emit color.
-    Always,
-    /// Never emit color.
-    Never,
-}
-
-impl From<CliColorChoice> for ColorChoice {
-    fn from(choice: CliColorChoice) -> Self {
-        match choice {
-            CliColorChoice::Auto => Self::Auto,
-            CliColorChoice::Always => Self::Always,
-            CliColorChoice::Never => Self::Never,
-        }
-    }
-}
-
-/// Deployment-tool operations.
+/// Telemetry operations.
 #[derive(Subcommand)]
 enum BoomerangCommand {
     /// Receive framework telemetry and print the completed monitor snapshot.
@@ -88,45 +65,32 @@ enum BoomerangCommand {
         #[arg(long, value_parser = parse_idle_timeout)]
         idle_timeout: Option<Duration>,
     },
-    /// Build and publish one immutable fingerprinted deployment bundle.
-    Build {
-        /// Deployment name declared in `Boomerang.toml`.
-        #[arg(long)]
-        deployment: String,
-    },
-    /// Validate and lower one named deployment without compiling payload facets.
-    Check {
-        /// Deployment name declared in `Boomerang.toml`.
-        #[arg(long)]
-        deployment: String,
-    },
-    /// Build, validate, and run one native generated monolithic deployment.
-    Run {
-        /// Deployment name declared in `Boomerang.toml`.
-        #[arg(long)]
-        deployment: String,
-        /// Write the completed execution summary as JSON.
-        #[arg(short, long)]
-        summary: Option<PathBuf>,
-    },
+    /// Reject commands when monitor support is disabled.
+    #[cfg(not(feature = "monitor"))]
+    #[command(external_subcommand)]
+    Unavailable(Vec<String>),
 }
 
 fn main() -> Result<()> {
-    if cargo_boomerang::compiler_wrapper::is_invocation() {
-        cargo_boomerang::compiler_wrapper::main();
+    let CargoCommand::Boomerang(BoomerangArgs { command }) = CargoCli::parse().command;
+    #[cfg(feature = "monitor")]
+    {
+        run(command)
     }
-    let CargoCommand::Boomerang(BoomerangArgs {
-        workspace,
-        quiet,
-        verbose,
-        color,
-        command,
-    }) = CargoCli::parse().command;
-    let color = color
-        .map(ColorChoice::from)
-        .unwrap_or_else(ColorChoice::from_cargo_env);
-    let output = CommandOutput::new(quiet, verbose, color);
+    #[cfg(not(feature = "monitor"))]
+    {
+        let BoomerangCommand::Unavailable(arguments) = command;
+        CargoCli::command()
+            .error(
+                clap::error::ErrorKind::InvalidSubcommand,
+                format!("unrecognized subcommand '{}'", arguments[0]),
+            )
+            .exit();
+    }
+}
 
+#[cfg(feature = "monitor")]
+fn run(command: BoomerangCommand) -> Result<()> {
     match command {
         #[cfg(feature = "monitor")]
         BoomerangCommand::Monitor {
@@ -161,23 +125,6 @@ fn main() -> Result<()> {
                     serve_dashboard(&options)?;
                 }
             }
-        }
-        BoomerangCommand::Build { deployment } => {
-            let manifest = cargo_boomerang::build_with_output(workspace, &deployment, &output)?;
-            println!("{}", manifest.display());
-        }
-        BoomerangCommand::Check { deployment } => {
-            cargo_boomerang::check_with_output(workspace, &deployment, &output)?;
-        }
-        BoomerangCommand::Run {
-            deployment,
-            summary,
-        } => {
-            let outcome = cargo_boomerang::run_with_output(workspace, &deployment, &output)?;
-            if let (Some(path), Some(summary)) = (summary, outcome.summary()) {
-                summary.write_json(path)?;
-            }
-            std::process::exit(numeric_exit_code(outcome.status())?);
         }
     }
     Ok(())
@@ -216,51 +163,23 @@ fn parse_idle_timeout(value: &str) -> Result<Duration, String> {
     Ok(duration)
 }
 
-fn numeric_exit_code(status: &std::process::ExitStatus) -> Result<i32> {
-    status
-        .code()
-        .ok_or_else(|| anyhow!("generated application terminated without a numeric exit code"))
-}
-
-#[cfg(all(test, unix))]
+#[cfg(all(test, feature = "monitor"))]
 mod tests {
-    use super::numeric_exit_code;
-    #[cfg(feature = "monitor")]
     use super::{monitor_presentation, MonitorPresentation};
-    use std::{os::unix::process::ExitStatusExt, process::ExitStatus};
 
-    #[test]
-    fn terminated_process_without_a_numeric_code_is_a_tool_error() {
-        let status = ExitStatus::from_raw(15);
-
-        let error = numeric_exit_code(&status).unwrap_err();
-
-        assert!(
-            error
-                .to_string()
-                .contains("terminated without a numeric exit code"),
-            "{error:#}"
-        );
-    }
-
-    #[cfg(feature = "monitor")]
     #[test]
     fn monitor_output_is_interactive_only_for_an_unredirected_terminal() {
-        assert_eq!(
-            monitor_presentation(false, false, true, true),
-            MonitorPresentation::Dashboard
-        );
-        assert_eq!(
-            monitor_presentation(false, false, true, false),
-            MonitorPresentation::Debug
-        );
-        assert_eq!(
-            monitor_presentation(false, true, true, true),
-            MonitorPresentation::Debug
-        );
-        assert_eq!(
-            monitor_presentation(true, false, true, true),
-            MonitorPresentation::Json
-        );
+        for (json, no_interactive, stdin, stdout, expected) in [
+            (false, false, true, true, MonitorPresentation::Dashboard),
+            (false, false, true, false, MonitorPresentation::Debug),
+            (false, false, false, true, MonitorPresentation::Debug),
+            (false, true, true, true, MonitorPresentation::Debug),
+            (true, false, true, true, MonitorPresentation::Json),
+        ] {
+            assert_eq!(
+                monitor_presentation(json, no_interactive, stdin, stdout),
+                expected
+            );
+        }
     }
 }

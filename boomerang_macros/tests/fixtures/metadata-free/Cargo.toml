@@ -7,7 +7,4 @@ publish = false
 [dependencies]
 boomerang = { path = "../../../../boomerang" }
 
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(boomerang_facet, values("descriptor", "payload"))'] }
-
 [workspace]

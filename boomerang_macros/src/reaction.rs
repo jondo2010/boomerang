@@ -282,7 +282,7 @@ impl Parse for Model {
 }
 
 impl Model {
-    /// Emits a hosted reaction declaration with optional descriptor-slot metadata.
+    /// Emits a dynamic reaction declaration with optional descriptor-slot metadata.
     pub(crate) fn to_tokens_with_descriptor_slot(
         &self,
         tokens: &mut proc_macro2::TokenStream,

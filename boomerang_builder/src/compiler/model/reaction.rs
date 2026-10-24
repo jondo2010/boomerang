@@ -1,25 +1,9 @@
 use crate::compiler::{ActionId, ModeId, PortId, ReactionId, ReactorId};
-#[cfg(feature = "host-interchange")]
-use serde::{Deserialize, Serialize};
 use std::ops::{BitOr, BitOrAssign};
 
 /// Independent trigger, use, and effect relation bits.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[cfg_attr(feature = "host-interchange", derive(Serialize))]
 pub struct ReactionRelationFlags(u8);
-
-#[cfg(feature = "host-interchange")]
-impl<'de> serde::Deserialize<'de> for ReactionRelationFlags {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let bits = <u8 as serde::Deserialize>::deserialize(deserializer)?;
-        if bits == 0 || bits & !0b111 != 0 {
-            return Err(serde::de::Error::custom(
-                "reaction relation flags must contain only trigger, use, or effect bits",
-            ));
-        }
-        Ok(Self(bits))
-    }
-}
 
 impl ReactionRelationFlags {
     /// Trigger relation bit.
@@ -65,7 +49,6 @@ impl BitOrAssign for ReactionRelationFlags {
 
 /// Stable action-or-port reaction target.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-#[cfg_attr(feature = "host-interchange", derive(Deserialize, Serialize))]
 pub enum ReactionRelationTarget {
     /// Stable action target.
     Action(ActionId),
@@ -75,8 +58,6 @@ pub enum ReactionRelationTarget {
 
 /// One stable reaction dependency relation.
 #[derive(Clone, Debug, Eq, PartialEq)]
-#[cfg_attr(feature = "host-interchange", derive(Deserialize, Serialize))]
-#[cfg_attr(feature = "host-interchange", serde(deny_unknown_fields))]
 pub struct ReactionRelation {
     /// Stable relation target.
     pub(super) target: ReactionRelationTarget,
@@ -118,7 +99,6 @@ impl ReactionRelation {
 
 /// Modal transition behavior.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-#[cfg_attr(feature = "host-interchange", derive(Deserialize, Serialize))]
 pub enum ModeTransitionKind {
     /// Reset target mode state on entry.
     Reset,
@@ -128,8 +108,6 @@ pub enum ModeTransitionKind {
 
 /// Stable modal transition declaration.
 #[derive(Clone, Debug, Eq, PartialEq)]
-#[cfg_attr(feature = "host-interchange", derive(Deserialize, Serialize))]
-#[cfg_attr(feature = "host-interchange", serde(deny_unknown_fields))]
 pub struct ModeTransition {
     /// Stable transition target.
     pub target: ModeId,
@@ -156,8 +134,6 @@ impl ModeTransition {
 
 /// Optional modal metadata used when constructing a reaction.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-#[cfg_attr(feature = "host-interchange", derive(Deserialize, Serialize))]
-#[cfg_attr(feature = "host-interchange", serde(deny_unknown_fields))]
 pub struct ReactionOptions {
     /// Reactor-local mode that lexically owns the reaction.
     ///
@@ -195,8 +171,6 @@ impl ReactionOptions {
 
 /// Structural reaction declaration using stable identities.
 #[derive(Clone, Debug, Eq, PartialEq)]
-#[cfg_attr(feature = "host-interchange", derive(Deserialize, Serialize))]
-#[cfg_attr(feature = "host-interchange", serde(deny_unknown_fields))]
 pub struct Reaction {
     /// Stable reaction identity.
     pub(super) id: ReactionId,

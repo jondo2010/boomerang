@@ -11,6 +11,9 @@ repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 cd "$repo_root"
 
 cargo build -p cargo-boomerang --features monitor
-cargo run -p cargo-boomerang --features monitor -- boomerang --workspace examples/snake build --deployment snake
+cargo build -p snake-app --features telemetry
+
+BOOMERANG_TELEMETRY_RUN_ID=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+export BOOMERANG_TELEMETRY_RUN_ID
 
 exec zellij --new-session-with-layout examples/snake/telemetry-demo.kdl

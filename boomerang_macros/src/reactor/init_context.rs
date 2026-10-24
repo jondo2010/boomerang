@@ -96,7 +96,7 @@ fn generic_marker(model: &Model) -> (TokenStream, TokenStream) {
     )
 }
 
-/// Emits the public user-named argument structure in hosted and payload facets.
+/// Emits the public user-named argument structure in dynamic and payload facets.
 pub(super) fn declaration(args: &ReactorArgs, model: &Model) -> syn::Result<TokenStream> {
     let Some(capabilities) = &args.init_context else {
         return Ok(TokenStream::new());
@@ -173,26 +173,6 @@ pub(super) fn initializer(
         }
     })
 }
-/// Emits descriptor-only stable identities for compiler validation and dense lowering.
-pub(super) fn descriptor(args: &ReactorArgs, model: &Model) -> syn::Result<TokenStream> {
-    let Some(capabilities) = &args.init_context else {
-        return Ok(quote!(None));
-    };
-    let source = capabilities
-        .source
-        .as_ref()
-        .map_or_else(|| quote!(None), |source| quote!(Some(#source.into())));
-    let actions = capabilities.actions(model)?.into_iter().map(|(name, _)| {
-        let path =
-            super::stable_path_tokens(&[super::ident_text(&model.name), super::ident_text(name)]);
-        quote!(::boomerang::builder::ActionSlotId::from_path(#path))
-    });
-    let clock = capabilities.clock_control();
-    Ok(
-        quote!(Some(::boomerang::builder::InitializerCapabilities { source: #source, actions: vec![#(#actions),*], clock_control: #clock })),
-    )
-}
-
 /// Registers the same named initializer in the live builder using existing action aliases.
 pub(super) fn live_registration(args: &ReactorArgs, model: &Model) -> syn::Result<TokenStream> {
     let Some(capabilities) = &args.init_context else {
@@ -239,7 +219,10 @@ mod tests {
             (syn::parse_quote!([logical]), "missing or is not physical"),
             (syn::parse_quote!([sample, sample]), "duplicate or reserved"),
             (syn::parse_quote!([send]), "duplicate or reserved"),
-            (syn::parse_quote!([__boomerang_marker]), "duplicate or reserved"),
+            (
+                syn::parse_quote!([__boomerang_marker]),
+                "duplicate or reserved",
+            ),
         ] {
             let declaration = InitContextArgs {
                 name: syn::parse_quote!(DriverInit),

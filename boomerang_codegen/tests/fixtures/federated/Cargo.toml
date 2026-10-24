@@ -1,0 +1,14 @@
+[workspace]
+members = ["deployment", "controller", "sensor", "rti", "sensor-host", "vehicle-control"]
+resolver = "2"
+
+[workspace.dependencies]
+boomerang_runtime = { path = "../../../../boomerang_runtime" }
+boomerang_federated = { path = "../../../../boomerang_federated" }
+boomerang_central_rti = { path = "../../../../boomerang_central_rti" }
+tinymap = { package = "boomerang_tinymap", path = "../../../../boomerang_tinymap" }
+boomerang_codegen = { path = "../../..", features = ["cargo-build"] }
+native-vehicle-deployment = { path = "deployment" }
+
+[profile.dev]
+debug = 0

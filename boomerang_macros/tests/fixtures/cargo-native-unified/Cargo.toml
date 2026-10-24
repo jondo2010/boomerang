@@ -1,0 +1,11 @@
+[package]
+name = "cargo-native-unified"
+version = "0.0.0"
+edition = "2021"
+publish = false
+[dependencies]
+metadata-user = { path = "metadata-user" }
+payload-user = { path = "payload-user" }
+[workspace]
+resolver = "2"
+members = ["metadata-user", "payload-user"]

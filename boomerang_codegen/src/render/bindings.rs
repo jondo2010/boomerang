@@ -1,0 +1,437 @@
+use super::BindingConfiguration;
+use crate::{ComponentRegistration, PayloadExports};
+use anyhow::{anyhow, bail, Context, Result};
+use boomerang_builder::{
+    compiler::{ComponentInstanceId, ImplementationId, OwnedEnclaveImage, RequiredBinding},
+    ComponentDescriptor, DescriptorLifecycle, DescriptorRelationshipKind,
+    DescriptorRelationshipTarget, ReactionSlot, ReactionSlotId, ReactorSlotId,
+};
+use boomerang_runtime::image::{BindingKind, EnclaveImage, RouteDirection};
+use proc_macro2::TokenStream;
+use quote::{format_ident, quote};
+use std::collections::BTreeMap;
+
+pub(super) fn render_bindings(
+    components: &BTreeMap<ImplementationId, ComponentRegistration>,
+    enclaves: &[OwnedEnclaveImage],
+    enclave_start: usize,
+    exports: &BTreeMap<ImplementationId, ComponentRegistration>,
+    route_bindings: RouteBindings,
+    distributed: bool,
+    physical: &BindingConfiguration,
+) -> Result<TokenStream> {
+    let inputs = &physical.sources;
+    let manual = physical.manual_clock;
+    let writers = enclaves
+        .iter()
+        .flat_map(|enclave| enclave.required_bindings().iter())
+        .filter(|binding| {
+            let RequiredBinding::State {
+                reactor,
+                implementation,
+                ..
+            } = binding
+            else {
+                return false;
+            };
+            components
+                .get(implementation)
+                .expect("validated registration")
+                .descriptor
+                .reactor_slots()
+                .iter()
+                .any(|slot| {
+                    &slot.id == reactor
+                        && slot
+                            .capabilities
+                            .as_ref()
+                            .is_some_and(|caps| caps.clock_control)
+                })
+        })
+        .count();
+    if writers > 1 {
+        bail!("manual clock control must have one component owner");
+    }
+    let mut enclave_bindings = Vec::with_capacity(enclaves.len());
+    for (enclave_offset, enclave) in enclaves.iter().enumerate() {
+        let enclave_index = u32::try_from(
+            enclave_start
+                .checked_add(enclave_offset)
+                .ok_or_else(|| anyhow!("compiled Enclave index exceeds the image domain"))?,
+        )?;
+        let enclave_index = proc_macro2::Literal::u32_unsuffixed(enclave_index);
+        let mut bindings = TokenStream::new();
+        for (slot, binding) in enclave.required_bindings().iter().enumerate() {
+            bindings.extend(
+                render_binding(components, exports, slot, binding, enclave, inputs, manual)
+                    .map_err(|error| crate::CompilationError::render_binding(error, binding))?,
+            );
+        }
+        enclave_bindings.push(quote!(
+            .bind_enclave(
+                EnclaveIndex::new(#enclave_index),
+                EnclaveBindings::new() #bindings,
+            )
+        ));
+    }
+    let route_bindings = render_route_bindings(route_bindings);
+    let body = quote!(FederateBindings::new() #(#enclave_bindings)* #route_bindings);
+    Ok(if distributed {
+        quote! {
+            pub fn generated_bindings(
+                _rti: &boomerang_central_rti::compiled::RtiClientBindings<'static>,
+                _sink: std::sync::Arc<dyn boomerang_central_rti::compiled::RtiRequestSink>,
+            ) -> Result<FederateBindings<'static>, Box<dyn std::error::Error>> {
+                Ok(#body)
+            }
+        }
+    } else {
+        quote!(pub fn generated_bindings() -> FederateBindings<'static> { #body })
+    })
+}
+
+/// Accumulated generated payload types for each local scheduler boundary.
+pub(super) type RouteBindings = BTreeMap<String, (Option<TokenStream>, Option<TokenStream>)>;
+
+/// Validates one externally derived Rust identifier before token interpolation.
+fn rust_ident(value: &str, role: &str) -> Result<syn::Ident> {
+    syn::parse_str(value).with_context(|| format!("invalid generated {role} identifier '{value}'"))
+}
+
+/// Renders a generated payload binding path from validated identifier segments.
+fn binding_path(alias: &PayloadExports, symbol: &str) -> Result<TokenStream> {
+    let alias = &alias.path;
+    let symbol = rust_ident(symbol, "binding symbol")?;
+    Ok(quote!(#alias::#symbol))
+}
+
+/// Collects paired route payloads while each enclave image is borrowed.
+pub(super) fn collect_route_bindings(
+    routes: &mut RouteBindings,
+    enclave: &OwnedEnclaveImage,
+    image: &EnclaveImage<'_>,
+    exports: &BTreeMap<ImplementationId, ComponentRegistration>,
+) -> Result<()> {
+    for route in image.routes.values() {
+        let boundary = route.boundary().as_str().to_owned();
+        let port = &image.ports[route.local_port()];
+        let binding = enclave
+            .required_bindings()
+            .iter()
+            .nth(usize::try_from(port.binding().as_u32())?)
+            .expect("compiled port binding index is validated");
+        let RequiredBinding::Port { implementation, .. } = binding else {
+            bail!("route '{boundary}' local port does not have a port binding");
+        };
+        let alias = exports.get(implementation).ok_or_else(|| {
+            anyhow!("missing generated alias for implementation '{implementation}'")
+        })?;
+        let payload = binding_path(&alias.payload, &binding.symbol())?;
+        let pair = routes.entry(boundary.clone()).or_default();
+        let slot = match route.direction() {
+            RouteDirection::Outbound => &mut pair.0,
+            RouteDirection::Inbound => &mut pair.1,
+        };
+        if slot.replace(payload).is_some() {
+            bail!(
+                "route '{boundary}' has duplicate {:?} halves",
+                route.direction()
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Emits one typed route binding for each paired local scheduler boundary.
+fn render_route_bindings(routes: RouteBindings) -> TokenStream {
+    let mut tokens = TokenStream::new();
+    for (boundary, (source_payload, destination_payload)) in routes {
+        tokens.extend(match (source_payload, destination_payload) {
+            (Some(source), Some(destination)) => quote! {
+                .bind_route(BoundaryId::new(#boundary), #source, #destination)
+            },
+            (Some(source), None) => quote! {
+                .bind_outbound_route(
+                    BoundaryId::new(#boundary), #source,
+                    boomerang_central_rti::compiled::hosted::encode_json,
+                    _rti.outbound_sink(_sink.clone(), BoundaryId::new(#boundary))?,
+                )
+            },
+            (None, Some(destination)) => quote! {
+                .bind_inbound_route(
+                    BoundaryId::new(#boundary), #destination,
+                    boomerang_central_rti::compiled::hosted::decode_json,
+                )
+            },
+            (None, None) => TokenStream::new(),
+        });
+    }
+    tokens
+}
+
+/// Emits one state, reaction, port, or action binding chain entry.
+fn render_binding(
+    components: &BTreeMap<ImplementationId, ComponentRegistration>,
+    exports: &BTreeMap<ImplementationId, ComponentRegistration>,
+    slot: usize,
+    binding: &RequiredBinding,
+    enclave: &OwnedEnclaveImage,
+    inputs: &BTreeMap<ComponentInstanceId, u32>,
+    manual: bool,
+) -> Result<TokenStream> {
+    let slot = u32::try_from(slot).context("generated binding slot exceeds u32 range")?;
+    let slot = proc_macro2::Literal::u32_unsuffixed(slot);
+    let (implementation, symbol) = match binding {
+        RequiredBinding::State { implementation, .. }
+        | RequiredBinding::Reaction { implementation, .. }
+        | RequiredBinding::Port { implementation, .. }
+        | RequiredBinding::Action { implementation, .. } => (implementation, binding.symbol()),
+    };
+    let alias = exports
+        .get(implementation)
+        .ok_or_else(|| anyhow!("missing generated alias for implementation '{implementation}'"))?;
+    let path = binding_path(&alias.payload, &symbol)?;
+    match binding {
+        RequiredBinding::State {
+            component, reactor, ..
+        } => {
+            let descriptor = &components
+                .get(implementation)
+                .context("missing component registration")?
+                .descriptor;
+            let declaration = descriptor
+                .reactor_slots()
+                .iter()
+                .find(|slot| &slot.id == reactor)
+                .expect("state reactor descriptor");
+            let Some(required) = &declaration.capabilities else {
+                return Ok(quote!(.bind_state(BindingSlotIndex::new(#slot), #path)));
+            };
+            if required.clock_control && !manual {
+                bail!("component '{component}' requires a selected manual clock")
+            }
+            let clock_control = required.clock_control;
+            let source = if let Some(source) = &required.source {
+                let index = inputs.get(component).copied().ok_or_else(|| {
+                    anyhow!("component '{component}' requires physical source '{source}'")
+                })?;
+                quote!(source: Some(boomerang_runtime::input::SourceKey::new(#index)),)
+            } else {
+                quote!()
+            };
+            let mut action_rows = Vec::new();
+            let mut requirements = Vec::new();
+            for action in &required.actions {
+                let (action_slot, action_binding) = enclave.required_bindings().iter().enumerate().find(|(_, binding)| matches!(binding, RequiredBinding::Action { component: owner, action: candidate, .. } if owner == component && candidate == action)).ok_or_else(|| anyhow!("initializer action '{action}' missing from component '{component}'"))?;
+                let payload = binding_path(&alias.payload, &action_binding.symbol())?;
+                let row = enclave.with_image(|image| {
+                    let slot = boomerang_runtime::image::BindingSlotIndex::new(
+                        u32::try_from(action_slot).expect("compiled binding index"),
+                    );
+                    image
+                        .actions
+                        .iter()
+                        .find_map(|(row, action)| {
+                            (action.binding() == Some(slot)).then_some(row.as_u32())
+                        })
+                        .expect("action binding has image row")
+                });
+                action_rows.push(quote!(ActionIndex::new(#row)));
+                requirements.push(quote!(boomerang_runtime::initialization::ActionCapability::new(ActionIndex::new(#row), #payload)));
+            }
+            Ok(
+                quote!(.bind_state_with_capabilities(BindingSlotIndex::new(#slot), boomerang_runtime::initialization::StateCapabilities { #source actions: vec![#(#requirements),*], clock_control: #clock_control, ..Default::default() }, |context| #path(context, &[#(#action_rows),*]))),
+            )
+        }
+        RequiredBinding::Port { .. } => Ok(quote!(
+            .bind_port(BindingSlotIndex::new(#slot), #path)
+        )),
+        RequiredBinding::Action { .. } => Ok(quote!(
+            .bind_action(BindingSlotIndex::new(#slot), #path)
+        )),
+        RequiredBinding::Reaction { reaction, .. } => {
+            let descriptor = &components
+                .get(implementation)
+                .context("missing component registration")?
+                .descriptor;
+            let state = reaction_reactor(descriptor.reaction_slots(), reaction)?;
+            let state_symbol = boomerang_builder::compiler::direct_binding_symbol(
+                BindingKind::StateInitializer,
+                state.path(),
+            );
+            render_reaction_binding(
+                descriptor,
+                reaction,
+                slot,
+                &alias.payload,
+                &state_symbol,
+                &symbol,
+            )
+        }
+    }
+}
+
+/// Resolves a reaction slot to the exact descriptor reactor that owns it.
+fn reaction_reactor<'a>(
+    slots: &'a [ReactionSlot],
+    reaction: &ReactionSlotId,
+) -> Result<&'a ReactorSlotId> {
+    slots
+        .iter()
+        .find(|slot| slot.id == *reaction)
+        .map(|slot| &slot.reactor)
+        .ok_or_else(|| anyhow!("reaction '{reaction}' has no descriptor reactor"))
+}
+
+/// Emits the erased-to-typed adapter for one generated payload reaction function.
+fn render_reaction_binding(
+    descriptor: &ComponentDescriptor,
+    reaction: &ReactionSlotId,
+    slot: proc_macro2::Literal,
+    alias: &PayloadExports,
+    state_symbol: &str,
+    reaction_symbol: &str,
+) -> Result<TokenStream> {
+    let relations = descriptor
+        .relationships()
+        .iter()
+        .filter(|relation| relation.reaction == *reaction)
+        .collect::<Vec<_>>();
+    let mut immutable_ports = Vec::new();
+    let mut mutable_ports = Vec::new();
+    let mut actions = Vec::new();
+    let mut tuple = Vec::new();
+    let has_mode_effect = relations.iter().any(|relation| {
+        relation.kind == DescriptorRelationshipKind::Effect
+            && matches!(&relation.target, DescriptorRelationshipTarget::Mode(_))
+            && relation.mode_transition.is_some()
+    });
+    for kind in [
+        DescriptorRelationshipKind::Trigger,
+        DescriptorRelationshipKind::Use,
+        DescriptorRelationshipKind::Effect,
+    ] {
+        let mut category = relations
+            .iter()
+            .copied()
+            .filter(|relation| relation.kind == kind)
+            .collect::<Vec<_>>();
+        category.sort_by_key(|relation| relation.declaration_position);
+        for relation in category {
+            let name = match (&relation.target, kind) {
+                (
+                    DescriptorRelationshipTarget::Port(_),
+                    DescriptorRelationshipKind::Trigger | DescriptorRelationshipKind::Use,
+                ) => {
+                    let name = next_name("port", &mut immutable_ports);
+                    quote!(#name)
+                }
+                (DescriptorRelationshipTarget::Port(_), DescriptorRelationshipKind::Effect) => {
+                    let name = next_name("port_mut", &mut mutable_ports);
+                    quote!(#name)
+                }
+                (DescriptorRelationshipTarget::Action(_), _) => {
+                    let name = next_name("action", &mut actions);
+                    quote!(#name)
+                }
+                (
+                    DescriptorRelationshipTarget::Lifecycle(
+                        DescriptorLifecycle::Startup | DescriptorLifecycle::Shutdown,
+                    ),
+                    DescriptorRelationshipKind::Trigger,
+                ) => {
+                    let name = next_name("action", &mut actions);
+                    quote!(#name)
+                }
+                (
+                    DescriptorRelationshipTarget::Lifecycle(DescriptorLifecycle::Reset),
+                    DescriptorRelationshipKind::Trigger,
+                ) => continue,
+                (DescriptorRelationshipTarget::Mode(_), DescriptorRelationshipKind::Effect)
+                    if relation.mode_transition.is_some() =>
+                {
+                    quote!(mode_effect.expect("compiled mode effect is required"))
+                }
+                (_, DescriptorRelationshipKind::Mode | DescriptorRelationshipKind::Scope) => {
+                    continue
+                }
+                (target, _) => bail!("unsupported generated reaction relationship {target:?}"),
+            };
+            tuple.push(name);
+        }
+    }
+    let mode_effect = if has_mode_effect {
+        format_ident!("mode_effect")
+    } else {
+        format_ident!("_mode_effect")
+    };
+    let state = binding_path(alias, &format!("type_{state_symbol}"))?;
+    let reaction = binding_path(alias, reaction_symbol)?;
+    let immutable_partition = render_partition(quote!(refs.ports.partition()?), &immutable_ports);
+    let mutable_partition =
+        render_partition(quote!(refs.ports_mut.partition_mut()?), &mutable_ports);
+    let action_partition = render_partition(quote!(refs.actions.partition_mut()?), &actions);
+    Ok(quote!(
+        .bind_reaction(
+            BindingSlotIndex::new(#slot),
+            |ctx, state, refs, #mode_effect| {
+                let state = generated_state(state, #state());
+                #immutable_partition
+                #mutable_partition
+                #action_partition
+                #reaction(ctx, state, (#(#tuple,)*));
+                Ok(())
+            },
+        )
+    ))
+}
+
+/// Allocates the next generated local name within one reference partition.
+fn next_name(prefix: &str, values: &mut Vec<syn::Ident>) -> syn::Ident {
+    let name = format_ident!("{prefix}_{}", values.len());
+    values.push(name.clone());
+    name
+}
+
+/// Emits a tuple destructure whose inferred element types drive runtime reference extraction.
+fn render_partition(expression: TokenStream, values: &[syn::Ident]) -> TokenStream {
+    if values.is_empty() {
+        return TokenStream::new();
+    }
+    quote!(let (#(#values,)*) = #expression;)
+}
+
+#[cfg(test)]
+mod tests {
+    use boomerang_builder::{ReactionSlot, ReactionSlotId, ReactorSlotId};
+    use quote::quote;
+
+    use super::reaction_reactor;
+    use crate::render::format_rust;
+
+    /// Confirms malformed structural output fails at the publication boundary.
+    #[test]
+    fn malformed_generated_tokens_are_rejected_before_publication() {
+        let error = format_rust(quote!(fn incomplete)).unwrap_err();
+
+        assert!(
+            error.to_string().contains("generated Rust syntax"),
+            "{error:#}"
+        );
+    }
+
+    /// Confirms nested reactions resolve their exact descriptor state owner.
+    #[test]
+    fn nested_reaction_uses_its_exact_descriptor_owner() {
+        let root = ReactorSlotId::new("Root").unwrap();
+        let child = ReactorSlotId::new("Root/child").unwrap();
+        let reaction = ReactionSlotId::new("Root/child/startup").unwrap();
+        let slots = [ReactionSlot {
+            id: reaction.clone(),
+            reactor: child.clone(),
+        }];
+
+        assert_eq!(reaction_reactor(&slots, &reaction).unwrap(), &child);
+        assert_ne!(reaction_reactor(&slots, &reaction).unwrap(), &root);
+    }
+}

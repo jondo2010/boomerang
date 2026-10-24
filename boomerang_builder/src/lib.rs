@@ -11,8 +11,6 @@ pub mod compiler;
 mod connection;
 mod descriptor;
 mod fqn;
-#[cfg(feature = "host-interchange")]
-pub mod host_interchange;
 mod inter_partition;
 mod port;
 mod reaction;

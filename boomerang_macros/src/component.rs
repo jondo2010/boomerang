@@ -2,7 +2,10 @@ use proc_macro2::TokenStream;
 use quote::{quote, ToTokens};
 
 /// Expands the owning inline module without relocating any helper items.
-pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
+pub fn expand(
+    input: TokenStream,
+    emission: crate::reactor::ComponentEmission,
+) -> syn::Result<TokenStream> {
     let module: syn::ItemMod = syn::parse2(input)?;
     let Some((_, items)) = module.content else {
         return Err(syn::Error::new_spanned(
@@ -10,6 +13,7 @@ pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
             "component! requires an inline module",
         ));
     };
+    let selection = crate::reactor::emission::SelectionPolicy::new(emission);
     let mut reactor_found = false;
     let mut output = Vec::new();
     for item in items {
@@ -52,15 +56,18 @@ pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
                 };
                 let model = syn::parse2(function.into_token_stream())?;
                 reactor_found = true;
-                output.push(crate::reactor::ArgsModel(args, model, true).into_token_stream());
+                let mut reactor_output = TokenStream::new();
+                crate::reactor::ArgsModel(args, model, true)
+                    .to_tokens_with_emission(&mut reactor_output, emission);
+                output.push(reactor_output);
             } else {
-                output.push(helper(function.into_token_stream()));
+                output.push(selection.helper(function.into_token_stream()));
             }
         } else if matches!(item, syn::Item::Use(_)) {
-            // Imports used by hosted reactor expansion may disappear in payload mode.
-            output.push(helper(quote!(#[allow(unused_imports)] #item)));
+            // Imports used by dynamic reactor expansion may disappear in payload mode.
+            output.push(selection.helper(quote!(#[allow(unused_imports)] #item)));
         } else {
-            output.push(helper(item.into_token_stream()));
+            output.push(selection.helper(item.into_token_stream()));
         }
     }
     if !reactor_found {
@@ -83,11 +90,4 @@ pub fn expand(input: TokenStream) -> syn::Result<TokenStream> {
             #(#output)*
         }
     })
-}
-
-fn helper(item: TokenStream) -> TokenStream {
-    quote! {
-        #[cfg(not(boomerang_facet = "descriptor"))]
-        #item
-    }
 }

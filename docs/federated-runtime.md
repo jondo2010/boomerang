@@ -31,8 +31,9 @@ current backend messages and timing rules, see
 - `boomerang_central_rti::compiled` owns `CompiledRti`, `CentralRtiClient`,
   `RtiClientBindings`, requests and replies, and hosted/reference transports.
   `tag_conversion` checks conversion between runtime and wire tags.
-- `cargo-boomerang` emits the selected images and direct payload bindings, builds
-  separate Federate and optional RTI artifacts, and supervises local processes.
+- `boomerang_codegen` emits the selected images and direct payload bindings.
+  Cargo builds checked-in Federate and RTI packages. Applications or external
+  process tools supervise execution.
 
 The central backend is selected through the deployment projection and explicit
 package dependency. It is absent from a default one-Federate target dependency
@@ -62,7 +63,7 @@ artifact. For the current generated `central-rti` deployment:
 | Host compiler | Complete application model, resolved deployment, canonical analysis, and lowered images used for code generation. | Build-time compiler state; absent from the deployed processes. |
 | Each independently built Federate executable | Its `FederateImage`, local `EnclaveImage` tables, selected payload code and bindings, plus coordination metadata described below. | Reactor/port/action storage, Enclave scheduler queues and mode state, Federate coordination frontier/revisions, `CentralRtiClient`, preflighted inbound adapters, and local connection queues. |
 | Separate RTI executable | `RtiImage`, canonical member identity table, shared `CoordinationIdentity`, and central backend implementation. | `CompiledRti` member admission/publication/grant/completion state, in-transit tags, idle/stop/failure state, and server connection queues. |
-| Host bundle and `cargo boomerang run` | Published artifact records, paths, and digests used to locate and validate the executables. | Supervisor child handles, readiness tracking, exit/failure handling, and child reaping. |
+| Application process supervisor | Application-selected executable paths and startup configuration. | Child handles, readiness tracking, exit/failure handling, and child reaping. |
 
 The current generator embeds the same immutable `RtiImage`, canonical member
 identity table, and `CoordinationIdentity` in the RTI executable and every
@@ -184,5 +185,5 @@ long-term compiled architecture.
 cargo test -p boomerang_runtime --offline
 cargo test -p boomerang_central_rti --offline
 cargo test -p boomerang_federated --offline
-cargo test -p cargo-boomerang --offline
+cargo test -p boomerang_codegen --all-features --offline
 ```

@@ -6,7 +6,7 @@ pub(super) fn output(args: &ReactorArgs, model: &Model) -> TokenStream {
     match generate(args, model) {
         Ok(tokens) => tokens,
         Err(error) => {
-            // Preserve hosted compatibility. The unsupported definition deliberately does not
+            // Preserve dynamic compatibility. The unsupported definition deliberately does not
             // implement ComponentDefinition, so failure occurs when used for topology authoring.
             let reason = format!("topology constructor unavailable: {error}");
             let unavailable = format_ident!("{}TopologyUnavailable", model.name);
@@ -67,7 +67,15 @@ fn generate(args: &ReactorArgs, model: &Model) -> syn::Result<TokenStream> {
                     (quote!(#compiler::TopologyOutput), quote!(output))
                 };
                 let binding = format_ident!("__boomerang_topology_port_{}", name);
-                fields.push(quote!(pub #ident: #handle<#ty>));
+                let direction = if matches!(arg.kind, ArgKind::Input { .. }) {
+                    "input"
+                } else {
+                    "output"
+                };
+                let field_doc = format!(
+                    "Typed topology {direction} port `{name}` owned by this component instance."
+                );
+                fields.push(quote!(#[doc = #field_doc] pub #ident: #handle<#ty>));
                 ports.push(quote!(#ident: #binding));
                 declarations
                     .push(quote!(let #binding = topology.#method::<#ty>(#name, #port_position)?;));
@@ -113,7 +121,7 @@ fn generate(args: &ReactorArgs, model: &Model) -> syn::Result<TokenStream> {
                 quote!(root.path().append_generated_ordinal(#ordinal))
             }
         };
-        // Hosted ABI positions are independent action/port first-encounter sequences.
+        // Dynamic ABI positions are independent action/port first-encounter sequences.
         let mut actions: Vec<(String, TokenStream)> = Vec::new();
         let mut ports_relations: Vec<(String, TokenStream)> = Vec::new();
         let mut record = |name: String, flags: TokenStream| -> syn::Result<()> {

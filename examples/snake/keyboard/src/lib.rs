@@ -7,9 +7,9 @@ mod input;
 
 use input::KeyboardInput;
 use boomerang::prelude::*;
-use crossterm::event::KeyEvent;
 
 pub struct KeyboardState {
+    /// Raw terminal guard and polling worker, released during shutdown.
     terminal: KeyboardInput,
 }
 
@@ -34,8 +34,8 @@ impl KeyboardState {
     )
 )]
 pub fn Keyboard(
-    #[physical_action(min_delay = 10 msec)] key_press: KeyEvent,
-    #[output] key: KeyEvent,
+    #[physical_action(min_delay = 10 msec)] key_press: crossterm::event::KeyEvent,
+    #[output] key: crossterm::event::KeyEvent,
     #[output] ready: (),
 ) -> impl Reactor {
     reaction! {
@@ -62,7 +62,7 @@ pub mod display {
 use boomerang::prelude::*;
 use crossterm::{
     cursor::MoveLeft,
-    event::{KeyCode, KeyEvent},
+    event::KeyCode,
     execute,
     terminal::{Clear, ClearType},
 };
@@ -78,7 +78,7 @@ use std::io::Write;
         scratch_bytes = 1024
     )
 )]
-pub fn ArrowDisplay(#[input] key: KeyEvent) -> impl Reactor {
+pub fn ArrowDisplay(#[input] key: crossterm::event::KeyEvent) -> impl Reactor {
     reaction! {
         Display (key) {
             let arrow = match key.as_ref().map(|event| event.code) {

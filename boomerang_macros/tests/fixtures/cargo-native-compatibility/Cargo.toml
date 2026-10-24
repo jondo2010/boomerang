@@ -1,0 +1,14 @@
+[package]
+name = "cargo-native-compatibility"
+version = "0.0.0"
+edition = "2021"
+publish = false
+[features]
+metadata = ["boomerang/builder"]
+payload = []
+[dependencies]
+boomerang = { path = "../../../../boomerang", default-features = false }
+[dev-dependencies]
+boomerang_builder = { path = "../../../../boomerang_builder", features = ["descriptor-fingerprint"] }
+[workspace]
+resolver = "2"

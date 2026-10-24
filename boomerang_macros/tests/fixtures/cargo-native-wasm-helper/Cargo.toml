@@ -1,0 +1,6 @@
+[package]
+name = "cargo-native-wasm-helper"
+version = "0.0.0"
+edition = "2021"
+publish = false
+[workspace]

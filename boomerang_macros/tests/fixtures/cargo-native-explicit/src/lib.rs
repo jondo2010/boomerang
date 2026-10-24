@@ -10,7 +10,7 @@ const MANIFEST: boomerang::runtime::binding::BindingManifest =
 const MANIFEST: boomerang::runtime::binding::BindingManifest =
     boomerang::runtime::binding::BindingManifest::new(
         controller::__boomerang::payload::binding_manifest().descriptor_fingerprint(),
-        4,
+        3,
     );
 const _: () = boomerang::runtime::binding::assert_descriptor_fingerprint(
     EXPECTED,
@@ -23,9 +23,9 @@ const _: () = boomerang::runtime::binding::assert_descriptor_fingerprint(
 );
 // Independent compatibility contract for this fixture, not derived from the actual payload.
 #[cfg(not(feature = "abi-mismatch"))]
-const EXPECTED_MACRO_ABI: u32 = 3;
-#[cfg(feature = "abi-mismatch")]
 const EXPECTED_MACRO_ABI: u32 = 4;
+#[cfg(feature = "abi-mismatch")]
+const EXPECTED_MACRO_ABI: u32 = 3;
 const _: () = assert!(
     EXPECTED_MACRO_ABI == MANIFEST.macro_abi(),
     "payload macro ABI mismatch"

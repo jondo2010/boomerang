@@ -86,10 +86,9 @@ pub fn render_definitions(
         }
     });
     Ok(quote! {
-        use boomerang_runtime::{EnclaveBindings,FederateBindings,ReactorData};
+        use boomerang_runtime::{EnclaveBindings,FederateBindings};
         use boomerang_runtime::image::*;
         use tinymap::{IndexSpan,SliceRange,TinyMapRef};
-        fn generated_state<T:ReactorData>(state:&mut dyn ReactorData,_state_type:boomerang_runtime::PayloadType<T>)->&mut T {state.downcast_mut::<T>().expect("generated state initializer and reaction must agree")}
         #(#checks)* #tables #federate #bindings
     })
 }

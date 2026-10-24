@@ -51,6 +51,10 @@
 //! Invalid paths fail during host generation.
 //! Generated assertions compare metadata fingerprints and macro ABI versions with the actual target payload's `binding_manifest()`.
 //! Missing target exports and incompatible payloads fail during target compilation.
+//! Each reaction binding associates its image-owned `BindingSlotIndex` directly with a payload adapter export.
+//! Payload macros own state downcasts, reference extraction, declaration order, and generic parameters.
+//! This compiler retains instance indices, routes, and initializer capability mappings.
+//! Reused exports require separate instance storage.
 //!
 //! ```
 //! use boomerang_codegen::{PayloadExports, TargetContext};

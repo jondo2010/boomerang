@@ -292,6 +292,13 @@ pub fn component_metadata(input: proc_macro::TokenStream) -> proc_macro::TokenSt
 ///
 /// Keeps implementation items in their owning module.
 /// The declaration determines compatibility information in `module::__boomerang::payload::binding_manifest()` without CLI inputs.
+/// Each `reaction_*` export implements the callback accepted by
+/// `boomerang::runtime::EnclaveBindings::bind_reaction`.
+/// The payload owns concrete state downcasts and reference extraction in declaration order.
+/// Generic exports retain declaration type and const parameters for explicit specialization.
+/// State factories and `type_state_*` witnesses remain separate exports.
+/// Deployment compilation owns instance slots, routes, and initializer action capabilities.
+/// Consumers must check descriptor fingerprints and macro ABI before binding exports.
 /// This entry point selects payload even when the invoking package enables metadata features.
 #[proc_macro_error2::proc_macro_error]
 #[proc_macro]

@@ -787,14 +787,40 @@ fn required_binding_symbol(prefix: &str, segments: &[&str]) -> Ident {
     format_ident!("{symbol}")
 }
 
-/// Resolves one own-relation reference to its concrete payload parameter type.
+/// Runtime reference partition selected from a payload declaration.
+enum PayloadRefKind {
+    /// Immutable input port references.
+    Input,
+    /// Mutable output port references.
+    Output,
+    /// Input bank with a declaration-owned width and element type.
+    InputBank {
+        /// Number of contiguous input references.
+        length: syn::Expr,
+        /// Concrete payload type of each input reference.
+        payload: Type,
+    },
+    /// Output bank with a declaration-owned width and element type.
+    OutputBank {
+        /// Number of contiguous output references.
+        length: syn::Expr,
+        /// Concrete payload type of each output reference.
+        payload: Type,
+    },
+    /// Logical, physical, startup, or shutdown action references.
+    Action,
+    /// Image-owned mode transition capability.
+    Mode,
+}
+
+/// Resolves one own-relation reference to its concrete payload parameter type and partition.
 fn payload_ref(
     reactor_name: &str,
     args: &[Arg],
     mode_names: &[String],
     path: &crate::reaction::PathOrIdent,
     store_lifetime: &syn::Lifetime,
-) -> syn::Result<(Ident, TokenStream)> {
+) -> syn::Result<(Ident, TokenStream, PayloadRefKind)> {
     let crate::reaction::PathOrIdent::Simple(ident) = path else {
         return Err(syn::Error::new_spanned(
             path,
@@ -806,6 +832,7 @@ fn payload_ref(
         return Ok((
             ident.clone(),
             quote!(::boomerang::runtime::CompiledModeEffectRef),
+            PayloadRefKind::Mode,
         ));
     }
     let Some(arg) = args.iter().find(|arg| ident_text(&arg.name.ident) == name) else {
@@ -849,7 +876,21 @@ fn payload_ref(
             ))
         }
     };
-    Ok((ident.clone(), reference))
+    let kind = match &arg.kind {
+        ArgKind::Input { len: Some(length) } => PayloadRefKind::InputBank {
+            length: length.clone(),
+            payload: arg.ty.clone(),
+        },
+        ArgKind::Output { len: Some(length) } => PayloadRefKind::OutputBank {
+            length: length.clone(),
+            payload: arg.ty.clone(),
+        },
+        ArgKind::Input { len: None } => PayloadRefKind::Input,
+        ArgKind::Output { len: None } => PayloadRefKind::Output,
+        ArgKind::LogicalAction { .. } | ArgKind::PhysicalAction { .. } => PayloadRefKind::Action,
+        ArgKind::State { .. } | ArgKind::Param { .. } => unreachable!("non-reference argument"),
+    };
+    Ok((ident.clone(), reference, kind))
 }
 
 /// Chooses a generated payload-reference lifetime absent from user generics.
@@ -889,8 +930,9 @@ fn payload_reaction_output(
                 CanonicalReactionSlot::for_reaction(reaction, &mut next_generated).text();
             let symbol = required_binding_symbol("reaction_", &[&reactor_name, &reaction_name]);
             let symbol = symbols.definition(&symbol);
+            let typed_symbol = format_ident!("{symbol}_typed");
             let export_doc = format!(
-                "Invokes payload reaction `{reactor_name}/{reaction_name}` with concrete references."
+                "Invokes payload reaction `{reactor_name}/{reaction_name}` through the erased runtime callback."
             );
             let mut refs = Vec::new();
             for trigger in reaction.triggers() {
@@ -898,10 +940,12 @@ fn payload_reaction_output(
                     crate::reaction::TriggerType::Startup => refs.push((
                         format_ident!("startup"),
                         quote!(::boomerang::runtime::ActionRef<#store_lifetime>),
+                        PayloadRefKind::Action,
                     )),
                     crate::reaction::TriggerType::Shutdown => refs.push((
                         format_ident!("shutdown"),
                         quote!(::boomerang::runtime::ActionRef<#store_lifetime>),
+                        PayloadRefKind::Action,
                     )),
                     crate::reaction::TriggerType::Reset => {}
                     crate::reaction::TriggerType::Regular(path) => {
@@ -938,7 +982,54 @@ fn payload_reaction_output(
                     &store_lifetime,
                 )?);
             }
-            let (ref_names, ref_types): (Vec<_>, Vec<_>) = refs.into_iter().unzip();
+            let mut extraction = Vec::new();
+            let mut arguments = Vec::new();
+            for (ordinal, (_, ty, kind)) in refs.iter().enumerate() {
+                let local = format_ident!("reference_{ordinal}");
+                let expression = match kind {
+                    PayloadRefKind::Input => quote! {
+                        let (value, rest) = ::boomerang::runtime::refs::Partition::part(refs.ports)?;
+                        refs.ports = rest;
+                        value
+                    },
+                    PayloadRefKind::Output => quote! {
+                        let (value, rest) = ::boomerang::runtime::refs::PartitionMut::part_mut(refs.ports_mut)?;
+                        refs.ports_mut = rest;
+                        value
+                    },
+                    PayloadRefKind::Action => quote! {
+                        let (value, rest) = ::boomerang::runtime::refs::PartitionMut::part_mut(refs.actions)?;
+                        refs.actions = rest;
+                        value
+                    },
+                    PayloadRefKind::InputBank { length, payload } => quote! {
+                        let ports = ::boomerang::runtime::Refs::take(&mut refs.ports, #length)?;
+                        for port in ports.iter() {
+                            ::boomerang::runtime::InputRef::<#payload>::try_from(
+                                ::boomerang::runtime::DynPortRef(port),
+                            )?;
+                        }
+                        ::boomerang::runtime::InputBankRef::from_slice(ports)
+                    },
+                    PayloadRefKind::OutputBank { length, payload } => quote! {
+                        let mut ports = ::boomerang::runtime::RefsMut::take(&mut refs.ports_mut, #length)?;
+                        for port in ports.iter_mut() {
+                            ::boomerang::runtime::OutputRef::<#payload>::try_from(
+                                ::boomerang::runtime::DynPortRefMut(port),
+                            )?;
+                        }
+                        ::boomerang::runtime::OutputBankRef::from_slice(ports)
+                    },
+                    PayloadRefKind::Mode => {
+                        arguments.push(quote!(mode_effect.expect("compiled mode effect is required")));
+                        continue;
+                    }
+                };
+                extraction.push(quote!(let #local: #ty = { #expression };));
+                arguments.push(quote!(#local));
+            }
+            let ref_names = refs.iter().map(|(name, _, _)| name);
+            let ref_types = refs.iter().map(|(_, ty, _)| ty);
             let code = reaction.code();
             let mut generics = model.generics.clone();
             generics.params.insert(
@@ -946,14 +1037,54 @@ fn payload_reaction_output(
                 syn::GenericParam::Lifetime(syn::LifetimeParam::new(store_lifetime.clone())),
             );
             let (impl_generics, _, where_clause) = generics.split_for_impl();
+            let mut adapter_generics = generics.clone();
+            adapter_generics.make_where_clause().predicates.push(
+                syn::parse_quote!(#state_type: ::boomerang::runtime::ReactorData),
+            );
+            let (adapter_impl, _, adapter_where) = adapter_generics.split_for_impl();
+            let type_arguments = model.generics.params.iter().filter_map(|parameter| match parameter {
+                syn::GenericParam::Type(parameter) => {
+                    let name = &parameter.ident;
+                    Some(quote!(#name))
+                }
+                syn::GenericParam::Const(parameter) => {
+                    let name = &parameter.ident;
+                    Some(quote!(#name))
+                }
+                syn::GenericParam::Lifetime(_) => None,
+            }).collect::<Vec<_>>();
+            let specialization = if type_arguments.is_empty() {
+                quote!()
+            } else {
+                quote!(::<#(#type_arguments),*>)
+            };
             Ok(quote! {
                 #[doc = #export_doc]
                 #[allow(non_snake_case, unused_mut, unused_variables)]
-                pub fn #symbol #impl_generics(
+                fn #typed_symbol #impl_generics(
                     ctx: &mut ::boomerang::runtime::Context,
                     state: &mut #state_type,
                     (#(mut #ref_names,)*): (#(#ref_types,)*),
                 ) #where_clause #code
+
+                #[doc = #export_doc]
+                #[allow(non_snake_case, unused_mut, unused_variables)]
+                pub fn #symbol #adapter_impl(
+                    ctx: &mut ::boomerang::runtime::Context,
+                    state: &mut dyn ::boomerang::runtime::ReactorData,
+                    mut refs: ::boomerang::runtime::ReactionRefs<#store_lifetime>,
+                    mode_effect: Option<::boomerang::runtime::CompiledModeEffectRef>,
+                ) -> ::core::result::Result<(), ::boomerang::runtime::ReactionBindingError> #adapter_where {
+                    let state = state.downcast_mut::<#state_type>()
+                        .expect("payload state initializer and reaction must agree");
+                    #(#extraction)*
+                    let remaining = refs.ports.len() + refs.ports_mut.len() + refs.actions.len();
+                    if remaining != 0 {
+                        return Err(::boomerang::runtime::ReactionRefsError::destructure_remaining(remaining).into());
+                    }
+                    #typed_symbol #specialization(ctx, state, (#(#arguments,)*));
+                    Ok(())
+                }
             })
         })
         .collect()
@@ -1333,7 +1464,7 @@ impl ArgsModel {
 
         let state_impl = if reactor_args.state.is_none() && !state_args.is_empty() {
             Some(quote! {
-                impl #impl_generics ::core::default::Default for #state_ident #ty_generics {
+                impl #impl_generics ::core::default::Default for #state_ident #ty_generics #where_clause {
                     fn default() -> Self {
                         Self {
                             #(#state_args_default),*

@@ -3,7 +3,12 @@
 //! Fingerprint hashing and encoding belong to host-side tooling, not this module.
 
 /// Authoritative macro ABI understood by component descriptors and payloads in this release.
-pub const COMPONENT_DESCRIPTOR_MACRO_ABI: u32 = 3;
+///
+/// ABI 4 exports each `reaction_*` symbol with the erased callback accepted by
+/// [`crate::EnclaveBindings::bind_reaction`]. Payload macros own state downcasts,
+/// reference extraction, argument order, and generic specialization.
+/// Deployment generation supplies binding slots and image-owned mode effects.
+pub const COMPONENT_DESCRIPTOR_MACRO_ABI: u32 = 4;
 
 /// Fingerprint of one canonical component implementation descriptor.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]

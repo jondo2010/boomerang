@@ -1,14 +1,12 @@
 use super::BindingConfiguration;
 use crate::{ComponentRegistration, PayloadExports};
 use anyhow::{anyhow, bail, Context, Result};
-use boomerang_builder::{
-    compiler::{ComponentInstanceId, ImplementationId, OwnedEnclaveImage, RequiredBinding},
-    ComponentDescriptor, DescriptorLifecycle, DescriptorRelationshipKind,
-    DescriptorRelationshipTarget, ReactionSlot, ReactionSlotId, ReactorSlotId,
+use boomerang_builder::compiler::{
+    ComponentInstanceId, ImplementationId, OwnedEnclaveImage, RequiredBinding,
 };
-use boomerang_runtime::image::{BindingKind, EnclaveImage, RouteDirection};
+use boomerang_runtime::image::{EnclaveImage, RouteDirection};
 use proc_macro2::TokenStream;
-use quote::{format_ident, quote};
+use quote::quote;
 use std::collections::BTreeMap;
 
 pub(super) fn render_bindings(
@@ -249,164 +247,16 @@ fn render_binding(
         RequiredBinding::Action { .. } => Ok(quote!(
             .bind_action(BindingSlotIndex::new(#slot), #path)
         )),
-        RequiredBinding::Reaction { reaction, .. } => {
-            let descriptor = &components
-                .get(implementation)
-                .context("missing component registration")?
-                .descriptor;
-            let state = reaction_reactor(descriptor.reaction_slots(), reaction)?;
-            let state_symbol = boomerang_builder::compiler::direct_binding_symbol(
-                BindingKind::StateInitializer,
-                state.path(),
-            );
-            render_reaction_binding(
-                descriptor,
-                reaction,
-                slot,
-                &alias.payload,
-                &state_symbol,
-                &symbol,
-            )
-        }
+        RequiredBinding::Reaction { .. } => Ok(quote!(
+            .bind_reaction(BindingSlotIndex::new(#slot), #path)
+        )),
     }
-}
-
-/// Resolves a reaction slot to the exact descriptor reactor that owns it.
-fn reaction_reactor<'a>(
-    slots: &'a [ReactionSlot],
-    reaction: &ReactionSlotId,
-) -> Result<&'a ReactorSlotId> {
-    slots
-        .iter()
-        .find(|slot| slot.id == *reaction)
-        .map(|slot| &slot.reactor)
-        .ok_or_else(|| anyhow!("reaction '{reaction}' has no descriptor reactor"))
-}
-
-/// Emits the erased-to-typed adapter for one generated payload reaction function.
-fn render_reaction_binding(
-    descriptor: &ComponentDescriptor,
-    reaction: &ReactionSlotId,
-    slot: proc_macro2::Literal,
-    alias: &PayloadExports,
-    state_symbol: &str,
-    reaction_symbol: &str,
-) -> Result<TokenStream> {
-    let relations = descriptor
-        .relationships()
-        .iter()
-        .filter(|relation| relation.reaction == *reaction)
-        .collect::<Vec<_>>();
-    let mut immutable_ports = Vec::new();
-    let mut mutable_ports = Vec::new();
-    let mut actions = Vec::new();
-    let mut tuple = Vec::new();
-    let has_mode_effect = relations.iter().any(|relation| {
-        relation.kind == DescriptorRelationshipKind::Effect
-            && matches!(&relation.target, DescriptorRelationshipTarget::Mode(_))
-            && relation.mode_transition.is_some()
-    });
-    for kind in [
-        DescriptorRelationshipKind::Trigger,
-        DescriptorRelationshipKind::Use,
-        DescriptorRelationshipKind::Effect,
-    ] {
-        let mut category = relations
-            .iter()
-            .copied()
-            .filter(|relation| relation.kind == kind)
-            .collect::<Vec<_>>();
-        category.sort_by_key(|relation| relation.declaration_position);
-        for relation in category {
-            let name = match (&relation.target, kind) {
-                (
-                    DescriptorRelationshipTarget::Port(_),
-                    DescriptorRelationshipKind::Trigger | DescriptorRelationshipKind::Use,
-                ) => {
-                    let name = next_name("port", &mut immutable_ports);
-                    quote!(#name)
-                }
-                (DescriptorRelationshipTarget::Port(_), DescriptorRelationshipKind::Effect) => {
-                    let name = next_name("port_mut", &mut mutable_ports);
-                    quote!(#name)
-                }
-                (DescriptorRelationshipTarget::Action(_), _) => {
-                    let name = next_name("action", &mut actions);
-                    quote!(#name)
-                }
-                (
-                    DescriptorRelationshipTarget::Lifecycle(
-                        DescriptorLifecycle::Startup | DescriptorLifecycle::Shutdown,
-                    ),
-                    DescriptorRelationshipKind::Trigger,
-                ) => {
-                    let name = next_name("action", &mut actions);
-                    quote!(#name)
-                }
-                (
-                    DescriptorRelationshipTarget::Lifecycle(DescriptorLifecycle::Reset),
-                    DescriptorRelationshipKind::Trigger,
-                ) => continue,
-                (DescriptorRelationshipTarget::Mode(_), DescriptorRelationshipKind::Effect)
-                    if relation.mode_transition.is_some() =>
-                {
-                    quote!(mode_effect.expect("compiled mode effect is required"))
-                }
-                (_, DescriptorRelationshipKind::Mode | DescriptorRelationshipKind::Scope) => {
-                    continue
-                }
-                (target, _) => bail!("unsupported generated reaction relationship {target:?}"),
-            };
-            tuple.push(name);
-        }
-    }
-    let mode_effect = if has_mode_effect {
-        format_ident!("mode_effect")
-    } else {
-        format_ident!("_mode_effect")
-    };
-    let state = binding_path(alias, &format!("type_{state_symbol}"))?;
-    let reaction = binding_path(alias, reaction_symbol)?;
-    let immutable_partition = render_partition(quote!(refs.ports.partition()?), &immutable_ports);
-    let mutable_partition =
-        render_partition(quote!(refs.ports_mut.partition_mut()?), &mutable_ports);
-    let action_partition = render_partition(quote!(refs.actions.partition_mut()?), &actions);
-    Ok(quote!(
-        .bind_reaction(
-            BindingSlotIndex::new(#slot),
-            |ctx, state, refs, #mode_effect| {
-                let state = generated_state(state, #state());
-                #immutable_partition
-                #mutable_partition
-                #action_partition
-                #reaction(ctx, state, (#(#tuple,)*));
-                Ok(())
-            },
-        )
-    ))
-}
-
-/// Allocates the next generated local name within one reference partition.
-fn next_name(prefix: &str, values: &mut Vec<syn::Ident>) -> syn::Ident {
-    let name = format_ident!("{prefix}_{}", values.len());
-    values.push(name.clone());
-    name
-}
-
-/// Emits a tuple destructure whose inferred element types drive runtime reference extraction.
-fn render_partition(expression: TokenStream, values: &[syn::Ident]) -> TokenStream {
-    if values.is_empty() {
-        return TokenStream::new();
-    }
-    quote!(let (#(#values,)*) = #expression;)
 }
 
 #[cfg(test)]
 mod tests {
-    use boomerang_builder::{ReactionSlot, ReactionSlotId, ReactorSlotId};
     use quote::quote;
 
-    use super::reaction_reactor;
     use crate::render::format_rust;
 
     /// Confirms malformed structural output fails at the publication boundary.
@@ -418,20 +268,5 @@ mod tests {
             error.to_string().contains("generated Rust syntax"),
             "{error:#}"
         );
-    }
-
-    /// Confirms nested reactions resolve their exact descriptor state owner.
-    #[test]
-    fn nested_reaction_uses_its_exact_descriptor_owner() {
-        let root = ReactorSlotId::new("Root").unwrap();
-        let child = ReactorSlotId::new("Root/child").unwrap();
-        let reaction = ReactionSlotId::new("Root/child/startup").unwrap();
-        let slots = [ReactionSlot {
-            id: reaction.clone(),
-            reactor: child.clone(),
-        }];
-
-        assert_eq!(reaction_reactor(&slots, &reaction).unwrap(), &child);
-        assert_ne!(reaction_reactor(&slots, &reaction).unwrap(), &root);
     }
 }

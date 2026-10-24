@@ -4,7 +4,7 @@ controller_declaration!(emit_component);
 fn main() {
     let descriptor = controller::__boomerang::metadata::descriptor();
     assert_eq!(descriptor.contract_id().as_str(), "example.controller");
-    assert_eq!(descriptor.macro_abi(), 3);
+    assert_eq!(descriptor.macro_abi(), 4);
     let mut topology = boomerang::builder::compiler::TopologyBuilder::new("app/root").unwrap();
     let enclave = topology.enclave("root").unwrap();
     let _ports = topology

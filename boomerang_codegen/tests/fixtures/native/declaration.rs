@@ -17,6 +17,12 @@ macro_rules! declare_controller {
                     count: u32,
                     /// Delivery count for this instance's physical action.
                     samples: u32,
+                    /// Number of active-mode startup callbacks.
+                    starts: u32,
+                    /// Number of reset callbacks after the mode transition.
+                    resets: u32,
+                    /// Number of active-mode shutdown callbacks.
+                    stops: u32,
                 }
                 impl DriverState {
                     fn new(init: DriverInit) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
@@ -43,13 +49,16 @@ macro_rules! declare_controller {
                             }
                         }
                         crate::INITIALIZED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                        Ok(Self { count: 7, samples: 0 })
+                        Ok(Self { count: 7, samples: 0, starts: 0, resets: 0, stops: 0 })
                     }
                 }
                 impl Drop for DriverState {
                     fn drop(&mut self) {
                         assert_eq!(self.count, 8, "reused state remains independent");
                         assert_eq!(self.samples, 1, "each instance receives its own sample");
+                        assert_eq!(self.starts, 1, "mode startup runs once per instance");
+                        assert_eq!(self.resets, 1, "mode reset runs once per instance");
+                        assert_eq!(self.stops, 1, "mode shutdown runs once per instance");
                     }
                 }
                 #[reactor(state = DriverState, state_init = DriverState::new,
@@ -59,11 +68,12 @@ macro_rules! declare_controller {
                            state_bytes = 512, scratch_bytes = 256))]
                 pub fn Controller(#[input] input: u32, #[output] output: u32,
                                   #[physical_action] sample: u32) -> impl Reactor {
-                    reaction! { tick(startup) -> output {
+                    reaction! { tick(startup) -> output, reset(active) {
                         assert_eq!(crate::INITIALIZED.load(std::sync::atomic::Ordering::SeqCst), 2);
                         state.count += 1;
                         assert_eq!(state.count, 8);
                         *output = Some(state.count);
+                        active.set(ctx);
                         crate::REACTIONS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     } }
                     reaction! { connected(input) {
@@ -76,6 +86,18 @@ macro_rules! declare_controller {
                         assert_eq!(ctx.get_tag(), boomerang_runtime::Tag::ZERO);
                         state.samples += 1;
                         crate::SAMPLES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    } }
+                    mode! { initial idle {} }
+                    mode! { active {
+                        reaction! { entered(startup) {
+                            assert!(startup.is_present(ctx));
+                            state.starts += 1;
+                        } }
+                        reaction! { reentered(reset) { state.resets += 1; } }
+                        reaction! { stopped(shutdown) {
+                            assert!(shutdown.is_present(ctx));
+                            state.stops += 1;
+                        } }
                     } }
                 }
             }

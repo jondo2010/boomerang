@@ -2,6 +2,7 @@ use boomerang::component_metadata as emit;
 use boomerang_builder::compiler::*;
 use boomerang_codegen::{cargo_build::CargoBuild, *};
 include!("declaration.rs");
+mod nested;
 #[cfg(feature = "source-input")]
 declare_controller!(emit, source = "plant",);
 #[cfg(not(feature = "source-input"))]
@@ -10,6 +11,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut cargo = CargoBuild::from_env()?;
     cargo.track_file("build.rs")?;
     cargo.track_file("declaration.rs")?;
+    cargo.track_file("nested.rs")?;
     for name in [
         "CARGO_FEATURE_MISSING_EXPORT",
         "CARGO_FEATURE_FINGERPRINT_MISMATCH",
@@ -24,6 +26,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let second_enclave = topology.enclave("second")?;
     let second = topology.component("second", controller::definition(), &second_enclave)?;
     topology.connect(&first.output, &second.input)?;
+    topology.component("nested", nested::Nested, &enclave)?;
     let federate = FederateId::new("local")?;
     let configuration = DeploymentConfiguration {
         name: "native".into(),
@@ -59,7 +62,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         "crate::incorrect_exports"
     } else {
-        "crate::controller::__boomerang::payload"
+        "crate::export_aliases"
     };
     compilation.register(
         implementation.clone(),
@@ -69,6 +72,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for component in ["first", "second"] {
         compilation.select(ComponentInstanceId::new(component)?, implementation.clone())?;
     }
+    let nested_descriptor = nested::descriptor();
+    compilation.register(
+        ImplementationId::new("nested")?,
+        nested_descriptor,
+        PayloadExports::new("crate::nested_payload::exports")?,
+    )?;
+    compilation.select(
+        ComponentInstanceId::new("nested")?,
+        ImplementationId::new("nested")?,
+    )?;
     #[cfg(feature = "source-input")]
     compilation.binding_configuration(boomerang_codegen::render::BindingConfiguration {
         sources: ["first", "second"]

@@ -1,5 +1,8 @@
 use boomerang::component_payload as emit;
 include!("../declaration.rs");
+#[path = "../nested_payload.rs"]
+mod nested_payload;
+static NESTED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 #[cfg(feature = "source-input")]
 declare_controller!(emit, source = "plant",);
 #[cfg(not(feature = "source-input"))]
@@ -25,6 +28,10 @@ mod incorrect_exports {
         };
         boomerang_runtime::binding::BindingManifest::new(fingerprint, abi)
     }
+}
+/// Public export aliases retain payload-owned reaction adapters.
+mod export_aliases {
+    pub use crate::controller::__boomerang::payload::*;
 }
 /// Compiler output retains fallback fields across initialization configurations.
 #[allow(clippy::needless_update)]
@@ -80,6 +87,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .with_timeout(boomerang_runtime::Duration::milliseconds(100)),
         &[],
     )?;
+    assert_eq!(NESTED.load(std::sync::atomic::Ordering::SeqCst), 3);
     assert_eq!(REACTIONS.load(std::sync::atomic::Ordering::SeqCst), 2);
     assert_eq!(ROUTED.load(std::sync::atomic::Ordering::SeqCst), 1);
     assert_eq!(SAMPLES.load(std::sync::atomic::Ordering::SeqCst), 2);

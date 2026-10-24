@@ -1,0 +1,12 @@
+[package]
+name = "native-vehicle-deployment"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+boomerang_builder = { path = "../../../../../boomerang_builder" }
+boomerang_codegen.workspace = true
+boomerang_runtime.workspace = true
+vehicle-control = { path = "../vehicle-control", default-features = false, features = ["metadata"] }
+sensor-host = { path = "../sensor-host", default-features = false, features = ["metadata"] }

@@ -9,5 +9,5 @@ pub fn init_with_directive(directive: &str) {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("warn"))
         .add_directive(directive.parse().expect("valid tracing filter directive"));
-    crate::launcher::init_test_tracing_with_filter(filter);
+    crate::tracing_setup::init_test_tracing_with_filter(filter);
 }

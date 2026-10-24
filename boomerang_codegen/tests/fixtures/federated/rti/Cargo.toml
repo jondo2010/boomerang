@@ -1,0 +1,15 @@
+[package]
+name = "native-vehicle-rti"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+boomerang_runtime.workspace = true
+boomerang_federated.workspace = true
+boomerang_central_rti.workspace = true
+tinymap.workspace = true
+
+[build-dependencies]
+boomerang_codegen.workspace = true
+native-vehicle-deployment.workspace = true

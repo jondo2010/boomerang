@@ -22,6 +22,8 @@ pub fn reactor_ports(
 ///
 /// The `#[reactor]` macro turns a plain Rust function into a reactor declaration. The reactor function takes
 /// any number of other arguments.
+/// Direct attributes always emit the hosted API.
+/// Use [`component!`] or explicit component macros for metadata and payload emission.
 ///
 /// Here’s how you would define and use a simple Boomerang reactor which has one input, a delay parameter, and a boolean state:
 /// ```rust,no_run
@@ -193,13 +195,80 @@ pub fn timer(s: proc_macro::TokenStream) -> proc_macro::TokenStream {
 /// Declares one named component in an inline Rust module.
 ///
 /// The module must contain exactly one root `#[reactor]` declaration. Helper
-/// items remain ordinary owning-crate code and are omitted in descriptor builds.
+/// items remain ordinary owning-crate code and are omitted in metadata builds.
+/// The invoking package's additive `metadata` and `payload` features select APIs in `module::__boomerang::{metadata,payload}`.
+/// Both features can coexist.
+/// Without either feature, the macro emits hosted APIs.
+/// Metadata also provides typed topology constructors through `module::definition()`.
+/// Declare these features in the component package.
+/// Gate implementation-only dependencies behind `payload`.
+/// Use resolver 2 or newer to isolate build dependencies.
+/// Use [`component_metadata!`] in build scripts to select metadata independently of package payload features.
+/// Code outside the declaration must follow the same host/target isolation rules.
 /// Root attributes other than documentation are rejected; put conditional and lint
 /// attributes on the component module instead.
 #[proc_macro_error2::proc_macro_error]
 #[proc_macro]
 pub fn component(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
-    match component::expand(input.into()) {
+    match component::expand(input.into(), reactor::ComponentEmission::Features) {
+        Ok(output) => output.into(),
+        Err(error) => error.to_compile_error().into(),
+    }
+}
+
+/// Emits portable component metadata and typed topology constructors from one inline module.
+///
+/// Accepts the same declaration as [`component!`], independently of package features.
+/// Parses but omits implementation imports, helper items, state initializers, and reaction bodies.
+/// Access the descriptor through `module::__boomerang::metadata::descriptor()`.
+/// Construct topology with `module::definition()`.
+/// Structural port types must be available on the host.
+/// Use fully qualified paths for types from portable dependencies.
+/// Metadata emission omits implementation imports inside the declaration.
+/// Metadata requires `boomerang/hosted`.
+/// Use `default-features = false` for payload-only normal dependencies that require no hosted APIs.
+///
+/// A shared source macro can invoke this entry point from a build script and
+/// [`component_payload!`] from the target. Explicit emission does not inspect package features.
+/// Do not invoke both entry points for the same module in one compilation.
+/// To emit both APIs, use [`component!`] with both package features or use distinct enclosing modules.
+///
+/// ```
+/// use boomerang::component_metadata;
+/// component_metadata! {
+///     pub mod controller {
+///         use boomerang::prelude::*;
+///         // Implementation-only items are parsed but never emitted for metadata.
+///         use target_only_dependency::implementation;
+///         #[reactor(contract = "example.controller", contract_version = 1,
+///             bounds(queue_capacity = 16, payload_bytes = 1024,
+///                    state_bytes = 512, scratch_bytes = 256))]
+///         pub fn Controller(#[output] command: u32) -> impl Reactor {
+///             reaction! { control(startup) -> command { *command = Some(implementation()); } }
+///         }
+///     }
+/// }
+/// assert_eq!(controller::__boomerang::metadata::descriptor().contract_version(), 1);
+/// let _definition = controller::definition();
+/// ```
+#[proc_macro_error2::proc_macro_error]
+#[proc_macro]
+pub fn component_metadata(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    match component::expand(input.into(), reactor::ComponentEmission::Metadata) {
+        Ok(output) => output.into(),
+        Err(error) => error.to_compile_error().into(),
+    }
+}
+
+/// Emits target payload bindings from the same inline declaration as [`component_metadata!`].
+///
+/// Keeps implementation items in their owning module.
+/// The declaration determines compatibility information in `module::__boomerang::payload::binding_manifest()` without CLI inputs.
+/// This entry point selects payload even when the invoking package enables metadata features.
+#[proc_macro_error2::proc_macro_error]
+#[proc_macro]
+pub fn component_payload(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    match component::expand(input.into(), reactor::ComponentEmission::Payload) {
         Ok(output) => output.into(),
         Err(error) => error.to_compile_error().into(),
     }

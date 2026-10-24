@@ -4,17 +4,18 @@ version = "0.0.0"
 edition = "2021"
 publish = false
 [features]
+default = ["boomerang/hosted"]
+metadata = ["boomerang/hosted"]
+payload = []
 sentinel = []
-descriptor-assert = []
-payload-assert = []
 duplicate = []
 invalid = []
 cfg-root = []
 cfg-attr-root = []
 deprecated-root = []
-subset-assert = []
+multiple = []
 [dependencies]
-boomerang = { path = "../../../../boomerang" }
-[target.'cfg(boomerang_facet = "descriptor")'.dev-dependencies]
+boomerang = { path = "../../../../boomerang", default-features = false }
+[dev-dependencies]
 boomerang_builder = { path = "../../../../boomerang_builder", features = ["descriptor-fingerprint"] }
 [workspace]

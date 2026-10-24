@@ -4,6 +4,67 @@
 //! identity before dispatch. The in-memory adapters serve testing/reference execution.
 //! Image dependencies are authoritative and are never recomputed from a topology.
 //!
+//! ## Efficient centralized coordination
+//!
+//! The central RTI follows [Improving the Efficiency of Coordinating Timed Events in
+//! Distributed Systems](https://doi.org/10.1145/3726301.3728399).
+//! Implementations must preserve the following ordering and progress requirements.
+//!
+//! ### Payload admission and grants
+//!
+//! Each Federate sends payloads through its reliable ordered RTI connection.
+//! The RTI must record incoming tag obligations before forwarding payloads.
+//! Each destination channel must order payloads before grants that depend on them.
+//! The destination must admit those payloads before the grants become effective.
+//!
+//! The earliest incoming message tag (EIMT) includes compiled minimum-delay paths,
+//! participant progress, and outstanding incoming tags. Progress publications must
+//! not conceal earlier messages in transit. A safe horizon must strictly precede
+//! EIMT, subject to stop and lifecycle constraints. Tag predecessor and delay
+//! calculations must use checked arithmetic with explicit `Never` and `Forever`
+//! semantics. A Federate can execute multiple local events within an authorized
+//! horizon without a control exchange for each event.
+//!
+//! ### Progress publication and completion
+//!
+//! Downstream next-event bounds (DNET) suppress next-event reports (NET) only when
+//! downstream participants do not need them and the Federate already has grant
+//! authority. The Federate must retain its latest suppressed report. It must send
+//! the required update when DNET tightens. Payload submission must update the
+//! local bound. Suppression must preserve publication revisions and scheduler
+//! progress.
+//!
+//! Latest Tag Complete (LTC) reports cumulative completion through a tag.
+//! It retires incoming obligations through that tag. A Federate must report
+//! completion after network-input reactions, their resulting outputs, and all
+//! participating Enclaves finish. Queue receipt alone does not establish
+//! completion. Local completion tracking must continue when no external report
+//! is necessary. Lifecycle reporting remains independent. The protocol requires
+//! neither per-payload application acknowledgments nor a duplicate receiver
+//! queue solely for LTC decisions.
+//!
+//! ### Resource bounds and failures
+//!
+//! In-transit accounting and transport storage must have explicit resource bounds.
+//! Saturation must preserve completion and control progress or produce a bounded
+//! declared failure. It must never discard an outstanding obligation. It must
+//! never block the sole reader while waiting for completion that releases capacity.
+//! The transport remains responsible for reliable delivery.
+//!
+//! Transitions must remain safe under delayed LTC and NET reports and
+//! cross-participant interleavings. Stale NET values must not regress grants or
+//! deadlock shutdown. Unexpected link loss must not authorize a terminal horizon
+//! as though the upstream Federate had normally resigned.
+//!
+//! These requirements apply outside zero-delay cycles, including positive-delay
+//! cycles. Constructive zero-delay coordination requires separate PTAG/ABS
+//! analysis and conformance evidence before these efficiency rules apply.
+//!
+//! Direct payload routing remains deferred. It requires separate safety evidence
+//! for conservative accounting and payload admission before effective grants
+//! across separate channels. The centralized baseline requires neither direct
+//! routing nor an additional control exchange for each payload.
+//!
 //! ## Coordination tracing
 //!
 //! Compiled execution emits optional structured [`tracing`] events at the
@@ -12,7 +73,7 @@
 //! no single owner). Runtime and channel events inherit context from
 //! [`RtiClientBindings::execution_span`](crate::compiled::RtiClientBindings::execution_span);
 //! enter it before connecting and executing a Federate.
-//! Generated launchers do this automatically and propagate the subscriber to worker threads.
+//! Application entry points enter the span and propagate the subscriber to worker threads.
 //! Route, tag, and revision fields are included when that event concerns them.
 //! The `event` field identifies a lifecycle action such as
 //! `coordination.payload.sent` or `coordination.grant.received`.

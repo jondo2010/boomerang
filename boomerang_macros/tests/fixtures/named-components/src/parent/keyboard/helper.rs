@@ -1,1 +1,3 @@
-pub(super) fn value() -> u32 { 7 }
+pub(super) fn value() -> u32 {
+    7
+}

@@ -13,7 +13,7 @@
 //!     -> CompiledDeploymentView validation or direct owned execution
 //!
 //! OwnedCompiledDeployment::federate_slice()
-//!     -> cargo-boomerang Rust rendering
+//!     -> boomerang_codegen Rust rendering
 //!     -> static CompiledDeploymentImage
 //!     -> runtime validation and execution
 //! ```

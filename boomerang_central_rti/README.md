@@ -38,8 +38,8 @@ owner must enforce ordered delivery, report transport loss through `abort`, and
 own connection deadlines.
 
 `compiled::hosted` provides bounded framed TCP connections and generated RTI/Federate
-artifact entry points. Generated launcher child-process supervision belongs to
-`cargo-boomerang`. Compiled runtime and boundary APIs are available unconditionally;
+artifact entry points. Applications or external process tools own process supervision.
+Compiled runtime and boundary APIs are available unconditionally;
 selecting the central backend adds this crate only to deployments that need it.
 
 ## Coordination tracing
@@ -77,10 +77,9 @@ themselves before entering inherited spans. Setup failure counts as diagnostic
 loss; it does not fail scheduling or transport. No subscriber is installed by
 these libraries. Without the feature, they have no `tracing-bounded` dependency.
 
-Generated bounded capture defaults to `boomerang::coordination`. Add the exact
+Configure bounded capture for `boomerang::coordination`. Add the exact
 `boomerang::runtime` target to include native runtime-construction, scheduler,
 and asynchronous action-admission events. Application/third-party targets may
 still contain unsupported formatted values.
-See the [launcher modes](../boomerang_util/README.md#launcher-trace-modes) for
-generated executables. Bounded output can be incomplete under contention or
+Read `boomerang_util::tracing_setup` rustdoc for application tracing setup. Bounded output can be incomplete under contention or
 capacity pressure; always inspect both event and lifecycle loss counters.

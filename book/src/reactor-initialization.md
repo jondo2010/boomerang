@@ -85,13 +85,13 @@ a source, or use source admission with the host monotonic clock.
 ## Select an execution path
 
 Ordinary action initialization works with the live builder, the live runner,
-and generated local hosted launchers. It requires neither hosted runtime feature.
+and local Cargo-native applications. It requires neither hosted runtime feature.
 Source admission and manual clock control require compiled local hosted
 Federate execution. Enable `hosted-source-input` or `hosted-manual-clock` on
 the runtime dependency of each payload package that uses the corresponding API.
-The toolchain rejects these hosted configurations on constrained targets such as Pico.
+These hosted APIs are unsupported on constrained targets such as Pico.
 
-Generated launchers call declared context initializers automatically. With the live
+Generated payload bindings call declared context initializers during runtime initialization. With the live
 builder, use `Reactor::build_initialized`. With the live runner, use
 `boomerang_util::runner::build_and_test_reactor_initialized`.
 Methods that accept supplied state do not call the context initializer.

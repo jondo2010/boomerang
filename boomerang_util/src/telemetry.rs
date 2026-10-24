@@ -29,9 +29,9 @@ pub struct TelemetryExporter {
 }
 
 impl TelemetryExporter {
-    /// Starts telemetry from the generated launch environment when an endpoint is configured.
+    /// Starts telemetry from application environment configuration when an endpoint is configured.
     ///
-    /// `BOOMERANG_TELEMETRY_ENDPOINT` enables publication. Enabled launchers also require a
+    /// `BOOMERANG_TELEMETRY_ENDPOINT` enables publication. Enabled applications also require a
     /// shared 32-digit hexadecimal `BOOMERANG_TELEMETRY_RUN_ID`; cadence defaults to 100 ms and
     /// can be overridden with positive integer `BOOMERANG_TELEMETRY_PERIOD_MS`.
     pub fn from_environment(
@@ -80,7 +80,7 @@ impl TelemetryExporter {
 
     /// Starts one Tokio UDP exporter for a fixed set of scheduler sources.
     ///
-    /// The identity must borrow static generated metadata because publication outlives launcher
+    /// The identity must borrow static generated metadata because publication outlives application
     /// setup until this guard is dropped.
     pub fn start(
         identities: impl IntoIterator<Item = TelemetryIdentity<'static>>,

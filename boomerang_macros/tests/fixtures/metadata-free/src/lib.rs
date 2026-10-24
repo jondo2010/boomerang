@@ -1,17 +1,9 @@
 use boomerang::prelude::*;
 
-#[cfg(not(any(
-    boomerang_facet = "descriptor",
-    boomerang_facet = "payload"
-)))]
 fn hosted_state_constructor() -> usize {
     7
 }
 
-#[cfg(not(any(
-    boomerang_facet = "descriptor",
-    boomerang_facet = "payload"
-)))]
 fn hosted_reaction_payload() {}
 
 #[reactor]
@@ -27,11 +19,6 @@ pub fn Hosted(
             *output = Some(state.count);
         }
     }
-}
-
-#[cfg(boomerang_facet = "descriptor")]
-pub mod __boomerang {
-    pub const HOSTED_ONLY: () = ();
 }
 
 #[cfg(test)]

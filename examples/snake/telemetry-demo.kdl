@@ -1,7 +1,7 @@
 layout {
     pane split_direction="horizontal" {
         pane name="Snake" command="sh" {
-            args "-lc" "sleep 1; BOOMERANG_TELEMETRY_ENDPOINT=127.0.0.1:9000 cargo run -p cargo-boomerang --features monitor -- boomerang --workspace examples/snake run --deployment snake"
+            args "-lc" "BOOMERANG_TELEMETRY_ENDPOINT=127.0.0.1:9000 cargo run -p snake-app --features telemetry"
         }
         pane name="Live telemetry" command="sh" size="35%" {
             args "-lc" "cargo run -p cargo-boomerang --features monitor -- boomerang monitor --listen 127.0.0.1:9000; status=$?; printf '\\nMonitor exited with status %s. Press Enter for a shell.\\n' \"$status\"; read _; exec \"${SHELL:-/bin/sh}\""

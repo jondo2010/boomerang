@@ -1,0 +1,6 @@
+[package]
+name = "metadata-user"
+version = "0.0.0"
+edition = "2021"
+[dependencies]
+cargo-native-component = { path = "../../cargo-native-component", default-features = false, features = ["metadata"] }

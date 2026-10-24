@@ -1,0 +1,27 @@
+[package]
+name = "cargo-native-explicit"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[features]
+metadata = []
+payload = []
+wasm-helper = ["dep:cargo-native-wasm-helper"]
+fingerprint-mismatch = []
+abi-mismatch = []
+incorrect-export-abi = []
+
+[dependencies]
+boomerang = { path = "../../../../boomerang", default-features = false }
+cargo-native-helper = { path = "../cargo-native-helper" }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+cargo-native-wasm-helper = { path = "../cargo-native-wasm-helper", optional = true }
+
+[build-dependencies]
+boomerang = { path = "../../../../boomerang" }
+boomerang_builder = { path = "../../../../boomerang_builder", features = ["descriptor-fingerprint"] }
+
+[workspace]
+resolver = "2"

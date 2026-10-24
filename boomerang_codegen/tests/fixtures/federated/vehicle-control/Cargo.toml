@@ -1,0 +1,12 @@
+[package]
+name = "vehicle-control"
+version = "0.1.0"
+edition = "2021"
+[features]
+default = ["hosted"]
+hosted = ["boomerang/hosted"]
+metadata = ["boomerang/hosted"]
+payload = []
+
+[dependencies]
+boomerang = { path = "../../../../../boomerang", default-features = false }

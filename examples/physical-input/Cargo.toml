@@ -7,8 +7,11 @@ license.workspace = true
 publish = false
 
 [dependencies]
-boomerang.workspace = true
+boomerang = { path = "../../boomerang", default-features = false }
 boomerang_runtime = { workspace = true, features = ["hosted-source-input", "hosted-manual-clock"] }
+tinymap.workspace = true
 
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(boomerang_facet, values("descriptor", "payload"))'] }
+[build-dependencies]
+boomerang.workspace = true
+boomerang_builder.workspace = true
+boomerang_codegen = { path = "../../boomerang_codegen", features = ["cargo-build"] }

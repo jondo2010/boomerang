@@ -5,13 +5,14 @@ including a local deployment with one Federate. There is no `federated` feature
 to enable. A Federate groups one or more Enclaves under a stable deployment
 identity; Federates, Enclaves, processes, and hosts remain separate concepts.
 
-Use `cargo boomerang` with a deployment manifest to generate, build, and run a
-compiled deployment. The `central-rti` projection produces a separate RTI
-executable and independently built Federate executables. The launcher waits for
-readiness, supervises their execution, and bounds shutdown and child reaping.
+Use ordinary Cargo packages for the Federates and central RTI. Each application
+owns its manifest, build script, and runtime entry point. The build script calls
+`boomerang_codegen` for image definitions and typed payload bindings.
+
 The RTI coordinates logical tags and forwards encoded payloads over the hosted
 transport. Generated images carry the shared coordination identity used to
-validate membership before execution.
+validate membership before execution. Applications or external process tools
+own startup, readiness checks, shutdown, and child reaping.
 
 The compiler remains authoritative for membership, route analysis, and timing
 constraints. Runtime preflight resolves stable identities to typed dense keys;
@@ -31,7 +32,7 @@ Compiled contracts live in the crates that implement them:
 ```sh
 cargo test -p boomerang_runtime --test compiled_execution --offline
 cargo test -p boomerang_central_rti --test compiled_execution --offline
-cargo test -p cargo-boomerang --test toolchain run::generated_central_rti_exchanges_tagged_payload --offline -- --exact
+bash boomerang_codegen/tests/run-applications.sh
 ```
 
 The RTI crate also provides an in-memory transport for testing and reference

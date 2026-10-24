@@ -140,11 +140,6 @@ impl FederateConfig {
 
 /// Closed distributed coordination backend vocabulary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[cfg_attr(
-    feature = "host-interchange",
-    derive(serde::Deserialize, serde::Serialize)
-)]
-#[cfg_attr(feature = "host-interchange", serde(rename_all = "kebab-case"))]
 pub enum CoordinationBackend {
     /// Federates coordinate through a generated central RTI artifact.
     CentralRti,

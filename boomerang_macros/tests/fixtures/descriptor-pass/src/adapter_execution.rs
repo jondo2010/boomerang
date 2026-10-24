@@ -1,4 +1,6 @@
-//! Execute payload exports with real references through a dynamic startup context.
+//! Execution support for the existing payload contract test.
+//! Replace handwritten adapter checks with actual payload export calls.
+//! Verify reference order, checked bank extraction, and independent state/reference lifetimes.
 
 use boomerang::runtime::*;
 use std::{
@@ -127,8 +129,8 @@ fn exercise(ctx: &mut Context) {
     assert_eq!(lifetime_state.marker, "invoked");
 }
 
-#[test]
-fn adapters_preserve_reference_order_and_reject_invalid_partitions() {
+/// Execute adapters inside a real context for the payload contract test.
+pub(super) fn verify() {
     let ran = Arc::new(AtomicBool::new(false));
     let observed = ran.clone();
     let mut assembly = boomerang_builder::Assembly::new();

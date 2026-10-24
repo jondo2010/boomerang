@@ -336,7 +336,7 @@ mod descriptor_tests {
 #[cfg(all(test, feature = "payload"))]
 mod payload_tests {
     #[test]
-    fn payload_derives_compatibility_and_preserves_initializers() {
+    fn payload_manifest_initializers_and_adapters_match_declaration() {
         assert_eq!(
             super::sensor::__boomerang::payload::binding_manifest()
                 .descriptor_fingerprint()
@@ -357,6 +357,7 @@ mod payload_tests {
         let custom_state: super::custom::CustomState =
             super::custom::__boomerang::payload::state_Custom();
         assert_eq!(custom_state.count, 11);
+        super::adapter_execution::verify();
     }
 }
 
@@ -418,57 +419,6 @@ mod typed_adapters {
         super::actions::__boomerang::payload::action_Actions_2flogical_5fnow;
     const _: boomerang::runtime::PayloadType<u16> =
         super::actions::__boomerang::payload::action_Actions_2fphysical_5flater;
-
-    #[test]
-    fn payload_exports_bind_without_launcher_adapters() {
-        use boomerang::runtime::image::BindingSlotIndex;
-
-        boomerang::runtime::EnclaveBindings::new()
-            .bind_state(
-                BindingSlotIndex::new(0),
-                super::sensor::__boomerang::payload::state_Match,
-            )
-            .bind_reaction(
-                BindingSlotIndex::new(3),
-                super::sensor::__boomerang::payload::reaction_Match_2fmove,
-            )
-            .bind_reaction(
-                BindingSlotIndex::new(4),
-                super::shaped::__boomerang::payload::reaction_Shaped_2fshaped,
-            )
-            .bind_reaction(
-                BindingSlotIndex::new(5),
-                super::custom::__boomerang::payload::reaction_Custom_2fstart,
-            )
-            .bind_reaction(
-                BindingSlotIndex::new(6),
-                super::lifetime_collision::__boomerang::payload::reaction_Lifetime_2ftick,
-            )
-            .bind_reaction(
-                BindingSlotIndex::new(7),
-                super::actions::__boomerang::payload::reaction_Actions_2fact,
-            )
-            .bind_reaction(
-                BindingSlotIndex::new(8),
-                super::generic_init::__boomerang::payload::reaction_Generic_2fobserve::<
-                    u32,
-                    String,
-                    2,
-                >,
-            )
-            .bind_reaction(
-                BindingSlotIndex::new(9),
-                super::sensor::__boomerang::payload::reaction_Match_2f_23g0,
-            )
-            .bind_port(
-                BindingSlotIndex::new(1),
-                super::sensor::__boomerang::payload::port_Match_2fasync,
-            )
-            .bind_action(
-                BindingSlotIndex::new(2),
-                super::actions::__boomerang::payload::action_Actions_2flogical_5fnow,
-            );
-    }
 
     /// Keeps a private reactor's generated state type nameable by the launcher.
     #[allow(dead_code)]

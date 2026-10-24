@@ -1,4 +1,5 @@
 //! Nested state owners and generic specialization behind direct adapter aliases.
+//! The existing native fixture verifies these contracts without another Cargo test case.
 
 boomerang::component_payload! {
     pub mod parent {

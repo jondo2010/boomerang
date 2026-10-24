@@ -1,4 +1,5 @@
-//! Manual nested topology fixture with payload-owned state selection.
+//! Nested execution replaces the removed reaction-owner lookup unit test.
+//! Distinct state types detect incorrect owner selection through actual payload adapters.
 
 use boomerang_builder::{compiler::*, *};
 

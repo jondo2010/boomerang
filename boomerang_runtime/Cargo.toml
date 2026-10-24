@@ -44,9 +44,9 @@ replay = [
 
 [dependencies]
 kanal = "0.1"
-getrandom = { version = "0.3", optional = true }
+getrandom = { version = "0.4", optional = true }
 document-features = { workspace = true }
-downcast-rs = "1.2"
+downcast-rs = "2.0"
 itertools.workspace = true
 pin-project = "1.1"
 rayon = { version = "1.7", optional = true }
@@ -60,8 +60,8 @@ variadics_please.workspace = true
 
 # replay dependencies
 bytes = { version = "1.10", optional = true }
-mcap = { version = "0.25", optional = true }
-foxglove = { version = "0.27", default-features = false, optional = true }
+mcap = { version = "0.26", optional = true }
+foxglove = { version = "0.30", default-features = false, optional = true }
 memmap2 = { version = "0.9", optional = true }
 serde_json = { version = "1.0", optional = true }
 

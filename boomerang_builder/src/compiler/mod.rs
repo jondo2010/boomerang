@@ -49,7 +49,7 @@ pub use compiled::{
 pub use coordination::{CoordinationProjectionError, OwnedCoordinationProjection, OwnedRtiImage};
 pub use deployment::{
     BoundaryBinding, BoundaryPolicies, CoordinationBackend, CoordinationSelection, FederateConfig,
-    ImplementationBinding, PhysicalBoundaryMetadata, PlacementAssignment,
+    ImplementationBinding, ImplementationCatalog, PhysicalBoundaryMetadata, PlacementAssignment,
 };
 pub use identity::{
     ActionId, ApplicationId, BindingSlotId, BoundaryId, CodecCapabilityId, ComponentInstanceId,

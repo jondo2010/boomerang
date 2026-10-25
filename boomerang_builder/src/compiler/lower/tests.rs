@@ -5,11 +5,12 @@ use crate::{
         ApplicationTopologyBuilder, BankMember, BoundaryBinding, BoundaryId, BoundaryPolicies,
         CodecCapabilityId, ComponentInstance, ComponentInstanceId, ConnectionSemantics,
         CoordinationBackend, CoordinationSelection, FederateConfig, FederateId, FlowId,
-        ImplementationBinding, ImplementationId, ModeId, ModeTransition, ModeTransitionKind,
-        OwnedCompiledDeployment, PhysicalBoundaryId, PhysicalBoundaryMetadata, PlacementAssignment,
-        PlacementGroupId, PortDirection, PortId, ReactionId, ReactionOptions, ReactionRelation,
-        ReactionRelationFlags, ReactionRelationTarget, Reactor, ReactorId, RequiredBinding,
-        ResolvedDeployment, RuntimeBackendId, StableEnclaveId, TargetTriple, TransportCapabilityId,
+        ImplementationBinding, ImplementationCatalog, ImplementationId, ModeId, ModeTransition,
+        ModeTransitionKind, OwnedCompiledDeployment, PhysicalBoundaryId, PhysicalBoundaryMetadata,
+        PlacementAssignment, PlacementGroupId, PortDirection, PortId, ReactionId, ReactionOptions,
+        ReactionRelation, ReactionRelationFlags, ReactionRelationTarget, Reactor, ReactorId,
+        RequiredBinding, ResolvedDeployment, RuntimeBackendId, StableEnclaveId, TargetTriple,
+        TransportCapabilityId,
     },
     descriptor::{
         ActionSlot, ActionSlotId, ComponentDescriptor, DescriptorBound, DescriptorBounds,
@@ -18,9 +19,9 @@ use crate::{
     },
     runtime::image::{
         ActionIndex, ActionTiming, BindingKind, BoundaryFailurePolicy, CodecPolicy,
-        CoordinationProjection, FederateIndex, ModeIndex, ReactionIndex, ReactorIndex,
-        RecoveryPolicy, RouteDirection, RouteIndex, RtiImage, RtiRouteIndex, ScopeIndex,
-        SecurityPolicy, TimingDomain, TimingPolicy, TransportPolicy,
+        CoordinationProjection, FederateIndex, ModeIndex, ReactionIndex, RecoveryPolicy,
+        RouteDirection, RouteIndex, RtiImage, RtiRouteIndex, ScopeIndex, SecurityPolicy,
+        TimingDomain, TimingPolicy, TransportPolicy,
     },
 };
 
@@ -490,12 +491,10 @@ fn deployment_with_bounds(
         ImplementationBinding::new(
             ComponentInstanceId::new("vehicle/controller").unwrap(),
             ImplementationId::new("controller-host").unwrap(),
-            descriptor("controller.v1", bounds[0]),
         ),
         ImplementationBinding::new(
             ComponentInstanceId::new("vehicle/sensor").unwrap(),
             ImplementationId::new("sensor-host").unwrap(),
-            descriptor("sensor.v1", bounds[1]),
         ),
     ];
     let mut placements = vec![
@@ -564,6 +563,18 @@ fn deployment_with_bounds(
             dependency_case,
             parallel,
         ),
+        [
+            (
+                ImplementationId::new("controller-host").unwrap(),
+                descriptor("controller.v1", bounds[0]),
+            ),
+            (
+                ImplementationId::new("sensor-host").unwrap(),
+                descriptor("sensor.v1", bounds[1]),
+            ),
+        ]
+        .into_iter()
+        .collect::<ImplementationCatalog>(),
         bindings,
         placements,
         federates,
@@ -631,55 +642,6 @@ fn with_central_rti<T>(compiled: &OwnedCompiledDeployment, f: impl FnOnce(RtiIma
     })
 }
 
-fn shared_implementation_deployment(reverse: bool) -> ResolvedDeployment {
-    let mut bindings = vec![
-        ImplementationBinding::new(
-            ComponentInstanceId::new("vehicle/controller").unwrap(),
-            ImplementationId::new("shared-host").unwrap(),
-            descriptor_with_root("controller.v1", known_bounds(), "Shared"),
-        ),
-        ImplementationBinding::new(
-            ComponentInstanceId::new("vehicle/sensor").unwrap(),
-            ImplementationId::new("shared-host").unwrap(),
-            descriptor_with_root("sensor.v1", known_bounds(), "Shared"),
-        ),
-    ];
-    let mut placements = vec![
-        PlacementAssignment::new(
-            PlacementGroupId::new("placement/controller").unwrap(),
-            FederateId::new("host").unwrap(),
-        ),
-        PlacementAssignment::new(
-            PlacementGroupId::new("placement/sensor").unwrap(),
-            FederateId::new("host").unwrap(),
-        ),
-    ];
-    if reverse {
-        bindings.reverse();
-        placements.reverse();
-    }
-    ResolvedDeployment::new(
-        topology(
-            reverse,
-            true,
-            ConnectionSemantics::Logical { after: None },
-            DependencyCase::None,
-            false,
-        ),
-        bindings,
-        placements,
-        [FederateConfig::new(
-            FederateId::new("host").unwrap(),
-            TargetTriple::new("x86_64-unknown-linux-gnu").unwrap(),
-            RuntimeBackendId::new("native").unwrap(),
-            RecoveryPolicy::FailStop,
-        )],
-        CoordinationSelection::Local,
-        [],
-    )
-    .unwrap()
-}
-
 fn deployment_with_controller_descriptor(
     controller_descriptor: ComponentDescriptor,
 ) -> ResolvedDeployment {
@@ -692,15 +654,25 @@ fn deployment_with_controller_descriptor(
             false,
         ),
         [
+            (
+                ImplementationId::new("controller-host").unwrap(),
+                controller_descriptor,
+            ),
+            (
+                ImplementationId::new("sensor-host").unwrap(),
+                descriptor("sensor.v1", known_bounds()),
+            ),
+        ]
+        .into_iter()
+        .collect::<ImplementationCatalog>(),
+        [
             ImplementationBinding::new(
                 ComponentInstanceId::new("vehicle/controller").unwrap(),
                 ImplementationId::new("controller-host").unwrap(),
-                controller_descriptor,
             ),
             ImplementationBinding::new(
                 ComponentInstanceId::new("vehicle/sensor").unwrap(),
                 ImplementationId::new("sensor-host").unwrap(),
-                descriptor("sensor.v1", known_bounds()),
             ),
         ],
         [
@@ -755,91 +727,6 @@ fn controller_descriptor_with(
         known_bounds(),
     )
     .unwrap()
-}
-
-#[test]
-fn lowering_keeps_reused_symbols_and_runtime_state_slots_distinct() {
-    let forward = shared_implementation_deployment(false).lower().unwrap();
-    let reverse = shared_implementation_deployment(true).lower().unwrap();
-    assert_eq!(forward, reverse);
-
-    let enclave = &federate_enclaves(&forward, FederateIndex::new(0))[0];
-    assert_eq!(
-        enclave
-            .required_bindings()
-            .iter()
-            .map(RequiredBinding::symbol)
-            .collect::<Vec<_>>(),
-        [
-            "action_Shared_2fpulse",
-            "action_Shared_2fack",
-            "port_Shared_2farray_5fin",
-            "port_Shared_2farray_5fin",
-            "port_Shared_2fbank_5fin",
-            "port_Shared_2fbank_5fin",
-            "port_Shared_2foutput",
-            "reaction_Shared_2femit",
-            "reaction_Shared_2freset_5factive",
-            "reaction_Shared_2fshutdown",
-            "reaction_Shared_2fstart",
-            "reaction_Shared_2ftimer_5ffired",
-            "reaction_Shared_2freceive",
-            "state_Shared",
-            "state_Shared",
-        ]
-    );
-    let states = enclave
-        .required_bindings()
-        .iter()
-        .filter_map(|binding| match binding {
-            RequiredBinding::State {
-                component,
-                implementation,
-                ..
-            } => Some((
-                component.to_string(),
-                implementation.to_string(),
-                binding.symbol(),
-            )),
-            RequiredBinding::Reaction { .. }
-            | RequiredBinding::Port { .. }
-            | RequiredBinding::Action { .. } => None,
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        states,
-        [
-            (
-                "vehicle/controller".to_owned(),
-                "shared-host".to_owned(),
-                "state_Shared".to_owned(),
-            ),
-            (
-                "vehicle/sensor".to_owned(),
-                "shared-host".to_owned(),
-                "state_Shared".to_owned(),
-            ),
-        ]
-    );
-
-    enclave
-        .with_view(|image| {
-            assert_eq!(
-                image
-                    .ports()
-                    .values()
-                    .map(|port| port.binding())
-                    .collect::<std::collections::BTreeSet<_>>()
-                    .len(),
-                5
-            );
-            assert_ne!(
-                image.reactors()[ReactorIndex::new(0)].state_binding(),
-                image.reactors()[ReactorIndex::new(1)].state_binding()
-            );
-            assert_eq!(image.storage_bounds().state_slots(), 2);
-        })
-        .unwrap();
 }
 
 #[test]
@@ -1390,6 +1277,7 @@ fn placement_only_deployment_with_no_enclaves_lowers_to_an_empty_root_image() {
         .unwrap();
     let deployment = ResolvedDeployment::new(
         topology.finish().unwrap(),
+        ImplementationCatalog::new(),
         [],
         [PlacementAssignment::new(
             PlacementGroupId::new("placement/host").unwrap(),

@@ -3,7 +3,10 @@ use crate::{
     *,
 };
 use boomerang_builder::{compiler::*, ComponentDescriptor};
-use std::collections::{btree_map::Entry, BTreeMap};
+use std::{
+    collections::{btree_map::Entry, BTreeMap},
+    sync::Arc,
+};
 
 /// Explicit deployment choices shared by independently compiled application packages.
 #[derive(Debug, Clone)]
@@ -25,7 +28,9 @@ pub struct DeploymentInputs {
     pub topology: ApplicationTopology,
     /// Explicit deployment policy applied during builder resolution.
     pub configuration: DeploymentConfiguration,
-    /// Resolved component-instance selections with their implementation identities and descriptors.
+    /// Shared structural descriptors stored once per implementation identity.
+    pub catalog: Arc<ImplementationCatalog>,
+    /// Component-instance selections containing only catalog identities.
     pub bindings: Vec<ImplementationBinding>,
 }
 impl DeploymentInputs {
@@ -49,6 +54,7 @@ impl DeploymentInputs {
         let config = self.configuration;
         let resolved = ResolvedDeployment::new(
             self.topology,
+            self.catalog,
             self.bindings,
             config.placements,
             config.federates,
@@ -110,8 +116,10 @@ pub struct Compilation {
     federate: FederateId,
     /// Caller-supplied target facts checked before builder lowering.
     target: TargetContext,
-    /// Host descriptors and target export paths keyed by semantic implementation identity.
-    registrations: BTreeMap<ImplementationId, ComponentRegistration>,
+    /// Shared canonical host descriptors keyed by implementation identity.
+    catalog: Arc<ImplementationCatalog>,
+    /// Rust payload export paths kept outside semantic resolution.
+    exports: BTreeMap<ImplementationId, PayloadExports>,
     /// Explicit mapping from stable component-instance identity to registered implementation identity.
     selections: BTreeMap<ComponentInstanceId, ImplementationId>,
     /// Application-installed runtime capabilities used by the generated binding constructor.
@@ -145,7 +153,8 @@ impl Compilation {
             configuration,
             federate,
             target,
-            registrations: BTreeMap::new(),
+            catalog: Arc::new(ImplementationCatalog::new()),
+            exports: BTreeMap::new(),
             selections: BTreeMap::new(),
             bindings: BindingConfiguration::default(),
         }
@@ -164,12 +173,10 @@ impl Compilation {
         descriptor: ComponentDescriptor,
         payload: PayloadExports,
     ) -> Result<(), CompilationError> {
-        match self.registrations.entry(implementation.clone()) {
+        match self.exports.entry(implementation.clone()) {
             Entry::Vacant(entry) => {
-                entry.insert(ComponentRegistration {
-                    descriptor,
-                    payload,
-                });
+                Arc::make_mut(&mut self.catalog).insert(implementation, descriptor);
+                entry.insert(payload);
                 Ok(())
             }
             Entry::Occupied(_) => Err(CompilationError::new(
@@ -230,29 +237,19 @@ impl Compilation {
             )
             .deployment(name));
         }
-        let mut bindings = Vec::new();
-        let mut selected = BTreeMap::new();
-        for (component, implementation) in &self.selections {
-            let registration = self.registrations.get(implementation).ok_or_else(|| {
-                CompilationError::new(
-                    Stage::Registration,
-                    DiagnosticCode::MissingRegistration,
+        let bindings = self.selections.iter().map(|(component, implementation)| {
+            if !self.catalog.contains_key(implementation) {
+                return Err(CompilationError::new(
+                    Stage::Registration, DiagnosticCode::MissingRegistration,
                     format!("component '{component}' selects unregistered implementation '{implementation}'"),
-                )
-                .deployment(name)
-                .component(component)
-                .implementation(implementation)
-            })?;
-            bindings.push(ImplementationBinding::new(
-                component.clone(),
-                implementation.clone(),
-                registration.descriptor.clone(),
-            ));
-            selected.insert(implementation.clone(), registration.clone());
-        }
+                ).deployment(name).component(component).implementation(implementation));
+            }
+            Ok(ImplementationBinding::new(component.clone(), implementation.clone()))
+        }).collect::<Result<Vec<_>, CompilationError>>()?;
         let image = DeploymentInputs {
             topology: self.topology.clone(),
             configuration: self.configuration.clone(),
+            catalog: Arc::clone(&self.catalog),
             bindings,
         }
         .lower()?;
@@ -266,25 +263,12 @@ impl Compilation {
                 .deployment(name)
                 .cause(e)
         })?;
-        // Only selected local implementations appear in this target's compatibility checks.
-        selected.retain(|id, _| {
-            slice
-                .enclaves()
-                .iter()
-                .flat_map(|e| e.required_bindings().iter())
-                .any(|b| match b {
-                    RequiredBinding::State { implementation, .. }
-                    | RequiredBinding::Reaction { implementation, .. }
-                    | RequiredBinding::Port { implementation, .. }
-                    | RequiredBinding::Action { implementation, .. } => implementation == id,
-                })
-        });
         let mut options = self.bindings.clone();
         options.distributed = matches!(
             self.configuration.coordination,
             CoordinationSelection::Distributed { .. }
         );
-        let mut tokens = render::render_definitions(&slice, &selected, &options)
+        let mut tokens = render::render_definitions(&slice, &self.catalog, &self.exports, &options)
             .map_err(|e| CompilationError::render(e, name))?;
         if image.with_coordination(|projection| {
             matches!(

@@ -108,6 +108,19 @@ pub fn inputs(settings: &Settings) -> Result<DeploymentInputs, Box<dyn std::erro
     let host = FederateId::new("host")?;
     let sensor = FederateId::new("sensor")?;
     Ok(DeploymentInputs {
+        catalog: [
+            (
+                ImplementationId::new("vehicle-control")?,
+                vehicle_control::controller::__boomerang::metadata::descriptor(),
+            ),
+            (
+                ImplementationId::new("sensor-host")?,
+                sensor_host::sensor::__boomerang::metadata::descriptor(),
+            ),
+        ]
+        .into_iter()
+        .collect::<ImplementationCatalog>()
+        .into(),
         topology: app.finish()?,
         configuration: DeploymentConfiguration {
             name: "native-vehicle".into(),
@@ -158,17 +171,14 @@ pub fn inputs(settings: &Settings) -> Result<DeploymentInputs, Box<dyn std::erro
             ImplementationBinding::new(
                 ComponentInstanceId::new("controller")?,
                 ImplementationId::new("vehicle-control")?,
-                vehicle_control::controller::__boomerang::metadata::descriptor(),
             ),
             ImplementationBinding::new(
                 ComponentInstanceId::new("backup")?,
                 ImplementationId::new("vehicle-control")?,
-                vehicle_control::controller::__boomerang::metadata::descriptor(),
             ),
             ImplementationBinding::new(
                 ComponentInstanceId::new("sensor")?,
                 ImplementationId::new("sensor-host")?,
-                sensor_host::sensor::__boomerang::metadata::descriptor(),
             ),
         ],
     })

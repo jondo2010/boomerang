@@ -1,5 +1,5 @@
 use super::BindingConfiguration;
-use crate::{ComponentRegistration, PayloadExports};
+use crate::PayloadExports;
 use anyhow::{anyhow, bail, Context, Result};
 use boomerang_builder::compiler::{
     ComponentInstanceId, ImplementationId, OwnedEnclaveImage, RequiredBinding,
@@ -12,16 +12,22 @@ use std::collections::BTreeMap;
 pub(super) fn render_bindings(
     enclaves: &[OwnedEnclaveImage],
     enclave_start: usize,
-    exports: &BTreeMap<ImplementationId, ComponentRegistration>,
+    exports: &BTreeMap<ImplementationId, PayloadExports>,
     route_bindings: RouteBindings,
     distributed: bool,
     physical: &BindingConfiguration,
 ) -> Result<TokenStream> {
     let inputs = &physical.sources;
     let manual = physical.manual_clock;
-    let writers = enclaves.iter().flat_map(|enclave| enclave.required_bindings().iter()).filter(|binding| {
-        matches!(binding, RequiredBinding::State { initializer: Some(required), .. } if required.clock_control)
-    }).count();
+    let writers = enclaves
+        .iter()
+        .flat_map(|enclave| enclave.required_bindings().iter())
+        .filter_map(|binding| match binding {
+            RequiredBinding::State { initializer, .. } => initializer.as_ref(),
+            _ => None,
+        })
+        .filter(|initializer| initializer.clock_control)
+        .count();
     if writers > 1 {
         bail!("manual clock control must have one component owner");
     }
@@ -83,7 +89,7 @@ pub(super) fn collect_route_bindings(
     routes: &mut RouteBindings,
     enclave: &OwnedEnclaveImage,
     image: &EnclaveImage<'_>,
-    exports: &BTreeMap<ImplementationId, ComponentRegistration>,
+    exports: &BTreeMap<ImplementationId, PayloadExports>,
 ) -> Result<()> {
     for route in image.routes.values() {
         let boundary = route.boundary().as_str().to_owned();
@@ -98,7 +104,7 @@ pub(super) fn collect_route_bindings(
         let alias = exports.get(implementation).ok_or_else(|| {
             anyhow!("missing generated alias for implementation '{implementation}'")
         })?;
-        let payload = binding_path(&alias.payload, &binding.symbol())?;
+        let payload = binding_path(alias, &binding.symbol())?;
         let pair = routes.entry(boundary.clone()).or_default();
         let slot = match route.direction() {
             RouteDirection::Outbound => &mut pair.0,
@@ -143,7 +149,7 @@ fn render_route_bindings(routes: RouteBindings) -> TokenStream {
 
 /// Emits one state, reaction, port, or action binding chain entry.
 fn render_binding(
-    exports: &BTreeMap<ImplementationId, ComponentRegistration>,
+    exports: &BTreeMap<ImplementationId, PayloadExports>,
     slot: usize,
     binding: &RequiredBinding,
     inputs: &BTreeMap<ComponentInstanceId, u32>,
@@ -151,16 +157,12 @@ fn render_binding(
 ) -> Result<TokenStream> {
     let slot = u32::try_from(slot).context("generated binding slot exceeds u32 range")?;
     let slot = proc_macro2::Literal::u32_unsuffixed(slot);
-    let (implementation, symbol) = match binding {
-        RequiredBinding::State { implementation, .. }
-        | RequiredBinding::Reaction { implementation, .. }
-        | RequiredBinding::Port { implementation, .. }
-        | RequiredBinding::Action { implementation, .. } => (implementation, binding.symbol()),
-    };
+    let implementation = binding.implementation();
+    let symbol = binding.symbol();
     let alias = exports
         .get(implementation)
         .ok_or_else(|| anyhow!("missing generated alias for implementation '{implementation}'"))?;
-    let path = binding_path(&alias.payload, &symbol)?;
+    let path = binding_path(alias, &symbol)?;
     match binding {
         RequiredBinding::State {
             component,
@@ -189,7 +191,7 @@ fn render_binding(
                     boomerang_runtime::image::BindingKind::Action,
                     action.slot.path(),
                 );
-                let payload = binding_path(&alias.payload, &symbol)?;
+                let payload = binding_path(alias, &symbol)?;
                 let row = action.index.as_u32();
                 action_rows.push(quote!(ActionIndex::new(#row)));
                 requirements.push(quote!(boomerang_runtime::initialization::ActionCapability::new(ActionIndex::new(#row), #payload)));

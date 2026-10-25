@@ -54,6 +54,10 @@
 //! Each reaction binding associates its image-owned `BindingSlotIndex` directly with a payload adapter export.
 //! Payload macros own state downcasts, reference extraction, declaration order, and generic parameters.
 //! This compiler retains instance indices, routes, and initializer capability mappings.
+//! The host compiler stores descriptors once in an implementation catalog.
+//! Component selections contain catalog identities, and Rust export paths stay in a codegen side table.
+//! Lowering resolves initializer actions to descriptor-local payload slots and image-owned action indices.
+//! Rendering must consume this plan without descriptor or action-row reconstruction.
 //! Reused exports require separate instance storage.
 //!
 //! ```
@@ -168,8 +172,6 @@ pub mod render;
 pub use compilation::*;
 pub use diagnostic::*;
 
-use boomerang_builder::ComponentDescriptor;
-
 /// How a payload namespace exports its runtime compatibility manifest.
 #[derive(Debug, Clone, Copy)]
 pub enum ManifestStyle {
@@ -215,15 +217,6 @@ impl PayloadExports {
         })?;
         Ok(Self { path, manifest })
     }
-}
-
-/// One registered implementation's independently obtained descriptor and target exports.
-#[derive(Debug, Clone)]
-pub struct ComponentRegistration {
-    /// Host-owned structural descriptor used for semantic validation and compatibility assertions.
-    pub descriptor: ComponentDescriptor,
-    /// Independently selected target namespace containing this implementation's concrete payload exports.
-    pub payload: PayloadExports,
 }
 
 impl std::fmt::Debug for PayloadExports {

@@ -208,8 +208,10 @@ impl<'a> DescriptorSlots<'a> {
         let binding = deployment
             .binding(component)
             .expect("resolved deployment binds every topology component");
-        let roots = binding
-            .descriptor()
+        let descriptor = deployment
+            .implementation(binding.implementation())
+            .expect("resolved implementation exists");
+        let roots = descriptor
             .reactor_slots()
             .iter()
             .filter(|slot| slot.parent.is_none())
@@ -224,7 +226,7 @@ impl<'a> DescriptorSlots<'a> {
         Ok(Self {
             component,
             implementation: binding.implementation(),
-            descriptor: binding.descriptor(),
+            descriptor,
             root,
         })
     }
@@ -749,10 +751,12 @@ fn storage_bounds(
     let mut state = 0u64;
     let mut scratch = 0u64;
     for component in components {
-        let bounds = deployment
+        let binding = deployment
             .binding(&component)
-            .expect("resolved component has an implementation binding")
-            .descriptor()
+            .expect("resolved component selection");
+        let bounds = deployment
+            .implementation(binding.implementation())
+            .expect("resolved implementation descriptor")
             .bounds();
         queue = checked_bound(
             queue,

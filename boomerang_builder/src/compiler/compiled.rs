@@ -122,6 +122,26 @@ pub enum RequiredBinding {
 }
 
 impl RequiredBinding {
+    /// Returns the component instance that owns this binding.
+    pub fn component(&self) -> &ComponentInstanceId {
+        match self {
+            Self::State { component, .. }
+            | Self::Reaction { component, .. }
+            | Self::Port { component, .. }
+            | Self::Action { component, .. } => component,
+        }
+    }
+
+    /// Returns the catalog identity that supplies this binding's exports.
+    pub fn implementation(&self) -> &ImplementationId {
+        match self {
+            Self::State { implementation, .. }
+            | Self::Reaction { implementation, .. }
+            | Self::Port { implementation, .. }
+            | Self::Action { implementation, .. } => implementation,
+        }
+    }
+
     /// Returns the runtime binding category.
     pub const fn kind(&self) -> BindingKind {
         match self {

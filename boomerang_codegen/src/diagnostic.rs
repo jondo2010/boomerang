@@ -88,31 +88,9 @@ impl CompilationError {
         self
     }
     pub(crate) fn render_binding(error: anyhow::Error, binding: &RequiredBinding) -> Self {
-        let (component, implementation) = match binding {
-            RequiredBinding::State {
-                component,
-                implementation,
-                ..
-            }
-            | RequiredBinding::Reaction {
-                component,
-                implementation,
-                ..
-            }
-            | RequiredBinding::Port {
-                component,
-                implementation,
-                ..
-            }
-            | RequiredBinding::Action {
-                component,
-                implementation,
-                ..
-            } => (component, implementation),
-        };
         let mut result = Self::new(Stage::Render, DiagnosticCode::Render, format!("{error:#}"))
-            .component(component)
-            .implementation(implementation);
+            .component(binding.component())
+            .implementation(binding.implementation());
         result.diagnostic.binding = Some(binding.symbol());
         result.source = Some(error.into_boxed_dyn_error());
         result
@@ -183,6 +161,10 @@ impl CompilationError {
                 result.diagnostic.component = Some(component.clone());
             }
             ResolveError::UnknownComponentBinding {
+                component,
+                implementation,
+            }
+            | ResolveError::MissingImplementation {
                 component,
                 implementation,
             }

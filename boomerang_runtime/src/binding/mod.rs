@@ -4,11 +4,12 @@
 
 /// Authoritative macro ABI understood by component descriptors and payloads in this release.
 ///
-/// ABI 4 exports each `reaction_*` symbol with the erased callback accepted by
+/// ABI 5 retains the erased `reaction_*` callbacks accepted by
 /// [`crate::EnclaveBindings::bind_reaction`]. Payload macros own state downcasts,
 /// reference extraction, argument order, and generic specialization.
 /// Deployment generation supplies binding slots and image-owned mode effects.
-pub const COMPONENT_DESCRIPTOR_MACRO_ABI: u32 = 4;
+/// `binding_manifest()` exports one descriptor fingerprint that includes this ABI version.
+pub const COMPONENT_DESCRIPTOR_MACRO_ABI: u32 = 5;
 
 /// Fingerprint of one canonical component implementation descriptor.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -39,32 +40,29 @@ impl DescriptorFingerprint {
     }
 }
 
-/// Target-safe compatibility values for one component payload.
+/// Target-safe compatibility contract for one component payload.
+///
+/// The fingerprint must derive from the payload declaration and include the macro ABI.
+/// Generated deployment code must compare it with the selected metadata descriptor fingerprint.
+/// Cargo feature resolution and target configuration do not establish this agreement.
+/// Rust checks exported symbols and signatures; the fingerprint checks descriptor semantics.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct BindingManifest {
     /// Canonical descriptor fingerprint computed by the host macro.
     descriptor_fingerprint: DescriptorFingerprint,
-    /// Actual descriptor macro ABI exported by the component payload.
-    macro_abi: u32,
 }
 
 impl BindingManifest {
-    /// Constructs a manifest from declaration-derived compatibility values.
-    pub const fn new(descriptor_fingerprint: DescriptorFingerprint, macro_abi: u32) -> Self {
+    /// Constructs a manifest from a declaration-derived fingerprint that includes the macro ABI.
+    pub const fn new(descriptor_fingerprint: DescriptorFingerprint) -> Self {
         Self {
             descriptor_fingerprint,
-            macro_abi,
         }
     }
 
     /// Returns the canonical descriptor fingerprint for this component payload.
     pub const fn descriptor_fingerprint(self) -> DescriptorFingerprint {
         self.descriptor_fingerprint
-    }
-
-    /// Returns the actual descriptor macro ABI exported by this component payload.
-    pub const fn macro_abi(self) -> u32 {
-        self.macro_abi
     }
 }
 

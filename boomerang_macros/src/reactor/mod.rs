@@ -1041,14 +1041,12 @@ fn payload_output(
         Ok(exports) => exports,
         Err(error) => return PayloadOutput::diagnostic(error.to_compile_error()),
     };
-    let macro_abi = boomerang_runtime::binding::COMPONENT_DESCRIPTOR_MACRO_ABI;
     let fingerprint = descriptor.fingerprint().to_bytes();
     let binding_manifest = quote! {
         /// Actual compatibility information derived from this component declaration.
         pub const fn binding_manifest() -> ::boomerang::runtime::binding::BindingManifest {
             ::boomerang::runtime::binding::BindingManifest::new(
                 ::boomerang::runtime::binding::DescriptorFingerprint::new([#(#fingerprint),*]),
-                #macro_abi,
             )
         }
     };

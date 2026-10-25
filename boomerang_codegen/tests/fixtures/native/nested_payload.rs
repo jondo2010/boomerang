@@ -54,10 +54,10 @@ pub mod exports {
     pub const fn binding_manifest() -> boomerang_runtime::binding::BindingManifest {
         boomerang_runtime::binding::BindingManifest::new(
             boomerang_runtime::binding::DescriptorFingerprint::new([
-                183, 233, 254, 229, 118, 90, 34, 77, 92, 30, 45, 77, 65, 5, 171, 12, 202, 203, 236,
-                140, 163, 2, 123, 246, 8, 47, 180, 253, 24, 72, 57, 220,
+                0xc6, 0xa1, 0x77, 0xc3, 0xbf, 0xac, 0x9d, 0x61, 0x66, 0xc4, 0x51, 0x1c, 0x15, 0x7b,
+                0x95, 0x05, 0xdb, 0xfd, 0x33, 0xa1, 0xaf, 0xe8, 0xc9, 0x00, 0x37, 0xb3, 0xe6, 0x1a,
+                0xc9, 0x33, 0xa2, 0x87,
             ]),
-            4,
         )
     }
 }

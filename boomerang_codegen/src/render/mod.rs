@@ -59,11 +59,9 @@ pub fn render_definitions(
         };
         let bytes = descriptor.fingerprint().to_bytes();
         let bytes = bytes.iter();
-        let abi = descriptor.macro_abi();
         let path = &payload.path;
         checks.extend(quote! {
             const _: ()=boomerang_runtime::binding::assert_descriptor_fingerprint(boomerang_runtime::binding::DescriptorFingerprint::new([#(#bytes),*]),#path::binding_manifest().descriptor_fingerprint());
-            const _: ()=assert!(#abi==#path::binding_manifest().macro_abi(),"macro ABI mismatch");
         });
     }
     let mut routes = BTreeMap::new();

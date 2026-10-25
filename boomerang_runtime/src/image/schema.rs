@@ -4,7 +4,7 @@
 //! [`crate::image`]. Host lowering assigns table order, ownership spans, relationship ranges, and
 //! binding slots. Emitters must preserve these assignments and each index type's domain.
 //! Payload implementations bind separately through [`crate::binding`]. Generated artifacts must
-//! retain descriptor fingerprint and macro ABI checks alongside their image definitions.
+//! retain descriptor fingerprint checks, including macro ABI compatibility, alongside their image definitions.
 //!
 //! Identity text and backing slices must outlive every image that borrows them. Generated static
 //! images use string literals and immutable tables. Host-owned images lend their backing storage

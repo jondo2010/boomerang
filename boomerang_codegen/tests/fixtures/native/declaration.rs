@@ -1,5 +1,5 @@
 macro_rules! declare_controller {
-    ($emit:ident, $($source:tt)*) => {
+    ($emit:ident, $startup:ident, $($source:tt)*) => {
         $emit! {
             pub mod controller {
                 use boomerang::prelude::*;
@@ -69,7 +69,7 @@ macro_rules! declare_controller {
                 pub fn Controller(#[input] input: u32, #[output] output: u32,
                                   #[physical_action] sample: u32,
                                   #[physical_action] auxiliary: u16) -> impl Reactor {
-                    reaction! { tick(startup) -> output, reset(active) {
+                    reaction! { tick($startup) -> output, reset(active) {
                         assert_eq!(crate::INITIALIZED.load(std::sync::atomic::Ordering::SeqCst), 2);
                         state.count += 1;
                         assert_eq!(state.count, 8);

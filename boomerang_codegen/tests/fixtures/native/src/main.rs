@@ -3,32 +3,16 @@ include!("../declaration.rs");
 #[path = "../nested_payload.rs"]
 mod nested_payload;
 static NESTED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-#[cfg(feature = "source-input")]
-declare_controller!(emit, source = "plant",);
-#[cfg(not(feature = "source-input"))]
-declare_controller!(emit,);
+#[cfg(feature = "fingerprint-mismatch")]
+declare_controller!(emit, shutdown,);
+#[cfg(all(not(feature = "fingerprint-mismatch"), feature = "source-input"))]
+declare_controller!(emit, startup, source = "plant",);
+#[cfg(all(not(feature = "fingerprint-mismatch"), not(feature = "source-input")))]
+declare_controller!(emit, startup,);
 static INITIALIZED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 static ROUTED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 static SAMPLES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 static REACTIONS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-#[cfg(any(feature = "fingerprint-mismatch", feature = "abi-mismatch"))]
-mod incorrect_exports {
-    pub use crate::controller::__boomerang::payload::*;
-    pub const fn binding_manifest() -> boomerang_runtime::binding::BindingManifest {
-        let actual = crate::controller::__boomerang::payload::binding_manifest();
-        let fingerprint = if cfg!(feature = "fingerprint-mismatch") {
-            boomerang_runtime::binding::DescriptorFingerprint::new([0; 32])
-        } else {
-            actual.descriptor_fingerprint()
-        };
-        let abi = if cfg!(feature = "abi-mismatch") {
-            999
-        } else {
-            actual.macro_abi()
-        };
-        boomerang_runtime::binding::BindingManifest::new(fingerprint, abi)
-    }
-}
 /// Public export aliases retain payload-owned reaction adapters.
 mod export_aliases {
     pub use crate::controller::__boomerang::payload::*;

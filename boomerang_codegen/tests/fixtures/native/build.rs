@@ -4,9 +4,9 @@ use boomerang_codegen::{cargo_build::CargoBuild, *};
 include!("declaration.rs");
 mod nested;
 #[cfg(feature = "source-input")]
-declare_controller!(emit, source = "plant",);
+declare_controller!(emit, startup, source = "plant",);
 #[cfg(not(feature = "source-input"))]
-declare_controller!(emit,);
+declare_controller!(emit, startup,);
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut cargo = CargoBuild::from_env()?;
     cargo.track_file("build.rs")?;
@@ -57,10 +57,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let implementation = ImplementationId::new("controller")?;
     let path = if std::env::var_os("CARGO_FEATURE_MISSING_EXPORT").is_some() {
         "crate::absent::__boomerang::payload"
-    } else if std::env::var_os("CARGO_FEATURE_FINGERPRINT_MISMATCH").is_some()
-        || std::env::var_os("CARGO_FEATURE_ABI_MISMATCH").is_some()
-    {
-        "crate::incorrect_exports"
     } else {
         "crate::export_aliases"
     };

@@ -63,7 +63,12 @@ pub fn descriptor() -> ComponentDescriptor {
     ComponentDescriptor::try_new(
         ContractId::new("example.nested").unwrap(),
         1,
-        COMPONENT_DESCRIPTOR_MACRO_ABI,
+        // Keep the composite structure intact; only its metadata export-contract version differs.
+        if cfg!(feature = "abi-mismatch") {
+            COMPONENT_DESCRIPTOR_MACRO_ABI - 1
+        } else {
+            COMPONENT_DESCRIPTOR_MACRO_ABI
+        },
         vec![
             ReactorSlot {
                 id: root.clone(),

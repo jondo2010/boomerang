@@ -108,7 +108,7 @@ fn cargo_resolves_host_and_target_features_and_rejects_invalid_exports() {
     for (feature, expected) in [
         ("missing-export", "could not find `absent`"),
         ("fingerprint-mismatch", "descriptor fingerprint mismatch"),
-        ("abi-mismatch", "macro ABI mismatch"),
+        ("abi-mismatch", "descriptor fingerprint mismatch"),
     ] {
         let output = cargo("check", &[feature]);
         assert!(!output.status.success(), "{feature} unexpectedly built");

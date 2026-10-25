@@ -50,7 +50,8 @@
 //!
 //! [`PayloadExports::new`] accepts a Rust module path without generic arguments, expressions, macros, or trailing source.
 //! Invalid paths fail during host generation.
-//! Generated assertions compare metadata fingerprints and macro ABI versions with the actual target payload's `binding_manifest()`.
+//! One generated assertion per selected implementation compares metadata and target payload descriptor fingerprints.
+//! The fingerprint includes the macro ABI version; emitters must retain this compatibility check.
 //! Missing target exports and incompatible payloads fail during target compilation.
 //! Each reaction binding associates its image-owned `BindingSlotIndex` directly with a payload adapter export.
 //! Payload macros own state downcasts, reference extraction, declaration order, and generic parameters.

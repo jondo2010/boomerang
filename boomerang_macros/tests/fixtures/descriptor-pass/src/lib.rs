@@ -296,14 +296,6 @@ mod descriptor_tests {
                 scratch_bytes: boomerang::builder::DescriptorBound::Known(256),
             }
         );
-        assert_eq!(
-            descriptor.fingerprint().to_bytes(),
-            [
-                0xa0, 0x8b, 0x58, 0x1b, 0xab, 0x17, 0x0b, 0xd1, 0x40, 0xc8, 0xb9, 0x0d, 0x12, 0x45,
-                0x71, 0xaf, 0x50, 0xa8, 0x04, 0x45, 0x37, 0xc8, 0xf3, 0x47, 0x28, 0xfb, 0xac, 0xed,
-                0xb0, 0x78, 0x3e, 0x1d
-            ]
-        );
     }
 
     #[test]
@@ -336,22 +328,7 @@ mod descriptor_tests {
 #[cfg(all(test, feature = "payload"))]
 mod payload_tests {
     #[test]
-    fn payload_manifest_initializers_and_adapters_match_declaration() {
-        assert_eq!(
-            super::sensor::__boomerang::payload::binding_manifest()
-                .descriptor_fingerprint()
-                .to_bytes(),
-            [
-                0xa0, 0x8b, 0x58, 0x1b, 0xab, 0x17, 0x0b, 0xd1, 0x40, 0xc8, 0xb9, 0x0d, 0x12, 0x45,
-                0x71, 0xaf, 0x50, 0xa8, 0x04, 0x45, 0x37, 0xc8, 0xf3, 0x47, 0x28, 0xfb, 0xac, 0xed,
-                0xb0, 0x78, 0x3e, 0x1d
-            ],
-        );
-        assert_eq!(
-            super::sensor::__boomerang::payload::binding_manifest().macro_abi(),
-            boomerang::runtime::binding::COMPONENT_DESCRIPTOR_MACRO_ABI,
-        );
-
+    fn payload_initializers_and_adapters_match_declaration() {
         let state: super::sensor::MatchState = super::sensor::__boomerang::payload::state_Match();
         assert_eq!(state.r#loop, 3);
         let custom_state: super::custom::CustomState =

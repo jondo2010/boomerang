@@ -44,7 +44,7 @@ pub use authoring::{
 pub use compiled::{
     direct_binding_symbol, CompiledDeploymentValidationError, FederateSlice, GlobalFederationImage,
     OwnedCompiledDeployment, OwnedEnclaveImage, OwnedFederateImage, RequiredBinding,
-    RequiredBindings,
+    RequiredBindings, ResolvedInitializerAction, ResolvedInitializerCapabilities,
 };
 pub use coordination::{CoordinationProjectionError, OwnedCoordinationProjection, OwnedRtiImage};
 pub use deployment::{

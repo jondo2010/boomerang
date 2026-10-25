@@ -29,7 +29,8 @@ use super::{
     ApplicationTopology, BoundaryId, ComponentInstanceId, CoordinationProjectionError,
     GlobalFederationImage, ImplementationId, OwnedCompiledDeployment, OwnedCoordinationProjection,
     OwnedEnclaveImage, OwnedFederateImage, PortId, Reaction, ReactionId, ReactorId,
-    RequiredBinding, RequiredBindings, ResolvedDeployment, StableEnclaveId, StablePath,
+    RequiredBinding, RequiredBindings, ResolvedDeployment, ResolvedInitializerAction,
+    ResolvedInitializerCapabilities, StableEnclaveId, StablePath,
 };
 use crate::{
     descriptor::{ActionSlotId, DescriptorBound, PortSlotId, ReactionSlotId, ReactorSlotId},
@@ -146,6 +147,18 @@ pub enum CompileError {
         /// Fully qualified logical path of the unmatched binding.
         logical: String,
     },
+    /// An initializer requires an action absent from its instance's Enclave.
+    #[error("initializer {reactor} for component {component} requires missing action {action}")]
+    MissingInitializerAction {
+        /// Component instance receiving the initializer.
+        component: ComponentInstanceId,
+        /// Selected implementation declaring the initializer.
+        implementation: ImplementationId,
+        /// Descriptor-local reactor that declares the capability.
+        reactor: ReactorSlotId,
+        /// Descriptor-local action absent from the instance's action table.
+        action: ActionSlotId,
+    },
     /// A logical runtime binding matches more than one descriptor-local slot.
     #[error(
         "implementation {implementation} for component {component} has {candidates} {kind} slots matching {logical}"
@@ -234,13 +247,15 @@ impl<'a> DescriptorSlots<'a> {
     }
 
     /// Resolves the descriptor reactor slot for one logical reactor.
-    fn reactor_slot(&self, logical: &ReactorId) -> Result<ReactorSlotId, CompileError> {
+    fn reactor_slot(
+        &self,
+        logical: &ReactorId,
+    ) -> Result<&'a crate::descriptor::ReactorSlot, CompileError> {
         let matches = self
             .descriptor
             .reactor_slots()
             .iter()
             .filter(|slot| self.matches_relative_path(logical.path(), slot.id.path()))
-            .map(|slot| slot.id.clone())
             .collect::<Vec<_>>();
         self.one_slot("reactor", logical.path(), matches)
     }
@@ -330,6 +345,16 @@ impl ResolvedDeployment {
     pub fn lower(&self) -> Result<OwnedCompiledDeployment, CompileError> {
         self.validate_policies()?;
         let analysis = self.analyze()?;
+        let descriptor_slots = self
+            .bindings()
+            .map(|binding| {
+                let component = binding.component();
+                Ok((
+                    component.clone(),
+                    DescriptorSlots::for_component(self, component)?,
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>, CompileError>>()?;
         let mut federates = self.federates().collect::<Vec<_>>();
         federates.sort_by_cached_key(|federate| canonical_identity_text(federate.id()));
         let members = analysis.federation.members().to_vec().into_boxed_slice();
@@ -360,7 +385,7 @@ impl ResolvedDeployment {
             sort_by_encoded_identity(&mut enclaves);
             let enclaves = enclaves
                 .into_iter()
-                .map(|(id, _)| self.lower_enclave(id, &analysis))
+                .map(|(id, _)| self.lower_enclave(id, &analysis, &descriptor_slots))
                 .collect::<Result<Vec<_>, _>>()?;
             if matches!(
                 self.coordination(),

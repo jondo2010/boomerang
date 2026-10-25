@@ -62,12 +62,13 @@ macro_rules! declare_controller {
                     }
                 }
                 #[reactor(state = DriverState, state_init = DriverState::new,
-                    init_context(name = DriverInit, $($source)* actions = [sample]),
+                    init_context(name = DriverInit, $($source)* actions = [sample, auxiliary]),
                     contract = "example.controller", contract_version = 1,
                     bounds(queue_capacity = 16, payload_bytes = 1024,
                            state_bytes = 512, scratch_bytes = 256))]
                 pub fn Controller(#[input] input: u32, #[output] output: u32,
-                                  #[physical_action] sample: u32) -> impl Reactor {
+                                  #[physical_action] sample: u32,
+                                  #[physical_action] auxiliary: u16) -> impl Reactor {
                     reaction! { tick(startup) -> output, reset(active) {
                         assert_eq!(crate::INITIALIZED.load(std::sync::atomic::Ordering::SeqCst), 2);
                         state.count += 1;

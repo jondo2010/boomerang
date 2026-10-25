@@ -146,6 +146,11 @@ impl CompilationError {
                 implementation,
                 ..
             }
+            | CompileError::MissingInitializerAction {
+                component,
+                implementation,
+                ..
+            }
             | CompileError::AmbiguousDescriptorSlot {
                 component,
                 implementation,

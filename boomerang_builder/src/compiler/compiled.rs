@@ -20,6 +20,11 @@
 //!
 //! Borrowed image rows may reference temporary canonical strings for the duration of a callback.
 //! These strings are ordinary Rust string storage, not a manually packed identity blob.
+//!
+//! State bindings retain initializer capabilities resolved during lowering.
+//! Each initializer action retains its descriptor-local payload slot and image-owned [`ActionIndex`].
+//! Declaration order controls the state factory's capability arguments.
+//! Renderers must use these assignments without descriptor or action-row searches.
 use super::{
     BindingSlotId, BoundaryId, ComponentInstanceId, FederateId, ImplementationId,
     OwnedCoordinationProjection, RuntimeBackendId, StableEnclaveId, StablePath, TargetTriple,
@@ -42,10 +47,35 @@ pub struct RequiredBindings {
 }
 
 impl RequiredBindings {
+    /// Returns the binding assigned to an image-owned binding slot.
+    pub fn get(&self, slot: BindingSlotIndex) -> Option<&RequiredBinding> {
+        self.entries.get(tinymap::Key::index(&slot))
+    }
+
     /// Iterates required bindings in canonical stable-identity order.
     pub fn iter(&self) -> impl Iterator<Item = &RequiredBinding> {
         self.entries.iter()
     }
+}
+
+/// Initializer capabilities resolved for one reactor instance.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedInitializerCapabilities {
+    /// Physical source name required from application configuration.
+    pub source: Option<String>,
+    /// Action capabilities in the initializer declaration's order.
+    pub actions: Vec<ResolvedInitializerAction>,
+    /// Whether this initializer owns manual-clock control.
+    pub clock_control: bool,
+}
+
+/// One initializer action resolved to its image row and payload type export.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedInitializerAction {
+    /// Descriptor-local slot that supplies the action payload type export.
+    pub slot: ActionSlotId,
+    /// Image-owned dense action index for this component instance.
+    pub index: ActionIndex,
 }
 
 /// One direct typed payload binding required by an Enclave image.
@@ -59,6 +89,8 @@ pub enum RequiredBinding {
         implementation: ImplementationId,
         /// Implementation-local descriptor reactor slot.
         reactor: ReactorSlotId,
+        /// Instance-specific initializer capabilities resolved during lowering.
+        initializer: Option<ResolvedInitializerCapabilities>,
     },
     /// Invokes one user reaction implementation.
     Reaction {
@@ -813,11 +845,13 @@ mod tests {
             component: ComponentInstanceId::new("fleet/left").unwrap(),
             implementation: ImplementationId::new("shared-match").unwrap(),
             reactor,
+            initializer: None,
         };
         let right = RequiredBinding::State {
             component: ComponentInstanceId::new("fleet/right").unwrap(),
             implementation: ImplementationId::new("shared-match").unwrap(),
             reactor: ReactorSlotId::new("Match").unwrap(),
+            initializer: None,
         };
 
         assert_ne!(left, right);
@@ -876,6 +910,7 @@ mod tests {
                     component: ComponentInstanceId::new("vehicle/main").unwrap(),
                     implementation: ImplementationId::new("main-host").unwrap(),
                     reactor: ReactorSlotId::new("Main").unwrap(),
+                    initializer: None,
                 }]),
             },
             storage_bounds: StorageBounds::new(1, 0, 0, 0, 0, 0),

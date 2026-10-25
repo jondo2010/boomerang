@@ -10,7 +10,6 @@ use quote::quote;
 use std::collections::BTreeMap;
 
 pub(super) fn render_bindings(
-    components: &BTreeMap<ImplementationId, ComponentRegistration>,
     enclaves: &[OwnedEnclaveImage],
     enclave_start: usize,
     exports: &BTreeMap<ImplementationId, ComponentRegistration>,
@@ -20,33 +19,9 @@ pub(super) fn render_bindings(
 ) -> Result<TokenStream> {
     let inputs = &physical.sources;
     let manual = physical.manual_clock;
-    let writers = enclaves
-        .iter()
-        .flat_map(|enclave| enclave.required_bindings().iter())
-        .filter(|binding| {
-            let RequiredBinding::State {
-                reactor,
-                implementation,
-                ..
-            } = binding
-            else {
-                return false;
-            };
-            components
-                .get(implementation)
-                .expect("validated registration")
-                .descriptor
-                .reactor_slots()
-                .iter()
-                .any(|slot| {
-                    &slot.id == reactor
-                        && slot
-                            .capabilities
-                            .as_ref()
-                            .is_some_and(|caps| caps.clock_control)
-                })
-        })
-        .count();
+    let writers = enclaves.iter().flat_map(|enclave| enclave.required_bindings().iter()).filter(|binding| {
+        matches!(binding, RequiredBinding::State { initializer: Some(required), .. } if required.clock_control)
+    }).count();
     if writers > 1 {
         bail!("manual clock control must have one component owner");
     }
@@ -61,7 +36,7 @@ pub(super) fn render_bindings(
         let mut bindings = TokenStream::new();
         for (slot, binding) in enclave.required_bindings().iter().enumerate() {
             bindings.extend(
-                render_binding(components, exports, slot, binding, enclave, inputs, manual)
+                render_binding(exports, slot, binding, inputs, manual)
                     .map_err(|error| crate::CompilationError::render_binding(error, binding))?,
             );
         }
@@ -115,8 +90,7 @@ pub(super) fn collect_route_bindings(
         let port = &image.ports[route.local_port()];
         let binding = enclave
             .required_bindings()
-            .iter()
-            .nth(usize::try_from(port.binding().as_u32())?)
+            .get(port.binding())
             .expect("compiled port binding index is validated");
         let RequiredBinding::Port { implementation, .. } = binding else {
             bail!("route '{boundary}' local port does not have a port binding");
@@ -169,11 +143,9 @@ fn render_route_bindings(routes: RouteBindings) -> TokenStream {
 
 /// Emits one state, reaction, port, or action binding chain entry.
 fn render_binding(
-    components: &BTreeMap<ImplementationId, ComponentRegistration>,
     exports: &BTreeMap<ImplementationId, ComponentRegistration>,
     slot: usize,
     binding: &RequiredBinding,
-    enclave: &OwnedEnclaveImage,
     inputs: &BTreeMap<ComponentInstanceId, u32>,
     manual: bool,
 ) -> Result<TokenStream> {
@@ -191,18 +163,11 @@ fn render_binding(
     let path = binding_path(&alias.payload, &symbol)?;
     match binding {
         RequiredBinding::State {
-            component, reactor, ..
+            component,
+            initializer,
+            ..
         } => {
-            let descriptor = &components
-                .get(implementation)
-                .context("missing component registration")?
-                .descriptor;
-            let declaration = descriptor
-                .reactor_slots()
-                .iter()
-                .find(|slot| &slot.id == reactor)
-                .expect("state reactor descriptor");
-            let Some(required) = &declaration.capabilities else {
+            let Some(required) = initializer else {
                 return Ok(quote!(.bind_state(BindingSlotIndex::new(#slot), #path)));
             };
             if required.clock_control && !manual {
@@ -220,20 +185,12 @@ fn render_binding(
             let mut action_rows = Vec::new();
             let mut requirements = Vec::new();
             for action in &required.actions {
-                let (action_slot, action_binding) = enclave.required_bindings().iter().enumerate().find(|(_, binding)| matches!(binding, RequiredBinding::Action { component: owner, action: candidate, .. } if owner == component && candidate == action)).ok_or_else(|| anyhow!("initializer action '{action}' missing from component '{component}'"))?;
-                let payload = binding_path(&alias.payload, &action_binding.symbol())?;
-                let row = enclave.with_image(|image| {
-                    let slot = boomerang_runtime::image::BindingSlotIndex::new(
-                        u32::try_from(action_slot).expect("compiled binding index"),
-                    );
-                    image
-                        .actions
-                        .iter()
-                        .find_map(|(row, action)| {
-                            (action.binding() == Some(slot)).then_some(row.as_u32())
-                        })
-                        .expect("action binding has image row")
-                });
+                let symbol = boomerang_builder::compiler::direct_binding_symbol(
+                    boomerang_runtime::image::BindingKind::Action,
+                    action.slot.path(),
+                );
+                let payload = binding_path(&alias.payload, &symbol)?;
+                let row = action.index.as_u32();
                 action_rows.push(quote!(ActionIndex::new(#row)));
                 requirements.push(quote!(boomerang_runtime::initialization::ActionCapability::new(ActionIndex::new(#row), #payload)));
             }

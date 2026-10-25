@@ -12,9 +12,9 @@ use crate::{
         ResolvedDeployment, RuntimeBackendId, StableEnclaveId, TargetTriple, TransportCapabilityId,
     },
     descriptor::{
-        ActionSlot, ActionSlotId, ComponentDescriptor, DescriptorBound, DescriptorBounds, PortSlot,
-        PortSlotId, ReactionSlot, ReactionSlotId, ReactorSlot, ReactorSlotId,
-        COMPONENT_DESCRIPTOR_MACRO_ABI,
+        ActionSlot, ActionSlotId, ComponentDescriptor, DescriptorBound, DescriptorBounds,
+        InitializerCapabilities, PortSlot, PortSlotId, ReactionSlot, ReactionSlotId, ReactorSlot,
+        ReactorSlotId, COMPONENT_DESCRIPTOR_MACRO_ABI,
     },
     runtime::image::{
         ActionIndex, ActionTiming, BindingKind, BoundaryFailurePolicy, CodecPolicy,
@@ -100,7 +100,11 @@ fn descriptor_with_root(
         1,
         COMPONENT_DESCRIPTOR_MACRO_ABI,
         vec![ReactorSlot {
-            capabilities: None,
+            capabilities: (contract == "controller.v1").then(|| InitializerCapabilities {
+                source: None,
+                actions: vec![ActionSlotId::new(format!("{root}/pulse")).unwrap()],
+                clock_control: false,
+            }),
             id: reactor.clone(),
             parent: None,
         }],
@@ -725,13 +729,22 @@ fn controller_descriptor_with(
     reactor_slots: Vec<ReactorSlot>,
     reaction_slots: Vec<ReactionSlot>,
 ) -> ComponentDescriptor {
+    let complete = descriptor("controller.v1", known_bounds());
+    let (ports, actions) = if reactor_slots.is_empty() {
+        (vec![], vec![])
+    } else {
+        (
+            complete.port_slots().to_vec(),
+            complete.action_slots().to_vec(),
+        )
+    };
     ComponentDescriptor::try_new(
         "controller.v1".parse().unwrap(),
         1,
         COMPONENT_DESCRIPTOR_MACRO_ABI,
         reactor_slots,
-        vec![],
-        vec![],
+        ports,
+        actions,
         reaction_slots,
         vec![],
         vec![],
@@ -853,6 +866,38 @@ fn lowering_reports_invalid_descriptor_slot_mappings() {
             logical,
             ..
         }) if logical == "vehicle/controller/emit"
+    ));
+
+    let original = descriptor("controller.v1", known_bounds());
+    let missing = ActionSlotId::new("Controller/missing").unwrap();
+    let mut reactors = original.reactor_slots().to_vec();
+    reactors[0].capabilities.as_mut().unwrap().actions = vec![missing.clone()];
+    let mut actions = original.action_slots().to_vec();
+    actions.push(ActionSlot {
+        id: missing.clone(),
+        reactor: reactors[0].id.clone(),
+    });
+    let absent_action = ComponentDescriptor::try_new(
+        original.contract_id().clone(),
+        original.contract_version(),
+        original.macro_abi(),
+        reactors,
+        original.port_slots().to_vec(),
+        actions,
+        original.reaction_slots().to_vec(),
+        original.mode_slots().to_vec(),
+        original.state_slots().to_vec(),
+        original.codec_slots().to_vec(),
+        original.relationships().to_vec(),
+        original.placement_groups().to_vec(),
+        original.enclaves().to_vec(),
+        original.bounds(),
+    )
+    .unwrap();
+    assert!(matches!(
+        deployment_with_controller_descriptor(absent_action).lower(),
+        Err(CompileError::MissingInitializerAction { action, component, .. })
+            if action == missing && component.to_string() == "vehicle/controller"
     ));
 }
 
@@ -1442,6 +1487,18 @@ fn same_tag_reaction_dependencies_are_precomputed_before_slicing() {
 #[test]
 fn modes_actions_lifecycle_and_scopes_are_fully_lowered() {
     let compiled = deployment(false, false).lower().unwrap();
+    let owner = &federate_enclaves(&compiled, FederateIndex::new(0))[0];
+    let initializer = owner
+        .required_bindings()
+        .iter()
+        .find_map(|binding| match binding {
+            RequiredBinding::State { initializer, .. } => initializer.as_ref(),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(initializer.actions.len(), 1);
+    assert_eq!(initializer.actions[0].slot.to_string(), "Controller/pulse");
+    assert_eq!(initializer.actions[0].index, ActionIndex::new(0));
     federate_enclaves(&compiled, FederateIndex::new(0))[0]
         .with_view(|enclave| {
             assert_eq!(enclave.actions().len(), 4);

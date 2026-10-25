@@ -69,7 +69,6 @@ pub fn render_definitions(
     }
     let federate = image::render_federate(slice);
     let bindings = bindings::render_bindings(
-        components,
         slice.enclaves(),
         slice.enclave_range().start(),
         components,

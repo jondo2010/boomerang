@@ -53,8 +53,8 @@ pub(super) struct Relation<'a> {
     pub kind: DescriptorRelationshipKind,
     /// Resolved local declaration or lifecycle target.
     pub target: Target<'a>,
-    /// Last same-name port or action, independent of descriptor and payload name precedence.
-    pub topology_argument: Option<&'a Arg>,
+    /// Final topology domain, independent of descriptor and payload name precedence.
+    pub topology_target: Option<TopologyTarget>,
     /// Original reference syntax for local paths and precise diagnostics.
     pub reference: Option<&'a PathOrIdent>,
     /// Reset or history semantics for a declared mode transition.
@@ -63,7 +63,17 @@ pub(super) struct Relation<'a> {
     pub position: u32,
 }
 
+/// Typed domain used for topology relationship ordering and flags.
+#[derive(Clone, Copy)]
+pub(super) enum TopologyTarget {
+    /// Declared input or output port.
+    Port,
+    /// Declared action or reserved lifecycle fallback.
+    Action,
+}
+
 /// Shared target classification with concrete Rust declaration ownership.
+#[derive(Clone, Copy)]
 pub(super) enum Target<'a> {
     /// Same-name arguments in the structural and payload namespaces.
     Argument {
@@ -85,55 +95,75 @@ impl<'a> Declaration<'a> {
     pub fn new(args: &ReactorArgs, model: &'a Model) -> Self {
         let modes = model.body.modes().collect::<Vec<_>>();
         let mut targets = BTreeMap::new();
-        let mut topology_targets = BTreeMap::new();
         let priority = |arg: &Arg| match arg.kind {
             ArgKind::Input { .. } | ArgKind::Output { .. } => 0,
             ArgKind::LogicalAction { .. } | ArgKind::PhysicalAction { .. } => 1,
             ArgKind::State { .. } | ArgKind::Param { .. } => 2,
         };
         for arg in &model.args {
-            if priority(arg) < 2 {
-                topology_targets.insert(ident_text(&arg.name.ident), arg);
-            }
+            let topology = match arg.kind {
+                ArgKind::Input { .. } | ArgKind::Output { .. } => Some(TopologyTarget::Port),
+                ArgKind::LogicalAction { .. } | ArgKind::PhysicalAction { .. } => {
+                    Some(TopologyTarget::Action)
+                }
+                ArgKind::State { .. } | ArgKind::Param { .. } => None,
+            };
             targets
                 .entry(ident_text(&arg.name.ident))
-                .and_modify(|target| {
+                .and_modify(|(target, previous_topology)| {
+                    if topology.is_some() {
+                        *previous_topology = topology;
+                    }
                     if let Target::Argument { structural, .. } = target {
                         if priority(arg) < priority(structural) {
                             *structural = arg;
                         }
                     }
                 })
-                .or_insert(Target::Argument {
-                    structural: arg,
-                    payload: arg,
-                });
+                .or_insert((
+                    Target::Argument {
+                        structural: arg,
+                        payload: arg,
+                    },
+                    topology,
+                ));
         }
         for mode in &modes {
-            targets.insert(mode.name_str(), Target::Mode(mode));
+            targets
+                .entry(mode.name_str())
+                .and_modify(|(target, _)| *target = Target::Mode(mode))
+                .or_insert((Target::Mode(mode), None));
         }
         let resolve = |reference: &'a PathOrIdent| match reference {
-            PathOrIdent::Simple(ident) => match targets.get(&ident_text(ident)) {
-                Some(Target::Argument {
-                    structural,
-                    payload,
-                }) => Target::Argument {
-                    structural,
-                    payload,
-                },
-                Some(Target::Mode(mode)) => Target::Mode(mode),
-                _ => Target::Lexical,
-            },
+            PathOrIdent::Simple(ident) => targets
+                .get(&ident_text(ident))
+                .map_or(Target::Lexical, |(target, _)| *target),
             PathOrIdent::Field(_) => Target::Lexical,
         };
-        let mut declarations = Vec::new();
-        model.body.reactions(None, &mut declarations);
         let mut next_generated = 0;
         let mut names = BTreeSet::new();
         let mut name_error = None;
-        let reactions = declarations
-            .into_iter()
-            .map(|(scope, reaction)| {
+        let mut reactions = Vec::new();
+        let mut unsupported = None;
+        for item in &model.body.items {
+            let (scope, items) = match item {
+                BodyItem::Mode(mode) => (Some(mode), mode.body.items.as_slice()),
+                _ => (None, std::slice::from_ref(item)),
+            };
+            for item in items {
+                let reaction = match item {
+                    BodyItem::Reaction(reaction) => reaction,
+                    BodyItem::Tokens(tokens) => {
+                        if unsupported.is_none() {
+                            unsupported =
+                                tokens.clone().into_iter().next().map(|token| token.span());
+                        }
+                        continue;
+                    }
+                    BodyItem::Mode(_) => {
+                        unreachable!("nested mode blocks are rejected during parsing")
+                    }
+                };
                 if let Some(name) = reaction.name() {
                     if !names.insert(ident_text(name)) && name_error.is_none() {
                         name_error = Some(syn::Error::new(
@@ -164,8 +194,15 @@ impl<'a> Declaration<'a> {
                     relations.push(Relation {
                         kind,
                         target,
-                        topology_argument: topology_name
-                            .and_then(|name| topology_targets.get(&name).copied()),
+                        topology_target: topology_name.and_then(|name| {
+                            targets
+                                .get(&name)
+                                .and_then(|(_, topology)| *topology)
+                                .or_else(|| {
+                                    matches!(name.as_str(), "__startup" | "__shutdown")
+                                        .then_some(TopologyTarget::Action)
+                                })
+                        }),
                         reference,
                         transition,
                         position: u32::try_from(position).expect("relationship count fits u32"),
@@ -221,14 +258,14 @@ impl<'a> Declaration<'a> {
                     };
                     record(kind, target, Some(reference), transition, position);
                 }
-                Reaction {
+                reactions.push(Reaction {
                     model: reaction,
                     slot: CanonicalReactionSlot::for_reaction(reaction, &mut next_generated),
                     scope,
                     relations,
-                }
-            })
-            .collect();
+                });
+            }
+        }
         names.clear();
         for mode in &modes {
             if !names.insert(mode.name_str()) && name_error.is_none() {
@@ -242,7 +279,7 @@ impl<'a> Declaration<'a> {
             model,
             modes,
             reactions,
-            unsupported: model.body.unsupported_span(),
+            unsupported,
             initializer_actions: args
                 .init_context
                 .as_ref()

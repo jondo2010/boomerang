@@ -17,7 +17,6 @@ pub(super) fn parse_descriptor(
     declaration: &declaration::Declaration<'_>,
 ) -> syn::Result<Option<ComponentDescriptor>> {
     let model = declaration.model;
-    args.validate()?;
     let (Some(contract), Some(version)) = (&args.contract, &args.contract_version) else {
         return Ok(None);
     };
@@ -294,7 +293,8 @@ mod tests {
     }"#;
 
     fn descriptor(args: &str, model: &str) -> ComponentDescriptor {
-        let args = syn::parse_str(args).unwrap();
+        let args: ReactorArgs = syn::parse_str(args).unwrap();
+        args.validate().unwrap();
         parse_descriptor(
             &args,
             &declaration::Declaration::new(&args, &syn::parse_str(model).unwrap()),

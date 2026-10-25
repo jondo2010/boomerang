@@ -637,28 +637,6 @@ impl ReactorBody {
         tokens
     }
 
-    fn unsupported_span(&self) -> Option<Span> {
-        self.items.iter().find_map(|item| match item {
-            BodyItem::Tokens(tokens) => tokens.clone().into_iter().next().map(|token| token.span()),
-            BodyItem::Mode(mode) => mode.body.unsupported_span(),
-            BodyItem::Reaction(_) => None,
-        })
-    }
-
-    fn reactions<'a>(
-        &'a self,
-        scope: Option<&'a ModeDecl>,
-        output: &mut Vec<(Option<&'a ModeDecl>, &'a crate::reaction::Model)>,
-    ) {
-        for item in &self.items {
-            match item {
-                BodyItem::Mode(mode) => mode.body.reactions(Some(mode), output),
-                BodyItem::Reaction(reaction) => output.push((scope, reaction)),
-                BodyItem::Tokens(_) => {}
-            }
-        }
-    }
-
     fn modes(&self) -> impl Iterator<Item = &ModeDecl> {
         self.items.iter().filter_map(|item| match item {
             BodyItem::Mode(mode) => Some(mode),
@@ -761,38 +739,12 @@ fn required_binding_symbol(prefix: &str, segments: &[&str]) -> Ident {
     format_ident!("{symbol}")
 }
 
-/// Runtime reference partition selected from a payload declaration.
-enum PayloadRefKind {
-    /// Immutable input port references.
-    Input,
-    /// Mutable output port references.
-    Output,
-    /// Input bank with a declaration-owned width and element type.
-    InputBank {
-        /// Number of contiguous input references.
-        length: syn::Expr,
-        /// Concrete payload type of each input reference.
-        payload: Type,
-    },
-    /// Output bank with a declaration-owned width and element type.
-    OutputBank {
-        /// Number of contiguous output references.
-        length: syn::Expr,
-        /// Concrete payload type of each output reference.
-        payload: Type,
-    },
-    /// Logical, physical, startup, or shutdown action references.
-    Action,
-    /// Image-owned mode transition capability.
-    Mode,
-}
-
-/// Resolves one own-relation reference to its concrete payload parameter type and partition.
+/// Resolves one own-relation reference to its payload parameter type and extraction expression.
 fn payload_ref(
     reactor_name: &str,
     relation: &declaration::Relation<'_>,
     store_lifetime: &syn::Lifetime,
-) -> syn::Result<(Ident, TokenStream, PayloadRefKind)> {
+) -> syn::Result<(Ident, TokenStream, Option<TokenStream>)> {
     let path = relation
         .reference
         .expect("payload local relationship has reference syntax");
@@ -807,7 +759,7 @@ fn payload_ref(
         return Ok((
             ident.clone(),
             quote!(::boomerang::runtime::CompiledModeEffectRef),
-            PayloadRefKind::Mode,
+            None,
         ));
     }
     let declaration::Target::Argument { payload: arg, .. } = &relation.target else {
@@ -818,32 +770,75 @@ fn payload_ref(
             ),
         ));
     };
-    let reference = match (&arg.kind, &arg.ty) {
-        (ArgKind::Input { len: None }, Type::Array(array)) => {
-            let element = &array.elem;
-            let len = &array.len;
-            quote!([::boomerang::runtime::InputRef<#store_lifetime, #element>; #len])
-        }
-        (ArgKind::Output { len: None }, Type::Array(array)) => {
-            let element = &array.elem;
-            let len = &array.len;
-            quote!([::boomerang::runtime::OutputRef<#store_lifetime, #element>; #len])
-        }
-        (ArgKind::Input { len: Some(_) }, ty) => {
-            quote!(::boomerang::runtime::InputBankRef<#store_lifetime, #ty>)
-        }
-        (ArgKind::Output { len: Some(_) }, ty) => {
-            quote!(::boomerang::runtime::OutputBankRef<#store_lifetime, #ty>)
-        }
+    let (reference, extraction) = match (&arg.kind, &arg.ty) {
         (ArgKind::Input { len: None }, ty) => {
-            quote!(::boomerang::runtime::InputRef<#store_lifetime, #ty>)
+            let reference = match ty {
+                Type::Array(array) => {
+                    let element = &array.elem;
+                    let len = &array.len;
+                    quote!([::boomerang::runtime::InputRef<#store_lifetime, #element>; #len])
+                }
+                _ => quote!(::boomerang::runtime::InputRef<#store_lifetime, #ty>),
+            };
+            (
+                reference,
+                quote! {
+                    let (value, rest) = ::boomerang::runtime::refs::Partition::part(refs.ports)?;
+                    refs.ports = rest;
+                    value
+                },
+            )
         }
         (ArgKind::Output { len: None }, ty) => {
-            quote!(::boomerang::runtime::OutputRef<#store_lifetime, #ty>)
+            let reference = match ty {
+                Type::Array(array) => {
+                    let element = &array.elem;
+                    let len = &array.len;
+                    quote!([::boomerang::runtime::OutputRef<#store_lifetime, #element>; #len])
+                }
+                _ => quote!(::boomerang::runtime::OutputRef<#store_lifetime, #ty>),
+            };
+            (
+                reference,
+                quote! {
+                    let (value, rest) = ::boomerang::runtime::refs::PartitionMut::part_mut(refs.ports_mut)?;
+                    refs.ports_mut = rest;
+                    value
+                },
+            )
         }
-        (ArgKind::LogicalAction { .. } | ArgKind::PhysicalAction { .. }, ty) => {
-            quote!(::boomerang::runtime::ActionRef<#store_lifetime, #ty>)
-        }
+        (ArgKind::Input { len: Some(length) }, ty) => (
+            quote!(::boomerang::runtime::InputBankRef<#store_lifetime, #ty>),
+            quote! {
+                let ports = ::boomerang::runtime::Refs::take(&mut refs.ports, #length)?;
+                for port in ports.iter() {
+                    ::boomerang::runtime::InputRef::<#ty>::try_from(
+                        ::boomerang::runtime::DynPortRef(port),
+                    )?;
+                }
+                ::boomerang::runtime::InputBankRef::from_slice(ports)
+            },
+        ),
+        (ArgKind::Output { len: Some(length) }, ty) => (
+            quote!(::boomerang::runtime::OutputBankRef<#store_lifetime, #ty>),
+            quote! {
+                let mut ports = ::boomerang::runtime::RefsMut::take(&mut refs.ports_mut, #length)?;
+                for port in ports.iter_mut() {
+                    ::boomerang::runtime::OutputRef::<#ty>::try_from(
+                        ::boomerang::runtime::DynPortRefMut(port),
+                    )?;
+                }
+                ::boomerang::runtime::OutputBankRef::from_slice(ports)
+            },
+        ),
+        (ArgKind::LogicalAction { .. } | ArgKind::PhysicalAction { .. }, ty) => (
+            quote!(::boomerang::runtime::ActionRef<#store_lifetime, #ty>),
+            quote! {
+                let (value, rest) = ::boomerang::runtime::refs::PartitionMut::part_mut(refs.actions)?;
+                refs.actions = rest;
+                value
+            },
+        ),
         (ArgKind::State { .. } | ArgKind::Param { .. }, _) => {
             return Err(syn::Error::new_spanned(
                 path,
@@ -851,21 +846,7 @@ fn payload_ref(
             ))
         }
     };
-    let kind = match &arg.kind {
-        ArgKind::Input { len: Some(length) } => PayloadRefKind::InputBank {
-            length: length.clone(),
-            payload: arg.ty.clone(),
-        },
-        ArgKind::Output { len: Some(length) } => PayloadRefKind::OutputBank {
-            length: length.clone(),
-            payload: arg.ty.clone(),
-        },
-        ArgKind::Input { len: None } => PayloadRefKind::Input,
-        ArgKind::Output { len: None } => PayloadRefKind::Output,
-        ArgKind::LogicalAction { .. } | ArgKind::PhysicalAction { .. } => PayloadRefKind::Action,
-        ArgKind::State { .. } | ArgKind::Param { .. } => unreachable!("non-reference argument"),
-    };
-    Ok((ident.clone(), reference, kind))
+    Ok((ident.clone(), reference, Some(extraction)))
 }
 
 /// Chooses a generated payload-reference lifetime absent from user generics.
@@ -906,71 +887,36 @@ fn payload_reaction_output(
             let export_doc = format!(
                 "Invokes payload reaction `{reactor_name}/{reaction_name}` through the erased runtime callback."
             );
-            let mut refs = Vec::new();
-            for relation in &declaration.relations {
-                match relation.target {
-                    declaration::Target::Lifecycle(boomerang_builder::DescriptorLifecycle::Startup) => refs.push((
-                        format_ident!("startup"),
-                        quote!(::boomerang::runtime::ActionRef<#store_lifetime>),
-                        PayloadRefKind::Action,
-                    )),
-                    declaration::Target::Lifecycle(boomerang_builder::DescriptorLifecycle::Shutdown) => refs.push((
-                        format_ident!("shutdown"),
-                        quote!(::boomerang::runtime::ActionRef<#store_lifetime>),
-                        PayloadRefKind::Action,
-                    )),
-                    declaration::Target::Lifecycle(boomerang_builder::DescriptorLifecycle::Reset) => {},
-                    _ => refs.push(payload_ref(&reactor_name, relation, &store_lifetime)?),
-                }
-            }
+            let mut parameters = Vec::new();
             let mut extraction = Vec::new();
             let mut arguments = Vec::new();
-            for (ordinal, (_, ty, kind)) in refs.iter().enumerate() {
+            for relation in &declaration.relations {
+                let (name, ty, expression) = match relation.target {
+                    declaration::Target::Lifecycle(lifecycle @ (
+                        boomerang_builder::DescriptorLifecycle::Startup
+                        | boomerang_builder::DescriptorLifecycle::Shutdown
+                    )) => (
+                        format_ident!("{}", if lifecycle == boomerang_builder::DescriptorLifecycle::Startup { "startup" } else { "shutdown" }),
+                        quote!(::boomerang::runtime::ActionRef<#store_lifetime>),
+                        Some(quote! {
+                            let (value, rest) = ::boomerang::runtime::refs::PartitionMut::part_mut(refs.actions)?;
+                            refs.actions = rest;
+                            value
+                        }),
+                    ),
+                    declaration::Target::Lifecycle(boomerang_builder::DescriptorLifecycle::Reset) => continue,
+                    _ => payload_ref(&reactor_name, relation, &store_lifetime)?,
+                };
+                let ordinal = parameters.len();
+                parameters.push(quote!(mut #name: #ty));
                 let local = format_ident!("reference_{ordinal}");
-                let expression = match kind {
-                    PayloadRefKind::Input => quote! {
-                        let (value, rest) = ::boomerang::runtime::refs::Partition::part(refs.ports)?;
-                        refs.ports = rest;
-                        value
-                    },
-                    PayloadRefKind::Output => quote! {
-                        let (value, rest) = ::boomerang::runtime::refs::PartitionMut::part_mut(refs.ports_mut)?;
-                        refs.ports_mut = rest;
-                        value
-                    },
-                    PayloadRefKind::Action => quote! {
-                        let (value, rest) = ::boomerang::runtime::refs::PartitionMut::part_mut(refs.actions)?;
-                        refs.actions = rest;
-                        value
-                    },
-                    PayloadRefKind::InputBank { length, payload } => quote! {
-                        let ports = ::boomerang::runtime::Refs::take(&mut refs.ports, #length)?;
-                        for port in ports.iter() {
-                            ::boomerang::runtime::InputRef::<#payload>::try_from(
-                                ::boomerang::runtime::DynPortRef(port),
-                            )?;
-                        }
-                        ::boomerang::runtime::InputBankRef::from_slice(ports)
-                    },
-                    PayloadRefKind::OutputBank { length, payload } => quote! {
-                        let mut ports = ::boomerang::runtime::RefsMut::take(&mut refs.ports_mut, #length)?;
-                        for port in ports.iter_mut() {
-                            ::boomerang::runtime::OutputRef::<#payload>::try_from(
-                                ::boomerang::runtime::DynPortRefMut(port),
-                            )?;
-                        }
-                        ::boomerang::runtime::OutputBankRef::from_slice(ports)
-                    },
-                    PayloadRefKind::Mode => {
-                        arguments.push(quote!(mode_effect.expect("compiled mode effect is required")));
-                        continue;
-                    }
+                let Some(expression) = expression else {
+                    arguments.push(quote!(mode_effect.expect("compiled mode effect is required")));
+                    continue;
                 };
                 extraction.push(quote!(let #local: #ty = { #expression };));
                 arguments.push(quote!(#local));
             }
-            let ref_names = refs.iter().map(|(name, _, _)| name);
-            let ref_types = refs.iter().map(|(_, ty, _)| ty);
             let code = reaction.code();
             let mut generics = model.generics.clone();
             generics.params.insert(
@@ -1005,7 +951,7 @@ fn payload_reaction_output(
                 fn #typed_symbol #impl_generics(
                     ctx: &mut ::boomerang::runtime::Context,
                     state: &mut #state_type,
-                    (#(mut #ref_names,)*): (#(#ref_types,)*),
+                    #(#parameters,)*
                 ) #where_clause #code
 
                 #[doc = #export_doc]
@@ -1023,7 +969,7 @@ fn payload_reaction_output(
                     if remaining != 0 {
                         return Err(::boomerang::runtime::ReactionRefsError::destructure_remaining(remaining).into());
                     }
-                    #typed_symbol #specialization(ctx, state, (#(#arguments,)*));
+                    #typed_symbol #specialization(ctx, state, #(#arguments,)*);
                     Ok(())
                 }
             })

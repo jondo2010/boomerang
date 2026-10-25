@@ -129,31 +129,17 @@ fn generate(
                           relation: &declaration::Relation<'_>,
                           flags: TokenStream|
          -> syn::Result<()> {
-            let action = match relation.topology_argument {
-                Some(arg) => Some(matches!(
-                    arg.kind,
-                    ArgKind::LogicalAction { .. } | ArgKind::PhysicalAction { .. }
-                )),
-                None if matches!(relation.target, declaration::Target::Lifecycle(_))
-                    || name == "__startup"
-                    || name == "__shutdown" =>
-                {
-                    Some(true)
-                }
-                None => None,
-            };
-            let Some(action) = action else {
-                return Err(syn::Error::new_spanned(
-                    reaction.model.code(),
-                    format!(
+            let list = match relation.topology_target {
+                Some(declaration::TopologyTarget::Action) => &mut actions,
+                Some(declaration::TopologyTarget::Port) => &mut ports_relations,
+                None => {
+                    return Err(syn::Error::new_spanned(
+                        reaction.model.code(),
+                        format!(
                         "topology relationship `{name}` must name a declared scalar port or action"
                     ),
-                ));
-            };
-            let list = if action {
-                &mut actions
-            } else {
-                &mut ports_relations
+                    ))
+                }
             };
             if let Some((_, previous)) = list.iter_mut().find(|(target, _)| target == &name) {
                 // Legacy declaration overwrites relation mode while retaining its first position.
@@ -209,17 +195,19 @@ fn generate(
                             "reset/history effect requires a declared mode",
                         ));
                     }
-                    let history = relation.transition == Some(ModeTransitionKind::History);
+                    let kind = relation
+                        .transition
+                        .expect("mode effect has a transition kind");
                     if transition
                         .as_ref()
-                        .is_some_and(|previous| previous != &(name.clone(), history))
+                        .is_some_and(|previous| previous != &(name.clone(), kind))
                     {
                         return Err(syn::Error::new_spanned(
                             reference,
                             "topology reaction has inconsistent mode transitions",
                         ));
                     }
-                    transition = Some((name, history));
+                    transition = Some((name, kind));
                 }
                 Kind::Scope => unreachable!("normalized scopes belong to reactions"),
             }
@@ -247,8 +235,11 @@ fn generate(
         } else {
             quote!(vec![])
         };
-        let transition = transition.map_or(quote!(None), |(name, history)| {
-            let kind = if history { quote!(#compiler::ModeTransitionKind::History) } else { quote!(#compiler::ModeTransitionKind::Reset) };
+        let transition = transition.map_or(quote!(None), |(name, kind)| {
+            let kind = match kind {
+                ModeTransitionKind::History => quote!(#compiler::ModeTransitionKind::History),
+                ModeTransitionKind::Reset => quote!(#compiler::ModeTransitionKind::Reset),
+            };
             quote!(Some(#compiler::ModeTransition::new(#compiler::ModeId::from_path(root.path().append_name(#name)?), #kind)))
         });
         declarations.push(quote! {

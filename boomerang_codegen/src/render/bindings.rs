@@ -14,11 +14,10 @@ pub(super) fn render_bindings(
     enclave_start: usize,
     exports: &BTreeMap<ImplementationId, PayloadExports>,
     route_bindings: RouteBindings,
-    distributed: bool,
-    physical: &BindingConfiguration,
+    configuration: &BindingConfiguration,
 ) -> Result<TokenStream> {
-    let inputs = &physical.sources;
-    let manual = physical.manual_clock;
+    let inputs = &configuration.sources;
+    let manual = configuration.manual_clock;
     let writers = enclaves
         .iter()
         .flat_map(|enclave| enclave.required_bindings().iter())
@@ -55,7 +54,7 @@ pub(super) fn render_bindings(
     }
     let route_bindings = render_route_bindings(route_bindings);
     let body = quote!(FederateBindings::new() #(#enclave_bindings)* #route_bindings);
-    Ok(if distributed {
+    Ok(if configuration.distributed {
         quote! {
             pub fn generated_bindings(
                 _rti: &boomerang_central_rti::compiled::RtiClientBindings<'static>,

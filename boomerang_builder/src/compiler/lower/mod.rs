@@ -211,17 +211,19 @@ impl<'a> DescriptorSlots<'a> {
         let descriptor = deployment
             .implementation(binding.implementation())
             .expect("resolved implementation exists");
-        let roots = descriptor
+        let mut roots = descriptor
             .reactor_slots()
             .iter()
-            .filter(|slot| slot.parent.is_none())
-            .collect::<Vec<_>>();
-        let [root] = roots.as_slice() else {
-            return Err(CompileError::DescriptorRoot {
-                component: component.clone(),
-                implementation: binding.implementation().clone(),
-                roots: roots.len(),
-            });
+            .filter(|slot| slot.parent.is_none());
+        let root = match (roots.next(), roots.count()) {
+            (Some(root), 0) => root,
+            (first, remaining) => {
+                return Err(CompileError::DescriptorRoot {
+                    component: component.clone(),
+                    implementation: binding.implementation().clone(),
+                    roots: usize::from(first.is_some()) + remaining,
+                });
+            }
         };
         Ok(Self {
             component,
@@ -257,8 +259,7 @@ impl<'a> DescriptorSlots<'a> {
             .descriptor
             .reactor_slots()
             .iter()
-            .filter(|slot| self.matches_relative_path(logical.path(), slot.id.path()))
-            .collect::<Vec<_>>();
+            .filter(|slot| self.matches_relative_path(logical.path(), slot.id.path()));
         self.one_slot("reactor", logical.path(), matches)
     }
 
@@ -269,9 +270,8 @@ impl<'a> DescriptorSlots<'a> {
             .reaction_slots()
             .iter()
             .filter(|slot| self.matches_relative_path(logical.path(), slot.id.path()))
-            .map(|slot| slot.id.clone())
-            .collect::<Vec<_>>();
-        self.one_slot("reaction", logical.path(), matches)
+            .map(|slot| &slot.id);
+        self.one_slot("reaction", logical.path(), matches).cloned()
     }
 
     /// Resolves the descriptor port slot for one logical port.
@@ -294,9 +294,9 @@ impl<'a> DescriptorSlots<'a> {
                 .port_slots()
                 .iter()
                 .filter(|slot| self.matches_relative_path(&declaration, slot.id.path()))
-                .map(|slot| slot.id.clone())
-                .collect(),
+                .map(|slot| &slot.id),
         )
+        .cloned()
     }
 
     /// Resolves the descriptor action slot for one logical action.
@@ -308,36 +308,37 @@ impl<'a> DescriptorSlots<'a> {
                 .action_slots()
                 .iter()
                 .filter(|slot| self.matches_relative_path(logical.path(), slot.id.path()))
-                .map(|slot| slot.id.clone())
-                .collect(),
+                .map(|slot| &slot.id),
         )
+        .cloned()
     }
 
-    /// Converts a matching descriptor-slot set into one required binding slot.
+    /// Selects one matching descriptor slot and reports the exact candidate count.
     fn one_slot<T>(
         &self,
         kind: &'static str,
         logical: &StablePath,
-        matches: Vec<T>,
+        mut matches: impl Iterator<Item = T>,
     ) -> Result<T, CompileError> {
-        match matches.len() {
-            0 => Err(CompileError::MissingDescriptorSlot {
+        let first = matches
+            .next()
+            .ok_or_else(|| CompileError::MissingDescriptorSlot {
                 component: self.component.clone(),
                 implementation: self.implementation.clone(),
                 kind,
                 logical: logical.to_string(),
-            }),
-            1 => Ok(matches
-                .into_iter()
-                .next()
-                .expect("one matching descriptor slot")),
-            candidates => Err(CompileError::AmbiguousDescriptorSlot {
+            })?;
+        let remaining = matches.count();
+        if remaining == 0 {
+            Ok(first)
+        } else {
+            Err(CompileError::AmbiguousDescriptorSlot {
                 component: self.component.clone(),
                 implementation: self.implementation.clone(),
                 kind,
                 logical: logical.to_string(),
-                candidates,
-            }),
+                candidates: remaining + 1,
+            })
         }
     }
 }

@@ -48,12 +48,27 @@ pub fn render_definitions(
         .flat_map(|enclave| enclave.required_bindings().iter())
         .map(RequiredBinding::implementation)
         .collect::<BTreeSet<_>>();
-    for implementation in &selected {
-        if !catalog.contains_key(implementation) || !exports.contains_key(implementation) {
+    let mut checks = TokenStream::new();
+    for implementation in selected {
+        let (Some(descriptor), Some(payload)) =
+            (catalog.get(implementation), exports.get(implementation))
+        else {
             return Err(anyhow!(
                 "missing registration for implementation '{implementation}'"
             ));
-        }
+        };
+        let bytes = descriptor.fingerprint().to_bytes();
+        let bytes = bytes.iter();
+        let abi = descriptor.macro_abi();
+        let path = &payload.path;
+        let manifest = match payload.manifest {
+            ManifestStyle::Function => quote!(#path::binding_manifest()),
+            ManifestStyle::Constant => quote!(#path::BINDING_MANIFEST),
+        };
+        checks.extend(quote! {
+            const _: ()=boomerang_runtime::binding::assert_descriptor_fingerprint(boomerang_runtime::binding::DescriptorFingerprint::new([#(#bytes),*]),#manifest.descriptor_fingerprint());
+            const _: ()=assert!(#abi==#manifest.macro_abi(),"macro ABI mismatch");
+        });
     }
     let mut routes = BTreeMap::new();
     let mut tables = TokenStream::new();
@@ -69,29 +84,12 @@ pub fn render_definitions(
         slice.enclave_range().start(),
         exports,
         routes,
-        configuration.distributed,
         configuration,
     )?;
-    let checks = selected.into_iter().map(|implementation| {
-        let descriptor = &catalog[implementation];
-        let payload = &exports[implementation];
-        let bytes = descriptor.fingerprint().to_bytes();
-        let bytes = bytes.iter();
-        let abi = descriptor.macro_abi();
-        let path = &payload.path;
-        let manifest = match payload.manifest {
-            ManifestStyle::Function => quote!(#path::binding_manifest()),
-            ManifestStyle::Constant => quote!(#path::BINDING_MANIFEST),
-        };
-        quote! {
-            const _: ()=boomerang_runtime::binding::assert_descriptor_fingerprint(boomerang_runtime::binding::DescriptorFingerprint::new([#(#bytes),*]),#manifest.descriptor_fingerprint());
-            const _: ()=assert!(#abi==#manifest.macro_abi(),"macro ABI mismatch");
-        }
-    });
     Ok(quote! {
         use boomerang_runtime::{EnclaveBindings,FederateBindings};
         use boomerang_runtime::image::*;
         use tinymap::{IndexSpan,SliceRange,TinyMapRef};
-        #(#checks)* #tables #federate #bindings
+        #checks #tables #federate #bindings
     })
 }

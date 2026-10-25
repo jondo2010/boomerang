@@ -105,15 +105,21 @@ pub struct RtiMemberImage {
     pub(super) affected_downstream: SliceRange<FederateIndex>,
 }
 
+/// A borrowed cross-Federate route image.
+pub type RtiRouteImage<'a> = RtiRouteRecord<BoundaryId<'a>>;
+
 /// One concrete directed cross-Federate boundary hop.
 ///
 /// [`RtiRouteIndex`] selects this deployment-wide record. Every route has its own stable boundary
 /// identity and route-specific settings. Its [`FlowIndex`] may be shared with other sequential or
 /// parallel routes belonging to the same end-to-end application flow.
+///
+/// `B` selects identity storage. Host compilers retain validated structured identities.
+/// Runtime images borrow canonical text through the corresponding image alias.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RtiRouteImage<'a> {
+pub struct RtiRouteRecord<B> {
     /// Stable identity of this concrete boundary hop.
-    pub(super) boundary: BoundaryId<'a>,
+    pub(super) boundary: B,
     /// Dense end-to-end application flow grouping this route with related hops.
     pub(super) flow: FlowIndex,
     /// Optional dense physical input identity.
@@ -142,12 +148,37 @@ pub struct RtiRouteImage<'a> {
     delay_nanos: u64,
 }
 
-impl<'a> RtiRouteImage<'a> {
+impl<B> RtiRouteRecord<B> {
+    /// Returns the stored boundary identity without a storage conversion.
+    pub const fn boundary_identity(&self) -> &B {
+        &self.boundary
+    }
+
+    /// Replaces the boundary identity without changing route coordinates or policies.
+    pub fn with_boundary<C>(&self, boundary: C) -> RtiRouteRecord<C> {
+        RtiRouteRecord {
+            boundary,
+            flow: self.flow,
+            physical_input: self.physical_input,
+            physical_output: self.physical_output,
+            failure_policy: self.failure_policy,
+            transport_policy: self.transport_policy,
+            codec_policy: self.codec_policy,
+            timing_policy: self.timing_policy,
+            security_policy: self.security_policy,
+            transport_capability: self.transport_capability,
+            codec_capability: self.codec_capability,
+            source: self.source,
+            target: self.target,
+            delay_nanos: self.delay_nanos,
+        }
+    }
+
     /// Creates one unchecked route record.
     #[must_use]
     #[allow(clippy::too_many_arguments, reason = "flat immutable image record")]
     pub const fn new(
-        boundary: BoundaryId<'a>,
+        boundary: B,
         flow: FlowIndex,
         physical_input: Option<PhysicalBoundaryIndex>,
         physical_output: Option<PhysicalBoundaryIndex>,

@@ -246,33 +246,8 @@ pub struct OwnedEnclaveImage {
     pub(crate) storage_bounds: StorageBounds,
 }
 
-/// Host-owned scheduler route retaining its typed stable boundary identity.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct OwnedRouteImage {
-    /// Stable scheduler-boundary identity.
-    pub(crate) boundary: BoundaryId,
-    /// Dense Enclave-local port attached to the boundary.
-    pub(crate) local_port: PortIndex,
-    /// Whether events enter or leave through the local port.
-    pub(crate) direction: crate::runtime::image::RouteDirection,
-    /// Clock domain used to interpret the route delay.
-    pub(crate) timing_domain: crate::runtime::image::TimingDomain,
-    /// Route delay in nanoseconds.
-    pub(crate) delay_nanos: u64,
-}
-
-impl OwnedRouteImage {
-    /// Borrows the owned route as a target-facing runtime image row.
-    fn image<'a>(&self, boundary: &'a str) -> RouteImage<'a> {
-        RouteImage::new(
-            runtime_image::BoundaryId::new(boundary),
-            self.local_port,
-            self.direction,
-            self.timing_domain,
-            self.delay_nanos,
-        )
-    }
-}
+/// Host-owned route retaining a validated stable boundary identity.
+pub(crate) type OwnedRouteImage = runtime_image::RouteRecord<BoundaryId>;
 
 /// Host-owned canonical implementation-binding identity and its required kind.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -357,7 +332,7 @@ impl OwnedEnclaveImage {
     fn route_identity_text(&self) -> Vec<String> {
         self.routes()
             .values()
-            .map(|route| route.boundary.to_canonical_string())
+            .map(|route| route.boundary_identity().to_canonical_string())
             .collect()
     }
 
@@ -369,7 +344,7 @@ impl OwnedEnclaveImage {
             .routes()
             .values()
             .zip(identities)
-            .map(|(route, boundary)| route.image(boundary));
+            .map(|(route, boundary)| route.with_boundary(runtime_image::BoundaryId::new(boundary)));
         let mut builder = HeapTinyMapBuilder::heap();
         if let Err(error) = builder.try_extend_exact(rows) {
             unreachable!("rendered routes are bounded by the sealed route table: {error}");

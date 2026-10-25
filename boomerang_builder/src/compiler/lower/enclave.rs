@@ -207,13 +207,13 @@ fn lower_routes(
     let mut images = tinymap::HeapTinyMapBuilder::heap();
     for (boundary, local_port, direction, timing_domain, delay_nanos) in routes {
         images
-            .try_insert(OwnedRouteImage {
+            .try_insert(OwnedRouteImage::new(
                 boundary,
                 local_port,
                 direction,
                 timing_domain,
                 delay_nanos,
-            })
+            ))
             .map_err(|_| CompileError::ResourceOverflow {
                 enclave: enclave_id.clone(),
                 resource: "routes",

@@ -9,6 +9,7 @@ use syn::{
 
 use crate::util::convert_from_snake_case;
 
+mod declaration;
 pub(crate) mod emission;
 mod init_context;
 mod semantic;
@@ -585,26 +586,28 @@ impl ReactorBody {
     }
 
     fn body_tokens(&self) -> TokenStream {
-        self.body_tokens_with_descriptor_slots(None, &mut 0)
+        self.body_tokens_with_descriptor_slots(None, &mut std::iter::empty())
     }
 
     /// Emits dynamic body tokens while assigning descriptor reaction slots in source order.
-    fn body_tokens_with_descriptor_slots(
+    fn body_tokens_with_descriptor_slots<'a>(
         &self,
         reactor_name: Option<&str>,
-        ordinal: &mut u32,
+        slots: &mut impl Iterator<Item = &'a CanonicalReactionSlot>,
     ) -> TokenStream {
         let mut tokens = TokenStream::new();
         for item in &self.items {
             match item {
                 BodyItem::Tokens(body_tokens) => tokens.append_all(body_tokens.clone()),
                 BodyItem::Reaction(reaction) => {
-                    let descriptor_slot =
-                        reactor_name.map(|reactor_name| match CanonicalReactionSlot::for_reaction(
-                            reaction, ordinal,
-                        ) {
+                    let descriptor_slot = reactor_name.map(|reactor_name| {
+                        match slots
+                            .next()
+                            .expect("normalized reaction order matches the body")
+                        {
                             CanonicalReactionSlot::Named(name) => {
-                                let path = stable_path_tokens(&[reactor_name.to_owned(), name]);
+                                let path =
+                                    stable_path_tokens(&[reactor_name.to_owned(), name.clone()]);
                                 quote!(::boomerang::builder::ReactionSlotId::from_path(#path))
                             }
                             CanonicalReactionSlot::Generated(ordinal) => {
@@ -613,14 +616,15 @@ impl ReactorBody {
                                     (#reactor_path).append_generated_ordinal(#ordinal)
                                 ))
                             }
-                        });
+                        }
+                    });
                     reaction.to_tokens_with_descriptor_slot(&mut tokens, descriptor_slot);
                 }
                 BodyItem::Mode(mode) => {
                     let key_ident = mode.key_ident();
                     let body = mode
                         .body
-                        .body_tokens_with_descriptor_slots(reactor_name, ordinal);
+                        .body_tokens_with_descriptor_slots(reactor_name, slots);
                     tokens.append_all(quote! {
                         ctx.in_mode(#key_ident, |ctx| {
                             #body
@@ -655,36 +659,6 @@ impl ReactorBody {
         }
     }
 
-    fn validate_unique_reaction_names(&self) -> syn::Result<()> {
-        let mut reactions = Vec::new();
-        self.reactions(None, &mut reactions);
-        let mut names = BTreeSet::new();
-        for (_, reaction) in reactions {
-            if let Some(name) = reaction.name() {
-                if !names.insert(ident_text(name)) {
-                    return Err(syn::Error::new(
-                        name.span(),
-                        format!("duplicate reaction name `{name}`"),
-                    ));
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn validate_unique_mode_names(&self) -> syn::Result<()> {
-        let mut names = BTreeSet::new();
-        for mode in self.modes() {
-            if !names.insert(ident_text(&mode.name)) {
-                return Err(syn::Error::new(
-                    mode.name.span(),
-                    format!("duplicate mode name `{}`", mode.name),
-                ));
-            }
-        }
-        Ok(())
-    }
-
     fn modes(&self) -> impl Iterator<Item = &ModeDecl> {
         self.items.iter().filter_map(|item| match item {
             BodyItem::Mode(mode) => Some(mode),
@@ -716,9 +690,9 @@ impl CanonicalReactionSlot {
     }
 
     /// Formats the slot segment for generated binding symbols.
-    fn text(self) -> String {
+    fn text(&self) -> String {
         match self {
-            Self::Named(name) => name,
+            Self::Named(name) => name.clone(),
             Self::Generated(ordinal) => format!("#g{ordinal}"),
         }
     }
@@ -816,11 +790,12 @@ enum PayloadRefKind {
 /// Resolves one own-relation reference to its concrete payload parameter type and partition.
 fn payload_ref(
     reactor_name: &str,
-    args: &[Arg],
-    mode_names: &[String],
-    path: &crate::reaction::PathOrIdent,
+    relation: &declaration::Relation<'_>,
     store_lifetime: &syn::Lifetime,
 ) -> syn::Result<(Ident, TokenStream, PayloadRefKind)> {
+    let path = relation
+        .reference
+        .expect("payload local relationship has reference syntax");
     let crate::reaction::PathOrIdent::Simple(ident) = path else {
         return Err(syn::Error::new_spanned(
             path,
@@ -828,14 +803,14 @@ fn payload_ref(
         ));
     };
     let name = ident_text(ident);
-    if mode_names.contains(&name) {
+    if matches!(relation.target, declaration::Target::Mode(_)) {
         return Ok((
             ident.clone(),
             quote!(::boomerang::runtime::CompiledModeEffectRef),
             PayloadRefKind::Mode,
         ));
     }
-    let Some(arg) = args.iter().find(|arg| ident_text(&arg.name.ident) == name) else {
+    let declaration::Target::Argument { payload: arg, .. } = &relation.target else {
         return Err(syn::Error::new_spanned(
             path,
             format!(
@@ -913,21 +888,18 @@ fn fresh_payload_lifetime(generics: &syn::Generics) -> syn::Lifetime {
 
 /// Emits typed payload functions for every descriptor-local reaction slot.
 fn payload_reaction_output(
-    model: &Model,
+    declaration: &declaration::Declaration<'_>,
     state_type: &syn::Path,
-    mode_names: &[String],
     symbols: &mut PayloadSymbols,
 ) -> syn::Result<Vec<TokenStream>> {
+    let model = declaration.model;
     let reactor_name = ident_text(&model.name);
     let store_lifetime = fresh_payload_lifetime(&model.generics);
-    let mut reactions = Vec::new();
-    model.body.reactions(None, &mut reactions);
-    let mut next_generated = 0;
-    reactions
-        .into_iter()
-        .map(|(_, reaction)| {
-            let reaction_name =
-                CanonicalReactionSlot::for_reaction(reaction, &mut next_generated).text();
+    declaration.reactions
+        .iter()
+        .map(|declaration| {
+            let reaction = declaration.model;
+            let reaction_name = declaration.slot.text();
             let symbol = required_binding_symbol("reaction_", &[&reactor_name, &reaction_name]);
             let symbol = symbols.definition(&symbol);
             let typed_symbol = format_ident!("{symbol}_typed");
@@ -935,52 +907,21 @@ fn payload_reaction_output(
                 "Invokes payload reaction `{reactor_name}/{reaction_name}` through the erased runtime callback."
             );
             let mut refs = Vec::new();
-            for trigger in reaction.triggers() {
-                match trigger {
-                    crate::reaction::TriggerType::Startup => refs.push((
+            for relation in &declaration.relations {
+                match relation.target {
+                    declaration::Target::Lifecycle(boomerang_builder::DescriptorLifecycle::Startup) => refs.push((
                         format_ident!("startup"),
                         quote!(::boomerang::runtime::ActionRef<#store_lifetime>),
                         PayloadRefKind::Action,
                     )),
-                    crate::reaction::TriggerType::Shutdown => refs.push((
+                    declaration::Target::Lifecycle(boomerang_builder::DescriptorLifecycle::Shutdown) => refs.push((
                         format_ident!("shutdown"),
                         quote!(::boomerang::runtime::ActionRef<#store_lifetime>),
                         PayloadRefKind::Action,
                     )),
-                    crate::reaction::TriggerType::Reset => {}
-                    crate::reaction::TriggerType::Regular(path) => {
-                        refs.push(payload_ref(
-                            &reactor_name,
-                            &model.args,
-                            mode_names,
-                            path,
-                            &store_lifetime,
-                        )?);
-                    }
+                    declaration::Target::Lifecycle(boomerang_builder::DescriptorLifecycle::Reset) => {},
+                    _ => refs.push(payload_ref(&reactor_name, relation, &store_lifetime)?),
                 }
-            }
-            for path in reaction.uses() {
-                refs.push(payload_ref(
-                    &reactor_name,
-                    &model.args,
-                    mode_names,
-                    path,
-                    &store_lifetime,
-                )?);
-            }
-            for effect in reaction.effects() {
-                let path = match effect {
-                    crate::reaction::EffectType::Regular(path)
-                    | crate::reaction::EffectType::Reset(path)
-                    | crate::reaction::EffectType::History(path) => path,
-                };
-                refs.push(payload_ref(
-                    &reactor_name,
-                    &model.args,
-                    mode_names,
-                    path,
-                    &store_lifetime,
-                )?);
             }
             let mut extraction = Vec::new();
             let mut arguments = Vec::new();
@@ -1124,12 +1065,13 @@ impl PayloadOutput {
 
 fn payload_output(
     reactor_args: &ReactorArgs,
-    model: &Model,
+    declaration: &declaration::Declaration<'_>,
     state_type: &syn::Path,
     state_struct: &Option<TokenStream>,
     state_impl: &Option<TokenStream>,
     semantic: &syn::Result<Option<boomerang_builder::ComponentDescriptor>>,
 ) -> PayloadOutput {
+    let model = declaration.model;
     let descriptor = match semantic {
         Ok(Some(descriptor)) => descriptor,
         Ok(None) => {
@@ -1146,19 +1088,13 @@ fn payload_output(
     }
 
     let reactor_name = ident_text(&model.name);
-    let mode_names = model
-        .body
-        .modes()
-        .map(|mode| ident_text(&mode.name))
-        .collect::<Vec<_>>();
     let mut symbols = PayloadSymbols {
         aliases: Vec::new(),
     };
-    let reaction_exports =
-        match payload_reaction_output(model, state_type, &mode_names, &mut symbols) {
-            Ok(exports) => exports,
-            Err(error) => return PayloadOutput::diagnostic(error.to_compile_error()),
-        };
+    let reaction_exports = match payload_reaction_output(declaration, state_type, &mut symbols) {
+        Ok(exports) => exports,
+        Err(error) => return PayloadOutput::diagnostic(error.to_compile_error()),
+    };
     let macro_abi = boomerang_runtime::binding::COMPONENT_DESCRIPTOR_MACRO_ABI;
     let fingerprint = descriptor.fingerprint().to_bytes();
     let binding_manifest = quote! {
@@ -1213,12 +1149,12 @@ fn payload_output(
         .predicates
         .push(syn::parse_quote!(#state_type: ::boomerang::runtime::ReactorData));
     let (state_type_generics, _, state_type_where) = state_witness_generics.split_for_impl();
-    let capability_declaration = match init_context::declaration(reactor_args, model) {
+    let capability_declaration = match init_context::declaration(reactor_args, declaration) {
         Ok(value) => value,
         Err(error) => return PayloadOutput::diagnostic(error.to_compile_error()),
     };
     let state_initializer = if reactor_args.init_context.is_some() {
-        match init_context::initializer(reactor_args, model, &state_symbol, state_type) {
+        match init_context::initializer(reactor_args, declaration, &state_symbol, state_type) {
             Ok(value) => value,
             Err(error) => return PayloadOutput::diagnostic(error.to_compile_error()),
         }
@@ -1320,14 +1256,15 @@ impl ArgsModel {
             return;
         }
         let selection = emission::SelectionPolicy::new(emission);
-        let descriptor = semantic::parse_descriptor(&self.0, &self.1);
+        let declaration = declaration::Declaration::new(&self.0, &self.1);
+        let descriptor = semantic::parse_descriptor(&self.0, &declaration);
         let descriptor_contents = match &descriptor {
             Ok(Some(descriptor)) => semantic::emit_descriptor(descriptor),
             Ok(None) => TokenStream::new(),
             Err(error) => error.to_compile_error(),
         };
         let topology_output = if self.2 {
-            topology::output(&self.0, &self.1)
+            topology::output(&self.0, &declaration)
         } else {
             TokenStream::new()
         };
@@ -1481,7 +1418,7 @@ impl ArgsModel {
         } = if selection.needs_payload() {
             self::payload_output(
                 reactor_args,
-                &self.1,
+                &declaration,
                 &state_type_path,
                 &payload_state_struct,
                 &state_impl,
@@ -1553,8 +1490,10 @@ impl ArgsModel {
                     }
                 };
                 let reactor_name = ident_text(name);
-                let body_tokens =
-                    body.body_tokens_with_descriptor_slots(Some(&reactor_name), &mut 0);
+                let body_tokens = body.body_tokens_with_descriptor_slots(
+                    Some(&reactor_name),
+                    &mut declaration.reactions.iter().map(|reaction| &reaction.slot),
+                );
                 (
                     quote! {
                         ctx.set_component_contract(
@@ -1571,7 +1510,7 @@ impl ArgsModel {
         };
 
         let capability_mode = reactor_args.init_context.is_some();
-        let live_registration = match init_context::live_registration(reactor_args, &self.1) {
+        let live_registration = match init_context::live_registration(reactor_args, &declaration) {
             Ok(tokens) => tokens,
             Err(error) => {
                 tokens.append_all(error.to_compile_error());
@@ -1824,7 +1763,7 @@ impl ArgsModel {
             }
         };
 
-        let capability_declaration = match init_context::declaration(reactor_args, &self.1) {
+        let capability_declaration = match init_context::declaration(reactor_args, &declaration) {
             Ok(value) => value,
             Err(error) => {
                 tokens.append_all(error.to_compile_error());

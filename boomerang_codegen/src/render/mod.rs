@@ -2,7 +2,7 @@
 //! Application entry points own startup policy; these functions emit only definitions.
 mod bindings;
 mod image;
-use crate::{ManifestStyle, PayloadExports};
+use crate::PayloadExports;
 use anyhow::{anyhow, Context, Result};
 use boomerang_builder::compiler::{
     ComponentInstanceId, FederateSlice, ImplementationCatalog, ImplementationId, RequiredBinding,
@@ -61,13 +61,9 @@ pub fn render_definitions(
         let bytes = bytes.iter();
         let abi = descriptor.macro_abi();
         let path = &payload.path;
-        let manifest = match payload.manifest {
-            ManifestStyle::Function => quote!(#path::binding_manifest()),
-            ManifestStyle::Constant => quote!(#path::BINDING_MANIFEST),
-        };
         checks.extend(quote! {
-            const _: ()=boomerang_runtime::binding::assert_descriptor_fingerprint(boomerang_runtime::binding::DescriptorFingerprint::new([#(#bytes),*]),#manifest.descriptor_fingerprint());
-            const _: ()=assert!(#abi==#manifest.macro_abi(),"macro ABI mismatch");
+            const _: ()=boomerang_runtime::binding::assert_descriptor_fingerprint(boomerang_runtime::binding::DescriptorFingerprint::new([#(#bytes),*]),#path::binding_manifest().descriptor_fingerprint());
+            const _: ()=assert!(#abi==#path::binding_manifest().macro_abi(),"macro ABI mismatch");
         });
     }
     let mut routes = BTreeMap::new();

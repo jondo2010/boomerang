@@ -73,8 +73,6 @@
 //!
 //! [`DeploymentInputs::lower`] accepts resolved implementation bindings for callers that already perform selection.
 //! The [`render`] module consumes validated builder images, registrations keyed by implementation identity, and explicit [`render::BindingConfiguration`].
-//! [`PayloadExports::with_manifest`] selects the compatibility manifest export convention explicitly.
-//! Use [`PayloadExports::new`] for Cargo-native payloads.
 //!
 //! # Build script
 //!
@@ -173,34 +171,18 @@ pub mod render;
 pub use compilation::*;
 pub use diagnostic::*;
 
-/// How a payload namespace exports its runtime compatibility manifest.
-#[derive(Debug, Clone, Copy)]
-pub enum ManifestStyle {
-    /// Function export: `binding_manifest()`.
-    Function,
-    /// Constant export: `BINDING_MANIFEST`.
-    Constant,
-}
-
 /// A parsed Rust module path to payload exports. This is not a semantic identity.
 #[derive(Clone)]
 pub struct PayloadExports {
     /// Parsed target-side Rust namespace used to reference concrete payload exports.
     pub(crate) path: syn::Path,
-    /// Export convention used to retrieve this payload namespace's compatibility manifest.
-    pub(crate) manifest: ManifestStyle,
 }
 impl PayloadExports {
     /// Parse a Cargo-native path such as `crate::controller::__boomerang::payload`.
     /// Generic arguments, expressions, macros, and trailing source are rejected.
+    /// The namespace must export `binding_manifest()` returning its declaration-derived
+    /// [`BindingManifest`](boomerang_runtime::binding::BindingManifest).
     pub fn new(path: impl AsRef<str>) -> Result<Self, CompilationError> {
-        Self::with_manifest(path, ManifestStyle::Function)
-    }
-    /// Select the compatibility manifest export convention for this payload namespace.
-    pub fn with_manifest(
-        path: impl AsRef<str>,
-        manifest: ManifestStyle,
-    ) -> Result<Self, CompilationError> {
         let path = path.as_ref();
         let parsed = syn::parse_str::<syn::Path>(path).ok().filter(|path| {
             !path.segments.is_empty()
@@ -216,7 +198,7 @@ impl PayloadExports {
                 format!("invalid payload export path '{path}'"),
             )
         })?;
-        Ok(Self { path, manifest })
+        Ok(Self { path })
     }
 }
 
@@ -225,7 +207,6 @@ impl std::fmt::Debug for PayloadExports {
         use quote::ToTokens;
         f.debug_struct("PayloadExports")
             .field("path", &self.path.to_token_stream().to_string())
-            .field("manifest", &self.manifest)
             .finish()
     }
 }

@@ -58,9 +58,10 @@ pub use authoring::{
     TopologyEnclave, TopologyInput, TopologyOutput,
 };
 pub use compiled::{
-    direct_binding_symbol, CompiledDeploymentValidationError, FederateSlice, GlobalFederationImage,
-    OwnedCompiledDeployment, OwnedEnclaveImage, OwnedFederateImage, RequiredBinding,
-    RequiredBindings, ResolvedInitializerAction, ResolvedInitializerCapabilities,
+    direct_binding_symbol, BoundaryEndpointContract, CompiledDeploymentValidationError,
+    FederateSlice, GlobalFederationImage, OwnedCompiledDeployment, OwnedEnclaveImage,
+    OwnedFederateImage, RequiredBinding, RequiredBindings, ResolvedInitializerAction,
+    ResolvedInitializerCapabilities,
 };
 pub use coordination::{CoordinationProjectionError, OwnedCoordinationProjection, OwnedRtiImage};
 pub use deployment::{

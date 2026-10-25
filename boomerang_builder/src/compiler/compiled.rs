@@ -26,8 +26,9 @@
 //! Declaration order controls the state factory's capability arguments.
 //! Renderers must use these assignments without descriptor or action-row searches.
 use super::{
-    BindingSlotId, BoundaryId, ComponentInstanceId, FederateId, ImplementationId,
-    OwnedCoordinationProjection, RuntimeBackendId, StableEnclaveId, StablePath, TargetTriple,
+    BindingSlotId, BoundaryId, ComponentInstance, ComponentInstanceId, FederateId,
+    ImplementationId, OwnedCoordinationProjection, PortId, RuntimeBackendId, StableEnclaveId,
+    StablePath, TargetTriple,
 };
 use crate::descriptor::{ActionSlotId, PortSlotId, ReactionSlotId, ReactorSlotId};
 use crate::runtime::image::{
@@ -473,6 +474,19 @@ impl OwnedFederateImage {
     }
 }
 
+/// Resolved contract at one cross-Federate boundary endpoint.
+///
+/// Retain typed source identities for coordination hashing without the original topology.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BoundaryEndpointContract {
+    /// Stable boundary identity shared by its source and target endpoint records.
+    pub boundary: BoundaryId,
+    /// Logical port at this boundary endpoint.
+    pub endpoint: PortId,
+    /// Owning component identity and required contract, independent of implementation selection.
+    pub component: ComponentInstance,
+}
+
 /// Backend-neutral global federation structure in stable identities.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GlobalFederationImage {
@@ -480,6 +494,8 @@ pub struct GlobalFederationImage {
     pub(crate) members: Box<[FederateId]>,
     /// Canonical cross-Federate routes retained independently of any backend projection.
     pub(crate) edges: Box<[super::federation::FederationEdge]>,
+    /// Endpoint contracts in canonical edge order, with source before target for each edge.
+    pub(crate) boundary_contracts: Box<[BoundaryEndpointContract]>,
 }
 
 impl GlobalFederationImage {
@@ -491,6 +507,11 @@ impl GlobalFederationImage {
     /// Returns canonical cross-Federate edges, including parallel routes.
     pub fn edges(&self) -> &[super::federation::FederationEdge] {
         &self.edges
+    }
+
+    /// Returns source and target contracts in canonical edge order for coordination hashing.
+    pub fn boundary_contracts(&self) -> &[BoundaryEndpointContract] {
+        &self.boundary_contracts
     }
 }
 
@@ -965,6 +986,7 @@ mod tests {
             GlobalFederationImage {
                 members: vec![FederateId::new("host").unwrap()].into_boxed_slice(),
                 edges: Box::default(),
+                boundary_contracts: Box::default(),
             },
             sealed([OwnedFederateImage {
                 id: FederateId::new("host").unwrap(),
@@ -987,6 +1009,7 @@ mod tests {
             GlobalFederationImage {
                 members: Box::default(),
                 edges: Box::default(),
+                boundary_contracts: Box::default(),
             },
             deployment.federates.clone(),
             deployment.enclaves.clone(),

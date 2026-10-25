@@ -18,7 +18,7 @@
 //! generation renders the assignments made here; it does not perform a second lowering pass.
 
 use super::{
-    compiled::{OwnedBindingImage, OwnedRouteImage},
+    compiled::{BoundaryEndpointContract, OwnedBindingImage, OwnedRouteImage},
     coordination::project_central_rti,
     federation::{
         analyze_federation_graph, AnalyzedFederationGraph, FederationAnalysisError,
@@ -362,6 +362,33 @@ impl ResolvedDeployment {
         federates.sort_by_cached_key(|federate| canonical_identity_text(federate.id()));
         let members = analysis.federation.members().to_vec().into_boxed_slice();
         let federation_edges = analysis.federation.edges().to_vec().into_boxed_slice();
+        let topology = self.topology();
+        let boundary_contracts = analysis
+            .federation
+            .edges()
+            .iter()
+            .flat_map(|edge| {
+                let connection = topology
+                    .connection(edge.id())
+                    .expect("analyzed boundary exists");
+                [connection.source(), connection.target()].map(|endpoint| {
+                    let port = topology
+                        .port(endpoint)
+                        .expect("validated boundary port exists");
+                    let reactor = topology
+                        .reactor(port.reactor())
+                        .expect("validated boundary owner exists");
+                    BoundaryEndpointContract {
+                        boundary: edge.id().clone(),
+                        endpoint: endpoint.clone(),
+                        component: topology
+                            .component(reactor.component())
+                            .expect("validated component exists")
+                            .clone(),
+                    }
+                })
+            })
+            .collect();
         let mut in_transit_capacities = BTreeMap::new();
         let mut owned_federates: tinymap::HeapTinyMapBuilder<FederateIndex, _> =
             tinymap::HeapTinyMapBuilder::heap();
@@ -427,6 +454,7 @@ impl ResolvedDeployment {
             GlobalFederationImage {
                 members,
                 edges: federation_edges,
+                boundary_contracts,
             },
             owned_federates.seal(),
             owned_enclaves.seal(),

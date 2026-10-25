@@ -37,14 +37,13 @@ impl DeploymentInputs {
     /// Compile target-neutral central RTI definitions from explicit deployment inputs.
     ///
     /// Builder validation and lowering own deployment semantics.
-    /// Boundary hashing uses the original topology without serialization or discovery.
+    /// Boundary hashing uses the endpoint contracts retained by lowering.
     /// This API selects no member target. The RTI package owns its target and toolchain.
     /// Local coordination returns a render-stage error.
     pub fn compile_coordination(self) -> Result<CoordinationCompilationOutput, CompilationError> {
-        let topology = self.topology.clone();
         let name = self.configuration.name.clone();
         let image = self.lower()?;
-        let tokens = coordination::render_definitions(&image, &topology)
+        let tokens = coordination::render_definitions(&image)
             .map_err(|e| CompilationError::render(e, &name))?;
         let source = render::format_rust(tokens).map_err(|e| CompilationError::render(e, &name))?;
         Ok(CoordinationCompilationOutput { image, source })
@@ -271,7 +270,7 @@ impl Compilation {
             )
         }) {
             tokens.extend(
-                coordination::render_definitions(&image, &self.topology)
+                coordination::render_definitions(&image)
                     .map_err(|e| CompilationError::render(e, name))?,
             );
         }

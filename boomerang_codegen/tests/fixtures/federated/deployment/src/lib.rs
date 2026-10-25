@@ -253,12 +253,10 @@ mod tests {
             assert_eq!(
                 boomerang_codegen::coordination::coordination_fingerprint(
                     &generated.image,
-                    &inputs(&settings).unwrap().topology
                 )
                 .unwrap(),
                 boomerang_codegen::coordination::coordination_fingerprint(
                     &coordinator.image,
-                    &inputs(&settings).unwrap().topology
                 )
                 .unwrap()
             );

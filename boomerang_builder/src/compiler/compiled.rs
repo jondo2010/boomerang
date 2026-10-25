@@ -494,17 +494,21 @@ impl GlobalFederationImage {
     }
 }
 
-/// Heap-backed canonical result of deployment lowering.
+/// Validated, immutable, heap-backed result of deployment lowering.
+///
+/// Construction validates the complete runtime image hierarchy before returning this owner.
+/// Private fields and immutable projections preserve that result. Backends must consume this
+/// validated result without repeating root image validation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OwnedCompiledDeployment {
     /// Backend-neutral global federation structure.
-    pub(crate) federation: GlobalFederationImage,
+    federation: GlobalFederationImage,
     /// Complete compiled Federate table keyed by deployment-wide dense identity.
-    pub(crate) federates: HeapSealedTinyMap<FederateIndex, OwnedFederateImage>,
+    federates: HeapSealedTinyMap<FederateIndex, OwnedFederateImage>,
     /// Complete compiled Enclave table keyed by deployment-wide dense identity.
-    pub(crate) enclaves: HeapSealedTinyMap<EnclaveIndex, OwnedEnclaveImage>,
+    enclaves: HeapSealedTinyMap<EnclaveIndex, OwnedEnclaveImage>,
     /// Selected coordination projection.
-    pub(crate) coordination: OwnedCoordinationProjection,
+    coordination: OwnedCoordinationProjection,
 }
 
 /// A borrowed host-side projection for one deployment-wide Federate.
@@ -591,6 +595,23 @@ impl CompiledDeploymentValidationError {
 }
 
 impl OwnedCompiledDeployment {
+    /// Validates the complete hierarchy before publishing its immutable owner.
+    pub(super) fn new(
+        federation: GlobalFederationImage,
+        federates: HeapSealedTinyMap<FederateIndex, OwnedFederateImage>,
+        enclaves: HeapSealedTinyMap<EnclaveIndex, OwnedEnclaveImage>,
+        coordination: OwnedCoordinationProjection,
+    ) -> Result<Self, CompiledDeploymentValidationError> {
+        let compiled = Self {
+            federation,
+            federates,
+            enclaves,
+            coordination,
+        };
+        compiled.validate()?;
+        Ok(compiled)
+    }
+
     /// Returns the backend-neutral federation structure.
     pub fn federation(&self) -> &GlobalFederationImage {
         &self.federation
@@ -740,7 +761,9 @@ impl OwnedCompiledDeployment {
         })
     }
 
-    /// Validates the complete target-facing deployment hierarchy.
+    /// Explicitly revalidates the complete target-facing deployment hierarchy.
+    ///
+    /// Construction already performs this check. Backends do not need to repeat it.
     pub fn validate(&self) -> Result<(), CompiledDeploymentValidationError> {
         self.with_image(|image| {
             crate::runtime::image::CompiledDeploymentView::new(image)
@@ -938,20 +961,21 @@ mod tests {
     fn owned_deployment_validates_the_complete_borrowed_hierarchy() {
         fn assert_dense_ref<K: tinymap::Key, V>(_: TinyMapRef<'_, K, V>) {}
 
-        let deployment = OwnedCompiledDeployment {
-            federation: GlobalFederationImage {
+        let deployment = OwnedCompiledDeployment::new(
+            GlobalFederationImage {
                 members: vec![FederateId::new("host").unwrap()].into_boxed_slice(),
                 edges: Box::default(),
             },
-            federates: sealed([OwnedFederateImage {
+            sealed([OwnedFederateImage {
                 id: FederateId::new("host").unwrap(),
                 target: TargetTriple::new("x86_64-unknown-linux-gnu").unwrap(),
                 runtime: RuntimeBackendId::new("native").unwrap(),
                 enclaves: IndexSpan::new(0, 1),
             }]),
-            enclaves: sealed([empty_enclave()]),
-            coordination: OwnedCoordinationProjection::Local,
-        };
+            sealed([empty_enclave()]),
+            OwnedCoordinationProjection::Local,
+        )
+        .unwrap();
 
         deployment.with_image(|image| {
             assert_eq!(image.federates.len(), 1);
@@ -959,15 +983,16 @@ mod tests {
             assert_eq!(image.federation.members, &[FederateIndex::new(0)]);
             assert_eq!(image.federates[FederateIndex::new(0)].id().as_str(), "host");
         });
-        deployment.validate().unwrap();
-        let invalid = OwnedCompiledDeployment {
-            federation: GlobalFederationImage {
+        let invalid = OwnedCompiledDeployment::new(
+            GlobalFederationImage {
                 members: Box::default(),
                 edges: Box::default(),
             },
-            ..deployment.clone()
-        };
-        assert!(invalid.validate().is_err());
+            deployment.federates.clone(),
+            deployment.enclaves.clone(),
+            deployment.coordination.clone(),
+        );
+        assert!(invalid.is_err());
         assert_dense_ref(deployment.federates());
         assert_dense_ref(deployment.enclaves());
         let federates = deployment.federates();

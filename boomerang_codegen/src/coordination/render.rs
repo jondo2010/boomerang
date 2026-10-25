@@ -1,5 +1,5 @@
 //! Mechanical rendering of the already lowered coordination projection.
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use boomerang_builder::compiler::OwnedCompiledDeployment;
 use boomerang_runtime::image::*;
 use proc_macro2::TokenStream;
@@ -11,9 +11,6 @@ use tinymap::SliceRange;
 /// Every table and relationship range is borrowed from its original owner. This is
 /// serialization of lowering output, never another federation analysis pass.
 pub(super) fn render_coordination(compiled: &OwnedCompiledDeployment) -> Result<TokenStream> {
-    compiled
-        .validate()
-        .context("invalid compiled coordination deployment")?;
     let identities = compiled
         .federates()
         .values()

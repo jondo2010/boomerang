@@ -62,15 +62,9 @@ impl DeploymentInputs {
             config.boundaries,
         )
         .map_err(|e| CompilationError::resolve(e, &config.name))?;
-        let image = resolved
+        resolved
             .lower()
-            .map_err(|e| CompilationError::lower(e, &config.name))?;
-        image.validate().map_err(|e| {
-            CompilationError::new(Stage::Validate, DiagnosticCode::Validate, e.to_string())
-                .deployment(&config.name)
-                .cause(e)
-        })?;
-        Ok(image)
+            .map_err(|e| CompilationError::lower(e, &config.name))
     }
 }
 /// Target facts supplied by the caller; never inferred from host `cfg!` values.

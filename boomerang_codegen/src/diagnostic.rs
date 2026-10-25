@@ -9,7 +9,6 @@ pub enum Stage {
     Target,
     Resolve,
     Lower,
-    Validate,
     Render,
     Cargo,
     Publish,
@@ -26,7 +25,6 @@ pub enum DiagnosticCode {
     InvalidInput,
     Resolve,
     Lower,
-    Validate,
     Render,
     Io,
 }

@@ -344,7 +344,7 @@ impl<'a> DescriptorSlots<'a> {
 }
 
 impl ResolvedDeployment {
-    /// Lowers a resolved deployment into canonical immutable compiled images.
+    /// Lowers a resolved deployment into validated, canonical, immutable compiled images.
     pub fn lower(&self) -> Result<OwnedCompiledDeployment, CompileError> {
         self.validate_policies()?;
         let analysis = self.analyze()?;
@@ -423,14 +423,14 @@ impl ResolvedDeployment {
                     message: format!("Federate table {error}"),
                 })?;
         }
-        let compiled = OwnedCompiledDeployment {
-            federation: GlobalFederationImage {
+        OwnedCompiledDeployment::new(
+            GlobalFederationImage {
                 members,
                 edges: federation_edges,
             },
-            federates: owned_federates.seal(),
-            enclaves: owned_enclaves.seal(),
-            coordination: match self.coordination() {
+            owned_federates.seal(),
+            owned_enclaves.seal(),
+            match self.coordination() {
                 super::CoordinationSelection::Local => OwnedCoordinationProjection::Local,
                 super::CoordinationSelection::Distributed {
                     backend: super::CoordinationBackend::CentralRti,
@@ -443,9 +443,10 @@ impl ResolvedDeployment {
                     return Err(CompileError::UnsupportedCoordination);
                 }
             },
-        };
-        validate_root_image(&compiled)?;
-        Ok(compiled)
+        )
+        .map_err(|error| CompileError::InvalidDeployment {
+            message: error.to_string(),
+        })
     }
 
     /// Fails closed on typed roadmap policies not supported by this compiler slice.
@@ -841,13 +842,4 @@ const fn route_direction_rank(direction: RouteDirection) -> u8 {
         RouteDirection::Inbound => 0,
         RouteDirection::Outbound => 1,
     }
-}
-
-/// Constructs and validates the borrowed root deployment image before success escapes.
-fn validate_root_image(compiled: &OwnedCompiledDeployment) -> Result<(), CompileError> {
-    compiled
-        .validate()
-        .map_err(|error| CompileError::InvalidDeployment {
-            message: error.to_string(),
-        })
 }

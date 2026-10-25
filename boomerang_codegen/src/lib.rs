@@ -43,6 +43,7 @@
 //! The builder validates component contracts and versions.
 //!
 //! [`Compilation::compile`] returns an owned validated deployment image and Rust source for the selected federate.
+//! Builder construction validates the complete immutable image once. Backends must not repeat root validation.
 //! The selected federate's configured target must equal [`TargetContext::triple`].
 //! The compiler never substitutes the host target.
 //! For Cargo builds, pass the complete target context from `CargoBuild::target`, including captured `CARGO_CFG_*` facts.

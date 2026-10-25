@@ -1,4 +1,18 @@
-//! Immutable dense image records consumed by compiled runtime execution.
+//! Schema API for compiled deployment tables emitted by `boomerang_codegen`.
+//!
+//! Generated Rust must use the public records, typed indices, and constructors re-exported by
+//! [`crate::image`]. Host lowering assigns table order, ownership spans, relationship ranges, and
+//! binding slots. Emitters must preserve these assignments and each index type's domain.
+//! Payload implementations bind separately through [`crate::binding`]. Generated artifacts must
+//! retain descriptor fingerprint and macro ABI checks alongside their image definitions.
+//!
+//! Identity text and backing slices must outlive every image that borrows them. Generated static
+//! images use string literals and immutable tables. Host-owned images lend their backing storage
+//! through borrowed views; their allocations do not become target static storage.
+//!
+//! Constructors assemble unchecked records. Consumers must validate complete images through the
+//! image view APIs before execution. These records define a Rust source API, not a serialized
+//! interchange format or a stable binary ABI.
 pub use tinymap::{IndexSpan, SliceRange, TinyMapRef};
 
 tinymap::key_type!(pub ReactorIndex);

@@ -344,8 +344,8 @@ impl<'a> DescriptorSlots<'a> {
 }
 
 impl ResolvedDeployment {
-    /// Lowers a resolved deployment into validated, canonical, immutable compiled images.
-    pub fn lower(&self) -> Result<OwnedCompiledDeployment, CompileError> {
+    /// Consumes this resolved deployment to produce validated, canonical, immutable compiled images.
+    pub fn lower(self) -> Result<OwnedCompiledDeployment, CompileError> {
         self.validate_policies()?;
         let analysis = self.analyze()?;
         let descriptor_slots = self
@@ -354,7 +354,7 @@ impl ResolvedDeployment {
                 let component = binding.component();
                 Ok((
                     component.clone(),
-                    DescriptorSlots::for_component(self, component)?,
+                    DescriptorSlots::for_component(&self, component)?,
                 ))
             })
             .collect::<Result<BTreeMap<_, _>, CompileError>>()?;
@@ -464,7 +464,7 @@ impl ResolvedDeployment {
                     backend: super::CoordinationBackend::CentralRti,
                 } => OwnedCoordinationProjection::CentralRti(Box::new(project_central_rti(
                     &analysis.federation,
-                    self,
+                    &self,
                     &in_transit_capacities,
                 )?)),
                 super::CoordinationSelection::Distributed { .. } => {

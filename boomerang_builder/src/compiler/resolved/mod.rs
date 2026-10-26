@@ -2,12 +2,9 @@
 //!
 //! The implementation catalog owns one descriptor per implementation identity.
 //! Component selections retain identities instead of descriptor copies.
-//! Resolution shares the catalog allocation with its caller and rejects missing catalog entries.
+//! Resolution owns the catalog and rejects missing catalog entries.
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    sync::Arc,
-};
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
     ApplicationTopology, BoundaryBinding, BoundaryId, ComponentInstanceId, ContractId,
@@ -162,12 +159,12 @@ pub enum ResolveError {
 }
 
 /// Complete canonical deployment resolution for one topology.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct ResolvedDeployment {
     /// Target-neutral application structure.
     topology: ApplicationTopology,
-    /// Shared canonical descriptors, stored once per implementation identity.
-    catalog: Arc<ImplementationCatalog>,
+    /// Owned canonical descriptors, stored once per implementation identity.
+    catalog: ImplementationCatalog,
     /// Component implementation selections in stable component order.
     bindings: BTreeMap<ComponentInstanceId, ImplementationBinding>,
     /// Placement ownership in stable group order.
@@ -182,17 +179,15 @@ pub struct ResolvedDeployment {
 
 impl ResolvedDeployment {
     /// Validates and canonicalizes all deployment selections against one implementation catalog.
-    /// Accepts either an owned catalog or an existing shared catalog allocation.
     pub fn new(
         topology: ApplicationTopology,
-        catalog: impl Into<Arc<ImplementationCatalog>>,
+        catalog: ImplementationCatalog,
         bindings: impl IntoIterator<Item = ImplementationBinding>,
         placements: impl IntoIterator<Item = PlacementAssignment>,
         federates: impl IntoIterator<Item = FederateConfig>,
         coordination: CoordinationSelection,
         boundary_bindings: impl IntoIterator<Item = BoundaryBinding>,
     ) -> Result<Self, ResolveError> {
-        let catalog = catalog.into();
         let mut canonical_bindings = BTreeMap::new();
         let mut duplicate_component_bindings = BTreeSet::new();
         for binding in bindings {

@@ -3,13 +3,10 @@ use crate::{
     *,
 };
 use boomerang_builder::{compiler::*, ComponentDescriptor};
-use std::{
-    collections::{btree_map::Entry, BTreeMap},
-    sync::Arc,
-};
+use std::collections::{btree_map::Entry, BTreeMap};
 
 /// Explicit deployment choices shared by independently compiled application packages.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct DeploymentConfiguration {
     /// Deployment label attached to compilation diagnostics.
     pub name: String,
@@ -28,8 +25,8 @@ pub struct DeploymentInputs {
     pub topology: ApplicationTopology,
     /// Explicit deployment policy applied during builder resolution.
     pub configuration: DeploymentConfiguration,
-    /// Shared structural descriptors stored once per implementation identity.
-    pub catalog: Arc<ImplementationCatalog>,
+    /// Owned structural descriptors stored once per implementation identity.
+    pub catalog: ImplementationCatalog,
     /// Component-instance selections containing only catalog identities.
     pub bindings: Vec<ImplementationBinding>,
 }
@@ -109,8 +106,8 @@ pub struct Compilation {
     federate: FederateId,
     /// Caller-supplied target facts checked before builder lowering.
     target: TargetContext,
-    /// Shared canonical host descriptors keyed by implementation identity.
-    catalog: Arc<ImplementationCatalog>,
+    /// Owned canonical host descriptors keyed by implementation identity.
+    catalog: ImplementationCatalog,
     /// Rust payload export paths kept outside semantic resolution.
     exports: BTreeMap<ImplementationId, PayloadExports>,
     /// Explicit mapping from stable component-instance identity to registered implementation identity.
@@ -146,7 +143,7 @@ impl Compilation {
             configuration,
             federate,
             target,
-            catalog: Arc::new(ImplementationCatalog::new()),
+            catalog: ImplementationCatalog::new(),
             exports: BTreeMap::new(),
             selections: BTreeMap::new(),
             bindings: BindingConfiguration::default(),
@@ -168,7 +165,7 @@ impl Compilation {
     ) -> Result<(), CompilationError> {
         match self.exports.entry(implementation.clone()) {
             Entry::Vacant(entry) => {
-                Arc::make_mut(&mut self.catalog).insert(implementation, descriptor);
+                self.catalog.insert(implementation, descriptor);
                 entry.insert(payload);
                 Ok(())
             }
@@ -201,9 +198,11 @@ impl Compilation {
             .implementation(&implementation)),
         }
     }
-    /// Compile with no filesystem, environment, process, or publication effects.
-    pub fn compile(&self) -> Result<CompilationOutput, CompilationError> {
-        let name = &self.configuration.name;
+    /// Consume this request without filesystem, environment, process, or publication effects.
+    /// Descriptor fingerprints remain available for rendering after lowering consumes the catalog.
+    pub fn compile(self) -> Result<CompilationOutput, CompilationError> {
+        let deployment_name = self.configuration.name.clone();
+        let name = &deployment_name;
         let federate = self
             .configuration
             .federates
@@ -230,19 +229,29 @@ impl Compilation {
             )
             .deployment(name));
         }
-        let bindings = self.selections.iter().map(|(component, implementation)| {
-            if !self.catalog.contains_key(implementation) {
+        let bindings = self.selections.into_iter().map(|(component, implementation)| {
+            if !self.catalog.contains_key(&implementation) {
                 return Err(CompilationError::new(
                     Stage::Registration, DiagnosticCode::MissingRegistration,
                     format!("component '{component}' selects unregistered implementation '{implementation}'"),
-                ).deployment(name).component(component).implementation(implementation));
+                ).deployment(name).component(&component).implementation(&implementation));
             }
-            Ok(ImplementationBinding::new(component.clone(), implementation.clone()))
+            Ok(ImplementationBinding::new(component, implementation))
         }).collect::<Result<Vec<_>, CompilationError>>()?;
+        let expected_fingerprints = self
+            .catalog
+            .iter()
+            .map(|(implementation, descriptor)| (implementation.clone(), descriptor.fingerprint()))
+            .collect();
+        let mut options = self.bindings;
+        options.distributed = matches!(
+            self.configuration.coordination,
+            CoordinationSelection::Distributed { .. }
+        );
         let image = DeploymentInputs {
-            topology: self.topology.clone(),
-            configuration: self.configuration.clone(),
-            catalog: Arc::clone(&self.catalog),
+            topology: self.topology,
+            configuration: self.configuration,
+            catalog: self.catalog,
             bindings,
         }
         .lower()?;
@@ -256,13 +265,9 @@ impl Compilation {
                 .deployment(name)
                 .cause(e)
         })?;
-        let mut options = self.bindings.clone();
-        options.distributed = matches!(
-            self.configuration.coordination,
-            CoordinationSelection::Distributed { .. }
-        );
-        let mut tokens = render::render_definitions(&slice, &self.catalog, &self.exports, &options)
-            .map_err(|e| CompilationError::render(e, name))?;
+        let mut tokens =
+            render::render_definitions(&slice, &expected_fingerprints, &self.exports, &options)
+                .map_err(|e| CompilationError::render(e, name))?;
         if image.with_coordination(|projection| {
             matches!(
                 projection,

@@ -119,8 +119,7 @@ pub fn inputs(settings: &Settings) -> Result<DeploymentInputs, Box<dyn std::erro
             ),
         ]
         .into_iter()
-        .collect::<ImplementationCatalog>()
-        .into(),
+        .collect::<ImplementationCatalog>(),
         topology: app.finish()?,
         configuration: DeploymentConfiguration {
             name: "native-vehicle".into(),

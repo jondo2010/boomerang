@@ -119,7 +119,7 @@ pub fn inputs(version: u64, delay: u64, codec: &str, reverse: bool) -> Deploymen
     let topology = topology.finish().unwrap();
     DeploymentInputs {
         topology,
-        catalog: catalog.into(),
+        catalog,
         configuration: DeploymentConfiguration {
             name: "shared".into(),
             placements,
@@ -153,9 +153,7 @@ pub fn selected(inputs: DeploymentInputs, member: &str) -> Compilation {
         FederateId::new(member).unwrap(),
         TargetContext::new("x86_64-unknown-linux-gnu").unwrap(),
     );
-    for (implementation, descriptor) in
-        std::sync::Arc::try_unwrap(inputs.catalog).expect("fixture owns the catalog")
-    {
+    for (implementation, descriptor) in inputs.catalog {
         let payload = PayloadExports::new(format!(
             "crate::{}::payload",
             implementation.as_str().replace('-', "_")

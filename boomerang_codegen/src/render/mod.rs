@@ -5,14 +5,14 @@ mod image;
 use crate::PayloadExports;
 use anyhow::{anyhow, Context, Result};
 use boomerang_builder::compiler::{
-    ComponentInstanceId, FederateSlice, ImplementationCatalog, ImplementationId, RequiredBinding,
+    ComponentInstanceId, FederateSlice, ImplementationId, RequiredBinding,
 };
 use proc_macro2::TokenStream;
 use quote::quote;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Runtime capabilities installed by the application's startup code.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub struct BindingConfiguration {
     /// Component instance to runtime source key, assigned by application configuration.
     pub sources: BTreeMap<ComponentInstanceId, u32>,
@@ -38,7 +38,10 @@ pub fn image_fingerprint_input(slice: &FederateSlice<'_>) -> Result<String> {
 /// Each map key is the explicit implementation identity in the compiled image.
 pub fn render_definitions(
     slice: &FederateSlice<'_>,
-    catalog: &ImplementationCatalog,
+    expected_fingerprints: &BTreeMap<
+        ImplementationId,
+        boomerang_runtime::binding::DescriptorFingerprint,
+    >,
     exports: &BTreeMap<ImplementationId, PayloadExports>,
     configuration: &BindingConfiguration,
 ) -> Result<TokenStream> {
@@ -50,14 +53,15 @@ pub fn render_definitions(
         .collect::<BTreeSet<_>>();
     let mut checks = TokenStream::new();
     for implementation in selected {
-        let (Some(descriptor), Some(payload)) =
-            (catalog.get(implementation), exports.get(implementation))
-        else {
+        let (Some(fingerprint), Some(payload)) = (
+            expected_fingerprints.get(implementation),
+            exports.get(implementation),
+        ) else {
             return Err(anyhow!(
                 "missing registration for implementation '{implementation}'"
             ));
         };
-        let bytes = descriptor.fingerprint().to_bytes();
+        let bytes = fingerprint.to_bytes();
         let bytes = bytes.iter();
         let path = &payload.path;
         checks.extend(quote! {

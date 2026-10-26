@@ -92,6 +92,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         manual_clock: false,
         distributed: false,
     });
-    cargo.compile(&compilation, &mut std::io::stdout())?;
+    cargo.compile(compilation, &mut std::io::stdout())?;
     Ok(())
 }

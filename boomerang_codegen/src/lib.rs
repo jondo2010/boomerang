@@ -57,7 +57,10 @@
 //! Each reaction binding associates its image-owned `BindingSlotIndex` directly with a payload adapter export.
 //! Payload macros own state downcasts, reference extraction, declaration order, and generic parameters.
 //! This compiler retains instance indices, routes, and initializer capability mappings.
-//! The host compiler stores descriptors once in an implementation catalog.
+//! Each compilation owns its implementation catalog.
+//! Compilation moves topology, deployment selections, and descriptors through resolution and lowering.
+//! Codegen prepares expected descriptor fingerprints before lowering consumes the catalog.
+//! Rendering uses these fingerprints and payload paths without descriptor access.
 //! Component selections contain catalog identities, and Rust export paths stay in a codegen side table.
 //! Lowering resolves initializer actions to descriptor-local payload slots and image-owned action indices.
 //! Rendering must consume this plan without descriptor or action-row reconstruction.
@@ -74,7 +77,7 @@
 //! ```
 //!
 //! [`DeploymentInputs::lower`] accepts resolved implementation bindings for callers that already perform selection.
-//! The [`render`] module consumes validated builder images, registrations keyed by implementation identity, and explicit [`render::BindingConfiguration`].
+//! The [`render`] module uses validated images, expected fingerprints, payload paths, and explicit [`render::BindingConfiguration`].
 //!
 //! # Build script
 //!
@@ -97,7 +100,7 @@
 //! )?;
 //! compilation.select(first_instance, implementation.clone())?;
 //! compilation.select(second_instance, implementation)?;
-//! cargo.compile(&compilation, &mut std::io::stdout())?;
+//! cargo.compile(compilation, &mut std::io::stdout())?;
 //! ```
 //!
 //! `CargoBuild::from_env` requires `TARGET` and `OUT_DIR`.

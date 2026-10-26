@@ -7,6 +7,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let settings = native_vehicle_deployment::Settings::from_env()?;
     let compilation =
         native_vehicle_deployment::compilation(&settings, "host", cargo.target().clone())?;
-    cargo.compile(&compilation, &mut std::io::stdout())?;
+    cargo.compile(compilation, &mut std::io::stdout())?;
     Ok(())
 }

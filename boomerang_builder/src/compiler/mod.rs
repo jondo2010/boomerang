@@ -1,5 +1,21 @@
 //! Target-neutral application compiler models.
 //!
+//! # Ownership
+//!
+//! This module owns topology authoring, implementation resolution, federation analysis, lowering,
+//! and host-owned image storage. Component descriptors share this crate's canonical identity types.
+//! Semantic resolution and lowering must remain independent of Rust source emission and Cargo
+//! publication. Keep target Rust export paths outside these semantic models.
+//!
+//! [`crate::Assembly::application_topology`] adapts hosted assembly records into these models.
+//! Preserve the hosted assembly API without introducing assembly keys into compiler identities.
+//!
+//! `boomerang_codegen` owns Rust source emission and the target export-path table. Its optional
+//! `cargo-build` adapter owns Cargo input tracking and generated-source publication.
+//! [`boomerang_runtime::image`] owns the target schema consumed by generated Rust.
+//! Host storage must lend borrowed image views without transferring its allocations into target
+//! static storage.
+//!
 //! # Representation boundary
 //!
 //! Semantic compiler data—topology, deployment selections, resolution, and analysis—uses stable
@@ -42,14 +58,15 @@ pub use authoring::{
     TopologyEnclave, TopologyInput, TopologyOutput,
 };
 pub use compiled::{
-    direct_binding_symbol, CompiledDeploymentValidationError, FederateSlice, GlobalFederationImage,
-    OwnedCompiledDeployment, OwnedEnclaveImage, OwnedFederateImage, RequiredBinding,
-    RequiredBindings,
+    direct_binding_symbol, BoundaryEndpointContract, CompiledDeploymentValidationError,
+    FederateSlice, GlobalFederationImage, OwnedCompiledDeployment, OwnedEnclaveImage,
+    OwnedFederateImage, RequiredBinding, RequiredBindings, ResolvedInitializerAction,
+    ResolvedInitializerCapabilities,
 };
 pub use coordination::{CoordinationProjectionError, OwnedCoordinationProjection, OwnedRtiImage};
 pub use deployment::{
     BoundaryBinding, BoundaryPolicies, CoordinationBackend, CoordinationSelection, FederateConfig,
-    ImplementationBinding, PhysicalBoundaryMetadata, PlacementAssignment,
+    ImplementationBinding, ImplementationCatalog, PhysicalBoundaryMetadata, PlacementAssignment,
 };
 pub use identity::{
     ActionId, ApplicationId, BindingSlotId, BoundaryId, CodecCapabilityId, ComponentInstanceId,

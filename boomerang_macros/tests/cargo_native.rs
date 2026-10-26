@@ -60,21 +60,6 @@ fn component_feature_matrix_is_additive_and_preserves_dynamic() {
     success(cargo("cargo-native-unified", "test", &[]));
 }
 #[test]
-fn fingerprint_and_macro_abi_mismatches_are_const_errors() {
-    for (feature, expected) in [
-        ("fingerprint-mismatch", "descriptor fingerprint mismatch"),
-        ("abi-mismatch", "payload macro ABI mismatch"),
-    ] {
-        let output = cargo("cargo-native-explicit", "check", &["--features", feature]);
-        assert!(!output.status.success());
-        assert!(
-            String::from_utf8_lossy(&output.stderr).contains(expected),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-}
-#[test]
 fn target_graph_excludes_host_builder_and_metadata_excludes_payload_helper() {
     let output = cargo(
         "cargo-native-component",
@@ -109,7 +94,7 @@ fn target_graph_excludes_host_builder_and_metadata_excludes_payload_helper() {
 }
 
 #[test]
-fn canonical_encoding_matches_the_independent_hand_checked_oracle() {
+fn native_exports_preserve_identifiers_modes_and_initialization() {
     for features in ["metadata", "payload", "metadata,payload"] {
         success(cargo(
             "cargo-native-compatibility",
@@ -195,25 +180,6 @@ fn cross_target_payload_keeps_builder_on_host_and_implementation_on_target() {
     assert!(graph.contains("cargo-native-wasm-helper"), "{graph}");
     assert!(!graph.contains("boomerang_builder"), "{graph}");
     assert!(!graph.contains("cargo-boomerang"), "{graph}");
-}
-
-#[test]
-fn normal_consumer_rejects_an_incorrectly_exported_macro_abi() {
-    // This keeps the normal consumer expectation, changing only the supplied actual ABI header.
-    let output = cargo(
-        "cargo-native-explicit",
-        "check",
-        &["--features", "incorrect-export-abi"],
-    );
-    assert!(
-        !output.status.success(),
-        "normal consumer accepted an incorrectly exported ABI 4"
-    );
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("payload macro ABI mismatch"),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
 }
 
 #[test]

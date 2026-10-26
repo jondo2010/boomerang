@@ -12,9 +12,7 @@ use fixture::selected;
 #[test]
 fn independent_members_and_coordinator_share_definitions() {
     let output = inputs().compile_coordination().unwrap();
-    let definitions =
-        render::format_rust(render_definitions(&output.image, &inputs().topology).unwrap())
-            .unwrap();
+    let definitions = render::format_rust(render_definitions(&output.image).unwrap()).unwrap();
     assert_eq!(output.source, definitions);
     for name in [
         "COORDINATION_IMAGE",
@@ -46,8 +44,8 @@ fn independent_members_and_coordinator_share_definitions() {
             mapping_fingerprint(&output.image).unwrap()
         );
         assert_eq!(
-            coordination_fingerprint(&local.image, &inputs().topology).unwrap(),
-            coordination_fingerprint(&output.image, &inputs().topology).unwrap()
+            coordination_fingerprint(&local.image).unwrap(),
+            coordination_fingerprint(&output.image).unwrap()
         );
         let remote = if member == "a" { "impl_b" } else { "impl_a" };
         assert!(!local.source.contains(&format!("crate::{remote}")));
@@ -64,16 +62,19 @@ fn independent_members_and_coordinator_share_definitions() {
 
 #[test]
 fn coordination_is_canonical_and_tracks_contract_delay_and_codec() {
-    let base = inputs();
     let image = inputs().lower().unwrap();
-    let identity = coordination_fingerprint(&image, &base.topology).unwrap();
+    let identity = coordination_fingerprint(&image).unwrap();
+    assert_eq!(
+        identity.to_hex().as_str(),
+        "a87f8224897d1828de6c0c772c590a23655480c547570c887f9bbb91a72eacef"
+    );
     let mapping = mapping_fingerprint(&image).unwrap();
     let reordered = fixture::inputs(1, 0, "serde-json", true)
         .compile_coordination()
         .unwrap();
     assert_eq!(
         identity,
-        coordination_fingerprint(&reordered.image, &base.topology).unwrap()
+        coordination_fingerprint(&reordered.image).unwrap()
     );
     assert_eq!(mapping, mapping_fingerprint(&reordered.image).unwrap());
     assert_eq!(
@@ -86,10 +87,9 @@ fn coordination_is_canonical_and_tracks_contract_delay_and_codec() {
         (1, 0, "postcard-v1"),
     ] {
         let changed = fixture::inputs(version, delay, codec, false);
-        let topology = changed.topology.clone();
         assert_ne!(
             identity,
-            coordination_fingerprint(&changed.lower().unwrap(), &topology).unwrap()
+            coordination_fingerprint(&changed.lower().unwrap()).unwrap()
         );
     }
 }

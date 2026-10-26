@@ -6,7 +6,7 @@ use boomerang_builder::{compiler::*, ComponentDescriptor};
 use std::collections::{btree_map::Entry, BTreeMap};
 
 /// Explicit deployment choices shared by independently compiled application packages.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct DeploymentConfiguration {
     /// Deployment label attached to compilation diagnostics.
     pub name: String,
@@ -25,21 +25,22 @@ pub struct DeploymentInputs {
     pub topology: ApplicationTopology,
     /// Explicit deployment policy applied during builder resolution.
     pub configuration: DeploymentConfiguration,
-    /// Resolved component-instance selections with their implementation identities and descriptors.
+    /// Owned structural descriptors stored once per implementation identity.
+    pub catalog: ImplementationCatalog,
+    /// Component-instance selections containing only catalog identities.
     pub bindings: Vec<ImplementationBinding>,
 }
 impl DeploymentInputs {
     /// Compile target-neutral central RTI definitions from explicit deployment inputs.
     ///
     /// Builder validation and lowering own deployment semantics.
-    /// Boundary hashing uses the original topology without serialization or discovery.
+    /// Boundary hashing uses the endpoint contracts retained by lowering.
     /// This API selects no member target. The RTI package owns its target and toolchain.
     /// Local coordination returns a render-stage error.
     pub fn compile_coordination(self) -> Result<CoordinationCompilationOutput, CompilationError> {
-        let topology = self.topology.clone();
         let name = self.configuration.name.clone();
         let image = self.lower()?;
-        let tokens = coordination::render_definitions(&image, &topology)
+        let tokens = coordination::render_definitions(&image)
             .map_err(|e| CompilationError::render(e, &name))?;
         let source = render::format_rust(tokens).map_err(|e| CompilationError::render(e, &name))?;
         Ok(CoordinationCompilationOutput { image, source })
@@ -49,6 +50,7 @@ impl DeploymentInputs {
         let config = self.configuration;
         let resolved = ResolvedDeployment::new(
             self.topology,
+            self.catalog,
             self.bindings,
             config.placements,
             config.federates,
@@ -56,15 +58,9 @@ impl DeploymentInputs {
             config.boundaries,
         )
         .map_err(|e| CompilationError::resolve(e, &config.name))?;
-        let image = resolved
+        resolved
             .lower()
-            .map_err(|e| CompilationError::lower(e, &config.name))?;
-        image.validate().map_err(|e| {
-            CompilationError::new(Stage::Validate, DiagnosticCode::Validate, e.to_string())
-                .deployment(&config.name)
-                .cause(e)
-        })?;
-        Ok(image)
+            .map_err(|e| CompilationError::lower(e, &config.name))
     }
 }
 /// Target facts supplied by the caller; never inferred from host `cfg!` values.
@@ -110,8 +106,10 @@ pub struct Compilation {
     federate: FederateId,
     /// Caller-supplied target facts checked before builder lowering.
     target: TargetContext,
-    /// Host descriptors and target export paths keyed by semantic implementation identity.
-    registrations: BTreeMap<ImplementationId, ComponentRegistration>,
+    /// Owned canonical host descriptors keyed by implementation identity.
+    catalog: ImplementationCatalog,
+    /// Rust payload export paths kept outside semantic resolution.
+    exports: BTreeMap<ImplementationId, PayloadExports>,
     /// Explicit mapping from stable component-instance identity to registered implementation identity.
     selections: BTreeMap<ComponentInstanceId, ImplementationId>,
     /// Application-installed runtime capabilities used by the generated binding constructor.
@@ -145,7 +143,8 @@ impl Compilation {
             configuration,
             federate,
             target,
-            registrations: BTreeMap::new(),
+            catalog: ImplementationCatalog::new(),
+            exports: BTreeMap::new(),
             selections: BTreeMap::new(),
             bindings: BindingConfiguration::default(),
         }
@@ -164,12 +163,10 @@ impl Compilation {
         descriptor: ComponentDescriptor,
         payload: PayloadExports,
     ) -> Result<(), CompilationError> {
-        match self.registrations.entry(implementation.clone()) {
+        match self.exports.entry(implementation.clone()) {
             Entry::Vacant(entry) => {
-                entry.insert(ComponentRegistration {
-                    descriptor,
-                    payload,
-                });
+                self.catalog.insert(implementation, descriptor);
+                entry.insert(payload);
                 Ok(())
             }
             Entry::Occupied(_) => Err(CompilationError::new(
@@ -201,9 +198,11 @@ impl Compilation {
             .implementation(&implementation)),
         }
     }
-    /// Compile with no filesystem, environment, process, or publication effects.
-    pub fn compile(&self) -> Result<CompilationOutput, CompilationError> {
-        let name = &self.configuration.name;
+    /// Consume this request without filesystem, environment, process, or publication effects.
+    /// Descriptor fingerprints remain available for rendering after lowering consumes the catalog.
+    pub fn compile(self) -> Result<CompilationOutput, CompilationError> {
+        let deployment_name = self.configuration.name.clone();
+        let name = &deployment_name;
         let federate = self
             .configuration
             .federates
@@ -230,29 +229,29 @@ impl Compilation {
             )
             .deployment(name));
         }
-        let mut bindings = Vec::new();
-        let mut selected = BTreeMap::new();
-        for (component, implementation) in &self.selections {
-            let registration = self.registrations.get(implementation).ok_or_else(|| {
-                CompilationError::new(
-                    Stage::Registration,
-                    DiagnosticCode::MissingRegistration,
+        let bindings = self.selections.into_iter().map(|(component, implementation)| {
+            if !self.catalog.contains_key(&implementation) {
+                return Err(CompilationError::new(
+                    Stage::Registration, DiagnosticCode::MissingRegistration,
                     format!("component '{component}' selects unregistered implementation '{implementation}'"),
-                )
-                .deployment(name)
-                .component(component)
-                .implementation(implementation)
-            })?;
-            bindings.push(ImplementationBinding::new(
-                component.clone(),
-                implementation.clone(),
-                registration.descriptor.clone(),
-            ));
-            selected.insert(implementation.clone(), registration.clone());
-        }
+                ).deployment(name).component(&component).implementation(&implementation));
+            }
+            Ok(ImplementationBinding::new(component, implementation))
+        }).collect::<Result<Vec<_>, CompilationError>>()?;
+        let expected_fingerprints = self
+            .catalog
+            .iter()
+            .map(|(implementation, descriptor)| (implementation.clone(), descriptor.fingerprint()))
+            .collect();
+        let mut options = self.bindings;
+        options.distributed = matches!(
+            self.configuration.coordination,
+            CoordinationSelection::Distributed { .. }
+        );
         let image = DeploymentInputs {
-            topology: self.topology.clone(),
-            configuration: self.configuration.clone(),
+            topology: self.topology,
+            configuration: self.configuration,
+            catalog: self.catalog,
             bindings,
         }
         .lower()?;
@@ -266,26 +265,9 @@ impl Compilation {
                 .deployment(name)
                 .cause(e)
         })?;
-        // Only selected local implementations appear in this target's compatibility checks.
-        selected.retain(|id, _| {
-            slice
-                .enclaves()
-                .iter()
-                .flat_map(|e| e.required_bindings().iter())
-                .any(|b| match b {
-                    RequiredBinding::State { implementation, .. }
-                    | RequiredBinding::Reaction { implementation, .. }
-                    | RequiredBinding::Port { implementation, .. }
-                    | RequiredBinding::Action { implementation, .. } => implementation == id,
-                })
-        });
-        let mut options = self.bindings.clone();
-        options.distributed = matches!(
-            self.configuration.coordination,
-            CoordinationSelection::Distributed { .. }
-        );
-        let mut tokens = render::render_definitions(&slice, &selected, &options)
-            .map_err(|e| CompilationError::render(e, name))?;
+        let mut tokens =
+            render::render_definitions(&slice, &expected_fingerprints, &self.exports, &options)
+                .map_err(|e| CompilationError::render(e, name))?;
         if image.with_coordination(|projection| {
             matches!(
                 projection,
@@ -293,7 +275,7 @@ impl Compilation {
             )
         }) {
             tokens.extend(
-                coordination::render_definitions(&image, &self.topology)
+                coordination::render_definitions(&image)
                     .map_err(|e| CompilationError::render(e, name))?,
             );
         }

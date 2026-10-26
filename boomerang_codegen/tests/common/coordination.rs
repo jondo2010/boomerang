@@ -15,6 +15,7 @@ pub fn inputs(version: u64, delay: u64, codec: &str, reverse: bool) -> Deploymen
     let implementation = "impl-a";
     let mut topology = ApplicationTopologyBuilder::new("app").unwrap();
     let mut bindings = Vec::new();
+    let mut catalog = ImplementationCatalog::new();
     let mut placements = Vec::new();
     let mut federates = Vec::new();
     let mut members = [("a", PortDirection::Output), ("b", PortDirection::Input)];
@@ -83,14 +84,15 @@ pub fn inputs(version: u64, delay: u64, codec: &str, reverse: bool) -> Deploymen
             },
         )
         .unwrap();
+        let selected = if name == "a" {
+            ImplementationId::new(implementation).unwrap()
+        } else {
+            ImplementationId::new("impl-b").unwrap()
+        };
+        catalog.insert(selected.clone(), descriptor);
         bindings.push(ImplementationBinding::new(
             ComponentInstanceId::new(name).unwrap(),
-            if name == "a" {
-                ImplementationId::new(implementation).unwrap()
-            } else {
-                ImplementationId::new("impl-b").unwrap()
-            },
-            descriptor,
+            selected,
         ));
         placements.push(PlacementAssignment::new(
             group,
@@ -117,6 +119,7 @@ pub fn inputs(version: u64, delay: u64, codec: &str, reverse: bool) -> Deploymen
     let topology = topology.finish().unwrap();
     DeploymentInputs {
         topology,
+        catalog,
         configuration: DeploymentConfiguration {
             name: "shared".into(),
             placements,
@@ -150,18 +153,17 @@ pub fn selected(inputs: DeploymentInputs, member: &str) -> Compilation {
         FederateId::new(member).unwrap(),
         TargetContext::new("x86_64-unknown-linux-gnu").unwrap(),
     );
-    for binding in inputs.bindings {
+    for (implementation, descriptor) in inputs.catalog {
+        let payload = PayloadExports::new(format!(
+            "crate::{}::payload",
+            implementation.as_str().replace('-', "_")
+        ))
+        .unwrap();
         compilation
-            .register(
-                binding.implementation().clone(),
-                binding.descriptor().clone(),
-                PayloadExports::new(format!(
-                    "crate::{}::payload",
-                    binding.implementation().as_str().replace('-', "_")
-                ))
-                .unwrap(),
-            )
+            .register(implementation, descriptor, payload)
             .unwrap();
+    }
+    for binding in inputs.bindings {
         compilation
             .select(
                 binding.component().clone(),

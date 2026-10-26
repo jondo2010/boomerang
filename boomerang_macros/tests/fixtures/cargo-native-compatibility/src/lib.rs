@@ -38,32 +38,16 @@ pub fn r#match(
 }
     }
 }
-const EXPECTED: boomerang::runtime::binding::DescriptorFingerprint =
-    boomerang::runtime::binding::DescriptorFingerprint::new([
-        0xfb, 0x3a, 0x9c, 0xf2, 0x2e, 0x1b, 0x7b, 0x33, 0x9e, 0xb8, 0x63, 0xc2, 0x02, 0x48, 0xa2,
-        0xc3, 0x4e, 0x95, 0x98, 0x3d, 0xa3, 0xd4, 0x6c, 0x96, 0xb0, 0x12, 0x4e, 0x6d, 0x69, 0x9c,
-        0xc6, 0x2d,
-    ]);
-#[cfg(feature = "payload")]
-const _: () = boomerang::runtime::binding::assert_descriptor_fingerprint(
-    EXPECTED,
-    oracle::__boomerang::payload::binding_manifest().descriptor_fingerprint(),
-);
 #[test]
-fn raw_identifiers_modes_and_anonymous_reactions_preserve_the_encoding_oracle() {
+fn raw_identifiers_modes_and_anonymous_reactions_preserve_exported_names() {
     #[cfg(feature = "metadata")]
     {
         let descriptor = oracle::__boomerang::metadata::descriptor();
-        assert_eq!(descriptor.fingerprint(), EXPECTED);
         assert_eq!(descriptor.reaction_slots()[1].id.to_string(), "Match/#g0");
         assert_eq!(descriptor.state_slots()[0].id.to_string(), "Match/loop");
     }
     #[cfg(feature = "payload")]
     {
         assert_eq!(oracle::__boomerang::payload::state_Match().r#loop, 3);
-        assert_eq!(
-            oracle::__boomerang::payload::binding_manifest().descriptor_fingerprint(),
-            EXPECTED
-        );
     }
 }

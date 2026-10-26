@@ -9,7 +9,6 @@ pub enum Stage {
     Target,
     Resolve,
     Lower,
-    Validate,
     Render,
     Cargo,
     Publish,
@@ -26,7 +25,6 @@ pub enum DiagnosticCode {
     InvalidInput,
     Resolve,
     Lower,
-    Validate,
     Render,
     Io,
 }
@@ -88,31 +86,9 @@ impl CompilationError {
         self
     }
     pub(crate) fn render_binding(error: anyhow::Error, binding: &RequiredBinding) -> Self {
-        let (component, implementation) = match binding {
-            RequiredBinding::State {
-                component,
-                implementation,
-                ..
-            }
-            | RequiredBinding::Reaction {
-                component,
-                implementation,
-                ..
-            }
-            | RequiredBinding::Port {
-                component,
-                implementation,
-                ..
-            }
-            | RequiredBinding::Action {
-                component,
-                implementation,
-                ..
-            } => (component, implementation),
-        };
         let mut result = Self::new(Stage::Render, DiagnosticCode::Render, format!("{error:#}"))
-            .component(component)
-            .implementation(implementation);
+            .component(binding.component())
+            .implementation(binding.implementation());
         result.diagnostic.binding = Some(binding.symbol());
         result.source = Some(error.into_boxed_dyn_error());
         result
@@ -142,6 +118,11 @@ impl CompilationError {
                 ..
             }
             | CompileError::MissingDescriptorSlot {
+                component,
+                implementation,
+                ..
+            }
+            | CompileError::MissingInitializerAction {
                 component,
                 implementation,
                 ..
@@ -181,6 +162,10 @@ impl CompilationError {
                 component,
                 implementation,
             }
+            | ResolveError::MissingImplementation {
+                component,
+                implementation,
+            }
             | ResolveError::ContractMismatch {
                 component,
                 implementation,
@@ -215,5 +200,16 @@ impl std::fmt::Display for CompilationError {
 impl std::error::Error for CompilationError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         self.source.as_ref().map(|e| &**e as _)
+    }
+}
+
+impl From<boomerang_builder::compiler::InvalidStableId> for CompilationError {
+    fn from(error: boomerang_builder::compiler::InvalidStableId) -> Self {
+        Self::new(
+            Stage::Registration,
+            DiagnosticCode::InvalidInput,
+            error.to_string(),
+        )
+        .cause(error)
     }
 }

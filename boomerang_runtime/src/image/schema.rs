@@ -1,4 +1,18 @@
-//! Immutable dense image records consumed by compiled runtime execution.
+//! Schema API for compiled deployment tables emitted by `boomerang_codegen`.
+//!
+//! Generated Rust must use the public records, typed indices, and constructors re-exported by
+//! [`crate::image`]. Host lowering assigns table order, ownership spans, relationship ranges, and
+//! binding slots. Emitters must preserve these assignments and each index type's domain.
+//! Payload implementations bind separately through [`crate::binding`]. Generated artifacts must
+//! retain descriptor fingerprint checks, including macro ABI compatibility, alongside their image definitions.
+//!
+//! Identity text and backing slices must outlive every image that borrows them. Generated static
+//! images use string literals and immutable tables. Host-owned images lend their backing storage
+//! through borrowed views; their allocations do not become target static storage.
+//!
+//! Constructors assemble unchecked records. Consumers must validate complete images through the
+//! image view APIs before execution. These records define a Rust source API, not a serialized
+//! interchange format or a stable binary ABI.
 pub use tinymap::{IndexSpan, SliceRange, TinyMapRef};
 
 tinymap::key_type!(pub ReactorIndex);
@@ -731,20 +745,47 @@ pub enum RouteDirection {
     Outbound,
 }
 
+/// A borrowed scheduler-boundary route image.
+pub type RouteImage<'a> = RouteRecord<BoundaryId<'a>>;
+
 /// An immutable scheduler-boundary route without transport state.
+///
+/// `B` selects identity storage. Host compilers retain validated structured identities.
+/// Runtime images borrow canonical text through the corresponding image alias.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RouteImage<'a> {
-    boundary: BoundaryId<'a>,
+pub struct RouteRecord<B> {
+    /// Stable identity of this scheduler boundary.
+    boundary: B,
+    /// Dense Enclave-local port attached to this boundary.
     local_port: PortIndex,
+    /// Whether events enter or leave through the local port.
     direction: RouteDirection,
+    /// Clock domain used to interpret the route delay.
     timing_domain: TimingDomain,
+    /// Route delay in nanoseconds.
     delay_nanos: u64,
 }
 
-impl<'a> RouteImage<'a> {
+impl<B> RouteRecord<B> {
+    /// Returns the stored boundary identity without a storage conversion.
+    pub const fn boundary_identity(&self) -> &B {
+        &self.boundary
+    }
+
+    /// Replaces the boundary identity without changing route coordinates or policies.
+    pub fn with_boundary<C>(&self, boundary: C) -> RouteRecord<C> {
+        RouteRecord {
+            boundary,
+            local_port: self.local_port,
+            direction: self.direction,
+            timing_domain: self.timing_domain,
+            delay_nanos: self.delay_nanos,
+        }
+    }
+
     /// Creates an unchecked route record.
     pub const fn new(
-        boundary: BoundaryId<'a>,
+        boundary: B,
         local_port: PortIndex,
         direction: RouteDirection,
         timing_domain: TimingDomain,
@@ -757,11 +798,6 @@ impl<'a> RouteImage<'a> {
             timing_domain,
             delay_nanos,
         }
-    }
-
-    /// Returns the boundary identity.
-    pub const fn boundary(&self) -> BoundaryId<'a> {
-        self.boundary
     }
 
     /// Returns the local dense port identity.
@@ -782,6 +818,13 @@ impl<'a> RouteImage<'a> {
     /// Returns the route delay in nanoseconds.
     pub const fn delay_nanos(&self) -> u64 {
         self.delay_nanos
+    }
+}
+
+impl<'a> RouteImage<'a> {
+    /// Returns the borrowed boundary identity.
+    pub const fn boundary(&self) -> BoundaryId<'a> {
+        self.boundary
     }
 }
 

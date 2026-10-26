@@ -1,11 +1,11 @@
 //! Shared coordination definitions and canonical channel identities.
 //!
-//! These functions consume validated builder output and explicit topology metadata.
+//! These functions consume validated builder output and its resolved boundary contracts.
 //! They preserve versioned hash domains, protocol inputs, and canonical table order.
 //! Local scheduler images and artifact policy use separate fingerprints.
 mod render;
 use anyhow::{Context, Result};
-use boomerang_builder::compiler::{ApplicationTopology, OwnedCompiledDeployment};
+use boomerang_builder::compiler::OwnedCompiledDeployment;
 use boomerang_runtime::image::{
     BoundaryFailurePolicy, CodecPolicy, CoordinationProjection, RecoveryPolicy, RtiDependencyImage,
     SecurityPolicy, TimingPolicy, TransportPolicy,
@@ -68,39 +68,29 @@ pub fn mapping_fingerprint(compiled: &OwnedCompiledDeployment) -> Result<blake3:
     })
 }
 
-/// Hashes shared boundary contracts and the existing analyzed coordination projection.
+/// Hashes retained boundary contracts and the analyzed coordination projection.
 /// Contract identity/version is the schema authority: a payload schema change must version it.
-/// Local coordination or a missing topology boundary contract returns an error.
-pub fn coordination_fingerprint(
-    compiled: &OwnedCompiledDeployment,
-    topology: &ApplicationTopology,
-) -> Result<blake3::Hash> {
+/// Use the endpoint contracts retained by lowering in canonical edge and source/target order.
+/// Local coordination returns an error.
+pub fn coordination_fingerprint(compiled: &OwnedCompiledDeployment) -> Result<blake3::Hash> {
     compiled.with_coordination(|projection| {
         let CoordinationProjection::CentralRti(image) = projection else {
             anyhow::bail!("wire coordination requires central-rti")
         };
-        let mut contracts = Vec::new();
-        for edge in compiled.federation().edges() {
-            let connection = topology
-                .connection(edge.id())
-                .context("compiled boundary missing from canonical topology")?;
-            for endpoint in [connection.source(), connection.target()] {
-                let port = topology.port(endpoint).context("missing boundary port")?;
-                let reactor = topology
-                    .reactor(port.reactor())
-                    .context("missing boundary reactor")?;
-                let component = topology
-                    .component(reactor.component())
-                    .context("missing boundary component")?;
-                contracts.push((
-                    edge.id().to_canonical_string(),
-                    endpoint.to_string(),
-                    component.id().to_string(),
-                    component.contract().as_str(),
-                    component.contract_version(),
-                ));
-            }
-        }
+        let contracts = compiled
+            .federation()
+            .boundary_contracts()
+            .iter()
+            .map(|contract| {
+                (
+                    contract.boundary.to_canonical_string(),
+                    contract.endpoint.to_string(),
+                    contract.component.id().to_string(),
+                    contract.component.contract().as_str(),
+                    contract.component.contract_version(),
+                )
+            })
+            .collect::<Vec<_>>();
         let ranges = |range: tinymap::SliceRange<RtiDependencyImage>| (range.start(), range.len());
         let members = image
             .members()
@@ -204,19 +194,16 @@ pub fn validate_generated_backend(compiled: &OwnedCompiledDeployment) -> Result<
 
 /// Emit immutable central RTI tables, identity, codec, and wire admission definitions.
 ///
-/// The topology supplies boundary contract identities and versions for hashing.
+/// Use the deployment's retained boundary contracts for identity hashing.
 /// Generated public names remain available at the including module boundary.
 /// An internal namespace prevents collisions with scheduler definition imports.
 /// This function emits no scheduler tables, payload bindings, startup, or execution.
 /// Local coordination returns an error.
 /// Unsupported generated-backend capabilities return an error before source emission.
-pub fn render_definitions(
-    compiled: &OwnedCompiledDeployment,
-    topology: &ApplicationTopology,
-) -> Result<TokenStream> {
+pub fn render_definitions(compiled: &OwnedCompiledDeployment) -> Result<TokenStream> {
     validate_generated_backend(compiled)?;
     let image = render::render_coordination(compiled)?;
-    let identity = coordination_fingerprint(compiled, topology)?;
+    let identity = coordination_fingerprint(compiled)?;
     let bytes = identity.as_bytes().iter();
     let mapping = mapping_fingerprint(compiled)?;
     let mapping_bytes = mapping.as_bytes().iter();

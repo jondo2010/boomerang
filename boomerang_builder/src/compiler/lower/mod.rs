@@ -18,7 +18,7 @@
 //! generation renders the assignments made here; it does not perform a second lowering pass.
 
 use super::{
-    compiled::{OwnedBindingImage, OwnedRouteImage},
+    compiled::{BoundaryEndpointContract, OwnedBindingImage, OwnedRouteImage},
     coordination::project_central_rti,
     federation::{
         analyze_federation_graph, AnalyzedFederationGraph, FederationAnalysisError,
@@ -29,7 +29,8 @@ use super::{
     ApplicationTopology, BoundaryId, ComponentInstanceId, CoordinationProjectionError,
     GlobalFederationImage, ImplementationId, OwnedCompiledDeployment, OwnedCoordinationProjection,
     OwnedEnclaveImage, OwnedFederateImage, PortId, Reaction, ReactionId, ReactorId,
-    RequiredBinding, RequiredBindings, ResolvedDeployment, StableEnclaveId, StablePath,
+    RequiredBinding, RequiredBindings, ResolvedDeployment, ResolvedInitializerAction,
+    ResolvedInitializerCapabilities, StableEnclaveId, StablePath,
 };
 use crate::{
     descriptor::{ActionSlotId, DescriptorBound, PortSlotId, ReactionSlotId, ReactorSlotId},
@@ -146,6 +147,18 @@ pub enum CompileError {
         /// Fully qualified logical path of the unmatched binding.
         logical: String,
     },
+    /// An initializer requires an action absent from its instance's Enclave.
+    #[error("initializer {reactor} for component {component} requires missing action {action}")]
+    MissingInitializerAction {
+        /// Component instance receiving the initializer.
+        component: ComponentInstanceId,
+        /// Selected implementation declaring the initializer.
+        implementation: ImplementationId,
+        /// Descriptor-local reactor that declares the capability.
+        reactor: ReactorSlotId,
+        /// Descriptor-local action absent from the instance's action table.
+        action: ActionSlotId,
+    },
     /// A logical runtime binding matches more than one descriptor-local slot.
     #[error(
         "implementation {implementation} for component {component} has {candidates} {kind} slots matching {logical}"
@@ -195,23 +208,27 @@ impl<'a> DescriptorSlots<'a> {
         let binding = deployment
             .binding(component)
             .expect("resolved deployment binds every topology component");
-        let roots = binding
-            .descriptor()
+        let descriptor = deployment
+            .implementation(binding.implementation())
+            .expect("resolved implementation exists");
+        let mut roots = descriptor
             .reactor_slots()
             .iter()
-            .filter(|slot| slot.parent.is_none())
-            .collect::<Vec<_>>();
-        let [root] = roots.as_slice() else {
-            return Err(CompileError::DescriptorRoot {
-                component: component.clone(),
-                implementation: binding.implementation().clone(),
-                roots: roots.len(),
-            });
+            .filter(|slot| slot.parent.is_none());
+        let root = match (roots.next(), roots.count()) {
+            (Some(root), 0) => root,
+            (first, remaining) => {
+                return Err(CompileError::DescriptorRoot {
+                    component: component.clone(),
+                    implementation: binding.implementation().clone(),
+                    roots: usize::from(first.is_some()) + remaining,
+                });
+            }
         };
         Ok(Self {
             component,
             implementation: binding.implementation(),
-            descriptor: binding.descriptor(),
+            descriptor,
             root,
         })
     }
@@ -234,14 +251,15 @@ impl<'a> DescriptorSlots<'a> {
     }
 
     /// Resolves the descriptor reactor slot for one logical reactor.
-    fn reactor_slot(&self, logical: &ReactorId) -> Result<ReactorSlotId, CompileError> {
+    fn reactor_slot(
+        &self,
+        logical: &ReactorId,
+    ) -> Result<&'a crate::descriptor::ReactorSlot, CompileError> {
         let matches = self
             .descriptor
             .reactor_slots()
             .iter()
-            .filter(|slot| self.matches_relative_path(logical.path(), slot.id.path()))
-            .map(|slot| slot.id.clone())
-            .collect::<Vec<_>>();
+            .filter(|slot| self.matches_relative_path(logical.path(), slot.id.path()));
         self.one_slot("reactor", logical.path(), matches)
     }
 
@@ -252,9 +270,8 @@ impl<'a> DescriptorSlots<'a> {
             .reaction_slots()
             .iter()
             .filter(|slot| self.matches_relative_path(logical.path(), slot.id.path()))
-            .map(|slot| slot.id.clone())
-            .collect::<Vec<_>>();
-        self.one_slot("reaction", logical.path(), matches)
+            .map(|slot| &slot.id);
+        self.one_slot("reaction", logical.path(), matches).cloned()
     }
 
     /// Resolves the descriptor port slot for one logical port.
@@ -277,9 +294,9 @@ impl<'a> DescriptorSlots<'a> {
                 .port_slots()
                 .iter()
                 .filter(|slot| self.matches_relative_path(&declaration, slot.id.path()))
-                .map(|slot| slot.id.clone())
-                .collect(),
+                .map(|slot| &slot.id),
         )
+        .cloned()
     }
 
     /// Resolves the descriptor action slot for one logical action.
@@ -291,49 +308,87 @@ impl<'a> DescriptorSlots<'a> {
                 .action_slots()
                 .iter()
                 .filter(|slot| self.matches_relative_path(logical.path(), slot.id.path()))
-                .map(|slot| slot.id.clone())
-                .collect(),
+                .map(|slot| &slot.id),
         )
+        .cloned()
     }
 
-    /// Converts a matching descriptor-slot set into one required binding slot.
+    /// Selects one matching descriptor slot and reports the exact candidate count.
     fn one_slot<T>(
         &self,
         kind: &'static str,
         logical: &StablePath,
-        matches: Vec<T>,
+        mut matches: impl Iterator<Item = T>,
     ) -> Result<T, CompileError> {
-        match matches.len() {
-            0 => Err(CompileError::MissingDescriptorSlot {
+        let first = matches
+            .next()
+            .ok_or_else(|| CompileError::MissingDescriptorSlot {
                 component: self.component.clone(),
                 implementation: self.implementation.clone(),
                 kind,
                 logical: logical.to_string(),
-            }),
-            1 => Ok(matches
-                .into_iter()
-                .next()
-                .expect("one matching descriptor slot")),
-            candidates => Err(CompileError::AmbiguousDescriptorSlot {
+            })?;
+        let remaining = matches.count();
+        if remaining == 0 {
+            Ok(first)
+        } else {
+            Err(CompileError::AmbiguousDescriptorSlot {
                 component: self.component.clone(),
                 implementation: self.implementation.clone(),
                 kind,
                 logical: logical.to_string(),
-                candidates,
-            }),
+                candidates: remaining + 1,
+            })
         }
     }
 }
 
 impl ResolvedDeployment {
-    /// Lowers a resolved deployment into canonical immutable compiled images.
-    pub fn lower(&self) -> Result<OwnedCompiledDeployment, CompileError> {
+    /// Consumes this resolved deployment to produce validated, canonical, immutable compiled images.
+    pub fn lower(self) -> Result<OwnedCompiledDeployment, CompileError> {
         self.validate_policies()?;
         let analysis = self.analyze()?;
+        let descriptor_slots = self
+            .bindings()
+            .map(|binding| {
+                let component = binding.component();
+                Ok((
+                    component.clone(),
+                    DescriptorSlots::for_component(&self, component)?,
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>, CompileError>>()?;
         let mut federates = self.federates().collect::<Vec<_>>();
         federates.sort_by_cached_key(|federate| canonical_identity_text(federate.id()));
         let members = analysis.federation.members().to_vec().into_boxed_slice();
         let federation_edges = analysis.federation.edges().to_vec().into_boxed_slice();
+        let topology = self.topology();
+        let boundary_contracts = analysis
+            .federation
+            .edges()
+            .iter()
+            .flat_map(|edge| {
+                let connection = topology
+                    .connection(edge.id())
+                    .expect("analyzed boundary exists");
+                [connection.source(), connection.target()].map(|endpoint| {
+                    let port = topology
+                        .port(endpoint)
+                        .expect("validated boundary port exists");
+                    let reactor = topology
+                        .reactor(port.reactor())
+                        .expect("validated boundary owner exists");
+                    BoundaryEndpointContract {
+                        boundary: edge.id().clone(),
+                        endpoint: endpoint.clone(),
+                        component: topology
+                            .component(reactor.component())
+                            .expect("validated component exists")
+                            .clone(),
+                    }
+                })
+            })
+            .collect();
         let mut in_transit_capacities = BTreeMap::new();
         let mut owned_federates: tinymap::HeapTinyMapBuilder<FederateIndex, _> =
             tinymap::HeapTinyMapBuilder::heap();
@@ -360,7 +415,7 @@ impl ResolvedDeployment {
             sort_by_encoded_identity(&mut enclaves);
             let enclaves = enclaves
                 .into_iter()
-                .map(|(id, _)| self.lower_enclave(id, &analysis))
+                .map(|(id, _)| self.lower_enclave(id, &analysis, &descriptor_slots))
                 .collect::<Result<Vec<_>, _>>()?;
             if matches!(
                 self.coordination(),
@@ -395,29 +450,31 @@ impl ResolvedDeployment {
                     message: format!("Federate table {error}"),
                 })?;
         }
-        let compiled = OwnedCompiledDeployment {
-            federation: GlobalFederationImage {
+        OwnedCompiledDeployment::new(
+            GlobalFederationImage {
                 members,
                 edges: federation_edges,
+                boundary_contracts,
             },
-            federates: owned_federates.seal(),
-            enclaves: owned_enclaves.seal(),
-            coordination: match self.coordination() {
+            owned_federates.seal(),
+            owned_enclaves.seal(),
+            match self.coordination() {
                 super::CoordinationSelection::Local => OwnedCoordinationProjection::Local,
                 super::CoordinationSelection::Distributed {
                     backend: super::CoordinationBackend::CentralRti,
                 } => OwnedCoordinationProjection::CentralRti(Box::new(project_central_rti(
                     &analysis.federation,
-                    self,
+                    &self,
                     &in_transit_capacities,
                 )?)),
                 super::CoordinationSelection::Distributed { .. } => {
                     return Err(CompileError::UnsupportedCoordination);
                 }
             },
-        };
-        validate_root_image(&compiled)?;
-        Ok(compiled)
+        )
+        .map_err(|error| CompileError::InvalidDeployment {
+            message: error.to_string(),
+        })
     }
 
     /// Fails closed on typed roadmap policies not supported by this compiler slice.
@@ -724,10 +781,12 @@ fn storage_bounds(
     let mut state = 0u64;
     let mut scratch = 0u64;
     for component in components {
-        let bounds = deployment
+        let binding = deployment
             .binding(&component)
-            .expect("resolved component has an implementation binding")
-            .descriptor()
+            .expect("resolved component selection");
+        let bounds = deployment
+            .implementation(binding.implementation())
+            .expect("resolved implementation descriptor")
             .bounds();
         queue = checked_bound(
             queue,
@@ -811,13 +870,4 @@ const fn route_direction_rank(direction: RouteDirection) -> u8 {
         RouteDirection::Inbound => 0,
         RouteDirection::Outbound => 1,
     }
-}
-
-/// Constructs and validates the borrowed root deployment image before success escapes.
-fn validate_root_image(compiled: &OwnedCompiledDeployment) -> Result<(), CompileError> {
-    compiled
-        .validate()
-        .map_err(|error| CompileError::InvalidDeployment {
-            message: error.to_string(),
-        })
 }

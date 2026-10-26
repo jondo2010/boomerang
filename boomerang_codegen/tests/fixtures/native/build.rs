@@ -2,14 +2,16 @@ use boomerang::component_metadata as emit;
 use boomerang_builder::compiler::*;
 use boomerang_codegen::{cargo_build::CargoBuild, *};
 include!("declaration.rs");
+mod nested;
 #[cfg(feature = "source-input")]
-declare_controller!(emit, source = "plant",);
+declare_controller!(emit, startup, source = "plant",);
 #[cfg(not(feature = "source-input"))]
-declare_controller!(emit,);
+declare_controller!(emit, startup,);
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut cargo = CargoBuild::from_env()?;
     cargo.track_file("build.rs")?;
     cargo.track_file("declaration.rs")?;
+    cargo.track_file("nested.rs")?;
     for name in [
         "CARGO_FEATURE_MISSING_EXPORT",
         "CARGO_FEATURE_FINGERPRINT_MISMATCH",
@@ -24,6 +26,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let second_enclave = topology.enclave("second")?;
     let second = topology.component("second", controller::definition(), &second_enclave)?;
     topology.connect(&first.output, &second.input)?;
+    topology.component("nested", nested::Nested, &enclave)?;
     let federate = FederateId::new("local")?;
     let configuration = DeploymentConfiguration {
         name: "native".into(),
@@ -51,24 +54,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         federate,
         cargo.target().clone(),
     );
-    let implementation = ImplementationId::new("controller")?;
-    let path = if std::env::var_os("CARGO_FEATURE_MISSING_EXPORT").is_some() {
-        "crate::absent::__boomerang::payload"
-    } else if std::env::var_os("CARGO_FEATURE_FINGERPRINT_MISMATCH").is_some()
-        || std::env::var_os("CARGO_FEATURE_ABI_MISMATCH").is_some()
-    {
-        "crate::incorrect_exports"
+    let implementation = if std::env::var_os("CARGO_FEATURE_MISSING_EXPORT").is_some() {
+        boomerang_codegen::register_component!(
+            compilation,
+            "controller",
+            metadata = controller,
+            payload = crate::absent
+        )?
     } else {
-        "crate::controller::__boomerang::payload"
+        boomerang_codegen::register_component!(
+            compilation,
+            "controller",
+            metadata = controller,
+            payload = crate::component_alias
+        )?
     };
-    compilation.register(
-        implementation.clone(),
-        controller::__boomerang::metadata::descriptor(),
-        PayloadExports::new(path)?,
-    )?;
     for component in ["first", "second"] {
         compilation.select(ComponentInstanceId::new(component)?, implementation.clone())?;
     }
+    let nested_descriptor = nested::descriptor();
+    compilation.register(
+        ImplementationId::new("nested")?,
+        nested_descriptor,
+        PayloadExports::new("crate::nested_payload::exports")?,
+    )?;
+    compilation.select(
+        ComponentInstanceId::new("nested")?,
+        ImplementationId::new("nested")?,
+    )?;
     #[cfg(feature = "source-input")]
     compilation.binding_configuration(boomerang_codegen::render::BindingConfiguration {
         sources: ["first", "second"]
@@ -79,6 +92,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         manual_clock: false,
         distributed: false,
     });
-    cargo.compile(&compilation, &mut std::io::stdout())?;
+    cargo.compile(compilation, &mut std::io::stdout())?;
     Ok(())
 }

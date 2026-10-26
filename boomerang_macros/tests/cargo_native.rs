@@ -94,7 +94,7 @@ fn target_graph_excludes_host_builder_and_metadata_excludes_payload_helper() {
 }
 
 #[test]
-fn canonical_encoding_matches_the_independent_hand_checked_oracle() {
+fn native_exports_preserve_identifiers_modes_and_initialization() {
     for features in ["metadata", "payload", "metadata,payload"] {
         success(cargo(
             "cargo-native-compatibility",

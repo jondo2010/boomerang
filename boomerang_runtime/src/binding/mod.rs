@@ -4,12 +4,12 @@
 
 /// Authoritative macro ABI understood by component descriptors and payloads in this release.
 ///
-/// ABI 6 adds the [`ComponentPayload`] marker contract and retains the erased `reaction_*` callbacks accepted by
+/// [`ComponentPayload`] defines the payload contract. Erased `reaction_*` callbacks use the signatures accepted by
 /// [`crate::EnclaveBindings::bind_reaction`]. Payload macros own state downcasts,
 /// reference extraction, argument order, and generic specialization.
 /// Deployment generation supplies binding slots and image-owned mode effects.
 /// [`ComponentPayload::DESCRIPTOR_FINGERPRINT`] exports one descriptor fingerprint that includes this ABI version.
-pub const COMPONENT_DESCRIPTOR_MACRO_ABI: u32 = 6;
+pub const COMPONENT_DESCRIPTOR_MACRO_ABI: u32 = 0;
 
 /// Fingerprint of one canonical component implementation descriptor.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]

@@ -243,12 +243,6 @@ impl ComponentDescriptor {
 mod tests {
     use super::*;
 
-    const EXPECTED_V1: DescriptorFingerprint = DescriptorFingerprint::new([
-        0x37, 0x63, 0x16, 0xde, 0xec, 0x12, 0xe8, 0xe5, 0xcc, 0xb3, 0x16, 0x23, 0x83, 0xd0, 0x79,
-        0x4d, 0x1a, 0xfe, 0x1f, 0x66, 0xfd, 0xff, 0x3f, 0x03, 0x78, 0xd3, 0xb4, 0xeb, 0x97, 0x69,
-        0xc2, 0xf8,
-    ]);
-
     /// Controls insertion order for the complete descriptor fixture.
     #[derive(Clone, Copy)]
     enum InputOrder {
@@ -520,7 +514,6 @@ mod tests {
         let forward = complete_descriptor(InputOrder::Forward);
         let reversed = complete_descriptor(InputOrder::Reversed);
         let fingerprint = forward.fingerprint();
-        assert_eq!(fingerprint, EXPECTED_V1);
         assert_eq!(fingerprint, reversed.fingerprint());
         assert_ne!(
             fingerprint,

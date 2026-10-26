@@ -13,10 +13,8 @@ static INITIALIZED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32:
 static ROUTED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 static SAMPLES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 static REACTIONS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-/// Public export aliases retain payload-owned reaction adapters.
-mod export_aliases {
-    pub use crate::controller::__boomerang::payload::*;
-}
+/// Target component alias remains independent of host metadata paths.
+use crate::controller as component_alias;
 /// Compiler output retains fallback fields across initialization configurations.
 #[allow(clippy::needless_update)]
 mod generated {

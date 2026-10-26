@@ -39,7 +39,7 @@ fn coexisting_namespaces_share_canonical_compatibility() {
     assert_eq!(
         controller::__boomerang::metadata::descriptor()
             .fingerprint(),
-        controller::__boomerang::payload::binding_manifest().descriptor_fingerprint()
+        <controller::__boomerang::payload::Payload as boomerang::runtime::binding::ComponentPayload>::DESCRIPTOR_FINGERPRINT
     );
 }
 #[cfg(not(any(feature = "metadata", feature = "payload")))]

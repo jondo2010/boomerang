@@ -16,7 +16,7 @@
 //! For component dependencies, enable metadata features in build dependencies.
 //! Enable payload features in normal dependencies.
 //! Set `default-features = false` where default features introduce implementation dependencies into the host build.
-//! Cargo aliases determine Rust paths; [`ImplementationId`](boomerang_builder::compiler::ImplementationId) determines semantic implementation identity.
+//! Cargo aliases determine Rust paths; [`ImplementationId`] determines semantic implementation identity.
 //!
 //! A single-package application must not depend on itself in build dependencies.
 //! Share its component declaration through a declarative macro or source file.
@@ -34,7 +34,8 @@
 //! # Compilation contract
 //!
 //! [`DeploymentConfiguration`] supplies the deployment name, placements, federate configurations, coordination selection, and boundary bindings.
-//! Register each implementation with [`Compilation::register`].
+//! Register each implementation with [`register_component!`].
+//! Use [`Compilation::register`] for explicit descriptors or custom payload exports.
 //! Supply its host descriptor and target payload module path independently.
 //! Select an implementation for every component instance with [`Compilation::select`].
 //! Multiple instances can select the same registration.
@@ -81,7 +82,7 @@
 //! The following fragment assumes application-defined topology, configuration, component instances, and implementation identifiers:
 //!
 //! ```rust,ignore
-//! use boomerang_codegen::{cargo_build::CargoBuild, Compilation, PayloadExports};
+//! use boomerang_codegen::{cargo_build::CargoBuild, Compilation, register_component};
 //!
 //! let mut cargo = CargoBuild::from_env()?;
 //! cargo.track_file("declaration.rs")?;
@@ -91,10 +92,8 @@
 //!     topology(), deployment_configuration(cargo.target().triple()),
 //!     selected_federate, cargo.target().clone(),
 //! );
-//! compilation.register(
-//!     implementation.clone(),
-//!     controller::__boomerang::metadata::descriptor(),
-//!     PayloadExports::new("crate::controller::__boomerang::payload")?,
+//! let implementation = register_component!(
+//!     compilation, "controller", metadata = controller, payload = crate::controller
 //! )?;
 //! compilation.select(first_instance, implementation.clone())?;
 //! compilation.select(second_instance, implementation)?;
@@ -181,8 +180,8 @@ pub struct PayloadExports {
 impl PayloadExports {
     /// Parse a Cargo-native path such as `crate::controller::__boomerang::payload`.
     /// Generic arguments, expressions, macros, and trailing source are rejected.
-    /// The namespace must export `binding_manifest()` returning its declaration-derived
-    /// [`BindingManifest`](boomerang_runtime::binding::BindingManifest).
+    /// The namespace must export a `Payload` marker that implements
+    /// [`ComponentPayload`](boomerang_runtime::binding::ComponentPayload).
     pub fn new(path: impl AsRef<str>) -> Result<Self, CompilationError> {
         let path = path.as_ref();
         let parsed = syn::parse_str::<syn::Path>(path).ok().filter(|path| {
@@ -210,4 +209,45 @@ impl std::fmt::Debug for PayloadExports {
             .field("path", &self.path.to_token_stream().to_string())
             .finish()
     }
+}
+
+/// Semantic implementation identity returned by [`register_component!`].
+pub use boomerang_builder::compiler::ImplementationId;
+
+/// Register host metadata with an explicit target component module path.
+///
+/// Returns a registration result containing the implementation identity for [`Compilation::select`].
+/// The metadata path resolves in the host build. The payload path remains target-side tokens.
+/// Both paths identify public component modules, without generated namespace suffixes.
+/// The macro evaluates the compilation and identity expressions once.
+/// Validation returns [`CompilationError`] without returning from the enclosing function.
+/// Identity errors retain their original cause through [`std::error::Error::source`].
+/// Duplicate registrations retain the original registration and its diagnostic context.
+///
+/// ```rust,ignore
+/// let implementation = boomerang_codegen::register_component!(
+///     compilation, "sensor", metadata = sensor, payload = physical_input::sensor
+/// )?;
+/// compilation.select(sensor_instance, implementation)?;
+/// ```
+#[macro_export]
+macro_rules! register_component {
+    ($compilation:expr, $implementation:expr, metadata = $metadata:path, payload = $payload:path $(,)?) => {{
+        (|| -> ::core::result::Result<$crate::ImplementationId, $crate::CompilationError> {
+            let compilation = &mut $compilation;
+            let implementation = $crate::ImplementationId::new($implementation)?;
+            use $metadata as component_metadata;
+            let payload = $crate::PayloadExports::new(::core::concat!(
+                ::core::stringify!($payload),
+                "::__boomerang::payload"
+            ))?;
+            compilation
+                .register(
+                    implementation.clone(),
+                    component_metadata::__boomerang::metadata::descriptor(),
+                    payload,
+                )
+                .map(|()| implementation)
+        })()
+    }};
 }

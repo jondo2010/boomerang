@@ -2,12 +2,9 @@ use boomerang::prelude::component_payload as emit_component;
 include!(concat!(env!("CARGO_MANIFEST_DIR"), "/declaration.rs"));
 controller_declaration!(emit_component);
 include!(concat!(env!("OUT_DIR"), "/expected.rs"));
-const MANIFEST: boomerang::runtime::binding::BindingManifest =
-    controller::__boomerang::payload::binding_manifest();
-const _: () = boomerang::runtime::binding::assert_descriptor_fingerprint(
-    EXPECTED,
-    MANIFEST.descriptor_fingerprint(),
-);
+const FINGERPRINT: boomerang::runtime::binding::DescriptorFingerprint =
+    <controller::__boomerang::payload::Payload as boomerang::runtime::binding::ComponentPayload>::DESCRIPTOR_FINGERPRINT;
+const _: () = boomerang::runtime::binding::assert_descriptor_fingerprint(EXPECTED, FINGERPRINT);
 #[test]
 fn payload_preserves_owned_implementation_and_actual_compatibility() {
     assert_eq!(
@@ -16,7 +13,7 @@ fn payload_preserves_owned_implementation_and_actual_compatibility() {
     );
     let _typed_port = controller::__boomerang::payload::port_Controller_2fcommand;
     let _typed_reaction = controller::__boomerang::payload::reaction_Controller_2fcontrol;
-    assert_eq!(MANIFEST.descriptor_fingerprint(), EXPECTED);
+    assert_eq!(FINGERPRINT, EXPECTED);
 }
 
 pub type ParentValue = u32;

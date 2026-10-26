@@ -1042,12 +1042,12 @@ fn payload_output(
         Err(error) => return PayloadOutput::diagnostic(error.to_compile_error()),
     };
     let fingerprint = descriptor.fingerprint().to_bytes();
-    let binding_manifest = quote! {
-        /// Actual compatibility information derived from this component declaration.
-        pub const fn binding_manifest() -> ::boomerang::runtime::binding::BindingManifest {
-            ::boomerang::runtime::binding::BindingManifest::new(
-                ::boomerang::runtime::binding::DescriptorFingerprint::new([#(#fingerprint),*]),
-            )
+    let payload_contract = quote! {
+        /// Zero-sized marker for this component's target payload compatibility contract.
+        pub struct Payload;
+        impl ::boomerang::runtime::binding::ComponentPayload for Payload {
+            const DESCRIPTOR_FINGERPRINT: ::boomerang::runtime::binding::DescriptorFingerprint =
+                ::boomerang::runtime::binding::DescriptorFingerprint::new([#(#fingerprint),*]);
         }
     };
     let binding_exports = model
@@ -1133,7 +1133,7 @@ fn payload_output(
             #capability_declaration
             #(#implementations)*
         },
-        exports: quote! { #binding_manifest #(#aliases)* },
+        exports: quote! { #payload_contract #(#aliases)* },
     }
 }
 

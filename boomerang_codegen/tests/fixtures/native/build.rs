@@ -54,17 +54,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         federate,
         cargo.target().clone(),
     );
-    let implementation = ImplementationId::new("controller")?;
-    let path = if std::env::var_os("CARGO_FEATURE_MISSING_EXPORT").is_some() {
-        "crate::absent::__boomerang::payload"
+    let implementation = if std::env::var_os("CARGO_FEATURE_MISSING_EXPORT").is_some() {
+        boomerang_codegen::register_component!(
+            compilation,
+            "controller",
+            metadata = controller,
+            payload = crate::absent
+        )?
     } else {
-        "crate::export_aliases"
+        boomerang_codegen::register_component!(
+            compilation,
+            "controller",
+            metadata = controller,
+            payload = crate::component_alias
+        )?
     };
-    compilation.register(
-        implementation.clone(),
-        controller::__boomerang::metadata::descriptor(),
-        PayloadExports::new(path)?,
-    )?;
     for component in ["first", "second"] {
         compilation.select(ComponentInstanceId::new(component)?, implementation.clone())?;
     }

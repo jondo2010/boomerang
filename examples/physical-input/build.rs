@@ -33,13 +33,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let mut compilation =
         Compilation::new(topology()?, configuration, federate, cargo.target().clone());
-    let implementation = ImplementationId::new("sensor")?;
-    let sensor = ComponentInstanceId::new("sensor")?;
-    compilation.register(
-        implementation.clone(),
-        sensor::__boomerang::metadata::descriptor(),
-        PayloadExports::new("physical_input::sensor::__boomerang::payload")?,
+    let implementation = register_component!(
+        compilation,
+        "sensor",
+        metadata = sensor,
+        payload = physical_input::sensor
     )?;
+    let sensor = ComponentInstanceId::new("sensor")?;
     compilation.select(sensor.clone(), implementation)?;
     compilation.binding_configuration(BindingConfiguration {
         sources: [(sensor, 0)].into_iter().collect(),

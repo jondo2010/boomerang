@@ -4,12 +4,12 @@
 
 /// Authoritative macro ABI understood by component descriptors and payloads in this release.
 ///
-/// ABI 5 retains the erased `reaction_*` callbacks accepted by
+/// ABI 6 adds the [`ComponentPayload`] marker contract and retains the erased `reaction_*` callbacks accepted by
 /// [`crate::EnclaveBindings::bind_reaction`]. Payload macros own state downcasts,
 /// reference extraction, argument order, and generic specialization.
 /// Deployment generation supplies binding slots and image-owned mode effects.
-/// `binding_manifest()` exports one descriptor fingerprint that includes this ABI version.
-pub const COMPONENT_DESCRIPTOR_MACRO_ABI: u32 = 5;
+/// [`ComponentPayload::DESCRIPTOR_FINGERPRINT`] exports one descriptor fingerprint that includes this ABI version.
+pub const COMPONENT_DESCRIPTOR_MACRO_ABI: u32 = 6;
 
 /// Fingerprint of one canonical component implementation descriptor.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -46,24 +46,12 @@ impl DescriptorFingerprint {
 /// Generated deployment code must compare it with the selected metadata descriptor fingerprint.
 /// Cargo feature resolution and target configuration do not establish this agreement.
 /// Rust checks exported symbols and signatures; the fingerprint checks descriptor semantics.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct BindingManifest {
-    /// Canonical descriptor fingerprint computed by the host macro.
-    descriptor_fingerprint: DescriptorFingerprint,
-}
-
-impl BindingManifest {
-    /// Constructs a manifest from a declaration-derived fingerprint that includes the macro ABI.
-    pub const fn new(descriptor_fingerprint: DescriptorFingerprint) -> Self {
-        Self {
-            descriptor_fingerprint,
-        }
-    }
-
-    /// Returns the canonical descriptor fingerprint for this component payload.
-    pub const fn descriptor_fingerprint(self) -> DescriptorFingerprint {
-        self.descriptor_fingerprint
-    }
+///
+/// Component macros emit a zero-sized `Payload` marker that implements this trait.
+/// State factories, type exports, and reaction adapters remain component-specific exports.
+pub trait ComponentPayload {
+    /// Declaration-derived compatibility information that includes the macro ABI.
+    const DESCRIPTOR_FINGERPRINT: DescriptorFingerprint;
 }
 
 /// Const-asserts that an application's expected fingerprint matches its component payload.

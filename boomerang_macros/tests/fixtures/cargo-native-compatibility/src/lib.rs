@@ -40,14 +40,14 @@ pub fn r#match(
 }
 const EXPECTED: boomerang::runtime::binding::DescriptorFingerprint =
     boomerang::runtime::binding::DescriptorFingerprint::new([
-        0xbd, 0x8f, 0x55, 0x17, 0xc7, 0xf1, 0x42, 0x86, 0x3a, 0xe7, 0xca, 0xb5, 0xf9, 0x0e, 0x52,
-        0x25, 0xf8, 0x03, 0xfd, 0x74, 0xe4, 0xf8, 0x7a, 0x45, 0xf6, 0xaf, 0x53, 0x95, 0xd9, 0xe0,
-        0x5a, 0x60,
+        0x56, 0xa8, 0xbb, 0x92, 0x1e, 0xff, 0x3d, 0x19, 0xc6, 0xea, 0x2f, 0xba, 0xf6, 0xad, 0x79,
+        0x3d, 0x9f, 0x38, 0xa5, 0x35, 0xb2, 0xc7, 0x23, 0x9f, 0x37, 0x09, 0xa2, 0x0e, 0x64, 0x9c,
+        0xd4, 0xe9,
     ]);
 #[cfg(feature = "payload")]
 const _: () = boomerang::runtime::binding::assert_descriptor_fingerprint(
     EXPECTED,
-    oracle::__boomerang::payload::binding_manifest().descriptor_fingerprint(),
+    <oracle::__boomerang::payload::Payload as boomerang::runtime::binding::ComponentPayload>::DESCRIPTOR_FINGERPRINT,
 );
 #[test]
 fn raw_identifiers_modes_and_anonymous_reactions_preserve_the_encoding_oracle() {
@@ -62,7 +62,7 @@ fn raw_identifiers_modes_and_anonymous_reactions_preserve_the_encoding_oracle() 
     {
         assert_eq!(oracle::__boomerang::payload::state_Match().r#loop, 3);
         assert_eq!(
-            oracle::__boomerang::payload::binding_manifest().descriptor_fingerprint(),
+            <oracle::__boomerang::payload::Payload as boomerang::runtime::binding::ComponentPayload>::DESCRIPTOR_FINGERPRINT,
             EXPECTED
         );
     }

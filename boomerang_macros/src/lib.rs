@@ -20,7 +20,7 @@
 //! Export paths use implementation-local slots rather than logical instance paths.
 //! Multiple logical instances reuse function exports while retaining separate runtime storage.
 //!
-//! `binding_manifest()` contains one structural descriptor fingerprint, including the macro ABI version.
+//! `ComponentPayload::DESCRIPTOR_FINGERPRINT` contains one structural descriptor fingerprint, including the macro ABI version.
 //! It contains no binding slots or function table.
 //! Generated applications must check this fingerprint before binding direct typed exports.
 //! Structural fingerprints omit reaction bodies and initializer implementations.
@@ -291,7 +291,7 @@ pub fn component_metadata(input: proc_macro::TokenStream) -> proc_macro::TokenSt
 /// Emits target payload bindings from the same inline declaration as [`component_metadata!`].
 ///
 /// Keeps implementation items in their owning module.
-/// The declaration determines compatibility information in `module::__boomerang::payload::binding_manifest()` without CLI inputs.
+/// The declaration determines compatibility information in `<module::__boomerang::payload::Payload as ComponentPayload>::DESCRIPTOR_FINGERPRINT` without CLI inputs.
 /// Each `reaction_*` export implements the callback accepted by
 /// `boomerang::runtime::EnclaveBindings::bind_reaction`.
 /// The payload owns concrete state downcasts and reference extraction in declaration order.

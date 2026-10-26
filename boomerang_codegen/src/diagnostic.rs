@@ -202,3 +202,14 @@ impl std::error::Error for CompilationError {
         self.source.as_ref().map(|e| &**e as _)
     }
 }
+
+impl From<boomerang_builder::compiler::InvalidStableId> for CompilationError {
+    fn from(error: boomerang_builder::compiler::InvalidStableId) -> Self {
+        Self::new(
+            Stage::Registration,
+            DiagnosticCode::InvalidInput,
+            error.to_string(),
+        )
+        .cause(error)
+    }
+}

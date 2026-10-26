@@ -61,7 +61,7 @@ pub fn render_definitions(
         let bytes = bytes.iter();
         let path = &payload.path;
         checks.extend(quote! {
-            const _: ()=boomerang_runtime::binding::assert_descriptor_fingerprint(boomerang_runtime::binding::DescriptorFingerprint::new([#(#bytes),*]),#path::binding_manifest().descriptor_fingerprint());
+            const _: ()=boomerang_runtime::binding::assert_descriptor_fingerprint(boomerang_runtime::binding::DescriptorFingerprint::new([#(#bytes),*]),<#path::Payload as boomerang_runtime::binding::ComponentPayload>::DESCRIPTOR_FINGERPRINT);
         });
     }
     let mut routes = BTreeMap::new();

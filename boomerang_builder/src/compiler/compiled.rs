@@ -41,7 +41,7 @@ use crate::runtime::image::{
 use tinymap::{HeapSealedTinyMap, HeapTinyMapBuilder, IndexSpan, TinyMapRef};
 
 /// Canonical required payload binding identities for one Enclave.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct RequiredBindings {
     /// Stable typed binding requirements.
     pub(crate) entries: Box<[RequiredBinding]>,
@@ -60,7 +60,7 @@ impl RequiredBindings {
 }
 
 /// Initializer capabilities resolved for one reactor instance.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct ResolvedInitializerCapabilities {
     /// Physical source name required from application configuration.
     pub source: Option<String>,
@@ -71,7 +71,7 @@ pub struct ResolvedInitializerCapabilities {
 }
 
 /// One initializer action resolved to its image row and payload type export.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct ResolvedInitializerAction {
     /// Descriptor-local slot that supplies the action payload type export.
     pub slot: ActionSlotId,
@@ -80,7 +80,7 @@ pub struct ResolvedInitializerAction {
 }
 
 /// One direct typed payload binding required by an Enclave image.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub enum RequiredBinding {
     /// Initializes and owns the state object for one reactor.
     State {
@@ -191,7 +191,7 @@ pub fn direct_binding_symbol(kind: BindingKind, slot: &StablePath) -> String {
 }
 
 /// Heap-backed immutable scheduler image for one Enclave.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct OwnedEnclaveImage {
     /// Stable Enclave identity.
     pub(crate) id: StableEnclaveId,
@@ -251,7 +251,7 @@ pub struct OwnedEnclaveImage {
 pub(crate) type OwnedRouteImage = runtime_image::RouteRecord<BoundaryId>;
 
 /// Host-owned canonical implementation-binding identity and its required kind.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub(crate) struct OwnedBindingImage {
     /// Stable binding identity retained by host-owned storage.
     id: BindingSlotId<OwnedBindingSlotMarker>,
@@ -440,7 +440,7 @@ impl OwnedEnclaveImage {
 }
 
 /// Heap-backed immutable image for one Federate.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct OwnedFederateImage {
     /// Stable Federate identity.
     pub(crate) id: FederateId,
@@ -477,7 +477,7 @@ impl OwnedFederateImage {
 /// Resolved contract at one cross-Federate boundary endpoint.
 ///
 /// Retain typed source identities for coordination hashing without the original topology.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct BoundaryEndpointContract {
     /// Stable boundary identity shared by its source and target endpoint records.
     pub boundary: BoundaryId,
@@ -488,7 +488,7 @@ pub struct BoundaryEndpointContract {
 }
 
 /// Backend-neutral global federation structure in stable identities.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct GlobalFederationImage {
     /// Federates in canonical identity order.
     pub(crate) members: Box<[FederateId]>,
@@ -520,7 +520,7 @@ impl GlobalFederationImage {
 /// Construction validates the complete runtime image hierarchy before returning this owner.
 /// Private fields and immutable projections preserve that result. Backends must consume this
 /// validated result without repeating root image validation.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct OwnedCompiledDeployment {
     /// Backend-neutral global federation structure.
     federation: GlobalFederationImage,
@@ -1005,17 +1005,6 @@ mod tests {
             assert_eq!(image.federation.members, &[FederateIndex::new(0)]);
             assert_eq!(image.federates[FederateIndex::new(0)].id().as_str(), "host");
         });
-        let invalid = OwnedCompiledDeployment::new(
-            GlobalFederationImage {
-                members: Box::default(),
-                edges: Box::default(),
-                boundary_contracts: Box::default(),
-            },
-            deployment.federates.clone(),
-            deployment.enclaves.clone(),
-            deployment.coordination.clone(),
-        );
-        assert!(invalid.is_err());
         assert_dense_ref(deployment.federates());
         assert_dense_ref(deployment.enclaves());
         let federates = deployment.federates();
@@ -1047,5 +1036,17 @@ mod tests {
                 );
             })
             .unwrap();
+
+        let invalid = OwnedCompiledDeployment::new(
+            GlobalFederationImage {
+                members: Box::default(),
+                edges: Box::default(),
+                boundary_contracts: Box::default(),
+            },
+            deployment.federates,
+            deployment.enclaves,
+            deployment.coordination,
+        );
+        assert!(invalid.is_err());
     }
 }

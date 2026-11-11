@@ -23,7 +23,9 @@ impl LiveActionCapability {
 }
 /// Borrowed live action storage and an already-started host monotonic clock.
 pub struct LiveInitContext<'a> {
+    /// Existing action storage; initialization creates no new action targets.
     actions: &'a TinyMap<ActionKey, Box<dyn BaseAction>>,
+    /// Capabilities declared by this exact deferred state.
     requirements: &'a [LiveActionCapability],
     send: SendContext,
 }
@@ -104,6 +106,23 @@ pub(crate) fn has_initializers(enclave: &Enclave) -> bool {
         .values()
         .any(|reactor| reactor.is::<DeferredReactor>())
 }
+/// Rejects an unsupported execution policy before any live state is constructed.
+pub(crate) fn validate_execution(
+    enclave: &Enclave,
+    config: &crate::Config,
+) -> Result<(), StateInitializationError> {
+    if config.fast_forward
+        && enclave
+            .env
+            .reactions
+            .values()
+            .any(|reaction| reaction.external_effect)
+    {
+        return Err(Box::new(crate::RuntimeError::ExternalEffectFastForward));
+    }
+    Ok(())
+}
+
 /// Validates every live typed requirement without calling user code.
 pub(crate) fn preflight(enclave: &Enclave) -> Result<(), InitializationError> {
     if !crate::store::Store::valid_layout(&enclave.env, &enclave.graph)
@@ -175,6 +194,30 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
         Arc,
     };
+
+    #[test]
+    fn output_initialization_later_fast_forward_effect_rejects_before_any_state_effect() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let first = guarded_enclave(calls.clone(), Arc::new(AtomicUsize::new(0)));
+        let mut invalid = Enclave::default();
+        let owner = invalid.insert_reactor(Reactor::new("effect", ()).boxed(), None);
+        let scope = invalid.root_scope(owner);
+        let mut effect = crate::Reaction::new(
+            "apply",
+            crate::reaction_closure!(_ctx, _state, _refs => { crate::OutputOutcome::Committed }),
+            None,
+        );
+        effect.external_effect = true;
+        invalid.insert_reaction(effect, owner, [], [], [], scope, None);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            crate::execute_enclaves(
+                [(EnclaveKey::new(0), first), (EnclaveKey::new(1), invalid)].into_iter(),
+                Config::default().with_fast_forward(true),
+            )
+        }));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(matches!(result, Ok(Err(_))));
+    }
 
     /// A returned state must observe closure before its destructor could join a sender.
     struct ReturnedGuard {

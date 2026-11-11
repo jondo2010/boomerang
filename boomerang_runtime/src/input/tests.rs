@@ -1401,3 +1401,53 @@ fn backend_stop_can_wait_for_a_pending_source_caller() {
         "backend stop began before the pending reply waiter was released"
     );
 }
+
+/// A seal must retain pre-cut input until actual execution, and reject fresh late data.
+#[cfg(feature = "hosted-output")]
+#[test]
+fn output_seal_keeps_admitted_batches_and_rejects_fresh_late_values() {
+    let h = harness(&[false], 1, 0, 8);
+    h.clock.advance_to(PhysicalInstant(30)).unwrap();
+    h.inputs
+        .submit(InputBatch::new(vec![sample(&h, 0, 1, 10)]))
+        .unwrap();
+    authorize(&h);
+    let seal = h
+        .inputs
+        .0
+        .coordination
+        .lock()
+        .unwrap()
+        .seal_ingress(
+            enclave_key(0),
+            crate::OutputBound::ThroughTime(PhysicalInstant(20)),
+        )
+        .unwrap();
+    assert_eq!(
+        seal.cut,
+        crate::OutputBound::ThroughTime(PhysicalInstant(20))
+    );
+    let batch = loop {
+        if let AsyncEvent::PhysicalBatch(batch) = h.rx[0].try_recv().unwrap().unwrap() {
+            break batch;
+        }
+    };
+    assert_eq!(batch.values.len(), 1);
+    assert_eq!(batch.values[0].0, Tag::new(Duration::nanoseconds(10), 0));
+    assert_eq!(
+        h.inputs
+            .submit(InputBatch::new(vec![sample(&h, 0, 2, 20)]))
+            .unwrap_err()
+            .kind,
+        InputErrorKind::Late,
+    );
+    h.inputs.submit(InputBatch::new(vec![])).unwrap();
+    assert_eq!(h.inputs.0.processor.lock().unwrap().state.retained.len(), 1);
+    assert!(h.reserve(0, batch.values[0].0));
+    h.complete(0, batch.values[0].0);
+    h.inputs.submit(InputBatch::new(vec![])).unwrap();
+    assert_eq!(h.inputs.0.processor.lock().unwrap().state.retained.len(), 0);
+    h.inputs
+        .submit(InputBatch::new(vec![sample(&h, 0, 2, 21)]))
+        .unwrap();
+}

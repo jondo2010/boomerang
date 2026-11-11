@@ -82,3 +82,12 @@ pub enum BoomerangError {
     #[error(transparent)]
     Runtime(#[from] runtime::RuntimeError),
 }
+
+// Keep public output and initialization examples checked with their required feature.
+#[cfg(all(doctest, feature = "hosted-output"))]
+#[doc = include_str!("../../book/src/output-outcomes.md")]
+mod output_guide {}
+
+#[cfg(all(doctest, feature = "hosted-output"))]
+#[doc = include_str!("../../book/src/reactor-initialization.md")]
+mod initialization_guide {}

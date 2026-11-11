@@ -327,7 +327,7 @@ fn external_effects_preserve_metadata_and_concrete_payload_outcomes() {
     success(cargo(
         "descriptor-pass",
         "test",
-        &["--features", "metadata,payload"],
+        &["--features", "metadata,payload,output-observer"],
     ));
     for args in [
         vec!["--features", "output-unit-return"],

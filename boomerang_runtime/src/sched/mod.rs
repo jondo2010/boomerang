@@ -10,6 +10,8 @@ mod compiled;
 pub(crate) mod core;
 pub(crate) mod federate;
 mod modal;
+#[cfg(feature = "hosted-output")]
+pub(crate) mod output;
 mod queue;
 
 // Kept at the scheduler-module boundary so sibling modules retain their narrow
@@ -24,7 +26,6 @@ pub(crate) use core::{ExecutionStorage, ModeTransition, Schedule, SchedulerError
 use core::{ReactionOutcome, SchedulerCore};
 
 use barrier::LogicalTimeBarrier;
-pub use barrier::LogicalTimeBarrierError;
 pub use federate::{
     CoordinationRevision, FederateAcquisition, FederateCompletion, FederateCoordinationBackend,
     FederateCoordinationError, FederatePublication,
@@ -274,26 +275,26 @@ impl ExecutionStorage<ReactionGraph> for Pin<Box<Store>> {
         #[cfg(feature = "parallel")]
         {
             use rayon::prelude::{ParallelBridge, ParallelIterator};
-            let results = contexts
-                .enumerate()
+            // Each worker owns its scratch slot before it invokes the callback.
+            // A sibling panic cannot discard a result that has already returned.
+            reactions
+                .iter()
+                .zip(outcomes)
+                .zip(contexts)
                 .par_bridge()
-                .map(|(index, context)| {
+                .map(|((&reaction, outcome), context)| {
                     let declared = context.reaction.external_effect;
-                    (index, declared, context.trigger(tag))
+                    let result = context.trigger(tag);
+                    let output = result.0;
+                    copy_live_outcome(outcome, result);
+                    if output.is_valid(declared) {
+                        Ok(())
+                    } else {
+                        Err(RuntimeError::OutputContract { reaction, output })
+                    }
                 })
-                .collect::<Vec<_>>();
-            // All parallel invocations have returned; retain every actual result before validation.
-            for &(index, _, result) in &results {
-                copy_live_outcome(&mut outcomes[index], result);
-            }
-            for (index, declared, (output, _)) in results {
-                if !output.is_valid(declared) {
-                    return Err(RuntimeError::OutputContract {
-                        reaction: reactions[index],
-                        output,
-                    });
-                }
-            }
+                // Do not stop at a returned error: peers may have known effects.
+                .reduce(|| Ok(()), Result::and)
         }
 
         #[cfg(not(feature = "parallel"))]
@@ -307,6 +308,7 @@ impl ExecutionStorage<ReactionGraph> for Pin<Box<Store>> {
             }
         }
 
+        #[cfg(not(feature = "parallel"))]
         Ok(())
     }
 
@@ -513,6 +515,8 @@ enum LiveSchedulerState {
     NotStarted,
     /// Startup completed and steps may still be processed.
     Running,
+    /// An operation unwound; failed finalization must precede any further step.
+    Interrupted,
     /// Normal or failed finalization completed.
     Terminated,
 }
@@ -592,15 +596,7 @@ impl Scheduler {
         use crate::initialization::live;
         let close = live::CloseMailboxes(vec![enclave.event_tx.clone()]);
         live::preflight(&enclave)?;
-        if config.fast_forward
-            && enclave
-                .env
-                .reactions
-                .values()
-                .any(|reaction| reaction.external_effect)
-        {
-            return Err(Box::new(RuntimeError::ExternalEffectFastForward));
-        }
+        live::validate_execution(&enclave, &config)?;
         if live::has_initializers(&enclave) {
             enclave.clock.initialize(std::time::Instant::now());
             live::initialize(&mut enclave, key)?;
@@ -633,12 +629,7 @@ impl Scheduler {
             .map(|(enclave_key, upstream_ref)| {
                 (
                     enclave_key,
-                    LogicalTimeBarrier {
-                        released_tag: Tag::NEVER,
-                        provisional_tag: Tag::NEVER,
-                        upstream_ctx: upstream_ref.send_ctx,
-                        upstream_delay: upstream_ref.delay,
-                    },
+                    LogicalTimeBarrier::new(upstream_ref.send_ctx, upstream_ref.delay),
                 )
             })
             .collect();
@@ -702,6 +693,8 @@ impl Scheduler {
         } = self;
 
         SchedulerCore {
+            #[cfg(feature = "hosted-output")]
+            output: None,
             clock: clock.clone(),
             key: *key,
             config,
@@ -740,6 +733,7 @@ impl Scheduler {
         if self.state != LiveSchedulerState::NotStarted {
             return;
         }
+        self.state = LiveSchedulerState::Interrupted;
         self.prepare_clock(std::time::Instant::now());
         self.core().startup();
         self.state = LiveSchedulerState::Running;
@@ -748,14 +742,22 @@ impl Scheduler {
     /// Processes one scheduler step after [`Self::startup`].
     ///
     /// Returns `Ok(true)` while another step may be processed. `Ok(false)` means
-    /// normal shutdown has been finalized. An error finalizes failed shutdown
-    /// before returning it. After either terminal result, later calls return
-    /// `Ok(false)` without restarting or finalizing the scheduler again.
+    /// shutdown has been finalized, including failure after a caught callback panic.
+    /// An error finalizes failed shutdown before returning it. After either terminal
+    /// result, later calls return `Ok(false)` without restarting or finalizing again.
     pub fn try_next(&mut self) -> Result<bool, RuntimeError> {
-        if self.state == LiveSchedulerState::Terminated {
-            return Ok(false);
+        match self.state {
+            LiveSchedulerState::Terminated => return Ok(false),
+            LiveSchedulerState::Interrupted => {
+                self.core().shutdown_failed();
+                self.state = LiveSchedulerState::Terminated;
+                return Ok(false);
+            }
+            LiveSchedulerState::NotStarted | LiveSchedulerState::Running => {}
         }
 
+        // A caught callback panic leaves the tag incomplete and cannot be resumed.
+        self.state = LiveSchedulerState::Interrupted;
         let result = {
             let mut core = self.core();
             match core.try_next() {
@@ -770,9 +772,11 @@ impl Scheduler {
                 }
             }
         };
-        if !matches!(result, Ok(true)) {
-            self.state = LiveSchedulerState::Terminated;
-        }
+        self.state = if matches!(result, Ok(true)) {
+            LiveSchedulerState::Running
+        } else {
+            LiveSchedulerState::Terminated
+        };
         live_scheduler_result(result)
     }
 
@@ -792,6 +796,8 @@ impl Scheduler {
     /// Process the reactions at this tag in increasing order of level.
     ///
     /// Reactions at a level N may trigger further reactions at levels M>N.
+    /// This method bypasses scheduling. Calls after interruption or termination
+    /// do not invoke reactions.
     ///
     /// # Panics
     ///
@@ -802,9 +808,20 @@ impl Scheduler {
         reaction_view: KeySetView<ReactionKey>,
         terminal: bool,
     ) {
+        match self.state {
+            LiveSchedulerState::Terminated => return,
+            LiveSchedulerState::Interrupted => {
+                self.core().shutdown_failed();
+                self.state = LiveSchedulerState::Terminated;
+                return;
+            }
+            LiveSchedulerState::NotStarted | LiveSchedulerState::Running => {}
+        }
+        let state = std::mem::replace(&mut self.state, LiveSchedulerState::Interrupted);
         self.core()
             .process_tag(tag, reaction_view, terminal, &[])
             .expect("live reaction execution failed");
+        self.state = state;
     }
 
     /// Consume the scheduler and return the `Env` instance.
@@ -867,6 +884,12 @@ pub fn execute_enclaves(
         live::preflight(enclave).map_err(|source| ExecuteEnclavesError::Initialization {
             enclave: *key,
             source: Box::new(source),
+        })?;
+        live::validate_execution(enclave, &config).map_err(|source| {
+            ExecuteEnclavesError::Initialization {
+                enclave: *key,
+                source,
+            }
         })?;
     }
     if enclaves
@@ -1181,6 +1204,69 @@ mod tests {
         assert_eq!(snapshot.processed_tags, 1);
         assert_eq!(snapshot.event_queue_occupancy, 0);
         assert_eq!(snapshot.event_queue_peak_occupancy, 1);
+    }
+
+    #[test]
+    fn caught_live_callback_panic_prevents_resuming_or_restarting() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        for direct in [false, true] {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let invoked = calls.clone();
+            let mut enclave = Enclave::default();
+            let owner = enclave.insert_reactor(Reactor::new("root", ()).boxed(), None);
+            let scope = enclave.root_scope(owner);
+            let reaction = enclave.insert_reaction(
+                Reaction::new(
+                    "panic",
+                    reaction_closure!(_ctx, _reactor, _refs => {
+                        assert_ne!(invoked.fetch_add(1, Ordering::SeqCst), 0, "callback panic");
+                    }),
+                    None,
+                ),
+                owner,
+                std::iter::empty::<PortKey>(),
+                std::iter::empty::<PortKey>(),
+                std::iter::empty::<ActionKey>(),
+                scope,
+                None,
+            );
+            let shutdown = enclave.shutdown_rx.clone();
+            let observation = Arc::new(crate::ObservationState::new(std::time::Instant::now()));
+            let mut scheduler = Scheduler::new(
+                EnclaveKey::new(0),
+                enclave,
+                Config::default().with_fast_forward(true),
+                Some(observation.clone()),
+            );
+            scheduler.startup();
+            for tag in [Tag::ZERO, Tag::ZERO.delay(Duration::ZERO)] {
+                scheduler
+                    .events
+                    .push_event(tag, [(Level::from(0), reaction)], false);
+            }
+            let mut reactions =
+                crate::key_set::KeySet::new(&scheduler.reaction_graph.reaction_limits());
+            reactions.extend_above([(Level::from(0), reaction)]);
+            assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if direct {
+                    scheduler.process_tag(Tag::ZERO, reactions.view(), false);
+                } else {
+                    let _ = scheduler.try_next();
+                }
+            }))
+            .is_err());
+            assert!(!scheduler.try_next().unwrap());
+            assert!(shutdown.is_shutdwon());
+            let sampled_at = std::time::Instant::now();
+            let snapshot = observation.snapshot(sampled_at).unwrap();
+            assert_eq!(snapshot.lifecycle, crate::SchedulerLifecycle::Failed);
+            assert_eq!(snapshot.current_phase, crate::SchedulerPhase::Idle);
+            scheduler.startup();
+            assert!(!scheduler.try_next().unwrap());
+            scheduler.process_tag(Tag::ZERO, reactions.view(), false);
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert_eq!(observation.snapshot(sampled_at).unwrap(), snapshot);
+        }
     }
 
     #[test]

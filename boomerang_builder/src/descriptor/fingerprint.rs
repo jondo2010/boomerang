@@ -117,6 +117,7 @@ impl ComponentDescriptor {
                     None => writer.u8(0),
                 }
                 writer.u8(u8::from(capabilities.clock_control));
+                writer.u8(u8::from(capabilities.output_observer));
                 writer.u64(capabilities.actions.len() as u64);
                 for action in &capabilities.actions {
                     writer.slot_id(action);
@@ -525,6 +526,24 @@ mod tests {
             fingerprint,
             complete_descriptor_with_macro_abi(COMPONENT_DESCRIPTOR_MACRO_ABI + 1).fingerprint(),
         );
+    }
+
+    #[test]
+    fn descriptor_fingerprint_changes_with_output_observer_capability() {
+        let mut input = complete_descriptor(InputOrder::Forward);
+        input.reactor_slots[0].capabilities = Some(super::super::InitializerCapabilities {
+            source: None,
+            actions: vec![],
+            clock_control: false,
+            output_observer: false,
+        });
+        let ordinary = input.fingerprint();
+        input.reactor_slots[0]
+            .capabilities
+            .as_mut()
+            .unwrap()
+            .output_observer = true;
+        assert_ne!(ordinary, input.fingerprint());
     }
 
     #[test]

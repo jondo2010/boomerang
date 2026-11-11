@@ -68,6 +68,8 @@ pub struct ResolvedInitializerCapabilities {
     pub actions: Vec<ResolvedInitializerAction>,
     /// Whether this initializer owns manual-clock control.
     pub clock_control: bool,
+    /// Exports an observer for the owning reactor instance.
+    pub output_observer: bool,
 }
 
 /// One initializer action resolved to its image row and payload type export.

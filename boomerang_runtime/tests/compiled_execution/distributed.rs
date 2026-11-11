@@ -430,3 +430,248 @@ fn slice_preflight_rejects_external_binding_errors_before_initialization_or_conn
         assert_eq!(SLICE_INITIALIZATIONS.load(Ordering::SeqCst), 0);
     }
 }
+
+/// A backend grant cannot substitute for final ingress exclusion at initialization.
+#[cfg(feature = "hosted-output")]
+#[test]
+fn output_initialization_rejects_unsupported_backend_before_any_state_effect() {
+    use boomerang_runtime::initialization::{InitializationError, StateCapabilities};
+    let images = [IMAGE];
+    let image =
+        FederateImageView::new(fixture_federate("output", "host", "std", s!(0, 1)), &images)
+            .unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let captured = calls.clone();
+    let bindings = FederateBindings::new().bind_enclave(
+        EnclaveIndex::new(0),
+        EnclaveBindings::new()
+            .bind_state_with_capabilities(
+                BindingSlotIndex::new(0),
+                StateCapabilities {
+                    output_observer: true,
+                    ..Default::default()
+                },
+                move |_| {
+                    captured.fetch_add(1, Ordering::SeqCst);
+                    Ok(initialize_counter())
+                },
+            )
+            .bind_reaction(BindingSlotIndex::new(1), |_, _, _, _| Ok(())),
+    );
+    let error = execute_owned_federate_with_backend(
+        FederateIndex::new(0),
+        &image,
+        bindings,
+        Config::default(),
+        |_| Ok(GrantBackend::default()),
+    )
+    .unwrap_err();
+    let ExecuteOwnedFederateError::EnclaveInitialization {
+        source: OwnedStorageError::Capabilities(source),
+        ..
+    } = error
+    else {
+        panic!("unexpected error: {error:?}")
+    };
+    assert_eq!(
+        source,
+        InitializationError::OutputUnavailable(
+            boomerang_runtime::OutputWaitError::UnsupportedBackend
+        )
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn output_initialization_later_fast_forward_image_rejects_before_any_state_effect() {
+    use boomerang_runtime::initialization::StateCapabilities;
+    let reactions = [REACTIONS[0].clone().with_external_effect(true)];
+    let images = [
+        IMAGE,
+        EnclaveImage {
+            enclave_id: EnclaveId::new("later"),
+            reactions: TinyMapRef::from_slice(&reactions),
+            ..IMAGE
+        },
+    ];
+    let image =
+        FederateImageView::new(fixture_federate("output", "host", "std", s!(0, 2)), &images)
+            .unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut bindings = FederateBindings::new();
+    for index in 0..2 {
+        let calls = calls.clone();
+        bindings = bindings.bind_enclave(
+            EnclaveIndex::new(index),
+            EnclaveBindings::new()
+                .bind_state_with_capabilities(
+                    BindingSlotIndex::new(0),
+                    StateCapabilities::default(),
+                    move |_| {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        Ok(initialize_counter())
+                    },
+                )
+                .bind_reaction(BindingSlotIndex::new(1), |_, _, _, _| {
+                    Ok(boomerang_runtime::OutputOutcome::Committed)
+                }),
+        );
+    }
+    let result = execute_owned_federate_with_backend(
+        FederateIndex::new(0),
+        &image,
+        bindings,
+        Config::default().with_fast_forward(true),
+        |_| Ok(GrantBackend::default()),
+    );
+    assert!(result.is_err());
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+/// Missing hosted support rejects every declaration before any earlier initializer runs.
+#[cfg(not(feature = "hosted-output"))]
+#[test]
+fn output_initialization_missing_feature_rejects_before_any_state_effect() {
+    use boomerang_runtime::initialization::{InitializationError, StateCapabilities};
+    let images = [
+        IMAGE,
+        EnclaveImage {
+            enclave_id: EnclaveId::new("later"),
+            ..IMAGE
+        },
+    ];
+    let image =
+        FederateImageView::new(fixture_federate("output", "host", "std", s!(0, 2)), &images)
+            .unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut bindings = FederateBindings::new();
+    for index in 0..2 {
+        let calls = calls.clone();
+        bindings = bindings.bind_enclave(
+            EnclaveIndex::new(index),
+            EnclaveBindings::new()
+                .bind_state_with_capabilities(
+                    BindingSlotIndex::new(0),
+                    StateCapabilities {
+                        output_observer: index == 1,
+                        ..Default::default()
+                    },
+                    move |_| {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        Ok(initialize_counter())
+                    },
+                )
+                .bind_reaction(BindingSlotIndex::new(1), |_, _, _, _| Ok(())),
+        );
+    }
+    let error = execute_owned_federate_with_backend(
+        FederateIndex::new(0),
+        &image,
+        bindings,
+        Config::default(),
+        |_| Ok(GrantBackend::default()),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(error, ExecuteOwnedFederateError::EnclaveInitialization { enclave, source: OwnedStorageError::Capabilities(InitializationError::OutputFeatureDisabled) } if enclave == EnclaveIndex::new(1))
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+/// Global cleanup must terminate peer observers before an earlier state joins its worker.
+#[cfg(feature = "hosted-output")]
+#[test]
+fn output_initialization_compiled_failure_closes_peer_waiters_before_state_join() {
+    use boomerang_runtime::initialization::StateCapabilities;
+    #[derive(Debug)]
+    struct JoinWorker(Option<std::thread::JoinHandle<()>>);
+    impl Drop for JoinWorker {
+        fn drop(&mut self) {
+            self.0.take().unwrap().join().unwrap();
+        }
+    }
+    for panic in [false, true] {
+        let images = [
+            IMAGE,
+            EnclaveImage {
+                enclave_id: EnclaveId::new("later"),
+                ..IMAGE
+            },
+        ];
+        let federates = [fixture_federate("output", "host", "std", s!(0, 2))];
+        let members = [FederateIndex::new(0)];
+        let deployment = CompiledDeploymentImage {
+            federation: GlobalFederationImage::new(&members, &[]),
+            federates: TinyMapRef::from_slice(&federates),
+            enclaves: TinyMapRef::from_slice(&images),
+            coordination: CoordinationProjection::Local,
+        };
+        let (peer_tx, peer_rx) = kanal::unbounded::<boomerang_runtime::OutputObserver>();
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        let (ready_tx, ready_rx) = kanal::unbounded::<()>();
+        let first = EnclaveBindings::new()
+            .bind_state_with_capabilities(
+                BindingSlotIndex::new(0),
+                StateCapabilities::default(),
+                move |_| {
+                    let peer_rx = peer_rx.clone();
+                    let result_tx = result_tx.clone();
+                    let ready_tx = ready_tx.clone();
+                    Ok(JoinWorker(Some(std::thread::spawn(move || {
+                        let peer = peer_rx
+                            .recv_timeout(std::time::Duration::from_secs(1))
+                            .unwrap();
+                        let wait = peer.request_tag(Tag::ZERO);
+                        ready_tx.send(()).unwrap();
+                        let result = wait.and_then(|wait| {
+                            wait.wait_timeout(std::time::Duration::from_millis(250))
+                        });
+                        result_tx.send(result).unwrap();
+                    }))))
+                },
+            )
+            .bind_reaction(BindingSlotIndex::new(1), |_, _, _, _| Ok(()));
+        let second = EnclaveBindings::new()
+            .bind_state_with_capabilities::<(), _>(
+                BindingSlotIndex::new(0),
+                StateCapabilities {
+                    output_observer: true,
+                    ..Default::default()
+                },
+                move |context| {
+                    peer_tx.send(context.output_observer()?).unwrap();
+                    ready_rx
+                        .recv_timeout(std::time::Duration::from_secs(1))
+                        .unwrap();
+                    if panic {
+                        panic!("injected compiled initializer panic");
+                    }
+                    Err(std::io::Error::other("injected compiled initializer error").into())
+                },
+            )
+            .bind_reaction(BindingSlotIndex::new(1), |_, _, _, _| Ok(()));
+        let bindings = FederateBindings::new()
+            .bind_enclave(EnclaveIndex::new(0), first)
+            .bind_enclave(EnclaveIndex::new(1), second);
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            execute_owned_federate(
+                deployment,
+                FederateIndex::new(0),
+                bindings,
+                Config::default(),
+            )
+        }));
+        if panic {
+            assert!(outcome.is_err());
+        } else {
+            assert!(outcome.unwrap().is_err());
+        }
+        assert!(matches!(
+            result_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .unwrap(),
+            Err(boomerang_runtime::OutputWaitError::Disconnected
+                | boomerang_runtime::OutputWaitError::ExecutionFailed)
+        ));
+    }
+}

@@ -202,6 +202,19 @@ pub enum FederateCoordinationError {
 
 /// Transport-neutral coordination boundary for one compiled Federate.
 pub trait FederateCoordinationBackend: Send {
+    /// Whether all logical ingress belongs to the local completion protocol.
+    ///
+    /// Return `true` only when every producer participates in the local upstream
+    /// barriers and all source admission uses the local coordinator. Independently
+    /// admitted backend payloads must not exist. A grant, publication, or idle
+    /// confirmation does not establish this property. Current network backends
+    /// use the conservative default and cannot supply tag or time output proofs.
+    /// Setup must inspect this before it exports observers to user initializers.
+    #[cfg(feature = "hosted-output")]
+    fn supports_output_proofs(&self) -> bool {
+        false
+    }
+
     /// Publishes the Federate's current revision and optional next event.
     ///
     /// Failures must use [FederateCoordinationError::BackendPublish].
@@ -253,6 +266,11 @@ pub(crate) struct LocalFederateCoordinationBackend {
 }
 
 impl FederateCoordinationBackend for LocalFederateCoordinationBackend {
+    #[cfg(feature = "hosted-output")]
+    fn supports_output_proofs(&self) -> bool {
+        true
+    }
+
     /// Retains the latest publication with a finite next event for local delivery.
     fn publish(
         &mut self,

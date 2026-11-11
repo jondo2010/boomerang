@@ -8,8 +8,18 @@
 //! Each reactor instance has a distinct boundary. A declaration can name multiple
 //! reactions. Parent instances do not inherit their children's declarations.
 //! Declared effects require paced execution. Fast-forward is rejected before
-//! invocation. These results do not yet provide completion observers, tag
-//! completion, time closure, or controlled simulator advancement.
+//! invocation. Hosted observers prove tag completion and explicit time closure
+//! for compiled execution. Live execution supports outcome reporting but cannot
+//! export observers. Completion proofs require final ingress exclusion.
+//! Backends that can admit logical payloads independently, including the current
+//! central RTI backend, return `OutputWaitError::UnsupportedBackend` for both
+//! bounds. Publication, grants, and idle confirmation do not make these proofs
+//! valid. The restriction does not disable ordinary reaction execution.
+//! Direct backend rejection occurs before a local cutoff is installed. If proof
+//! discovery later reaches an unsupported upstream participant, the request fails
+//! but cutoffs already installed elsewhere remain in force. Cancellation also
+//! keeps installed cutoffs; neither path rolls admission progress back.
+//! Controlled simulator advancement requires a separate progress contract.
 
 /// Failure reported by an external device operation, possibly after a partial effect.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,3 +63,15 @@ impl OutputOutcome {
         )
     }
 }
+
+mod bound;
+pub use bound::{OutputBound, OutputCompletion, OutputWaitError};
+#[cfg(feature = "hosted-output")]
+mod observer;
+#[cfg(feature = "hosted-output")]
+pub use observer::{OutputObserver, OutputRequest, OutputWait};
+
+#[cfg(feature = "hosted-output")]
+pub(crate) use bound::OutputTarget;
+#[cfg(feature = "hosted-output")]
+pub(crate) use observer::{Lifecycle, OutputEndpoint};

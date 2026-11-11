@@ -53,6 +53,7 @@ pub(super) fn parse_descriptor(
                     .map(|(name, _)| ActionSlotId::from_path(path(&ident_text(name))))
                     .collect(),
                 clock_control: context.clock_control(),
+                output_observer: context.output_observer(),
             })
         })
         .transpose()?;
@@ -206,7 +207,8 @@ pub(super) fn emit_descriptor(descriptor: &ComponentDescriptor) -> TokenStream {
                 let source = context.source.as_ref().map_or_else(|| quote!(None), |source| quote!(Some(#source.into())));
                 let actions = context.actions.iter().map(|action| { let path = path_tokens(action.path()); quote!(::boomerang::builder::ActionSlotId::from_path(#path)) });
                 let clock = context.clock_control;
-                quote!(Some(::boomerang::builder::InitializerCapabilities { source: #source, actions: vec![#(#actions),*], clock_control: #clock }))
+                let output = context.output_observer;
+                quote!(Some(::boomerang::builder::InitializerCapabilities { source: #source, actions: vec![#(#actions),*], clock_control: #clock, output_observer: #output }))
             });
             quote!(::boomerang::builder::ReactorSlot { id: ::boomerang::builder::ReactorSlotId::from_path(#id), parent: None, capabilities: #capabilities })
         });

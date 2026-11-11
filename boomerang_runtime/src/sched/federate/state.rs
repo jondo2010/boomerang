@@ -189,6 +189,9 @@ pub(crate) enum CoordinationStateError {
 /// Mutable candidate, completion, and observation state for one participant.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct ParticipantState {
+    /// Durable fresh-input cutoff. It does not complete any admitted value.
+    #[cfg(feature = "hosted-output")]
+    ingress_seal: Option<crate::sched::output::IngressSeal>,
     /// Accepted authority awaiting the final execution boundary.
     #[cfg(feature = "hosted-source-input")]
     granted: Option<Tag>,
@@ -422,9 +425,53 @@ impl FederateCoordinationState {
     #[cfg(feature = "hosted-source-input")]
     pub(crate) fn input_is_late(&self, enclave: EnclaveIndex, tag: Tag) -> bool {
         self.participants.get(enclave).is_none_or(|p| {
+            #[cfg(feature = "hosted-output")]
+            if p.ingress_seal
+                .is_some_and(|seal| crate::OutputBound::ThroughTag(tag) <= seal.cut)
+            {
+                return true;
+            }
             p.started.is_some_and(|started| tag <= started)
                 || p.completed.is_some_and(|completed| tag <= completed)
         })
+    }
+
+    /// Installs a fresh-input cutoff only after the existing authority covers it.
+    /// The adapter must publish its ordered marker before accepting another request.
+    #[cfg(feature = "hosted-output")]
+    pub(crate) fn seal_ingress(
+        &mut self,
+        enclave: EnclaveIndex,
+        cut: crate::OutputBound,
+    ) -> Option<crate::sched::output::IngressSeal> {
+        let crate::OutputBound::ThroughTime(time) = cut else {
+            return None;
+        };
+        let horizon = Tag::new(
+            crate::Duration::nanoseconds_i128(i128::from(time.0)),
+            usize::MAX,
+        );
+        if self.is_stopped() || self.grant_horizon.is_none_or(|grant| grant < horizon) {
+            return None;
+        }
+        #[cfg(feature = "hosted-source-input")]
+        if self.input_horizon.is_some_and(|cap| cap < horizon) {
+            return None;
+        }
+        let participant = self.participants.get_mut(enclave)?;
+        #[cfg(feature = "hosted-source-input")]
+        if self.input_horizon.is_some() && participant.granted.is_none_or(|grant| grant < horizon) {
+            return None;
+        }
+        if let Some(seal) = participant.ingress_seal.filter(|seal| seal.cut >= cut) {
+            return Some(seal);
+        }
+        let generation = participant
+            .ingress_seal
+            .map_or(Some(1), |seal| seal.generation.checked_add(1))?;
+        let seal = crate::sched::output::IngressSeal { generation, cut };
+        participant.ingress_seal = Some(seal);
+        Some(seal)
     }
 
     /// Returns authoritative participant completion for bounded staging collection.
@@ -1623,5 +1670,52 @@ mod tests {
             matches!(actions.as_slice(), [CoordinationAction::Complete(c)]
             if !c.confirms_network_input())
         );
+    }
+
+    #[cfg(all(feature = "hosted-output", feature = "hosted-source-input"))]
+    #[test]
+    fn output_seal_rejects_fresh_input_without_completing_retained_values() {
+        use crate::{clock::PhysicalInstant, OutputBound};
+        let enclave = EnclaveIndex::new(3);
+        let mut state =
+            FederateCoordinationState::new([enclave], LifecyclePolicy::KeepAlive).unwrap();
+        let cut = OutputBound::ThroughTime(PhysicalInstant(5));
+        let horizon = Tag::new(Duration::nanoseconds(5), usize::MAX);
+        state.input_horizon = Some(horizon);
+        publish(&mut state, enclave, Some(horizon));
+        state
+            .handle_acquisition(FederateAcquisition::new(state.revision(), horizon))
+            .unwrap();
+        let seal = state.seal_ingress(enclave, cut).unwrap();
+        assert_eq!(seal.cut, cut);
+        assert!(state.input_is_late(enclave, Tag::new(Duration::nanoseconds(5), 17)));
+        assert!(!state.input_is_late(enclave, Tag::new(Duration::nanoseconds(6), 0)));
+        assert!(!state.input_completed(enclave, Tag::new(Duration::nanoseconds(4), 0)));
+        // The floor restricts fresh admission, not execution of previously admitted input.
+        assert!(state.begin_tag(enclave, Tag::new(Duration::nanoseconds(4), 0)));
+        assert!(!state.input_completed(enclave, Tag::new(Duration::nanoseconds(4), 0)));
+    }
+
+    #[cfg(all(feature = "hosted-output", feature = "hosted-source-input"))]
+    #[test]
+    fn output_seal_requires_source_and_backend_authority() {
+        use crate::{clock::PhysicalInstant, OutputBound};
+        let enclave = EnclaveIndex::new(3);
+        let mut state =
+            FederateCoordinationState::new([enclave], LifecyclePolicy::KeepAlive).unwrap();
+        let cut = OutputBound::ThroughTime(PhysicalInstant(5));
+        let horizon = Tag::new(Duration::nanoseconds(5), usize::MAX);
+        assert!(state.seal_ingress(enclave, cut).is_none());
+        state.input_horizon = Some(Tag::new(Duration::nanoseconds(4), usize::MAX));
+        publish(&mut state, enclave, Some(horizon));
+        state
+            .handle_acquisition(FederateAcquisition::new(state.revision(), horizon))
+            .unwrap();
+        assert!(state.seal_ingress(enclave, cut).is_none());
+        assert!(!state.input_is_late(enclave, Tag::ZERO));
+        state.input_horizon = Some(horizon);
+        state.input_progress().unwrap();
+        assert!(state.seal_ingress(enclave, cut).is_some());
+        assert!(state.seal_ingress(EnclaveIndex::new(99), cut).is_none());
     }
 }

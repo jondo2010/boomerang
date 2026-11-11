@@ -431,7 +431,11 @@ pub enum ExecuteOwnedFederateError {
     #[error(transparent)]
     PhysicalInput(#[from] crate::input::InputError),
     /// Selected physical clock failed validation or terminated during execution.
-    #[cfg(any(feature = "hosted-source-input", feature = "hosted-manual-clock"))]
+    #[cfg(any(
+        feature = "hosted-source-input",
+        feature = "hosted-manual-clock",
+        feature = "hosted-output"
+    ))]
     #[error(transparent)]
     PhysicalClock(#[from] crate::clock::PhysicalClockError),
     /// The deployment root or one nested image was structurally invalid.
@@ -720,7 +724,11 @@ struct RunShutdown {
     #[cfg(feature = "hosted-manual-clock")]
     clock: Option<crate::clock::ManualClock>,
     /// Read capabilities close even when the selected timeline uses the host clock.
-    #[cfg(any(feature = "hosted-source-input", feature = "hosted-manual-clock"))]
+    #[cfg(any(
+        feature = "hosted-source-input",
+        feature = "hosted-manual-clock",
+        feature = "hosted-output"
+    ))]
     selected_clock: crate::clock::SelectedClock,
     /// Causal clock failure observed before teardown closes handles.
     #[cfg(feature = "hosted-manual-clock")]
@@ -729,7 +737,11 @@ struct RunShutdown {
 impl RunShutdown {
     /// Idempotently closes capabilities and wakes all runtime/application waiters.
     fn close(&self) {
-        #[cfg(any(feature = "hosted-source-input", feature = "hosted-manual-clock"))]
+        #[cfg(any(
+            feature = "hosted-source-input",
+            feature = "hosted-manual-clock",
+            feature = "hosted-output"
+        ))]
         self.selected_clock.finish_run();
         #[cfg(feature = "hosted-source-input")]
         if let Some(inputs) = &self.inputs {

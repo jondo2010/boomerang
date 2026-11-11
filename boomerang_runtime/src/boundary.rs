@@ -156,11 +156,11 @@ impl InboundBoundaryAdapter {
                 let value = decoder
                     .decode(payload)
                     .map_err(|error| PayloadCodecError::new(error.to_string()))?;
-                match sender.try_send(AsyncEvent::Logical {
+                match sender.try_send(AsyncEvent::routed_logical(
                     tag,
-                    target: AsyncEventTarget::NetworkBoundaryPort(port),
-                    value: Box::new(value),
-                }) {
+                    AsyncEventTarget::NetworkBoundaryPort(port),
+                    Box::new(value),
+                )) {
                     Ok(true) => Ok(()),
                     Ok(false) => Err(BoundaryAdmissionError::MailboxFull),
                     Err(_) => Err(BoundaryAdmissionError::MailboxClosed),

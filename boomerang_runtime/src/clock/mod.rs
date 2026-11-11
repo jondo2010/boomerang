@@ -88,6 +88,9 @@ pub(crate) struct WaitContext<'a, 'coordination> {
     pub(crate) event_rx: &'a crate::Receiver<AsyncEvent>,
     /// Optional scheduler phase observer, always timed with the host clock.
     pub(crate) observation: Option<&'a crate::ObservationHandle>,
+    /// A proof-only wait has no physical effect to preserve after mailbox closure.
+    #[cfg(feature = "hosted-output")]
+    pub(crate) checkpoint_only: bool,
     /// Existing coordinator used to distinguish terminal mailbox closure.
     pub(crate) coordination:
         &'a mut Option<&'coordination mut (dyn FederateSchedulerCoordination + 'coordination)>,
@@ -184,7 +187,11 @@ impl ExecutionClock {
 }
 /// Read-only access to the selected execution timeline and its identity.
 /// Cloning this capability grants no authority to advance a manual clock.
-#[cfg(any(feature = "hosted-source-input", feature = "hosted-manual-clock"))]
+#[cfg(any(
+    feature = "hosted-source-input",
+    feature = "hosted-manual-clock",
+    feature = "hosted-output"
+))]
 #[derive(Clone, Debug)]
 pub struct SelectedClock {
     /// Shared selected timeline.
@@ -196,7 +203,11 @@ pub struct SelectedClock {
     /// Execution-scoped terminal state, independent of the host clock scheduling path.
     closed: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
-#[cfg(any(feature = "hosted-source-input", feature = "hosted-manual-clock"))]
+#[cfg(any(
+    feature = "hosted-source-input",
+    feature = "hosted-manual-clock",
+    feature = "hosted-output"
+))]
 impl SelectedClock {
     /// Creates a host clock execution identity after binding its shared origin.
     pub(crate) fn host_monotonic(clock: ExecutionClock) -> Result<Self, PhysicalClockError> {
@@ -241,7 +252,11 @@ impl From<ManualClock> for SelectedClock {
         }
     }
 }
-#[cfg(any(feature = "hosted-source-input", feature = "hosted-manual-clock"))]
+#[cfg(any(
+    feature = "hosted-source-input",
+    feature = "hosted-manual-clock",
+    feature = "hosted-output"
+))]
 impl PhysicalClock for SelectedClock {
     fn domain(&self) -> PhysicalClockDomainId {
         self.domain()

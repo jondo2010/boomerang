@@ -218,6 +218,7 @@ fn missing_manual_clock_reports_the_component_and_binding() {
         source: None,
         actions: vec![],
         clock_control: true,
+        output_observer: false,
     });
     let descriptor = boomerang_builder::ComponentDescriptor::try_new(
         original.contract_id().clone(),

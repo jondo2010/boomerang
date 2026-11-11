@@ -750,7 +750,8 @@ impl Assembly {
             };
 
             let runtime_reaction_key = enclave.insert_reaction(
-                runtime::Reaction::new(&reaction_name, reaction_body, None),
+                runtime::Reaction::new(&reaction_name, reaction_body, None)
+                    .with_external_effect(reaction.external_effect),
                 runtime_reactor_key,
                 use_ports,
                 effect_ports,

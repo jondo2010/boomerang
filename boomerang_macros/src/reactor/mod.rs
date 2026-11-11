@@ -22,6 +22,8 @@ pub(crate) use emission::ComponentEmission;
 pub struct ReactorArgs {
     /// The name of the state type to use. If not provided, a state struct will be generated.
     state: Option<TypePath>,
+    /// Named local reactions that perform external effects.
+    external_effects: Option<syn::ExprArray>,
     /// State constructor. Receives the generated context when `init_context` is set.
     state_init: Option<syn::Path>,
     /// Fields of the generated context passed to the state constructor.
@@ -585,8 +587,64 @@ impl ReactorBody {
             .collect()
     }
 
-    fn body_tokens(&self) -> TokenStream {
-        self.body_tokens_with_descriptor_slots(None, &mut std::iter::empty())
+    fn validate_external_effects(
+        &self,
+        declaration: &syn::ExprArray,
+    ) -> syn::Result<BTreeSet<String>> {
+        fn collect(body: &ReactorBody, names: &mut BTreeSet<String>) -> syn::Result<()> {
+            for item in &body.items {
+                match item {
+                    BodyItem::Reaction(reaction) => {
+                        if let Some(name) = reaction.name() {
+                            if !names.insert(ident_text(name)) {
+                                return Err(syn::Error::new_spanned(
+                                    name,
+                                    "duplicate reaction name",
+                                ));
+                            }
+                        }
+                    }
+                    BodyItem::Mode(mode) => collect(&mode.body, names)?,
+                    BodyItem::Tokens(_) => {}
+                }
+            }
+            Ok(())
+        }
+        let mut names = BTreeSet::new();
+        collect(self, &mut names)?;
+        let mut declared = BTreeSet::new();
+        for expression in &declaration.elems {
+            let syn::Expr::Path(path) = expression else {
+                return Err(syn::Error::new_spanned(
+                    expression,
+                    "external effect must name a local reaction",
+                ));
+            };
+            let Some(name) = path.path.get_ident().filter(|_| path.qself.is_none()) else {
+                return Err(syn::Error::new_spanned(
+                    expression,
+                    "external effect must name a local reaction",
+                ));
+            };
+            let name = ident_text(name);
+            if !names.contains(&name) {
+                return Err(syn::Error::new_spanned(
+                    expression,
+                    "external effect reaction is missing from this reactor",
+                ));
+            }
+            if !declared.insert(name) {
+                return Err(syn::Error::new_spanned(
+                    expression,
+                    "duplicate external effect reaction",
+                ));
+            }
+        }
+        Ok(declared)
+    }
+
+    fn body_tokens(&self, external_effects: &BTreeSet<String>) -> TokenStream {
+        self.body_tokens_with_descriptor_slots(None, &mut std::iter::empty(), external_effects)
     }
 
     /// Emits dynamic body tokens while assigning descriptor reaction slots in source order.
@@ -594,6 +652,7 @@ impl ReactorBody {
         &self,
         reactor_name: Option<&str>,
         slots: &mut impl Iterator<Item = &'a CanonicalReactionSlot>,
+        external_effects: &BTreeSet<String>,
     ) -> TokenStream {
         let mut tokens = TokenStream::new();
         for item in &self.items {
@@ -618,13 +677,21 @@ impl ReactorBody {
                             }
                         }
                     });
-                    reaction.to_tokens_with_descriptor_slot(&mut tokens, descriptor_slot);
+                    reaction.to_tokens_with_descriptor_slot(
+                        &mut tokens,
+                        descriptor_slot,
+                        reaction
+                            .name()
+                            .is_some_and(|name| external_effects.contains(&ident_text(name))),
+                    );
                 }
                 BodyItem::Mode(mode) => {
                     let key_ident = mode.key_ident();
-                    let body = mode
-                        .body
-                        .body_tokens_with_descriptor_slots(reactor_name, slots);
+                    let body = mode.body.body_tokens_with_descriptor_slots(
+                        reactor_name,
+                        slots,
+                        external_effects,
+                    );
                     tokens.append_all(quote! {
                         ctx.in_mode(#key_ident, |ctx| {
                             #body
@@ -872,6 +939,7 @@ fn payload_reaction_output(
     declaration: &declaration::Declaration<'_>,
     state_type: &syn::Path,
     symbols: &mut PayloadSymbols,
+    external_effects: &BTreeSet<String>,
 ) -> syn::Result<Vec<TokenStream>> {
     let model = declaration.model;
     let reactor_name = ident_text(&model.name);
@@ -918,6 +986,9 @@ fn payload_reaction_output(
                 arguments.push(quote!(#local));
             }
             let code = reaction.code();
+            let return_type = if reaction.name().is_some_and(|name| external_effects.contains(&ident_text(name))) {
+                quote!(::boomerang::runtime::OutputOutcome)
+            } else { quote!(()) };
             let mut generics = model.generics.clone();
             generics.params.insert(
                 0,
@@ -952,7 +1023,7 @@ fn payload_reaction_output(
                     ctx: &mut ::boomerang::runtime::Context,
                     state: &mut #state_type,
                     #(#parameters,)*
-                ) #where_clause #code
+                ) -> #return_type #where_clause #code
 
                 #[doc = #export_doc]
                 #[allow(non_snake_case, unused_mut, unused_variables)]
@@ -961,7 +1032,7 @@ fn payload_reaction_output(
                     state: &mut dyn ::boomerang::runtime::ReactorData,
                     mut refs: ::boomerang::runtime::ReactionRefs<#store_lifetime>,
                     mode_effect: Option<::boomerang::runtime::CompiledModeEffectRef>,
-                ) -> ::core::result::Result<(), ::boomerang::runtime::ReactionBindingError> #adapter_where {
+                ) -> ::core::result::Result<::boomerang::runtime::OutputOutcome, ::boomerang::runtime::ReactionBindingError> #adapter_where {
                     let state = state.downcast_mut::<#state_type>()
                         .expect("payload state initializer and reaction must agree");
                     #(#extraction)*
@@ -969,8 +1040,7 @@ fn payload_reaction_output(
                     if remaining != 0 {
                         return Err(::boomerang::runtime::ReactionRefsError::destructure_remaining(remaining).into());
                     }
-                    #typed_symbol #specialization(ctx, state, #(#arguments,)*);
-                    Ok(())
+                    Ok(::core::convert::Into::<::boomerang::runtime::OutputOutcome>::into(#typed_symbol #specialization(ctx, state, #(#arguments,)*)))
                 }
             })
         })
@@ -1016,6 +1086,7 @@ fn payload_output(
     state_struct: &Option<TokenStream>,
     state_impl: &Option<TokenStream>,
     semantic: &syn::Result<Option<boomerang_builder::ComponentDescriptor>>,
+    external_effects: &BTreeSet<String>,
 ) -> PayloadOutput {
     let model = declaration.model;
     let descriptor = match semantic {
@@ -1037,10 +1108,11 @@ fn payload_output(
     let mut symbols = PayloadSymbols {
         aliases: Vec::new(),
     };
-    let reaction_exports = match payload_reaction_output(declaration, state_type, &mut symbols) {
-        Ok(exports) => exports,
-        Err(error) => return PayloadOutput::diagnostic(error.to_compile_error()),
-    };
+    let reaction_exports =
+        match payload_reaction_output(declaration, state_type, &mut symbols, external_effects) {
+            Ok(exports) => exports,
+            Err(error) => return PayloadOutput::diagnostic(error.to_compile_error()),
+        };
     let fingerprint = descriptor.fingerprint().to_bytes();
     let payload_contract = quote! {
         /// Zero-sized marker for this component's target payload compatibility contract.
@@ -1199,6 +1271,19 @@ impl ArgsModel {
             tokens.append_all(error.to_compile_error());
             return;
         }
+        let external_effects = match self
+            .0
+            .external_effects
+            .as_ref()
+            .map(|declaration| self.1.body.validate_external_effects(declaration))
+            .transpose()
+        {
+            Ok(names) => names.unwrap_or_default(),
+            Err(error) => {
+                tokens.append_all(error.to_compile_error());
+                return;
+            }
+        };
         let selection = emission::SelectionPolicy::new(emission);
         let declaration = declaration::Declaration::new(&self.0, &self.1);
         let descriptor = semantic::parse_descriptor(&self.0, &declaration);
@@ -1367,6 +1452,7 @@ impl ArgsModel {
                 &payload_state_struct,
                 &state_impl,
                 &descriptor,
+                &external_effects,
             )
         } else {
             PayloadOutput::diagnostic(TokenStream::new())
@@ -1437,6 +1523,7 @@ impl ArgsModel {
                 let body_tokens = body.body_tokens_with_descriptor_slots(
                     Some(&reactor_name),
                     &mut declaration.reactions.iter().map(|reaction| &reaction.slot),
+                    &external_effects,
                 );
                 (
                     quote! {
@@ -1449,7 +1536,7 @@ impl ArgsModel {
                     body_tokens,
                 )
             }
-            (None, None) => (TokenStream::new(), body.body_tokens()),
+            (None, None) => (TokenStream::new(), body.body_tokens(&external_effects)),
             _ => unreachable!("reactor argument validation requires complete contract metadata"),
         };
 
@@ -1735,6 +1822,27 @@ impl ArgsModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn external_effect_declarations_require_unique_local_named_reactions() {
+        let model: Model = syn::parse_quote! {
+            fn Driver() -> impl Reactor {
+                reaction! { Apply(startup) { () } }
+                reaction! { Stop(shutdown) { () } }
+            }
+        };
+        assert!(model
+            .body
+            .validate_external_effects(&parse_quote!([Apply, Stop]))
+            .is_ok());
+        for declaration in [
+            parse_quote!([Missing]),
+            parse_quote!([Apply, Apply]),
+            parse_quote!([child::Apply]),
+        ] {
+            assert!(model.body.validate_external_effects(&declaration).is_err());
+        }
+    }
 
     #[test]
     fn direct_reactor_emits_an_unconditional_dynamic_constructor() {

@@ -272,8 +272,10 @@ fn owned_federate_retains_route_failure_before_competing_scheduler_panic() {
             &error,
             ExecuteOwnedFederateError::EnclaveExecution {
                 enclave,
-                source: OwnedStorageError::OutboundRouteChannelFull { destination, .. },
-            } if *enclave == EnclaveIndex::new(0) && *destination == EnclaveIndex::new(1)
+                source: OwnedStorageError::AfterReactionOutput { output, source, .. },
+            } if *enclave == EnclaveIndex::new(0)
+                && *output == boomerang_runtime::OutputOutcome::NotReported
+                && matches!(source.as_ref(), OwnedStorageError::OutboundRouteChannelFull { destination, .. } if *destination == EnclaveIndex::new(1))
         ),
         "{error:?}"
     );

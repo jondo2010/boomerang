@@ -615,6 +615,19 @@ fn lower_entity_tables(
                     .map(|mode| mode_indices[mode]),
             )
             .map_err(packed_overflow(enclave_id))?;
+        let component = topology
+            .reactor(reaction.reactor())
+            .expect("validated reaction owner")
+            .component();
+        let slots = DescriptorSlots::for_component(deployment, component)?;
+        let slot = slots.reaction_slot(id)?;
+        let external_effect = slots
+            .descriptor
+            .reaction_slots()
+            .iter()
+            .find(|entry| entry.id == slot)
+            .expect("resolved descriptor reaction")
+            .external_effect;
         let image = ReactionImage::new(
             reactor_indices[reaction.reactor()],
             scope_for(reaction.reactor(), reaction.options().mode()),
@@ -624,7 +637,8 @@ fn lower_entity_tables(
             effect_range,
             action_range,
             mode_range,
-        );
+        )
+        .with_external_effect(external_effect);
         *reaction_images
             .get_mut(reaction_indices[*id])
             .ok_or_else(|| missing_image_row(enclave_id, "reactions", reaction_indices[*id]))? =

@@ -422,3 +422,48 @@ mod typed_adapters {
 
 #[cfg(all(test, feature = "payload"))]
 mod adapter_execution;
+
+boomerang::component! {
+    pub mod output_driver {
+        use boomerang::prelude::*;
+        #[reactor(contract = "example.output", contract_version = 1,
+            bounds(queue_capacity = 2, payload_bytes = 16, state_bytes = 16, scratch_bytes = 16),
+            external_effects = [Apply, Idle])]
+        pub fn Driver(#[state(default = 0)] calls: usize) -> impl Reactor {
+            reaction! { Apply(startup) {
+                state.calls += 1;
+                boomerang::runtime::OutputOutcome::Committed
+            } }
+            reaction! { Idle(shutdown) { return boomerang::runtime::OutputOutcome::Unchanged; } }
+            reaction! { Ordinary(startup) { state.calls += 1; } }
+        }
+        #[cfg(all(test, feature = "metadata"))]
+        #[test]
+        fn external_effect_metadata_names_local_reactions() {
+            let descriptor = __boomerang::metadata::descriptor();
+            let effects = descriptor.reaction_slots().iter()
+                .filter(|slot| slot.external_effect).map(|slot| slot.id.to_string()).collect::<Vec<_>>();
+            assert_eq!(effects, ["Driver/Apply", "Driver/Idle"]);
+        }
+        #[cfg(feature = "payload")]
+        const _: for<'a> fn(&mut boomerang::runtime::Context,
+            &mut dyn boomerang::runtime::ReactorData, boomerang::runtime::ReactionRefs<'a>,
+            Option<boomerang::runtime::CompiledModeEffectRef>)
+            -> Result<boomerang::runtime::OutputOutcome, boomerang::runtime::ReactionBindingError>
+            = __boomerang::payload::reaction_Driver_2fApply;
+    }
+}
+
+#[cfg(feature = "output-unit-return")]
+boomerang::component! {
+mod invalid_output {
+    use boomerang::prelude::*;
+    #[reactor(contract = "example.invalid-output", contract_version = 1,
+        bounds(queue_capacity = 1, payload_bytes = 1, state_bytes = 1, scratch_bytes = 1),
+        external_effects = [Apply])]
+    fn Invalid() -> impl Reactor {
+        reaction! { Apply(startup) { return (); } }
+    }
+}
+
+}

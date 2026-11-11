@@ -8,6 +8,7 @@ publish = false
 default = ["boomerang/builder"]
 metadata = ["boomerang/builder"]
 payload = []
+output-unit-return = []
 action-delay-overflow = []
 action-duration-unit-overflow = []
 invalid-action-attribute = []

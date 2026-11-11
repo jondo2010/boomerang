@@ -257,6 +257,7 @@ fn render_reactions(prefix: &str, image: &EnclaveImage<'_>) -> TokenStream {
         let effect_ports = slice_range(value.effect_ports());
         let actions = slice_range(value.actions());
         let enabled_modes = slice_range(value.enabled_modes());
+        let external_effect = value.external_effect();
         let base = quote!(ReactionImage::new(
             ReactorIndex::new(#reactor),
             ScopeIndex::new(#scope),
@@ -266,7 +267,7 @@ fn render_reactions(prefix: &str, image: &EnclaveImage<'_>) -> TokenStream {
             #effect_ports,
             #actions,
             #enabled_modes,
-        ));
+        ).with_external_effect(#external_effect));
         value.mode_effect().map_or_else(
             || base.clone(),
             |effect| {

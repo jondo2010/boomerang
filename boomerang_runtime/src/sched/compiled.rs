@@ -128,8 +128,19 @@ impl ExecutionStorage<EnclaveImageView<'_>> for OwnedStorage<'_> {
         tag: Tag,
         outcomes: &mut [ReactionOutcome<ActionIndex, ModeIndex>],
     ) -> Result<(), Self::Error> {
+        for outcome in outcomes.iter_mut() {
+            outcome.clear();
+        }
         for (&reaction, outcome) in reactions.iter().zip(outcomes) {
-            self.invoke_reaction(reaction, tag)?;
+            let invocation = self.invoke_reaction(reaction, tag);
+            outcome.output = match &invocation {
+                Ok(output) => Some(*output),
+                Err(error) => error.completed_output(),
+            };
+            if outcome.output.is_none() {
+                invocation?;
+                unreachable!("successful invocation always has an output");
+            }
             let result = self.reaction_trigger_res(reaction);
             outcome.scheduled_actions.clear();
             outcome.scheduled_actions.extend(
@@ -146,6 +157,7 @@ impl ExecutionStorage<EnclaveImageView<'_>> for OwnedStorage<'_> {
                         target: request.target,
                         transition: request.transition,
                     });
+            invocation?;
         }
         Ok(())
     }
@@ -228,6 +240,16 @@ pub(crate) fn run_owned_scheduler_with_coordination_and_observation(
     observation: Option<&crate::ObservationHandle>,
 ) -> Result<OwnedSchedulerOutcome, SchedulerError<OwnedStorageError>> {
     let schedule = storage.scheduler_image();
+    if config.fast_forward
+        && schedule
+            .reactions()
+            .values()
+            .any(|reaction| reaction.external_effect())
+    {
+        return Err(SchedulerError::Execution(
+            OwnedStorageError::ExternalEffectFastForward,
+        ));
+    }
     let reaction_limits = schedule.reaction_limits();
     let reaction_capacity = reaction_limits.num_keys;
     let mut events = EventManager::new(reaction_limits, &schedule, observation.is_some());
@@ -539,6 +561,36 @@ mod tests {
         shutdown_reactions: &SHUTDOWN_REACTIONS,
         ..IMAGE
     };
+
+    #[test]
+    fn external_effect_fast_forward_rejects_before_callback() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let reactions = [REACTIONS[0].clone().with_external_effect(true)];
+        let image = EnclaveImageView::new(EnclaveImage {
+            reactions: TinyMapRef::from_slice(&reactions),
+            ..IMAGE.clone()
+        })
+        .unwrap();
+        let observed = calls.clone();
+        let bindings = EnclaveBindings::new()
+            .bind_state(BindingSlotIndex::new(0), initialize_state)
+            .bind_reaction(
+                BindingSlotIndex::new(1),
+                move |_: &mut Context, _, _: ReactionRefs<'_>, _| {
+                    observed.lock().unwrap().push("physical effect");
+                    Ok(crate::OutputOutcome::Committed)
+                },
+            );
+        let mut storage = OwnedStorage::new(image, bindings).unwrap();
+        let error = run_owned_scheduler(&mut storage, &Config::default().with_fast_forward(true))
+            .err()
+            .unwrap();
+        assert!(matches!(
+            error,
+            SchedulerError::Execution(OwnedStorageError::ExternalEffectFastForward)
+        ));
+        assert!(calls.lock().unwrap().is_empty());
+    }
 
     /// Builds real owned compiled storage with a configurable reaction result.
     fn build_storage(calls: Arc<Mutex<Vec<Call>>>, fail_reaction: bool) -> OwnedStorage<'static> {

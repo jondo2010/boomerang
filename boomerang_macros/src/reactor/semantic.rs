@@ -94,6 +94,12 @@ pub(super) fn parse_descriptor(
             initial: mode.initial,
         })
         .collect::<Vec<_>>();
+    let external_effects = args
+        .external_effects
+        .as_ref()
+        .map(|effects| model.body.validate_external_effects(effects))
+        .transpose()?
+        .unwrap_or_default();
     let mut reactions = Vec::new();
     let mut relationships = Vec::new();
     for reaction in &declaration.reactions {
@@ -103,6 +109,10 @@ pub(super) fn parse_descriptor(
         };
         let reaction_id = ReactionSlotId::from_path(slot);
         reactions.push(ReactionSlot {
+            external_effect: reaction
+                .model
+                .name()
+                .is_some_and(|name| external_effects.contains(&ident_text(name))),
             id: reaction_id.clone(),
             reactor: reactor.clone(),
         });
@@ -214,7 +224,12 @@ pub(super) fn emit_descriptor(descriptor: &ComponentDescriptor) -> TokenStream {
             };
         }
     let actions = owned_slots!(descriptor.action_slots(), ActionSlot, ActionSlotId);
-    let reactions = owned_slots!(descriptor.reaction_slots(), ReactionSlot, ReactionSlotId);
+    let reactions = descriptor.reaction_slots().iter().map(|slot| {
+        let id = path_tokens(slot.id.path());
+        let reactor = path_tokens(slot.reactor.path());
+        let external_effect = slot.external_effect;
+        quote!(::boomerang::builder::ReactionSlot { id: ::boomerang::builder::ReactionSlotId::from_path(#id), reactor: ::boomerang::builder::ReactorSlotId::from_path(#reactor), external_effect: #external_effect })
+    });
     let states = owned_slots!(descriptor.state_slots(), StateSlot, StateSlotId);
     let modes = descriptor.mode_slots().iter().map(|slot| {
             let id = path_tokens(slot.id.path()); let reactor = path_tokens(slot.reactor.path()); let initial = slot.initial;

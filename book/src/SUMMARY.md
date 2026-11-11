@@ -7,6 +7,7 @@
 - [Recording and Replay](./replay.md)
 - [Static Federation](./static-federation.md)
 - [Reactor Initialization](./reactor-initialization.md)
+- [External Output Outcomes](./output-outcomes.md)
 - [External Inputs](./external-inputs.md)
 - [Physical Clocks](./hosted-physical-clocks.md)
 - [Glossary](./glossary.md)

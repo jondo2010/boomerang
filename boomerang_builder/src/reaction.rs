@@ -32,6 +32,8 @@ pub struct ReactionSpec {
     pub(super) name: Option<String>,
     /// Canonical implementation-local descriptor slot, when generated metadata supplied one.
     descriptor_slot: Option<ReactionSlotId>,
+    /// Whether this reaction declares an external effect.
+    pub(super) external_effect: bool,
     /// The owning Reactor for this Reaction
     pub(super) reactor_key: AssemblyReactorKey,
     /// The Reaction function
@@ -64,6 +66,7 @@ impl ReactionSpec {
         ReactionSpec {
             name: name.map(|s| s.into()),
             descriptor_slot: None,
+            external_effect: false,
             reactor_key: parent_key,
             reaction_fn,
             enabled_modes: None,
@@ -367,6 +370,8 @@ impl ReactionDeclarationField for ModeEffectSpec {
 pub struct ReactionDeclaration<'a, S: runtime::ReactorData, Fields = (), ReactionFn = ()> {
     name: Option<String>,
     descriptor_slot: Option<ReactionSlotId>,
+    /// Whether this reaction declares an external effect.
+    pub(super) external_effect: bool,
     reaction_fn: ReactionFn,
     enabled_modes: Option<Vec<AssemblyModeKey>>,
     scope_mode: Option<AssemblyModeKey>,
@@ -391,6 +396,7 @@ impl<'a, S: runtime::ReactorData> ReactionDeclaration<'a, S, (), ()> {
         Self {
             name: name.map(|s| s.to_string()),
             descriptor_slot: None,
+            external_effect: false,
             reaction_fn: (),
             enabled_modes: None,
             scope_mode: None,
@@ -411,6 +417,12 @@ impl<'a, S: runtime::ReactorData> ReactionDeclaration<'a, S, (), ()> {
 impl<'a, S: runtime::ReactorData, Fields, ReactionFn>
     ReactionDeclaration<'a, S, Fields, ReactionFn>
 {
+    /// Declares whether this reaction performs an external effect.
+    pub fn with_external_effect(mut self, external_effect: bool) -> Self {
+        self.external_effect = external_effect;
+        self
+    }
+
     /// Records the implementation-local descriptor slot represented by this declaration.
     pub fn with_descriptor_slot(mut self, slot: ReactionSlotId) -> Self {
         self.descriptor_slot = Some(slot);
@@ -489,6 +501,7 @@ macro_rules! impl_with_field {
                 let Self {
                     name,
                     descriptor_slot,
+                    external_effect,
                     enabled_modes,
                     scope_mode,
                     mode_effects,
@@ -505,6 +518,7 @@ macro_rules! impl_with_field {
                 ReactionDeclaration {
                     name,
                     descriptor_slot,
+                    external_effect,
                     reaction_fn: (),
                     enabled_modes,
                     scope_mode,
@@ -532,6 +546,7 @@ macro_rules! impl_with_field {
                 let Self {
                     name,
                     descriptor_slot,
+                    external_effect,
                     enabled_modes,
                     scope_mode,
                     mode_effects,
@@ -548,6 +563,7 @@ macro_rules! impl_with_field {
                 ReactionDeclaration {
                     name,
                     descriptor_slot,
+                    external_effect,
                     reaction_fn: (),
                     enabled_modes,
                     scope_mode,
@@ -574,6 +590,7 @@ macro_rules! impl_with_field {
                 let Self {
                     name,
                     descriptor_slot,
+                    external_effect,
                     enabled_modes,
                     scope_mode,
                     mode_effects,
@@ -590,6 +607,7 @@ macro_rules! impl_with_field {
                 ReactionDeclaration {
                     name,
                     descriptor_slot,
+                    external_effect,
                     reaction_fn: (),
                     enabled_modes,
                     scope_mode,
@@ -638,19 +656,21 @@ where
     S: runtime::ReactorData,
     Fields: runtime::ReactionRefsExtract + ResolveModeEffects + Clone + Send + Sync,
 {
-    pub fn with_reaction_fn<F>(
+    pub fn with_reaction_fn<F, R>(
         self,
         f: F,
     ) -> ReactionDeclaration<'a, S, Fields, DeferredReactionFactory>
     where
-        F: for<'store> Fn(&mut runtime::Context, &mut S, Fields::Ref<'store>)
+        F: for<'store> Fn(&mut runtime::Context, &mut S, Fields::Ref<'store>) -> R
             + Send
             + Sync
             + 'static,
+        R: Into<runtime::OutputOutcome>,
     {
         let Self {
             name,
             descriptor_slot,
+            external_effect,
             enabled_modes,
             scope_mode,
             mode_effects,
@@ -678,6 +698,7 @@ where
         ReactionDeclaration {
             name,
             descriptor_slot,
+            external_effect,
             reaction_fn,
             enabled_modes,
             scope_mode,
@@ -710,6 +731,7 @@ where
         let Self {
             name,
             descriptor_slot,
+            external_effect,
             enabled_modes,
             scope_mode,
             mode_effects,
@@ -726,6 +748,7 @@ where
         ReactionDeclaration {
             name,
             descriptor_slot,
+            external_effect,
             reaction_fn: Box::new(f),
             enabled_modes,
             scope_mode,
@@ -753,6 +776,7 @@ where
         let Self {
             name,
             descriptor_slot,
+            external_effect,
             enabled_modes,
             scope_mode,
             mode_effects,
@@ -834,6 +858,7 @@ where
         let reaction_spec = ReactionSpec {
             name,
             descriptor_slot,
+            external_effect,
             reactor_key,
             reaction_fn,
             enabled_modes,

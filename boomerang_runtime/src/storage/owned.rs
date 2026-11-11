@@ -14,8 +14,8 @@ use crate::{
         EnclaveIndex, PortIndex, ReactionIndex, ReactorIndex, StateSlotIndex, TimingDomain,
     },
     port::{BasePort, Port, PortKey},
-    CompiledModeEffectRef, Context, Duration, EnclaveKey, PayloadType, ReactionRefs, ReactorData,
-    Refs, RefsMut, Tag, TriggerRes,
+    CompiledModeEffectRef, Context, Duration, EnclaveKey, OutputOutcome, PayloadType, ReactionRefs,
+    ReactorData, Refs, RefsMut, Tag, TriggerRes,
 };
 
 /// Errors returned by direct reaction implementations.
@@ -252,17 +252,18 @@ impl EnclaveBindings {
         self
     }
     /// Binds a generated reaction and its optional image-owned mode effect to a required slot.
-    pub fn bind_reaction<F>(mut self, slot: BindingSlotIndex, function: F) -> Self
+    pub fn bind_reaction<F, R>(mut self, slot: BindingSlotIndex, function: F) -> Self
     where
         F: for<'store> FnMut(
                 &mut Context,
                 &mut dyn ReactorData,
                 ReactionRefs<'store>,
                 Option<CompiledModeEffectRef>,
-            ) -> Result<(), ReactionBindingError>
+            ) -> Result<R, ReactionBindingError>
             + Send
             + Sync
             + 'static,
+        R: Into<OutputOutcome>,
     {
         self.insert_binding(
             slot,
@@ -570,23 +571,24 @@ trait ReactionInvoker: Send + Sync {
         state: &mut dyn ReactorData,
         refs: ReactionRefs<'_>,
         mode_effect: Option<CompiledModeEffectRef>,
-    ) -> Result<(), ReactionBindingError>;
+    ) -> Result<OutputOutcome, ReactionBindingError>;
 }
 
 /// Type-erasing adapter for the single owned-reaction callback shape.
 struct ErasedReactionInvoker<F>(F);
 
-impl<F> ReactionInvoker for ErasedReactionInvoker<F>
+impl<F, R> ReactionInvoker for ErasedReactionInvoker<F>
 where
     F: for<'store> FnMut(
             &mut Context,
             &mut dyn ReactorData,
             ReactionRefs<'store>,
             Option<CompiledModeEffectRef>,
-        ) -> Result<(), ReactionBindingError>
+        ) -> Result<R, ReactionBindingError>
         + Send
         + Sync
         + 'static,
+    R: Into<OutputOutcome>,
 {
     /// Forwards to the caller-supplied generated reaction function.
     fn invoke(
@@ -595,8 +597,8 @@ where
         state: &mut dyn ReactorData,
         refs: ReactionRefs<'_>,
         mode_effect: Option<CompiledModeEffectRef>,
-    ) -> Result<(), ReactionBindingError> {
-        (self.0)(context, state, refs, mode_effect)
+    ) -> Result<OutputOutcome, ReactionBindingError> {
+        (self.0)(context, state, refs, mode_effect).map(Into::into)
     }
 }
 
@@ -616,6 +618,28 @@ impl Eq for StateInitializationFailure {}
 /// Errors building or accessing heap-backed compiled-image storage.
 #[derive(thiserror::Error, Debug, Clone, PartialEq, Eq)]
 pub enum OwnedStorageError {
+    /// Fast-forward execution has no physical release rule for direct effects.
+    #[error("external effects require paced execution; fast-forward is unsupported")]
+    ExternalEffectFastForward,
+    /// A returned invocation violates its declaration or reports device failure.
+    #[error("reaction {reaction} returned invalid or failed output {output:?}")]
+    OutputContract {
+        /// Executed reaction identity.
+        reaction: ReactionIndex,
+        /// Actual returned result.
+        output: OutputOutcome,
+    },
+    /// Framework work failed after a reaction returned a known output result.
+    #[error("reaction {reaction} returned {output:?} before framework failure: {source}")]
+    AfterReactionOutput {
+        /// The reaction whose callback returned.
+        reaction: ReactionIndex,
+        /// Known output retained even if subsequent routing or mode checks failed.
+        output: OutputOutcome,
+        /// The later framework failure. Boxing occurs only on this failure path.
+        #[source]
+        source: Box<OwnedStorageError>,
+    },
     /// A capability-aware initializer requires staged Federate construction.
     #[error("capability initializer requires prepared Federate context")]
     MissingInitializationContext,
@@ -871,6 +895,18 @@ pub enum OwnedStorageError {
         /// Canonical destination Enclave index.
         destination: EnclaveIndex,
     },
+}
+
+impl OwnedStorageError {
+    /// Returns an invocation's known output when later framework work failed.
+    pub fn completed_output(&self) -> Option<OutputOutcome> {
+        match self {
+            Self::AfterReactionOutput { output, .. } | Self::OutputContract { output, .. } => {
+                Some(*output)
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Mutable, heap-backed storage for one validated compiled enclave image.
@@ -1262,7 +1298,7 @@ impl<'image> OwnedStorage<'image> {
         &mut self,
         reaction: ReactionIndex,
         tag: Tag,
-    ) -> Result<(), OwnedStorageError> {
+    ) -> Result<OutputOutcome, OwnedStorageError> {
         let mut observation = ReactionObservation {
             reaction,
             tag,
@@ -1294,26 +1330,38 @@ impl<'image> OwnedStorage<'image> {
             ports_mut: RefsMut::new(&mut references.effect_ports),
             actions: RefsMut::new(&mut references.actions),
         };
-        invoker.invoke(
+        let output = invoker.invoke(
             context,
             state.value.as_mut(),
             refs,
             reaction_image.mode_effect(),
         )?;
-        if let Some(requested) = context.trigger_res.scheduled_compiled_mode {
-            let declared = reaction_image.mode_effect();
-            if declared != Some(requested) {
-                return Err(OwnedStorageError::CompiledModeTransitionMismatch {
-                    reaction,
-                    declared,
-                    requested,
-                });
+        if !output.is_valid(reaction_image.external_effect()) {
+            return Err(OwnedStorageError::OutputContract { reaction, output });
+        }
+        let requested_mode = context.trigger_res.scheduled_compiled_mode;
+        let declared_mode = reaction_image.mode_effect();
+        let has_live_mode_request = context.trigger_res.scheduled_mode.is_some();
+        let post_invocation = (|| {
+            if let Some(requested) = requested_mode {
+                if declared_mode != Some(requested) {
+                    return Err(OwnedStorageError::CompiledModeTransitionMismatch {
+                        reaction,
+                        declared: declared_mode,
+                        requested,
+                    });
+                }
             }
-        }
-        if context.trigger_res.scheduled_mode.is_some() {
-            return Err(OwnedStorageError::LegacyModeTransition { reaction });
-        }
-        self.emit_outbound_routes(tag)?;
+            if has_live_mode_request {
+                return Err(OwnedStorageError::LegacyModeTransition { reaction });
+            }
+            self.emit_outbound_routes(tag)
+        })();
+        post_invocation.map_err(|source| OwnedStorageError::AfterReactionOutput {
+            reaction,
+            output,
+            source: Box::new(source),
+        })?;
         observation.finished = true;
         tracing::debug!(
             target: "boomerang::coordination",
@@ -1323,7 +1371,7 @@ impl<'image> OwnedStorage<'image> {
             tag_offset_ns = tag.offset().whole_nanoseconds(),
             tag_microstep = tag.microstep(),
         );
-        Ok(())
+        Ok(output)
     }
 
     /// Borrows the reusable trigger result from a reaction's owning reactor context.
@@ -1728,8 +1776,8 @@ mod tests {
             TimingDomain, TinyMapRef,
         },
         AsyncEvent, CommonContext, CompiledModeEffectRef, Config, Context, Duration,
-        EnclaveBindings, ModeTransitionRequest, OwnedStorage, OwnedStorageError, PayloadType,
-        ReactionBindingError, ReactionRefs, ReactorData, Tag, TransitionKind,
+        EnclaveBindings, ModeTransitionRequest, OutputOutcome, OwnedStorage, OwnedStorageError,
+        PayloadType, ReactionBindingError, ReactionRefs, ReactorData, Tag, TransitionKind,
     };
     use std::{
         sync::{
@@ -2218,6 +2266,341 @@ mod tests {
         assert_eq!(INITIALIZER_CALLS.load(Ordering::SeqCst), 0);
     }
 
+    /// Returning a default result must not erase a bound driver's failure or scheduling.
+    #[test]
+    fn output_outcomes_survive_owned_adapter_and_routing() {
+        use crate::{
+            sched::core::{ExecutionStorage, ReactionOutcome},
+            OutputOutcome,
+        };
+
+        let reaction = ReactionIndex::new(0);
+        let mut ordinary = OwnedStorage::new(image(), complete_bindings()).unwrap();
+        assert_eq!(
+            ordinary.invoke_reaction(reaction, Tag::ZERO).unwrap(),
+            OutputOutcome::NotReported
+        );
+        let tag = Tag::new(Duration::nanoseconds(7), 2);
+        for expected in [OutputOutcome::Unchanged, OutputOutcome::Committed] {
+            let bindings = EnclaveBindings::new()
+                .bind_state(BindingSlotIndex::new(0), initialize_state)
+                .bind_reaction(
+                    BindingSlotIndex::new(1),
+                    move |context: &mut Context, _state, refs: ReactionRefs<'_>, _mode_effect| {
+                        let mut port: crate::OutputRef<u32> = refs.ports_mut.partition_mut()?;
+                        let mut action: crate::ActionRef<u32> = refs.actions.partition_mut()?;
+                        *port = Some(42);
+                        context.schedule_action(&mut action, 19, None);
+                        context.schedule_shutdown(Some(Duration::nanoseconds(3)));
+                        Ok(expected)
+                    },
+                )
+                .bind_port(BindingSlotIndex::new(2), PayloadType::<u32>::new())
+                .bind_action(BindingSlotIndex::new(3), PayloadType::<u32>::new());
+            let reactions = [REACTIONS[0].clone().with_external_effect(true)];
+            let image = EnclaveImageView::new(EnclaveImage {
+                reactions: TinyMapRef::from_slice(&reactions),
+                ..IMAGE.clone()
+            })
+            .unwrap();
+            let mut storage = OwnedStorage::new(image, bindings).unwrap();
+            let (tx, rx) = kanal::bounded(2);
+            storage.bind_outbound_route::<u32>(
+                PortIndex::new(0),
+                BoundaryId::new("output"),
+                EnclaveIndex::new(1),
+                PortIndex::new(4),
+                TimingDomain::Logical,
+                0,
+                tx,
+            );
+
+            assert_eq!(storage.invoke_reaction(reaction, tag).unwrap(), expected);
+            assert_eq!(
+                storage.reaction_trigger_res(reaction).scheduled_actions,
+                [(
+                    crate::ActionKey::from(0),
+                    Tag::new(Duration::nanoseconds(7), 3)
+                )]
+            );
+            storage.reset_ports();
+            let mut normalized = [ReactionOutcome::default()];
+            storage
+                .execute_reactions(&[reaction], tag, &mut normalized)
+                .unwrap();
+            assert_eq!(normalized[0].output, Some(expected));
+            assert_eq!(
+                normalized[0].scheduled_actions,
+                [(ActionIndex::new(0), Tag::new(Duration::nanoseconds(7), 4))]
+            );
+            assert_eq!(
+                normalized[0].scheduled_shutdown,
+                Some(Tag::new(Duration::nanoseconds(10), 0))
+            );
+            for _ in 0..2 {
+                match rx.try_recv().unwrap().unwrap() {
+                    AsyncEvent::Logical {
+                        tag: routed_tag,
+                        value,
+                        ..
+                    } => {
+                        assert_eq!(routed_tag, tag);
+                        assert_eq!(*value.downcast::<u32>().ok().unwrap(), 42);
+                    }
+                    event => panic!("unexpected route event: {event:?}"),
+                }
+            }
+
+            // Closed routing happens after the callback: both error and scratch retain the output.
+            drop(rx);
+            storage.reset_ports();
+            let error = storage
+                .execute_reactions(&[reaction], tag, &mut normalized)
+                .unwrap_err();
+            assert_eq!(error.completed_output(), Some(expected));
+            assert_eq!(normalized[0].output, Some(expected));
+            assert_eq!(
+                normalized[0].scheduled_shutdown,
+                Some(Tag::new(Duration::nanoseconds(10), 0))
+            );
+        }
+    }
+
+    /// Invalid returned outcomes must stop framework routing without erasing prior work.
+    #[test]
+    fn output_outcomes_reject_invalid_reports_before_owned_routing() {
+        use crate::{
+            sched::core::{ExecutionStorage, ReactionOutcome},
+            OutputFault, OutputOutcome,
+        };
+
+        let reaction = ReactionIndex::new(0);
+        let tag = Tag::new(Duration::nanoseconds(7), 2);
+        for (declared, invalid) in [
+            (true, OutputOutcome::Failed(OutputFault::Device)),
+            (true, OutputOutcome::NotReported),
+            (false, OutputOutcome::Committed),
+        ] {
+            for with_prefix in [false, true] {
+                let mut calls = 0;
+                let bindings = EnclaveBindings::new()
+                    .bind_state(BindingSlotIndex::new(0), initialize_state)
+                    .bind_reaction(
+                        BindingSlotIndex::new(1),
+                        move |context: &mut Context, _state, refs: ReactionRefs<'_>, _| {
+                            calls += 1;
+                            let mut port: crate::OutputRef<u32> = refs.ports_mut.partition_mut()?;
+                            *port = Some(calls);
+                            context.schedule_shutdown(Some(Duration::nanoseconds(3)));
+                            Ok(if with_prefix && calls == 1 {
+                                if declared {
+                                    OutputOutcome::Committed
+                                } else {
+                                    OutputOutcome::NotReported
+                                }
+                            } else {
+                                invalid
+                            })
+                        },
+                    )
+                    .bind_port(BindingSlotIndex::new(2), PayloadType::<u32>::new())
+                    .bind_action(BindingSlotIndex::new(3), PayloadType::<u32>::new());
+                let reactions = [REACTIONS[0].clone().with_external_effect(declared)];
+                let image = EnclaveImageView::new(EnclaveImage {
+                    reactions: TinyMapRef::from_slice(&reactions),
+                    ..IMAGE.clone()
+                })
+                .unwrap();
+                let mut storage = OwnedStorage::new(image, bindings).unwrap();
+                let (tx, rx) = kanal::bounded(2);
+                storage.bind_outbound_route::<u32>(
+                    PortIndex::new(0),
+                    BoundaryId::new("output"),
+                    EnclaveIndex::new(1),
+                    PortIndex::new(4),
+                    TimingDomain::Logical,
+                    0,
+                    tx,
+                );
+
+                let mut prefix = [ReactionOutcome::default()];
+                if with_prefix {
+                    storage
+                        .execute_reactions(&[reaction], tag, &mut prefix)
+                        .unwrap();
+                    // A fresh port epoch makes an erroneous second route observable.
+                    storage.reset_ports();
+                }
+                let mut outcomes = std::array::from_fn::<_, 2, _>(|_| ReactionOutcome {
+                    output: Some(OutputOutcome::Unchanged),
+                    scheduled_shutdown: Some(Tag::ZERO),
+                    ..Default::default()
+                });
+                let error = storage
+                    .execute_reactions(&[reaction; 2], tag, &mut outcomes)
+                    .unwrap_err();
+                assert!(matches!(
+                    error,
+                    OwnedStorageError::OutputContract { reaction: actual, output }
+                        if actual == reaction && output == invalid
+                ));
+                assert_eq!(error.completed_output(), Some(invalid));
+                assert_eq!(outcomes[0].output, Some(invalid));
+                assert_eq!(
+                    outcomes[0].scheduled_shutdown,
+                    Some(Tag::new(Duration::nanoseconds(10), 0))
+                );
+                assert!(outcomes[1].output.is_none());
+                assert!(outcomes[1].scheduled_shutdown.is_none());
+                if with_prefix {
+                    assert_eq!(
+                        prefix[0].output,
+                        Some(if declared {
+                            OutputOutcome::Committed
+                        } else {
+                            OutputOutcome::NotReported
+                        })
+                    );
+                    match rx.try_recv().unwrap().unwrap() {
+                        AsyncEvent::Logical {
+                            tag: routed_tag,
+                            value,
+                            ..
+                        } => {
+                            assert_eq!(routed_tag, tag);
+                            assert_eq!(*value.downcast::<u32>().ok().unwrap(), 1);
+                        }
+                        event => panic!("unexpected route event: {event:?}"),
+                    }
+                }
+                assert!(
+                    rx.try_recv().unwrap().is_none(),
+                    "invalid output routed: declared={declared}, output={invalid:?}, prefix={with_prefix}"
+                );
+            }
+        }
+    }
+
+    /// A binding failure must not expose a previous successful invocation's scratch result.
+    #[test]
+    fn external_effect_outcomes_validate_manual_bindings_and_preserve_results() {
+        use crate::sched::core::{ExecutionStorage, ReactionOutcome};
+        for (declared, output, valid) in [
+            (false, OutputOutcome::NotReported, true),
+            (false, OutputOutcome::Committed, false),
+            (true, OutputOutcome::NotReported, false),
+            (true, OutputOutcome::Unchanged, true),
+            (true, OutputOutcome::Committed, true),
+            (
+                true,
+                OutputOutcome::Failed(crate::OutputFault::Device),
+                false,
+            ),
+        ] {
+            let reactions = [REACTIONS[0].clone().with_external_effect(declared)];
+            let image = EnclaveImageView::new(EnclaveImage {
+                reactions: TinyMapRef::from_slice(&reactions),
+                ..IMAGE.clone()
+            })
+            .unwrap();
+            let bindings = EnclaveBindings::new()
+                .bind_state(BindingSlotIndex::new(0), initialize_state)
+                .bind_reaction(
+                    BindingSlotIndex::new(1),
+                    move |_: &mut Context, _, _: ReactionRefs<'_>, _| Ok(output),
+                )
+                .bind_port(BindingSlotIndex::new(2), PayloadType::<u32>::new())
+                .bind_action(BindingSlotIndex::new(3), PayloadType::<u32>::new());
+            let mut storage = OwnedStorage::new(image, bindings).unwrap();
+            let mut outcomes = [ReactionOutcome::default()];
+            let result =
+                storage.execute_reactions(&[ReactionIndex::new(0)], Tag::ZERO, &mut outcomes);
+            assert_eq!(
+                result.is_ok(),
+                valid,
+                "declared={declared}, output={output:?}"
+            );
+            assert_eq!(outcomes[0].output, Some(output));
+        }
+    }
+
+    #[test]
+    fn output_outcomes_clear_scratch_before_owned_binding_failure() {
+        use crate::{
+            sched::core::{ExecutionStorage, ReactionOutcome},
+            OutputOutcome,
+        };
+        let mut storage = OwnedStorage::new(image(), complete_bindings()).unwrap();
+        let reaction = ReactionIndex::new(0);
+        let mut normalized = [ReactionOutcome::default(), ReactionOutcome::default()];
+        storage
+            .execute_reactions(&[reaction, reaction], Tag::ZERO, &mut normalized)
+            .unwrap();
+        assert!(normalized
+            .iter()
+            .all(|outcome| outcome.output == Some(OutputOutcome::NotReported)));
+        storage.reactions = Default::default();
+        storage
+            .execute_reactions(&[reaction, reaction], Tag::ZERO, &mut normalized)
+            .unwrap_err();
+        assert!(normalized.iter().all(|outcome| outcome.output.is_none()));
+    }
+
+    /// A later binding error must preserve completed outputs and invalidate unexecuted slots.
+    #[test]
+    fn output_outcomes_retain_completed_prefix_on_owned_binding_failure() {
+        use crate::{
+            sched::core::{ExecutionStorage, ReactionOutcome},
+            OutputFault,
+        };
+        let mut calls = 0;
+        let bindings = EnclaveBindings::new()
+            .bind_state(BindingSlotIndex::new(0), initialize_state)
+            .bind_reaction(
+                BindingSlotIndex::new(1),
+                move |context: &mut Context, _state, refs: ReactionRefs<'_>, _mode_effect| {
+                    calls += 1;
+                    if calls == 2 {
+                        // The fixture binds u32; extraction exercises a real binding error.
+                        let _: crate::ActionRef<String> = refs.actions.partition_mut()?;
+                    }
+                    context.schedule_shutdown(Some(Duration::nanoseconds(3)));
+                    Ok(OutputOutcome::Committed)
+                },
+            )
+            .bind_port(BindingSlotIndex::new(2), PayloadType::<u32>::new())
+            .bind_action(BindingSlotIndex::new(3), PayloadType::<u32>::new());
+        let reactions = [REACTIONS[0].clone().with_external_effect(true)];
+        let image = EnclaveImageView::new(EnclaveImage {
+            reactions: TinyMapRef::from_slice(&reactions),
+            ..IMAGE.clone()
+        })
+        .unwrap();
+        let mut storage = OwnedStorage::new(image, bindings).unwrap();
+        let reaction = ReactionIndex::new(0);
+        let mut outcomes = std::array::from_fn::<_, 3, _>(|_| ReactionOutcome {
+            output: Some(OutputOutcome::Failed(OutputFault::Device)),
+            scheduled_shutdown: Some(Tag::ZERO),
+            ..Default::default()
+        });
+        let error = storage
+            .execute_reactions(&[reaction; 3], Tag::ZERO, &mut outcomes)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            OwnedStorageError::Reaction(ReactionBindingError::TypeMismatch { .. })
+        ));
+        assert_eq!(outcomes[0].output, Some(OutputOutcome::Committed));
+        assert_eq!(
+            outcomes[0].scheduled_shutdown,
+            Some(Tag::new(Duration::nanoseconds(3), 0))
+        );
+        for outcome in &outcomes[1..] {
+            assert!(outcome.output.is_none());
+            assert!(outcome.scheduled_shutdown.is_none());
+        }
+    }
+
     #[test]
     fn cached_references_survive_storage_moves_and_reborrows() {
         REACTION_CALLS.store(0, Ordering::SeqCst);
@@ -2256,8 +2639,8 @@ mod tests {
 
         assert!(matches!(
             error,
-            OwnedStorageError::LegacyModeTransition { reaction }
-                if reaction == ReactionIndex::new(0)
+            OwnedStorageError::AfterReactionOutput { output: OutputOutcome::NotReported, source, .. }
+                if matches!(*source, OwnedStorageError::LegacyModeTransition { reaction } if reaction == ReactionIndex::new(0))
         ));
     }
 
@@ -2404,8 +2787,8 @@ mod tests {
         worker.join().unwrap();
         assert!(matches!(
             result,
-            Ok(Err(OwnedStorageError::OutboundRouteChannelFull { destination, .. }))
-                if destination == EnclaveIndex::new(3)
+            Ok(Err(OwnedStorageError::AfterReactionOutput { output: OutputOutcome::NotReported, source, .. }))
+                if matches!(*source, OwnedStorageError::OutboundRouteChannelFull { destination, .. } if destination == EnclaveIndex::new(3))
         ));
 
         match logical_rx.try_recv().unwrap().unwrap() {

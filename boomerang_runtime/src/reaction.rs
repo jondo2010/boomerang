@@ -1,8 +1,8 @@
 use std::{fmt::Debug, sync::RwLock};
 
 use crate::{
-    ActionCommon, ActionRef, AsyncActionRef, BaseReactor, Context, Duration, InputRef, OutputRef,
-    ReactionRefs, ReactionRefsExtract, ReactorData, SendContext,
+    ActionCommon, ActionRef, AsyncActionRef, BaseReactor, Context, Duration, InputRef,
+    OutputOutcome, OutputRef, ReactionRefs, ReactionRefsExtract, ReactorData, SendContext,
 };
 
 tinymap::key_type! { pub ReactionKey }
@@ -13,7 +13,7 @@ pub trait ReactionFn<'store>: Send + Sync {
         ctx: &'store mut Context,
         reactor: &'store mut dyn BaseReactor,
         refs: ReactionRefs<'store>,
-    );
+    ) -> OutputOutcome;
 }
 
 pub type BoxedReactionFn = Box<dyn for<'store> ReactionFn<'store> + Send + Sync>;
@@ -29,12 +29,21 @@ pub trait FromRefs {
 }
 
 /// We implement [`ReactionFn`] for any `Fn` that straightforwardly matches the signature.
-impl<F> ReactionFn<'_> for F
+impl<F, R> ReactionFn<'_> for F
 where
-    F: for<'any> Fn(&mut Context, &mut dyn BaseReactor, ReactionRefs<'any>) + Send + Sync + 'static,
+    F: for<'any> Fn(&mut Context, &mut dyn BaseReactor, ReactionRefs<'any>) -> R
+        + Send
+        + Sync
+        + 'static,
+    R: Into<OutputOutcome>,
 {
-    fn trigger(&mut self, ctx: &mut Context, reactor: &mut dyn BaseReactor, refs: ReactionRefs) {
-        (self)(ctx, reactor, refs)
+    fn trigger(
+        &mut self,
+        ctx: &mut Context,
+        reactor: &mut dyn BaseReactor,
+        refs: ReactionRefs,
+    ) -> OutputOutcome {
+        (self)(ctx, reactor, refs).into()
     }
 }
 
@@ -53,18 +62,19 @@ pub struct FnRefsAdapter<S, Fields, F>
 where
     S: ReactorData,
     Fields: ReactionRefsExtract + Send + Sync,
-    F: for<'any> Fn(&mut Context, &mut S, Fields::Ref<'any>) + Send + Sync + 'static,
+    F: Send + Sync + 'static,
 {
     fields: Fields,
     f: F,
     _phantom: std::marker::PhantomData<fn() -> S>,
 }
 
-impl<S, Fields, F> FnRefsAdapter<S, Fields, F>
+impl<S, Fields, F, R> FnRefsAdapter<S, Fields, F>
 where
     S: ReactorData,
     Fields: ReactionRefsExtract + Send + Sync,
-    F: for<'any> Fn(&mut Context, &mut S, Fields::Ref<'any>) + Send + Sync + 'static,
+    F: for<'any> Fn(&mut Context, &mut S, Fields::Ref<'any>) -> R + Send + Sync + 'static,
+    R: Into<OutputOutcome>,
 {
     pub fn new(fields: Fields, f: F) -> Self {
         Self {
@@ -75,18 +85,19 @@ where
     }
 }
 
-impl<S, Fields, F> ReactionFn<'_> for FnRefsAdapter<S, Fields, F>
+impl<S, Fields, F, R> ReactionFn<'_> for FnRefsAdapter<S, Fields, F>
 where
     S: ReactorData,
     Fields: ReactionRefsExtract + Send + Sync,
-    F: for<'any> Fn(&mut Context, &mut S, Fields::Ref<'any>) + Send + Sync + 'static,
+    F: for<'any> Fn(&mut Context, &mut S, Fields::Ref<'any>) -> R + Send + Sync + 'static,
+    R: Into<OutputOutcome>,
 {
     fn trigger(
         &mut self,
         ctx: &mut Context,
         reactor: &mut dyn BaseReactor,
         mut refs: ReactionRefs,
-    ) {
+    ) -> OutputOutcome {
         let state = reactor.get_state_mut::<S>().expect("state");
 
         let fields = match self.fields.extract(&mut refs) {
@@ -97,7 +108,7 @@ where
             }
         };
 
-        (self.f)(ctx, state, fields)
+        (self.f)(ctx, state, fields).into()
     }
 }
 
@@ -134,12 +145,12 @@ impl<'store, T: ReactorData + Clone> ReactionFn<'store> for EnclaveSenderReactio
         ctx: &'store mut Context,
         _state: &'store mut dyn BaseReactor,
         refs: ReactionRefs<'store>,
-    ) {
+    ) -> OutputOutcome {
         let port: InputRef<T> = match refs.ports.partition() {
             Ok(port) => port,
             Err(error) => {
                 tracing::error!(?error, "Failed to destructure ports");
-                return;
+                return OutputOutcome::NotReported;
             }
         };
         if let Some(value) = (*port).as_ref() {
@@ -181,6 +192,7 @@ impl<'store, T: ReactorData + Clone> ReactionFn<'store> for EnclaveSenderReactio
         } else {
             tracing::warn!("Port is empty, skipping event send");
         }
+        OutputOutcome::NotReported
     }
 }
 
@@ -204,12 +216,12 @@ impl<'store, T: ReactorData + Clone> ReactionFn<'store> for ConnectionSenderReac
         ctx: &'store mut Context,
         _reactor: &'store mut dyn BaseReactor,
         refs: ReactionRefs<'store>,
-    ) {
+    ) -> OutputOutcome {
         let mut action: ActionRef<T> = match refs.actions.partition_mut() {
             Ok(action) => action,
             Err(error) => {
                 tracing::error!(?error, "Failed to destructure actions");
-                return;
+                return OutputOutcome::NotReported;
             }
         };
 
@@ -217,7 +229,7 @@ impl<'store, T: ReactorData + Clone> ReactionFn<'store> for ConnectionSenderReac
             Ok(port) => port,
             Err(error) => {
                 tracing::error!(?error, "Failed to destructure ports");
-                return;
+                return OutputOutcome::NotReported;
             }
         };
         if let Some(value) = (*port).as_ref() {
@@ -225,6 +237,7 @@ impl<'store, T: ReactorData + Clone> ReactionFn<'store> for ConnectionSenderReac
         } else {
             tracing::warn!("Port is empty, skipping action send");
         }
+        OutputOutcome::NotReported
     }
 }
 
@@ -250,12 +263,12 @@ impl<'store, T: ReactorData + Clone> ReactionFn<'store> for ConnectionReceiverRe
         ctx: &'store mut Context,
         _reactor: &'store mut dyn BaseReactor,
         refs: ReactionRefs<'store>,
-    ) {
+    ) -> OutputOutcome {
         let mut action: ActionRef<T> = match refs.actions.partition_mut() {
             Ok(action) => action,
             Err(error) => {
                 tracing::error!(?error, "Failed to destructure actions");
-                return;
+                return OutputOutcome::NotReported;
             }
         };
 
@@ -263,7 +276,7 @@ impl<'store, T: ReactorData + Clone> ReactionFn<'store> for ConnectionReceiverRe
             Ok(port) => port,
             Err(error) => {
                 tracing::error!(?error, "Failed to destructure ports");
-                return;
+                return OutputOutcome::NotReported;
             }
         };
         if let Some(value) = ctx.get_action_value(&mut action) {
@@ -271,6 +284,7 @@ impl<'store, T: ReactorData + Clone> ReactionFn<'store> for ConnectionReceiverRe
         } else {
             tracing::warn!("Action is empty, skipping port update");
         }
+        OutputOutcome::NotReported
     }
 }
 
@@ -291,6 +305,7 @@ impl Debug for Deadline {
 
 pub struct Reaction {
     name: String,
+    pub(crate) external_effect: bool,
     /// Reaction closure
     pub(crate) body: BoxedReactionFn,
     /// Local deadline relative to the time stamp for invocation of the reaction.
@@ -311,9 +326,16 @@ impl Reaction {
     pub fn new(name: &str, body: impl Into<BoxedReactionFn>, deadline: Option<Deadline>) -> Self {
         Self {
             name: name.to_owned(),
+            external_effect: false,
             body: body.into(),
             deadline,
         }
+    }
+
+    /// Declares whether this reaction performs an external effect.
+    pub fn with_external_effect(mut self, external_effect: bool) -> Self {
+        self.external_effect = external_effect;
+        self
     }
 
     pub fn get_name(&self) -> &str {
@@ -335,15 +357,16 @@ impl<'store> ReactionFn<'store> for TimerFn {
         ctx: &'store mut Context,
         _reactor: &'store mut dyn BaseReactor,
         refs: ReactionRefs<'store>,
-    ) {
+    ) -> OutputOutcome {
         let mut timer: ActionRef = match refs.actions.partition_mut() {
             Ok(timer) => timer,
             Err(error) => {
                 tracing::error!(?error, "Failed to destructure timer action");
-                return;
+                return OutputOutcome::NotReported;
             }
         };
         ctx.schedule_action(&mut timer, (), self.0);
+        OutputOutcome::NotReported
     }
 }
 

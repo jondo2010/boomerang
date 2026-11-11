@@ -86,7 +86,7 @@ where
         ctx: &mut Context,
         _reactor: &mut dyn BaseReactor,
         refs: ReactionRefs<'_>,
-    ) {
+    ) -> crate::OutputOutcome {
         let mut action: ActionRef<T> = refs
             .actions
             .partition_mut()
@@ -101,6 +101,7 @@ where
                 log_time: Some(timestamp as _),
             },
         );
+        crate::OutputOutcome::NotReported
     }
 }
 

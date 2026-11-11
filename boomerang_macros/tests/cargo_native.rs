@@ -321,3 +321,26 @@ fn component_diagnostics_preserve_distinct_syntax_and_initialization_errors() {
         assert!(error.contains(expected), "{fixture} ({features}): {error}");
     }
 }
+
+#[test]
+fn external_effects_preserve_metadata_and_concrete_payload_outcomes() {
+    success(cargo(
+        "descriptor-pass",
+        "test",
+        &["--features", "metadata,payload"],
+    ));
+    for args in [
+        vec!["--features", "output-unit-return"],
+        vec![
+            "--no-default-features",
+            "--features",
+            "payload,output-unit-return",
+        ],
+    ] {
+        let output = cargo("descriptor-pass", "check", &args);
+        assert!(!output.status.success());
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains("OutputOutcome"), "{error}");
+        assert!(error.contains("mismatched types"), "{error}");
+    }
+}

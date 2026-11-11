@@ -22,7 +22,7 @@ fn invoke(
     state: &mut super::shaped::ShapedState,
     inputs: &mut [Box<dyn BasePort>],
     outputs: &mut [Box<dyn BasePort>],
-) -> Result<(), ReactionBindingError> {
+) -> Result<boomerang::runtime::OutputOutcome, ReactionBindingError> {
     let mut inputs: Vec<_> = inputs
         .iter_mut()
         .map(|p| NonNull::from(p.as_mut()))

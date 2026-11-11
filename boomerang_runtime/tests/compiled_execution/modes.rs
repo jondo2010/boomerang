@@ -301,9 +301,16 @@ fn legacy_live_mode_key_transition_is_still_rejected() {
         Err(error) => error,
     };
 
+    let ExecuteOwnedError::Storage(OwnedStorageError::AfterReactionOutput {
+        output, source, ..
+    }) = error
+    else {
+        panic!("expected a retained output with the mode failure");
+    };
+    assert_eq!(output, boomerang_runtime::OutputOutcome::NotReported);
     assert!(matches!(
-        error,
-        ExecuteOwnedError::Storage(OwnedStorageError::LegacyModeTransition { .. })
+        *source,
+        OwnedStorageError::LegacyModeTransition { .. }
     ));
 }
 
@@ -318,13 +325,20 @@ fn compiled_mode_transition_must_match_the_declared_effect() {
         Err(error) => error,
     };
 
+    let ExecuteOwnedError::Storage(OwnedStorageError::AfterReactionOutput {
+        output, source, ..
+    }) = error
+    else {
+        panic!("expected a retained output with the mode failure");
+    };
+    assert_eq!(output, boomerang_runtime::OutputOutcome::NotReported);
     assert!(matches!(
-        error,
-        ExecuteOwnedError::Storage(OwnedStorageError::CompiledModeTransitionMismatch {
+        *source,
+        OwnedStorageError::CompiledModeTransitionMismatch {
             reaction,
             declared: Some(declared),
             requested,
-        }) if reaction == ReactionIndex::new(0)
+        } if reaction == ReactionIndex::new(0)
             && declared == (CompiledModeEffectRef {
                 target: ModeIndex::new(1),
                 transition: TransitionKind::Reset,

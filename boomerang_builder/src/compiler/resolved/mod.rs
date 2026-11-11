@@ -1,11 +1,16 @@
 //! Canonical deployment selections resolved before image lowering.
+//!
+//! The implementation catalog owns one descriptor per implementation identity.
+//! Component selections retain identities instead of descriptor copies.
+//! Resolution owns the catalog and rejects missing catalog entries.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
     ApplicationTopology, BoundaryBinding, BoundaryId, ComponentInstanceId, ContractId,
-    CoordinationSelection, FederateConfig, FederateId, ImplementationBinding, ImplementationId,
-    PlacementAssignment, PlacementGroupId, ReactorId, StableEnclaveId,
+    CoordinationSelection, FederateConfig, FederateId, ImplementationBinding,
+    ImplementationCatalog, ImplementationId, PlacementAssignment, PlacementGroupId, ReactorId,
+    StableEnclaveId,
 };
 
 #[cfg(test)]
@@ -26,6 +31,14 @@ pub enum ResolveError {
         /// Unknown component identity.
         component: ComponentInstanceId,
         /// Selected implementation identity.
+        implementation: ImplementationId,
+    },
+    /// A component selects an implementation absent from the catalog.
+    #[error("component `{component}` selects unregistered implementation `{implementation}`")]
+    MissingImplementation {
+        /// Component receiving the missing implementation.
+        component: ComponentInstanceId,
+        /// Implementation identity absent from the catalog.
         implementation: ImplementationId,
     },
     /// A topology component has no selected implementation.
@@ -146,10 +159,12 @@ pub enum ResolveError {
 }
 
 /// Complete canonical deployment resolution for one topology.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct ResolvedDeployment {
     /// Target-neutral application structure.
     topology: ApplicationTopology,
+    /// Owned canonical descriptors, stored once per implementation identity.
+    catalog: ImplementationCatalog,
     /// Component implementation selections in stable component order.
     bindings: BTreeMap<ComponentInstanceId, ImplementationBinding>,
     /// Placement ownership in stable group order.
@@ -163,9 +178,10 @@ pub struct ResolvedDeployment {
 }
 
 impl ResolvedDeployment {
-    /// Validates and canonicalizes all deployment selections.
+    /// Validates and canonicalizes all deployment selections against one implementation catalog.
     pub fn new(
         topology: ApplicationTopology,
+        catalog: ImplementationCatalog,
         bindings: impl IntoIterator<Item = ImplementationBinding>,
         placements: impl IntoIterator<Item = PlacementAssignment>,
         federates: impl IntoIterator<Item = FederateConfig>,
@@ -246,8 +262,14 @@ impl ResolvedDeployment {
                     component: component_id.clone(),
                 }
             })?;
-            let provided = binding.descriptor().contract_id();
-            let provided_version = binding.descriptor().contract_version();
+            let descriptor = catalog.get(binding.implementation()).ok_or_else(|| {
+                ResolveError::MissingImplementation {
+                    component: component_id.clone(),
+                    implementation: binding.implementation().clone(),
+                }
+            })?;
+            let provided = descriptor.contract_id();
+            let provided_version = descriptor.contract_version();
             if component.contract() != provided || component.contract_version() != provided_version
             {
                 return Err(ResolveError::ContractMismatch {
@@ -379,6 +401,7 @@ impl ResolvedDeployment {
 
         Ok(Self {
             topology,
+            catalog,
             bindings: canonical_bindings,
             placements: canonical_placements,
             federates: canonical_federates,
@@ -390,6 +413,14 @@ impl ResolvedDeployment {
     /// Returns the resolved application topology.
     pub fn topology(&self) -> &ApplicationTopology {
         &self.topology
+    }
+
+    /// Returns the canonical descriptor for one registered implementation.
+    pub fn implementation(
+        &self,
+        implementation: &ImplementationId,
+    ) -> Option<&crate::ComponentDescriptor> {
+        self.catalog.get(implementation)
     }
 
     /// Iterates implementation bindings in stable component order.

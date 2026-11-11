@@ -6,6 +6,20 @@ use common::*;
 #[test]
 fn payload_paths_reject_source_injection() {
     assert!(PayloadExports::new("crate::controller::__boomerang::payload").is_ok());
+    let mut compilation = compilation();
+    let result = register_component!(
+        compilation,
+        "",
+        metadata = common::controller,
+        payload = target_only::controller
+    );
+    let error = result.unwrap_err();
+    assert_eq!(error.diagnostic.stage, Stage::Registration);
+    assert_eq!(error.diagnostic.code, DiagnosticCode::InvalidInput);
+    assert!(std::error::Error::source(&error)
+        .unwrap()
+        .downcast_ref::<InvalidStableId>()
+        .is_some());
     for path in [
         "crate::controller; panic!(\"injected\")",
         "",
@@ -21,11 +35,24 @@ fn shared_registration_is_deterministic_and_does_not_generate_main() {
     register(&mut a, "unused", "crate::unused::__boomerang::payload");
     let mut b = compilation();
     register(&mut b, "unused", "crate::unused::__boomerang::payload");
-    register(
-        &mut b,
-        "controller",
-        "crate::controller::__boomerang::payload",
-    );
+    let mut compilation_evaluations = 0;
+    let mut identity_evaluations = 0;
+    let implementation = register_component!(
+        {
+            compilation_evaluations += 1;
+            &mut b
+        },
+        {
+            identity_evaluations += 1;
+            "controller"
+        },
+        metadata = common::controller,
+        payload = crate::controller,
+    )
+    .unwrap();
+    assert_eq!(implementation.as_str(), "controller");
+    assert_eq!(compilation_evaluations, 1);
+    assert_eq!(identity_evaluations, 1);
     select(&mut b, "second", "controller");
     select(&mut b, "first", "controller");
     let a = a.compile().unwrap();

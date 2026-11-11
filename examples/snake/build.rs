@@ -54,7 +54,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?;
         compilation.select(ComponentInstanceId::new(component)?, implementation)?;
     }
-    cargo.compile(&compilation, &mut std::io::stdout())?;
+    cargo.compile(compilation, &mut std::io::stdout())?;
     Ok(())
 }
 

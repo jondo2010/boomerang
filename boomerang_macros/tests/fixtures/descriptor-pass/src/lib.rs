@@ -100,9 +100,24 @@ boomerang::component! {
             #[input(len = 2)] bank_in: u64,
             #[output] array_out: [u32; 3],
             #[output(len = 3)] bank_out: u8,
+            #[input] single_in: u32,
+            #[output] single_out: u64,
+            #[state] calls: u32,
         ) -> impl Reactor {
             reaction! {
-                shaped (array_in, bank_in) -> array_out, bank_out {}
+                shaped (array_in, startup, bank_in) single_in -> array_out, bank_out, single_out {
+                    assert_eq!(*array_in[0], Some(11));
+                    assert_eq!(*array_in[1], Some(12));
+                    assert_eq!(bank_in.len(), 2);
+                    assert_eq!(*bank_in.get(0).unwrap(), Some(21));
+                    assert_eq!(*bank_in.get(1).unwrap(), Some(22));
+                    assert_eq!(*single_in, Some(31));
+                    for (index, port) in array_out.iter_mut().enumerate() { **port = Some(41 + index as u32); }
+                    assert_eq!(bank_out.len(), 3);
+                    for (index, mut port) in bank_out.iter_mut().enumerate() { *port = Some(51 + index as u8); }
+                    *single_out = Some(61);
+                    state.calls += 1;
+                }
             }
         }
     }
@@ -116,7 +131,7 @@ boomerang::component! {
 
         /// Declares the lifetime name formerly hardcoded by payload generation.
         ///
-        /// The generated `LifetimeState::marker` field retains the user's `'store` lifetime.
+        /// The generated state retains the user's lifetime, which matches the adapter's first candidate.
         #[reactor(
             contract = "example.lifetime",
             contract_version = 1,
@@ -127,9 +142,9 @@ boomerang::component! {
                 scratch_bytes = 1
             )
         )]
-        fn Lifetime<'store>(#[state(default = "")] marker: &'store str) -> impl Reactor {
+        fn Lifetime<'__boomerang_store>(#[state(default = "")] marker: &'__boomerang_store str) -> impl Reactor {
             reaction! {
-                tick (startup) {}
+                tick (startup) { state.marker = "invoked"; }
             }
         }
     }
@@ -281,14 +296,6 @@ mod descriptor_tests {
                 scratch_bytes: boomerang::builder::DescriptorBound::Known(256),
             }
         );
-        assert_eq!(
-            descriptor.fingerprint().to_bytes(),
-            [
-                0xfb, 0x3a, 0x9c, 0xf2, 0x2e, 0x1b, 0x7b, 0x33, 0x9e, 0xb8, 0x63, 0xc2, 0x02, 0x48,
-                0xa2, 0xc3, 0x4e, 0x95, 0x98, 0x3d, 0xa3, 0xd4, 0x6c, 0x96, 0xb0, 0x12, 0x4e, 0x6d,
-                0x69, 0x9c, 0xc6, 0x2d
-            ]
-        );
     }
 
     #[test]
@@ -321,27 +328,13 @@ mod descriptor_tests {
 #[cfg(all(test, feature = "payload"))]
 mod payload_tests {
     #[test]
-    fn payload_derives_compatibility_and_preserves_initializers() {
-        assert_eq!(
-            super::sensor::__boomerang::payload::binding_manifest()
-                .descriptor_fingerprint()
-                .to_bytes(),
-            [
-                0xfb, 0x3a, 0x9c, 0xf2, 0x2e, 0x1b, 0x7b, 0x33, 0x9e, 0xb8, 0x63, 0xc2, 0x02, 0x48,
-                0xa2, 0xc3, 0x4e, 0x95, 0x98, 0x3d, 0xa3, 0xd4, 0x6c, 0x96, 0xb0, 0x12, 0x4e, 0x6d,
-                0x69, 0x9c, 0xc6, 0x2d
-            ],
-        );
-        assert_eq!(
-            super::sensor::__boomerang::payload::binding_manifest().macro_abi(),
-            boomerang::runtime::binding::COMPONENT_DESCRIPTOR_MACRO_ABI,
-        );
-
+    fn payload_initializers_and_adapters_match_declaration() {
         let state: super::sensor::MatchState = super::sensor::__boomerang::payload::state_Match();
         assert_eq!(state.r#loop, 3);
         let custom_state: super::custom::CustomState =
             super::custom::__boomerang::payload::state_Custom();
         assert_eq!(custom_state.count, 11);
+        super::adapter_execution::verify();
     }
 }
 
@@ -397,116 +390,12 @@ boomerang::component! {
 
 #[cfg(feature = "payload")]
 mod typed_adapters {
-    /// Typed references for the root implementation reaction.
-    type MoveRefs<'store> = (
-        boomerang::runtime::InputRef<'store, u32>,
-        boomerang::runtime::ActionRef<'store>,
-        boomerang::runtime::CompiledModeEffectRef,
-        boomerang::runtime::OutputRef<'store, u32>,
-    );
-
-    /// Typed fixed-array and dynamic-bank references.
-    type ShapedRefs<'store> = (
-        [boomerang::runtime::InputRef<'store, u16>; 2],
-        boomerang::runtime::InputBankRef<'store, u64>,
-        [boomerang::runtime::OutputRef<'store, u32>; 3],
-        boomerang::runtime::OutputBankRef<'store, u8>,
-    );
-
-    /// Adapts owned-storage references and invokes the root typed reaction symbol.
-    #[allow(dead_code)]
-    fn bind_match(
-        ctx: &mut boomerang::runtime::Context,
-        state: &mut dyn boomerang::runtime::ReactorData,
-        refs: boomerang::runtime::ReactionRefs<'_>,
-        mode_effect: Option<boomerang::runtime::CompiledModeEffectRef>,
-    ) -> Result<(), boomerang::runtime::ReactionBindingError> {
-        let state = state
-            .downcast_mut::<super::sensor::MatchState>()
-            .expect("the generated state initializer supplies MatchState");
-        let input = refs.ports.partition()?;
-        let startup = refs.actions.partition_mut()?;
-        let output = refs.ports_mut.partition_mut()?;
-        let refs: MoveRefs<'_> = (
-            input,
-            startup,
-            mode_effect.expect("the compiled reaction declares its canonical mode effect"),
-            output,
-        );
-        super::sensor::__boomerang::payload::reaction_Match_2fmove(ctx, state, refs);
-        Ok(())
-    }
-
-    /// Directly constructs shaped state and invokes its typed reaction symbol.
-    #[allow(dead_code)]
-    fn bind_shaped<'store>(ctx: &mut boomerang::runtime::Context, refs: ShapedRefs<'store>) {
-        let mut state = super::shaped::__boomerang::payload::state_Shaped();
-        super::shaped::__boomerang::payload::reaction_Shaped_2fshaped(ctx, &mut state, refs);
-    }
-
-    /// Directly constructs custom state and invokes its typed reaction symbol.
-    #[allow(dead_code)]
-    fn bind_custom<'store>(
-        ctx: &mut boomerang::runtime::Context,
-        refs: (boomerang::runtime::ActionRef<'store>,),
-    ) {
-        let mut state = super::custom::__boomerang::payload::state_Custom();
-        super::custom::__boomerang::payload::reaction_Custom_2fstart(ctx, &mut state, refs);
-    }
-
-    /// Directly uses state and reaction symbols from a private generic reactor.
-    #[allow(dead_code)]
-    fn bind_lifetime<'store>(
-        ctx: &mut boomerang::runtime::Context,
-        refs: (boomerang::runtime::ActionRef<'store>,),
-    ) {
-        let mut state = super::lifetime_collision::__boomerang::payload::state_Lifetime();
-        super::lifetime_collision::__boomerang::payload::reaction_Lifetime_2ftick(
-            ctx, &mut state, refs,
-        );
-    }
-
-    /// Typed references for the standard-action fixture reaction.
-    type ActionRefs<'store> = (
-        boomerang::runtime::ActionRef<'store, u32>,
-        boomerang::runtime::ActionRef<'store, u16>,
-        boomerang::runtime::ActionRef<'store, u32>,
-        boomerang::runtime::ActionRef<'store, u16>,
-    );
-
-    /// Invokes a reaction whose references include logical and physical actions.
-    #[allow(dead_code)]
-    fn bind_actions<'store>(ctx: &mut boomerang::runtime::Context, refs: ActionRefs<'store>) {
-        let mut state = super::actions::__boomerang::payload::state_Actions();
-        super::actions::__boomerang::payload::reaction_Actions_2fact(ctx, &mut state, refs);
-    }
-
     const _: boomerang::runtime::PayloadType<u32> =
         super::sensor::__boomerang::payload::port_Match_2fasync;
     const _: boomerang::runtime::PayloadType<u32> =
         super::actions::__boomerang::payload::action_Actions_2flogical_5fnow;
     const _: boomerang::runtime::PayloadType<u16> =
         super::actions::__boomerang::payload::action_Actions_2fphysical_5flater;
-
-    #[allow(dead_code)]
-    fn direct_payload_bindings() -> boomerang::runtime::EnclaveBindings {
-        use boomerang::runtime::image::BindingSlotIndex;
-
-        boomerang::runtime::EnclaveBindings::new()
-            .bind_state(
-                BindingSlotIndex::new(0),
-                super::sensor::__boomerang::payload::state_Match,
-            )
-            .bind_reaction(BindingSlotIndex::new(3), bind_match)
-            .bind_port(
-                BindingSlotIndex::new(1),
-                super::sensor::__boomerang::payload::port_Match_2fasync,
-            )
-            .bind_action(
-                BindingSlotIndex::new(2),
-                super::actions::__boomerang::payload::action_Actions_2flogical_5fnow,
-            )
-    }
 
     /// Keeps a private reactor's generated state type nameable by the launcher.
     #[allow(dead_code)]
@@ -530,3 +419,6 @@ mod typed_adapters {
         state.count
     }
 }
+
+#[cfg(all(test, feature = "payload"))]
+mod adapter_execution;

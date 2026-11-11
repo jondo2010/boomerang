@@ -8,6 +8,7 @@
 //! known-but-unsupported selections before target images escape.
 
 use crate::descriptor::ComponentDescriptor;
+use std::collections::BTreeMap;
 
 use super::{
     BoundaryId, CodecCapabilityId, ComponentInstanceId, FederateId, ImplementationId,
@@ -18,6 +19,12 @@ use crate::runtime::image::{
     TransportPolicy,
 };
 
+/// Canonical implementation descriptors keyed by implementation identity.
+///
+/// Register each descriptor once. Component selections must reference this catalog by identity.
+/// Shared catalog ownership does not duplicate descriptors across component instances.
+pub type ImplementationCatalog = BTreeMap<ImplementationId, ComponentDescriptor>;
+
 /// One selected implementation for a logical component instance.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ImplementationBinding {
@@ -25,21 +32,14 @@ pub struct ImplementationBinding {
     component: ComponentInstanceId,
     /// Stable identity of the selected implementation.
     implementation: ImplementationId,
-    /// Validated structural descriptor supplied by the implementation.
-    descriptor: ComponentDescriptor,
 }
 
 impl ImplementationBinding {
     /// Creates one component-to-implementation selection.
-    pub fn new(
-        component: ComponentInstanceId,
-        implementation: ImplementationId,
-        descriptor: ComponentDescriptor,
-    ) -> Self {
+    pub fn new(component: ComponentInstanceId, implementation: ImplementationId) -> Self {
         Self {
             component,
             implementation,
-            descriptor,
         }
     }
 
@@ -51,11 +51,6 @@ impl ImplementationBinding {
     /// Returns the selected implementation identity.
     pub fn implementation(&self) -> &ImplementationId {
         &self.implementation
-    }
-
-    /// Returns the selected implementation descriptor.
-    pub fn descriptor(&self) -> &ComponentDescriptor {
-        &self.descriptor
     }
 }
 

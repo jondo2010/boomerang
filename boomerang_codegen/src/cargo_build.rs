@@ -125,7 +125,7 @@ impl CargoBuild {
         self.environment.insert(name.into());
         Ok(())
     }
-    /// Compile the deployment and atomically publish complete source as `boomerang.rs`.
+    /// Consume the compilation request and atomically publish complete source as `boomerang.rs`.
     ///
     /// The compilation must contain the adapter's complete target context.
     /// Identical bytes preserve the final file's modification time.
@@ -134,7 +134,7 @@ impl CargoBuild {
     /// Pass `&mut std::io::stdout()` from `build.rs` to emit Cargo rerun directives.
     pub fn compile(
         &self,
-        compilation: &Compilation,
+        compilation: Compilation,
         directives: &mut impl Write,
     ) -> Result<PathBuf, CompilationError> {
         self.publish(directives, || {

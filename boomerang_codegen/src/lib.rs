@@ -16,7 +16,7 @@
 //! For component dependencies, enable metadata features in build dependencies.
 //! Enable payload features in normal dependencies.
 //! Set `default-features = false` where default features introduce implementation dependencies into the host build.
-//! Cargo aliases determine Rust paths; [`ImplementationId`](boomerang_builder::compiler::ImplementationId) determines semantic implementation identity.
+//! Cargo aliases determine Rust paths; [`ImplementationId`] determines semantic implementation identity.
 //!
 //! A single-package application must not depend on itself in build dependencies.
 //! Share its component declaration through a declarative macro or source file.
@@ -34,7 +34,8 @@
 //! # Compilation contract
 //!
 //! [`DeploymentConfiguration`] supplies the deployment name, placements, federate configurations, coordination selection, and boundary bindings.
-//! Register each implementation with [`Compilation::register`].
+//! Register each implementation with [`register_component!`].
+//! Use [`Compilation::register`] for explicit descriptors or custom payload exports.
 //! Supply its host descriptor and target payload module path independently.
 //! Select an implementation for every component instance with [`Compilation::select`].
 //! Multiple instances can select the same registration.
@@ -43,14 +44,27 @@
 //! The builder validates component contracts and versions.
 //!
 //! [`Compilation::compile`] returns an owned validated deployment image and Rust source for the selected federate.
+//! Builder construction validates the complete immutable image once. Backends must not repeat root validation.
 //! The selected federate's configured target must equal [`TargetContext::triple`].
 //! The compiler never substitutes the host target.
 //! For Cargo builds, pass the complete target context from `CargoBuild::target`, including captured `CARGO_CFG_*` facts.
 //!
 //! [`PayloadExports::new`] accepts a Rust module path without generic arguments, expressions, macros, or trailing source.
 //! Invalid paths fail during host generation.
-//! Generated assertions compare metadata fingerprints and macro ABI versions with the actual target payload's `binding_manifest()`.
+//! One generated assertion per selected implementation compares metadata and target payload descriptor fingerprints.
+//! The fingerprint includes the macro ABI version; emitters must retain this compatibility check.
 //! Missing target exports and incompatible payloads fail during target compilation.
+//! Each reaction binding associates its image-owned `BindingSlotIndex` directly with a payload adapter export.
+//! Payload macros own state downcasts, reference extraction, declaration order, and generic parameters.
+//! This compiler retains instance indices, routes, and initializer capability mappings.
+//! Each compilation owns its implementation catalog.
+//! Compilation moves topology, deployment selections, and descriptors through resolution and lowering.
+//! Codegen prepares expected descriptor fingerprints before lowering consumes the catalog.
+//! Rendering uses these fingerprints and payload paths without descriptor access.
+//! Component selections contain catalog identities, and Rust export paths stay in a codegen side table.
+//! Lowering resolves initializer actions to descriptor-local payload slots and image-owned action indices.
+//! Rendering must consume this plan without descriptor or action-row reconstruction.
+//! Reused exports require separate instance storage.
 //!
 //! ```
 //! use boomerang_codegen::{PayloadExports, TargetContext};
@@ -63,9 +77,7 @@
 //! ```
 //!
 //! [`DeploymentInputs::lower`] accepts resolved implementation bindings for callers that already perform selection.
-//! The [`render`] module consumes validated builder images, registrations keyed by implementation identity, and explicit [`render::BindingConfiguration`].
-//! [`PayloadExports::with_manifest`] selects the compatibility manifest export convention explicitly.
-//! Use [`PayloadExports::new`] for Cargo-native payloads.
+//! The [`render`] module uses validated images, expected fingerprints, payload paths, and explicit [`render::BindingConfiguration`].
 //!
 //! # Build script
 //!
@@ -73,7 +85,7 @@
 //! The following fragment assumes application-defined topology, configuration, component instances, and implementation identifiers:
 //!
 //! ```rust,ignore
-//! use boomerang_codegen::{cargo_build::CargoBuild, Compilation, PayloadExports};
+//! use boomerang_codegen::{cargo_build::CargoBuild, Compilation, register_component};
 //!
 //! let mut cargo = CargoBuild::from_env()?;
 //! cargo.track_file("declaration.rs")?;
@@ -83,14 +95,12 @@
 //!     topology(), deployment_configuration(cargo.target().triple()),
 //!     selected_federate, cargo.target().clone(),
 //! );
-//! compilation.register(
-//!     implementation.clone(),
-//!     controller::__boomerang::metadata::descriptor(),
-//!     PayloadExports::new("crate::controller::__boomerang::payload")?,
+//! let implementation = register_component!(
+//!     compilation, "controller", metadata = controller, payload = crate::controller
 //! )?;
 //! compilation.select(first_instance, implementation.clone())?;
 //! compilation.select(second_instance, implementation)?;
-//! cargo.compile(&compilation, &mut std::io::stdout())?;
+//! cargo.compile(compilation, &mut std::io::stdout())?;
 //! ```
 //!
 //! `CargoBuild::from_env` requires `TARGET` and `OUT_DIR`.
@@ -164,36 +174,18 @@ pub mod render;
 pub use compilation::*;
 pub use diagnostic::*;
 
-use boomerang_builder::ComponentDescriptor;
-
-/// How a payload namespace exports its runtime compatibility manifest.
-#[derive(Debug, Clone, Copy)]
-pub enum ManifestStyle {
-    /// Function export: `binding_manifest()`.
-    Function,
-    /// Constant export: `BINDING_MANIFEST`.
-    Constant,
-}
-
 /// A parsed Rust module path to payload exports. This is not a semantic identity.
 #[derive(Clone)]
 pub struct PayloadExports {
     /// Parsed target-side Rust namespace used to reference concrete payload exports.
     pub(crate) path: syn::Path,
-    /// Export convention used to retrieve this payload namespace's compatibility manifest.
-    pub(crate) manifest: ManifestStyle,
 }
 impl PayloadExports {
     /// Parse a Cargo-native path such as `crate::controller::__boomerang::payload`.
     /// Generic arguments, expressions, macros, and trailing source are rejected.
+    /// The namespace must export a `Payload` marker that implements
+    /// [`ComponentPayload`](boomerang_runtime::binding::ComponentPayload).
     pub fn new(path: impl AsRef<str>) -> Result<Self, CompilationError> {
-        Self::with_manifest(path, ManifestStyle::Function)
-    }
-    /// Select the compatibility manifest export convention for this payload namespace.
-    pub fn with_manifest(
-        path: impl AsRef<str>,
-        manifest: ManifestStyle,
-    ) -> Result<Self, CompilationError> {
         let path = path.as_ref();
         let parsed = syn::parse_str::<syn::Path>(path).ok().filter(|path| {
             !path.segments.is_empty()
@@ -209,17 +201,8 @@ impl PayloadExports {
                 format!("invalid payload export path '{path}'"),
             )
         })?;
-        Ok(Self { path, manifest })
+        Ok(Self { path })
     }
-}
-
-/// One registered implementation's independently obtained descriptor and target exports.
-#[derive(Debug, Clone)]
-pub struct ComponentRegistration {
-    /// Host-owned structural descriptor used for semantic validation and compatibility assertions.
-    pub descriptor: ComponentDescriptor,
-    /// Independently selected target namespace containing this implementation's concrete payload exports.
-    pub payload: PayloadExports,
 }
 
 impl std::fmt::Debug for PayloadExports {
@@ -227,7 +210,47 @@ impl std::fmt::Debug for PayloadExports {
         use quote::ToTokens;
         f.debug_struct("PayloadExports")
             .field("path", &self.path.to_token_stream().to_string())
-            .field("manifest", &self.manifest)
             .finish()
     }
+}
+
+/// Semantic implementation identity returned by [`register_component!`].
+pub use boomerang_builder::compiler::ImplementationId;
+
+/// Register host metadata with an explicit target component module path.
+///
+/// Returns a registration result containing the implementation identity for [`Compilation::select`].
+/// The metadata path resolves in the host build. The payload path remains target-side tokens.
+/// Both paths identify public component modules, without generated namespace suffixes.
+/// The macro evaluates the compilation and identity expressions once.
+/// Validation returns [`CompilationError`] without returning from the enclosing function.
+/// Identity errors retain their original cause through [`std::error::Error::source`].
+/// Duplicate registrations retain the original registration and its diagnostic context.
+///
+/// ```rust,ignore
+/// let implementation = boomerang_codegen::register_component!(
+///     compilation, "sensor", metadata = sensor, payload = physical_input::sensor
+/// )?;
+/// compilation.select(sensor_instance, implementation)?;
+/// ```
+#[macro_export]
+macro_rules! register_component {
+    ($compilation:expr, $implementation:expr, metadata = $metadata:path, payload = $payload:path $(,)?) => {{
+        (|| -> ::core::result::Result<$crate::ImplementationId, $crate::CompilationError> {
+            let compilation = &mut $compilation;
+            let implementation = $crate::ImplementationId::new($implementation)?;
+            use $metadata as component_metadata;
+            let payload = $crate::PayloadExports::new(::core::concat!(
+                ::core::stringify!($payload),
+                "::__boomerang::payload"
+            ))?;
+            compilation
+                .register(
+                    implementation.clone(),
+                    component_metadata::__boomerang::metadata::descriptor(),
+                    payload,
+                )
+                .map(|()| implementation)
+        })()
+    }};
 }

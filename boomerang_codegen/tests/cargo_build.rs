@@ -9,8 +9,7 @@ fn publication_is_atomic_unchanged_and_failure_invalidates_only_owned_output() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("unrelated"), "keep").unwrap();
     let adapter = CargoBuild::from_context(dir.path(), target()).unwrap();
-    let first = ready();
-    let path = adapter.compile(&first, &mut Vec::new()).unwrap();
+    let path = adapter.compile(ready(), &mut Vec::new()).unwrap();
     let old_time = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
     fs::File::options()
         .write(true)
@@ -20,28 +19,29 @@ fn publication_is_atomic_unchanged_and_failure_invalidates_only_owned_output() {
         .unwrap();
     let before = fs::metadata(&path).unwrap().modified().unwrap();
     let source = fs::read(&path).unwrap();
-    adapter.compile(&first, &mut Vec::new()).unwrap();
+    adapter.compile(ready(), &mut Vec::new()).unwrap();
     assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), before);
     assert_eq!(fs::read(&path).unwrap(), source);
-    let mut changed = compilation();
-    register(
-        &mut changed,
-        "changed",
-        "crate::changed::__boomerang::payload",
-    );
-    select(&mut changed, "first", "changed");
-    select(&mut changed, "second", "changed");
-    adapter.compile(&changed, &mut Vec::new()).unwrap();
-    assert_eq!(
-        fs::read_to_string(&path).unwrap(),
-        changed.compile().unwrap().source
-    );
+    let changed = || {
+        let mut request = compilation();
+        register(
+            &mut request,
+            "changed",
+            "crate::changed::__boomerang::payload",
+        );
+        select(&mut request, "first", "changed");
+        select(&mut request, "second", "changed");
+        request
+    };
+    let expected_changed = changed().compile().unwrap().source;
+    adapter.compile(changed(), &mut Vec::new()).unwrap();
+    assert_eq!(fs::read_to_string(&path).unwrap(), expected_changed);
     assert_ne!(fs::read(&path).unwrap(), source);
     let leftover = dir.path().join(".boomerang-interrupted");
     fs::write(&leftover, "incomplete").unwrap();
-    adapter.compile(&first, &mut Vec::new()).unwrap();
+    adapter.compile(ready(), &mut Vec::new()).unwrap();
     assert_eq!(fs::read(&path).unwrap(), source);
-    assert!(adapter.compile(&compilation(), &mut Vec::new()).is_err());
+    assert!(adapter.compile(compilation(), &mut Vec::new()).is_err());
     assert!(
         !path.exists(),
         "failed generation must invalidate stale success"
@@ -50,7 +50,7 @@ fn publication_is_atomic_unchanged_and_failure_invalidates_only_owned_output() {
         fs::read_to_string(dir.path().join("unrelated")).unwrap(),
         "keep"
     );
-    adapter.compile(&first, &mut Vec::new()).unwrap();
+    adapter.compile(ready(), &mut Vec::new()).unwrap();
     assert_eq!(fs::read(&path).unwrap(), source);
 }
 #[test]
@@ -80,7 +80,7 @@ fn declared_files_environment_and_target_cfg_emit_valid_directives() {
     select(&mut c, "first", "controller");
     select(&mut c, "second", "controller");
     let mut directives = Vec::new();
-    adapter.compile(&c, &mut directives).unwrap();
+    adapter.compile(c, &mut directives).unwrap();
     let lines = String::from_utf8(directives).unwrap();
     for expected in [
         "cargo:rerun-if-changed=declaration.rs",
@@ -115,10 +115,10 @@ fn missing_context_and_directive_injection_are_rejected() {
         boomerang_builder::compiler::FederateId::new("local").unwrap(),
         TargetContext::new("aarch64-unknown-linux-gnu").unwrap(),
     );
-    let output = adapter.compile(&ready(), &mut Vec::new()).unwrap();
+    let output = adapter.compile(ready(), &mut Vec::new()).unwrap();
     assert_eq!(
         adapter
-            .compile(&wrong, &mut Vec::new())
+            .compile(wrong, &mut Vec::new())
             .unwrap_err()
             .diagnostic
             .code,
@@ -134,7 +134,7 @@ fn owned_output_never_follows_an_escaping_symlink() {
     fs::write(external.path(), "untouched").unwrap();
     std::os::unix::fs::symlink(external.path(), dir.path().join("boomerang.rs")).unwrap();
     let adapter = CargoBuild::from_context(dir.path(), target()).unwrap();
-    adapter.compile(&ready(), &mut Vec::new()).unwrap();
+    adapter.compile(ready(), &mut Vec::new()).unwrap();
     assert_eq!(fs::read_to_string(external.path()).unwrap(), "untouched");
     assert!(!fs::symlink_metadata(dir.path().join("boomerang.rs"))
         .unwrap()
@@ -243,7 +243,7 @@ fn unsupported_native_capabilities_invalidate_member_and_coordinator_publication
             } else {
                 adapter
                     .compile(
-                        &coordination_fixture::selected(invalid, "a"),
+                        coordination_fixture::selected(invalid, "a"),
                         &mut Vec::new(),
                     )
                     .unwrap_err()

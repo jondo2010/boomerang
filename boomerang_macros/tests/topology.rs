@@ -59,10 +59,18 @@ fn generated_topology_matches_legacy_without_constructing_state() {
 
 boomerang::component! {
     mod identifiers {
+        #![allow(unused_variables)]
         use boomerang::prelude::*;
         #[reactor(contract = "test.identifiers", contract_version = 1, bounds(queue_capacity = 8, payload_bytes = 64, state_bytes = 64, scratch_bytes = 64))]
-        pub fn root(#[input] root: u32, #[output] topology: u32) {
-            reaction! { (root) -> topology {} }
+        pub fn root(
+            #[state] root: u32,
+            #[input] root: u32,
+            #[output] topology: u32,
+            #[input] shared: u32,
+            #[logical_action] shared: u32,
+        ) {
+            reaction! { (root) -> topology { let _ = state.root; } }
+            reaction! { shared_name(shared) {} }
         }
     }
 }
@@ -75,7 +83,20 @@ fn user_port_names_cannot_shadow_constructor_locals() {
         .unwrap();
     assert_eq!(ports.root.id().to_string(), "identifiers/root");
     assert_eq!(ports.topology.id().to_string(), "identifiers/topology");
-    assert_eq!(app.finish().unwrap().reactions().count(), 1);
+    let generated = app.finish().unwrap();
+    let mut assembly = Assembly::new();
+    identifiers::Root()
+        .build(
+            "identifiers",
+            identifiers::RootState::default(),
+            None,
+            None,
+            None,
+            false,
+            &mut assembly,
+        )
+        .unwrap();
+    assert_eq!(generated, assembly.application_topology().unwrap());
 }
 
 boomerang::component! {

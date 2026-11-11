@@ -1,6 +1,6 @@
 //! Generate the declared state initializer context for each compilation facet.
 
-use super::{ArgKind, Model, ReactorArgs};
+use super::{declaration::Declaration, ArgKind, Model, ReactorArgs};
 use proc_macro2::TokenStream;
 use quote::quote;
 
@@ -97,7 +97,11 @@ fn generic_marker(model: &Model) -> (TokenStream, TokenStream) {
 }
 
 /// Emits the public user-named argument structure in dynamic and payload facets.
-pub(super) fn declaration(args: &ReactorArgs, model: &Model) -> syn::Result<TokenStream> {
+pub(super) fn declaration(
+    args: &ReactorArgs,
+    declaration: &Declaration<'_>,
+) -> syn::Result<TokenStream> {
+    let model = declaration.model;
     let Some(capabilities) = &args.init_context else {
         return Ok(TokenStream::new());
     };
@@ -105,20 +109,23 @@ pub(super) fn declaration(args: &ReactorArgs, model: &Model) -> syn::Result<Toke
     let generics = &model.generics;
     let where_clause = &generics.where_clause;
     let (marker, _) = generic_marker(model);
-    let actions = capabilities.actions(model)?.into_iter().map(|(field, ty)| {
-        let (ty, description) = if capabilities.source.is_some() {
-            (
+    let actions = declaration
+        .initializer_actions()?
+        .iter()
+        .map(|(field, ty)| {
+            let (ty, description) = if capabilities.source.is_some() {
+                (
                 quote!(::boomerang::runtime::input::SourceAction<#ty>),
                 "Source-owned action for timestamp-preserving admission through InputSourceHandle.",
             )
-        } else {
-            (
-                quote!(::boomerang::runtime::AsyncActionRef<#ty>),
-                "Ordinary asynchronous action for SendContext scheduling.",
-            )
-        };
-        quote!(#[doc = #description] pub #field: #ty,)
-    });
+            } else {
+                (
+                    quote!(::boomerang::runtime::AsyncActionRef<#ty>),
+                    "Ordinary asynchronous action for SendContext scheduling.",
+                )
+            };
+            quote!(#[doc = #description] pub #field: #ty,)
+        });
     let source = capabilities.source.as_ref().map(|_| quote!(#[doc = "Execution-bound source progress and timestamped input admission."] pub source: ::boomerang::runtime::input::InputSourceHandle,));
     let clock = capabilities.clock_control().then(|| quote!(#[doc = "Explicit write authority for the selected manual clock."] pub clock: ::boomerang::runtime::clock::ManualClock,));
     Ok(quote! {
@@ -135,10 +142,11 @@ pub(super) fn declaration(args: &ReactorArgs, model: &Model) -> syn::Result<Toke
 /// Emits a generated adapter from compiler-resolved rows to the user's named fields.
 pub(super) fn initializer(
     args: &ReactorArgs,
-    model: &Model,
+    declaration: &Declaration<'_>,
     symbol: &syn::Ident,
     state: &syn::Path,
 ) -> syn::Result<TokenStream> {
+    let model = declaration.model;
     let capabilities = args.init_context.as_ref().expect("capability declaration");
     let name = &capabilities.name;
     let path = args.state_init.as_ref().expect("validated initializer");
@@ -146,9 +154,9 @@ pub(super) fn initializer(
     let type_args = ty_generics.as_turbofish();
     let (_, marker) = generic_marker(model);
     let fields =
-        capabilities
-            .actions(model)?
-            .into_iter()
+        declaration
+            .initializer_actions()?
+            .iter()
             .enumerate()
             .map(|(index, (field, ty))| {
                 let method = if capabilities.source.is_some() {
@@ -174,7 +182,11 @@ pub(super) fn initializer(
     })
 }
 /// Registers the same named initializer in the live builder using existing action aliases.
-pub(super) fn live_registration(args: &ReactorArgs, model: &Model) -> syn::Result<TokenStream> {
+pub(super) fn live_registration(
+    args: &ReactorArgs,
+    declaration: &Declaration<'_>,
+) -> syn::Result<TokenStream> {
+    let model = declaration.model;
     let Some(capabilities) = &args.init_context else {
         return Ok(quote!());
     };
@@ -188,7 +200,7 @@ pub(super) fn live_registration(args: &ReactorArgs, model: &Model) -> syn::Resul
     let (_, ty_generics, _) = model.generics.split_for_impl();
     let type_args = ty_generics.as_turbofish();
     let (_, marker) = generic_marker(model);
-    let actions = capabilities.actions(model)?;
+    let actions = declaration.initializer_actions()?;
     let aliases = actions.iter().map(|(field, _)| quote!(let (_, #field) = runtime.aliases.action_aliases[::boomerang::builder::AssemblyActionKey::from(#field)];));
     let requirements = actions.iter().map(|(field, ty)| quote!(::boomerang::runtime::initialization::live::LiveActionCapability::new::<#ty>(#field)));
     let fields = actions

@@ -2,9 +2,9 @@ use crate::compiler::{
     ApplicationTopology, ApplicationTopologyBuilder, BoundaryBinding, BoundaryId, BoundaryPolicies,
     CodecCapabilityId, ComponentInstance, ComponentInstanceId, ConnectionSemantics, ContractId,
     CoordinationBackend, CoordinationSelection, FederateConfig, FederateId, FlowId,
-    ImplementationBinding, ImplementationId, PhysicalBoundaryMetadata, PlacementAssignment,
-    PlacementGroupId, PortDirection, PortId, Reactor, ReactorId, ResolveError, ResolvedDeployment,
-    RuntimeBackendId, StableEnclaveId, TargetTriple, TransportCapabilityId,
+    ImplementationBinding, ImplementationCatalog, ImplementationId, PhysicalBoundaryMetadata,
+    PlacementAssignment, PlacementGroupId, PortDirection, PortId, Reactor, ReactorId, ResolveError,
+    ResolvedDeployment, RuntimeBackendId, StableEnclaveId, TargetTriple, TransportCapabilityId,
 };
 use crate::descriptor::{ComponentDescriptor, DescriptorBounds, COMPONENT_DESCRIPTOR_MACRO_ABI};
 use crate::runtime::image::{
@@ -133,11 +133,25 @@ fn topology_with_layout(
     topology.finish().unwrap()
 }
 
-fn binding(component: &str, implementation: &str, contract: &str) -> ImplementationBinding {
+fn catalog() -> ImplementationCatalog {
+    [
+        (
+            ImplementationId::new("controller-host").unwrap(),
+            descriptor("controller.v1"),
+        ),
+        (
+            ImplementationId::new("sensor-mcu").unwrap(),
+            descriptor("sensor.v1"),
+        ),
+    ]
+    .into_iter()
+    .collect()
+}
+
+fn binding(component: &str, implementation: &str) -> ImplementationBinding {
     ImplementationBinding::new(
         ComponentInstanceId::new(component).unwrap(),
         ImplementationId::new(implementation).unwrap(),
-        descriptor(contract),
     )
 }
 
@@ -193,8 +207,8 @@ fn controller_to_sensor_binding() -> BoundaryBinding {
 
 fn resolve(reverse: bool) -> ResolvedDeployment {
     let mut bindings = vec![
-        binding("vehicle/controller", "controller-host", "controller.v1"),
-        binding("vehicle/sensor", "sensor-mcu", "sensor.v1"),
+        binding("vehicle/controller", "controller-host"),
+        binding("vehicle/sensor", "sensor-mcu"),
     ];
     let mut placements = vec![
         placement("placement/controller", "host"),
@@ -210,6 +224,7 @@ fn resolve(reverse: bool) -> ResolvedDeployment {
     }
     ResolvedDeployment::new(
         topology(),
+        catalog(),
         bindings,
         placements,
         federates,
@@ -228,6 +243,7 @@ fn resolution_error(
 ) -> ResolveError {
     ResolvedDeployment::new(
         topology(),
+        catalog(),
         bindings,
         placements,
         federates,
@@ -241,10 +257,10 @@ fn resolution_error(
 fn resolution_reports_duplicate_selection_errors_in_canonical_identity_order() {
     let duplicate_component_bindings = |reverse: bool| {
         let mut bindings = vec![
-            binding("vehicle/sensor", "sensor-mcu", "sensor.v1"),
-            binding("vehicle/controller", "controller-host", "controller.v1"),
-            binding("vehicle/sensor", "sensor-sim", "sensor.v1"),
-            binding("vehicle/controller", "controller-sim", "controller.v1"),
+            binding("vehicle/sensor", "sensor-mcu"),
+            binding("vehicle/controller", "controller-host"),
+            binding("vehicle/sensor", "sensor-sim"),
+            binding("vehicle/controller", "controller-sim"),
         ];
         if reverse {
             bindings.reverse();
@@ -282,8 +298,8 @@ fn resolution_reports_duplicate_selection_errors_in_canonical_identity_order() {
         }
         resolution_error(
             [
-                binding("vehicle/controller", "controller-host", "controller.v1"),
-                binding("vehicle/sensor", "sensor-mcu", "sensor.v1"),
+                binding("vehicle/controller", "controller-host"),
+                binding("vehicle/sensor", "sensor-mcu"),
             ],
             placements,
             standard_federates(),
@@ -313,8 +329,8 @@ fn resolution_reports_duplicate_selection_errors_in_canonical_identity_order() {
         }
         resolution_error(
             [
-                binding("vehicle/controller", "controller-host", "controller.v1"),
-                binding("vehicle/sensor", "sensor-mcu", "sensor.v1"),
+                binding("vehicle/controller", "controller-host"),
+                binding("vehicle/sensor", "sensor-mcu"),
             ],
             [
                 placement("placement/controller", "host"),
@@ -347,8 +363,8 @@ fn resolution_reports_duplicate_selection_errors_in_canonical_identity_order() {
         }
         resolution_error(
             [
-                binding("vehicle/controller", "controller-host", "controller.v1"),
-                binding("vehicle/sensor", "sensor-mcu", "sensor.v1"),
+                binding("vehicle/controller", "controller-host"),
+                binding("vehicle/sensor", "sensor-mcu"),
             ],
             [
                 placement("placement/controller", "host"),
@@ -374,9 +390,10 @@ fn resolution_reports_duplicate_selection_errors_in_canonical_identity_order() {
 fn resolution_requires_complete_reactor_placement_and_enclave_ownership() {
     let unplaced_reactor = ResolvedDeployment::new(
         topology_with_layout(true, false, false),
+        catalog(),
         [
-            binding("vehicle/controller", "controller-host", "controller.v1"),
-            binding("vehicle/sensor", "sensor-mcu", "sensor.v1"),
+            binding("vehicle/controller", "controller-host"),
+            binding("vehicle/sensor", "sensor-mcu"),
         ],
         [
             placement("placement/controller", "host"),
@@ -395,9 +412,10 @@ fn resolution_requires_complete_reactor_placement_and_enclave_ownership() {
 
     let split_enclave = ResolvedDeployment::new(
         topology_with_layout(true, true, true),
+        catalog(),
         [
-            binding("vehicle/controller", "controller-host", "controller.v1"),
-            binding("vehicle/sensor", "sensor-mcu", "sensor.v1"),
+            binding("vehicle/controller", "controller-host"),
+            binding("vehicle/sensor", "sensor-mcu"),
         ],
         [
             placement("placement/controller", "host"),
@@ -424,6 +442,7 @@ fn resolution_requires_complete_reactor_placement_and_enclave_ownership() {
             .unwrap()
             .finish()
             .unwrap(),
+        catalog(),
         [],
         [],
         [],
@@ -499,9 +518,10 @@ fn resolution_requires_coordination_matching_federate_cardinality() {
     {
         let result = ResolvedDeployment::new(
             topology(),
+            catalog(),
             [
-                binding("vehicle/controller", "controller-host", "controller.v1"),
-                binding("vehicle/sensor", "sensor-mcu", "sensor.v1"),
+                binding("vehicle/controller", "controller-host"),
+                binding("vehicle/sensor", "sensor-mcu"),
             ],
             placements,
             federates,
@@ -530,9 +550,10 @@ fn resolution_requires_coordination_matching_federate_cardinality() {
 fn resolution_requires_exact_cross_federate_boundary_bindings() {
     let missing_binding = ResolvedDeployment::new(
         topology(),
+        catalog(),
         [
-            binding("vehicle/controller", "controller-host", "controller.v1"),
-            binding("vehicle/sensor", "sensor-mcu", "sensor.v1"),
+            binding("vehicle/controller", "controller-host"),
+            binding("vehicle/sensor", "sensor-mcu"),
         ],
         [
             placement("placement/controller", "host"),
@@ -551,9 +572,10 @@ fn resolution_requires_exact_cross_federate_boundary_bindings() {
 
     let resolved = ResolvedDeployment::new(
         topology(),
+        catalog(),
         [
-            binding("vehicle/controller", "controller-host", "controller.v1"),
-            binding("vehicle/sensor", "sensor-mcu", "sensor.v1"),
+            binding("vehicle/controller", "controller-host"),
+            binding("vehicle/sensor", "sensor-mcu"),
         ],
         [
             placement("placement/controller", "host"),
@@ -572,9 +594,10 @@ fn resolution_requires_exact_cross_federate_boundary_bindings() {
 
     let unexpected_binding = ResolvedDeployment::new(
         topology(),
+        catalog(),
         [
-            binding("vehicle/controller", "controller-host", "controller.v1"),
-            binding("vehicle/sensor", "sensor-mcu", "sensor.v1"),
+            binding("vehicle/controller", "controller-host"),
+            binding("vehicle/sensor", "sensor-mcu"),
         ],
         [
             placement("placement/controller", "host"),
@@ -593,9 +616,10 @@ fn resolution_requires_exact_cross_federate_boundary_bindings() {
 
     let unknown_binding = ResolvedDeployment::new(
         topology(),
+        catalog(),
         [
-            binding("vehicle/controller", "controller-host", "controller.v1"),
-            binding("vehicle/sensor", "sensor-mcu", "sensor.v1"),
+            binding("vehicle/controller", "controller-host"),
+            binding("vehicle/sensor", "sensor-mcu"),
         ],
         [
             placement("placement/controller", "host"),
@@ -614,9 +638,10 @@ fn resolution_requires_exact_cross_federate_boundary_bindings() {
 
     let duplicate_binding = ResolvedDeployment::new(
         topology(),
+        catalog(),
         [
-            binding("vehicle/controller", "controller-host", "controller.v1"),
-            binding("vehicle/sensor", "sensor-mcu", "sensor.v1"),
+            binding("vehicle/controller", "controller-host"),
+            binding("vehicle/sensor", "sensor-mcu"),
         ],
         [
             placement("placement/controller", "host"),
@@ -698,11 +723,17 @@ fn resolution_is_canonical_under_selection_reordering() {
 
 #[test]
 fn resolution_rejects_contract_mismatch_at_the_component_boundary() {
+    let mut implementations = catalog();
+    implementations.insert(
+        ImplementationId::new("controller-host").unwrap(),
+        descriptor("wrong.v1"),
+    );
     let error = ResolvedDeployment::new(
         topology(),
+        implementations,
         [
-            binding("vehicle/controller", "controller-host", "wrong.v1"),
-            binding("vehicle/sensor", "sensor-mcu", "sensor.v1"),
+            binding("vehicle/controller", "controller-host"),
+            binding("vehicle/sensor", "sensor-mcu"),
         ],
         [
             placement("placement/controller", "host"),
@@ -735,15 +766,20 @@ fn resolution_rejects_contract_mismatch_at_the_component_boundary() {
 
 #[test]
 fn resolution_rejects_contract_version_mismatch_at_the_component_boundary() {
+    let mut implementations = catalog();
+    implementations.insert(
+        ImplementationId::new("controller-host").unwrap(),
+        descriptor_at_version("controller.v1", 2),
+    );
     let error = ResolvedDeployment::new(
         topology(),
+        implementations,
         [
             ImplementationBinding::new(
                 ComponentInstanceId::new("vehicle/controller").unwrap(),
                 ImplementationId::new("controller-host").unwrap(),
-                descriptor_at_version("controller.v1", 2),
             ),
-            binding("vehicle/sensor", "sensor-mcu", "sensor.v1"),
+            binding("vehicle/sensor", "sensor-mcu"),
         ],
         [
             placement("placement/controller", "host"),
@@ -775,13 +811,31 @@ fn resolution_rejects_contract_version_mismatch_at_the_component_boundary() {
 
 #[test]
 fn resolution_requires_exact_component_and_placement_coverage() {
+    let missing_implementation = ResolvedDeployment::new(
+        topology(),
+        ImplementationCatalog::new(),
+        [
+            binding("vehicle/controller", "controller-host"),
+            binding("vehicle/sensor", "sensor-mcu"),
+        ],
+        [
+            placement("placement/controller", "host"),
+            placement("placement/sensor", "edge"),
+        ],
+        standard_federates(),
+        distributed_coordination(),
+        [controller_to_sensor_binding()],
+    )
+    .unwrap_err();
+    assert!(matches!(missing_implementation,
+        ResolveError::MissingImplementation { component, implementation }
+            if component.to_string() == "vehicle/controller" && implementation.as_str() == "controller-host"
+    ));
+
     let missing_binding = ResolvedDeployment::new(
         topology(),
-        [binding(
-            "vehicle/controller",
-            "controller-host",
-            "controller.v1",
-        )],
+        catalog(),
+        [binding("vehicle/controller", "controller-host")],
         [
             placement("placement/controller", "host"),
             placement("placement/sensor", "edge"),
@@ -799,9 +853,10 @@ fn resolution_requires_exact_component_and_placement_coverage() {
 
     let missing_placement = ResolvedDeployment::new(
         topology(),
+        catalog(),
         [
-            binding("vehicle/controller", "controller-host", "controller.v1"),
-            binding("vehicle/sensor", "sensor-mcu", "sensor.v1"),
+            binding("vehicle/controller", "controller-host"),
+            binding("vehicle/sensor", "sensor-mcu"),
         ],
         [placement("placement/controller", "host")],
         standard_federates(),
@@ -820,10 +875,11 @@ fn resolution_requires_exact_component_and_placement_coverage() {
 fn resolution_rejects_duplicate_component_and_placement_selections() {
     let duplicate_binding = ResolvedDeployment::new(
         topology(),
+        catalog(),
         [
-            binding("vehicle/controller", "controller-host", "controller.v1"),
-            binding("vehicle/controller", "controller-sim", "controller.v1"),
-            binding("vehicle/sensor", "sensor-mcu", "sensor.v1"),
+            binding("vehicle/controller", "controller-host"),
+            binding("vehicle/controller", "controller-sim"),
+            binding("vehicle/sensor", "sensor-mcu"),
         ],
         [
             placement("placement/controller", "host"),
@@ -842,9 +898,10 @@ fn resolution_rejects_duplicate_component_and_placement_selections() {
 
     let duplicate_placement = ResolvedDeployment::new(
         topology(),
+        catalog(),
         [
-            binding("vehicle/controller", "controller-host", "controller.v1"),
-            binding("vehicle/sensor", "sensor-mcu", "sensor.v1"),
+            binding("vehicle/controller", "controller-host"),
+            binding("vehicle/sensor", "sensor-mcu"),
         ],
         [
             placement("placement/controller", "host"),
@@ -867,9 +924,10 @@ fn resolution_rejects_duplicate_component_and_placement_selections() {
 fn resolution_rejects_duplicate_federate_configs() {
     let error = ResolvedDeployment::new(
         topology(),
+        catalog(),
         [
-            binding("vehicle/controller", "controller-host", "controller.v1"),
-            binding("vehicle/sensor", "sensor-mcu", "sensor.v1"),
+            binding("vehicle/controller", "controller-host"),
+            binding("vehicle/sensor", "sensor-mcu"),
         ],
         [
             placement("placement/controller", "host"),
@@ -895,9 +953,10 @@ fn resolution_rejects_duplicate_federate_configs() {
 fn resolution_rejects_duplicate_boundary_bindings() {
     let error = ResolvedDeployment::new(
         topology(),
+        catalog(),
         [
-            binding("vehicle/controller", "controller-host", "controller.v1"),
-            binding("vehicle/sensor", "sensor-mcu", "sensor.v1"),
+            binding("vehicle/controller", "controller-host"),
+            binding("vehicle/sensor", "sensor-mcu"),
         ],
         [
             placement("placement/controller", "host"),
@@ -923,9 +982,10 @@ fn resolution_rejects_duplicate_boundary_bindings() {
 fn resolution_requires_a_federate_config_for_every_placement() {
     let error = ResolvedDeployment::new(
         topology(),
+        catalog(),
         [
-            binding("vehicle/controller", "controller-host", "controller.v1"),
-            binding("vehicle/sensor", "sensor-mcu", "sensor.v1"),
+            binding("vehicle/controller", "controller-host"),
+            binding("vehicle/sensor", "sensor-mcu"),
         ],
         [
             placement("placement/controller", "host"),
@@ -950,9 +1010,10 @@ fn resolution_requires_a_federate_config_for_every_placement() {
 fn resolution_rejects_unused_federate_configs() {
     let error = ResolvedDeployment::new(
         topology(),
+        catalog(),
         [
-            binding("vehicle/controller", "controller-host", "controller.v1"),
-            binding("vehicle/sensor", "sensor-mcu", "sensor.v1"),
+            binding("vehicle/controller", "controller-host"),
+            binding("vehicle/sensor", "sensor-mcu"),
         ],
         [
             placement("placement/controller", "host"),

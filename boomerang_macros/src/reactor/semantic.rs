@@ -14,9 +14,9 @@ use boomerang_builder::{
 
 pub(super) fn parse_descriptor(
     args: &ReactorArgs,
-    model: &Model,
+    declaration: &declaration::Declaration<'_>,
 ) -> syn::Result<Option<ComponentDescriptor>> {
-    args.validate()?;
+    let model = declaration.model;
     let (Some(contract), Some(version)) = (&args.contract, &args.contract_version) else {
         return Ok(None);
     };
@@ -27,9 +27,8 @@ pub(super) fn parse_descriptor(
         .base10_parse::<u64>()
         .map_err(|_| syn::Error::new(version.span(), "contract_version must fit in u64"))?;
     let bounds = args.descriptor_bounds()?;
-    model.body.validate_unique_reaction_names()?;
-    model.body.validate_unique_mode_names()?;
-    if let Some(span) = model.body.unsupported_span() {
+    declaration.validate_names()?;
+    if let Some(span) = declaration.unsupported {
         return Err(syn::Error::new(
             span,
             "deployment descriptor requires reaction! syntax",
@@ -48,9 +47,9 @@ pub(super) fn parse_descriptor(
         .map(|context| {
             Ok::<_, syn::Error>(InitializerCapabilities {
                 source: context.source.as_ref().map(syn::LitStr::value),
-                actions: context
-                    .actions(model)?
-                    .into_iter()
+                actions: declaration
+                    .initializer_actions()?
+                    .iter()
                     .map(|(name, _)| ActionSlotId::from_path(path(&ident_text(name))))
                     .collect(),
                 clock_control: context.clock_control(),
@@ -85,9 +84,9 @@ pub(super) fn parse_descriptor(
             ArgKind::Param { .. } => {}
         }
     }
-    let modes = model
-        .body
-        .modes()
+    let modes = declaration
+        .modes
+        .iter()
         .map(|mode| ModeSlot {
             id: ModeSlotId::from_path(path(&ident_text(&mode.name))),
             reactor: reactor.clone(),
@@ -95,92 +94,65 @@ pub(super) fn parse_descriptor(
             initial: mode.initial,
         })
         .collect::<Vec<_>>();
-    let target = |reference: &crate::reaction::PathOrIdent| {
-        let segments = path_segments(reference);
-        let slot = segments.iter().fold(root.clone(), |path, name| {
-            path.append_name(name.as_str())
-                .expect("valid relationship path")
-        });
-        if modes.iter().any(|mode| mode.id.path() == &slot) {
-            Target::Mode(ModeSlotId::from_path(slot))
-        } else if ports.iter().any(|port| port.id.path() == &slot) {
-            Target::Port(PortSlotId::from_path(slot))
-        } else if actions.iter().any(|action| action.id.path() == &slot) {
-            Target::Action(ActionSlotId::from_path(slot))
-        } else {
-            Target::Lexical(slot)
-        }
-    };
-    let mut declarations = Vec::new();
-    model.body.reactions(None, &mut declarations);
     let mut reactions = Vec::new();
     let mut relationships = Vec::new();
-    let mut next_generated = 0;
-    for (scope, reaction) in declarations {
-        let slot = match CanonicalReactionSlot::for_reaction(reaction, &mut next_generated) {
-            CanonicalReactionSlot::Named(name) => path(&name),
-            CanonicalReactionSlot::Generated(ordinal) => root.append_generated_ordinal(ordinal),
+    for reaction in &declaration.reactions {
+        let slot = match &reaction.slot {
+            CanonicalReactionSlot::Named(name) => path(name),
+            CanonicalReactionSlot::Generated(ordinal) => root.append_generated_ordinal(*ordinal),
         };
         let reaction_id = ReactionSlotId::from_path(slot);
         reactions.push(ReactionSlot {
             id: reaction_id.clone(),
             reactor: reactor.clone(),
         });
-        let mut record = |kind, target, transition, position: usize| {
+        for relation in &reaction.relations {
+            let target_path = || {
+                path_segments(
+                    relation
+                        .reference
+                        .expect("local relationship has reference syntax"),
+                )
+                .iter()
+                .fold(root.clone(), |path, name| {
+                    path.append_name(name.as_str())
+                        .expect("valid relationship path")
+                })
+            };
+            let target = match &relation.target {
+                declaration::Target::Lifecycle(lifecycle) => Target::Lifecycle(*lifecycle),
+                declaration::Target::Mode(mode) => {
+                    Target::Mode(ModeSlotId::from_path(path(&mode.name_str())))
+                }
+                declaration::Target::Argument {
+                    structural: arg, ..
+                } => match arg.kind {
+                    ArgKind::Input { .. } | ArgKind::Output { .. } => {
+                        Target::Port(PortSlotId::from_path(target_path()))
+                    }
+                    ArgKind::LogicalAction { .. } | ArgKind::PhysicalAction { .. } => {
+                        Target::Action(ActionSlotId::from_path(target_path()))
+                    }
+                    ArgKind::State { .. } | ArgKind::Param { .. } => Target::Lexical(target_path()),
+                },
+                declaration::Target::Lexical => Target::Lexical(target_path()),
+            };
             relationships.push(DescriptorRelationship {
                 reaction: reaction_id.clone(),
-                kind,
+                kind: relation.kind,
                 target,
-                mode_transition: transition,
-                declaration_position: u32::try_from(position).expect("relationship count fits u32"),
+                mode_transition: relation.transition,
+                declaration_position: relation.position,
             });
-        };
-        for (position, trigger) in reaction.triggers().iter().enumerate() {
-            use crate::reaction::TriggerType;
-            let target = match trigger {
-                TriggerType::Startup => Target::Lifecycle(DescriptorLifecycle::Startup),
-                TriggerType::Shutdown => Target::Lifecycle(DescriptorLifecycle::Shutdown),
-                TriggerType::Reset => Target::Lifecycle(DescriptorLifecycle::Reset),
-                TriggerType::Regular(reference) => target(reference),
-            };
-            record(Kind::Trigger, target, None, position);
         }
-        for (position, reference) in reaction.uses().iter().enumerate() {
-            record(Kind::Use, target(reference), None, position);
-        }
-        for (position, effect) in reaction.effects().iter().enumerate() {
-            use crate::reaction::EffectType;
-            let reference = match effect {
-                EffectType::Regular(path) | EffectType::Reset(path) | EffectType::History(path) => {
-                    path
-                }
-            };
-            let target = target(reference);
-            let mode = matches!(target, Target::Mode(_));
-            let transition = match effect {
-                EffectType::History(_) => Some(ModeTransitionKind::History),
-                EffectType::Reset(_) => Some(ModeTransitionKind::Reset),
-                EffectType::Regular(_) if mode => Some(ModeTransitionKind::Reset),
-                EffectType::Regular(_) => None,
-            };
-            record(
-                if mode || transition.is_some() {
-                    Kind::Mode
-                } else {
-                    Kind::Effect
-                },
-                target,
-                transition,
-                position,
-            );
-        }
-        if let Some(scope) = scope {
-            record(
-                Kind::Scope,
-                Target::Mode(ModeSlotId::from_path(path(&ident_text(&scope.name)))),
-                None,
-                0,
-            );
+        if let Some(scope) = reaction.scope {
+            relationships.push(DescriptorRelationship {
+                reaction: reaction_id,
+                kind: Kind::Scope,
+                target: Target::Mode(ModeSlotId::from_path(path(&scope.name_str()))),
+                mode_transition: None,
+                declaration_position: 0,
+            });
         }
     }
     ComponentDescriptor::try_new(
@@ -321,9 +293,11 @@ mod tests {
     }"#;
 
     fn descriptor(args: &str, model: &str) -> ComponentDescriptor {
+        let args: ReactorArgs = syn::parse_str(args).unwrap();
+        args.validate().unwrap();
         parse_descriptor(
-            &syn::parse_str(args).unwrap(),
-            &syn::parse_str(model).unwrap(),
+            &args,
+            &declaration::Declaration::new(&args, &syn::parse_str(model).unwrap()),
         )
         .unwrap()
         .unwrap()
@@ -343,6 +317,12 @@ mod tests {
 
     #[test]
     fn contract_version_bounds_direction_modes_and_relationship_order_affect_identity() {
+        let shared_name = descriptor(
+            ARGS,
+            "fn Root(#[state] value: u32, #[input] value: u32) { reaction! { observe(value) {} } }",
+        );
+        assert!(matches!(shared_name.relationships()[0].target,
+            Target::Port(ref slot) if slot.path().to_string() == "Root/value"));
         let expected = descriptor(ARGS, MODEL).fingerprint();
         for changed in [
             ARGS.replace("example.controller", "example.other"),

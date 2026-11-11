@@ -19,8 +19,8 @@ use super::{
 };
 use crate::runtime::image::{
     self as runtime_image, CodecCapabilityIndex, CoordinationProjection, FederateIndex, FlowIndex,
-    PhysicalBoundaryIndex, RtiDependencyImage, RtiImage, RtiMemberImage, RtiRouteImage,
-    RtiRouteIndex, TransportCapabilityIndex,
+    PhysicalBoundaryIndex, RtiDependencyImage, RtiImage, RtiMemberImage, RtiRouteIndex,
+    TransportCapabilityIndex,
 };
 use tinymap::{HeapSealedTinyMap, HeapTinyMapBuilder, SliceRange, TinyMapRef};
 
@@ -71,60 +71,8 @@ pub struct OwnedRtiImage {
     codec_capabilities: HeapSealedTinyMap<CodecCapabilityIndex, CodecCapabilityId>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-/// Host-owned route row retaining stable identities beside dense runtime references.
-struct OwnedRtiRouteImage {
-    /// Stable identity of this concrete boundary hop.
-    boundary: BoundaryId,
-    /// Dense end-to-end flow containing this route.
-    flow: FlowIndex,
-    /// Optional dense physical input boundary.
-    physical_input: Option<PhysicalBoundaryIndex>,
-    /// Optional dense physical output boundary.
-    physical_output: Option<PhysicalBoundaryIndex>,
-    /// Failure behavior selected for this route.
-    failure_policy: crate::runtime::image::BoundaryFailurePolicy,
-    /// Transport contract selected for this route.
-    transport_policy: crate::runtime::image::TransportPolicy,
-    /// Codec contract selected for this route.
-    codec_policy: crate::runtime::image::CodecPolicy,
-    /// Physical-time contract selected for this route.
-    timing_policy: crate::runtime::image::TimingPolicy,
-    /// Communication security profile selected for this route.
-    security_policy: crate::runtime::image::SecurityPolicy,
-    /// Dense selected transport capability.
-    transport_capability: TransportCapabilityIndex,
-    /// Dense selected codec capability.
-    codec_capability: CodecCapabilityIndex,
-    /// Dense source Federate.
-    source: FederateIndex,
-    /// Dense target Federate.
-    target: FederateIndex,
-    /// Direct route delay in nanoseconds.
-    delay_nanos: u64,
-}
-
-impl OwnedRtiRouteImage {
-    /// Borrows this host-owned row as its target-facing runtime representation.
-    fn image<'a>(&self, boundary: &'a str) -> RtiRouteImage<'a> {
-        RtiRouteImage::new(
-            runtime_image::BoundaryId::new(boundary),
-            self.flow,
-            self.physical_input,
-            self.physical_output,
-            self.failure_policy,
-            self.transport_policy,
-            self.codec_policy,
-            self.timing_policy,
-            self.security_policy,
-            self.transport_capability,
-            self.codec_capability,
-            self.source,
-            self.target,
-            self.delay_nanos,
-        )
-    }
-}
+/// Host-owned route retaining a validated stable boundary identity.
+type OwnedRtiRouteImage = runtime_image::RtiRouteRecord<BoundaryId>;
 
 /// Materializes canonical identity text in a dense table's key order.
 fn identity_text<I: std::fmt::Display, K: tinymap::Key>(
@@ -146,14 +94,14 @@ impl OwnedRtiImage {
             .routes
             .as_ref()
             .values()
-            .map(|route| route.boundary.to_canonical_string())
+            .map(|route| route.boundary_identity().to_canonical_string())
             .collect::<Vec<_>>();
         let routes = self
             .routes
             .as_ref()
             .values()
             .zip(&route_text)
-            .map(|(route, boundary)| route.image(boundary))
+            .map(|(route, boundary)| route.with_boundary(runtime_image::BoundaryId::new(boundary)))
             .collect::<Vec<_>>();
         let flow_text = identity_text(self.flows.as_ref());
         let physical_text = identity_text(self.physical_boundaries.as_ref());
@@ -262,22 +210,22 @@ pub(crate) fn project_central_rti(
     let mut routes: HeapTinyMapBuilder<RtiRouteIndex, _> = HeapTinyMapBuilder::heap();
     for (edge, binding) in analysis.edges().iter().zip(route_bindings) {
         routes
-            .try_insert(OwnedRtiRouteImage {
-                boundary: edge.id().clone(),
-                flow: flow_indices[binding.flow()],
-                physical_input: binding.physical().input().map(|id| physical_indices[id]),
-                physical_output: binding.physical().output().map(|id| physical_indices[id]),
-                failure_policy: binding.policies().failure(),
-                transport_policy: binding.policies().transport(),
-                codec_policy: binding.policies().codec(),
-                timing_policy: binding.policies().timing(),
-                security_policy: binding.policies().security(),
-                transport_capability: transport_capability_indices[binding.transport()],
-                codec_capability: codec_capability_indices[binding.codec()],
-                source: indices[edge.source()],
-                target: indices[edge.target()],
-                delay_nanos: edge.delay().as_nanos(),
-            })
+            .try_insert(OwnedRtiRouteImage::new(
+                edge.id().clone(),
+                flow_indices[binding.flow()],
+                binding.physical().input().map(|id| physical_indices[id]),
+                binding.physical().output().map(|id| physical_indices[id]),
+                binding.policies().failure(),
+                binding.policies().transport(),
+                binding.policies().codec(),
+                binding.policies().timing(),
+                binding.policies().security(),
+                transport_capability_indices[binding.transport()],
+                codec_capability_indices[binding.codec()],
+                indices[edge.source()],
+                indices[edge.target()],
+                edge.delay().as_nanos(),
+            ))
             .map_err(|_| CoordinationProjectionError::TableTooLarge { table: "routes" })?;
     }
     for member in analysis.members() {

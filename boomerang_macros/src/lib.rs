@@ -11,7 +11,7 @@
 //! Custom state types remain user-owned and must be accessible to the application.
 //! Payload emission requires `state_init = path` with `state = T`.
 //! Without `init_context`, the constructor has signature `fn() -> T`.
-//! The [`reactor`] documentation specifies context-aware initialization.
+//! The [`macro@reactor`] documentation specifies context-aware initialization.
 //! `state_init` without `state` is invalid.
 //!
 //! Binding exports use `state_`, `reaction_`, `port_`, and `action_` prefixes for their descriptor slot kinds.
@@ -20,9 +20,9 @@
 //! Export paths use implementation-local slots rather than logical instance paths.
 //! Multiple logical instances reuse function exports while retaining separate runtime storage.
 //!
-//! `binding_manifest()` contains the structural descriptor fingerprint and macro ABI version.
+//! `ComponentPayload::DESCRIPTOR_FINGERPRINT` contains one structural descriptor fingerprint, including the macro ABI version.
 //! It contains no binding slots or function table.
-//! Generated applications check these values before binding direct typed exports.
+//! Generated applications must check this fingerprint before binding direct typed exports.
 //! Structural fingerprints omit reaction bodies and initializer implementations.
 //! ABI compatibility does not guarantee equivalent reaction behavior.
 
@@ -291,7 +291,14 @@ pub fn component_metadata(input: proc_macro::TokenStream) -> proc_macro::TokenSt
 /// Emits target payload bindings from the same inline declaration as [`component_metadata!`].
 ///
 /// Keeps implementation items in their owning module.
-/// The declaration determines compatibility information in `module::__boomerang::payload::binding_manifest()` without CLI inputs.
+/// The declaration determines compatibility information in `<module::__boomerang::payload::Payload as ComponentPayload>::DESCRIPTOR_FINGERPRINT` without CLI inputs.
+/// Each `reaction_*` export implements the callback accepted by
+/// `boomerang::runtime::EnclaveBindings::bind_reaction`.
+/// The payload owns concrete state downcasts and reference extraction in declaration order.
+/// Generic exports retain declaration type and const parameters for explicit specialization.
+/// State factories and `type_state_*` witnesses remain separate exports.
+/// Deployment compilation owns instance slots, routes, and initializer action capabilities.
+/// Consumers must check descriptor fingerprints, which include the macro ABI, before binding exports.
 /// This entry point selects payload even when the invoking package enables metadata features.
 #[proc_macro_error2::proc_macro_error]
 #[proc_macro]

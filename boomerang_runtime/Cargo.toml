@@ -14,6 +14,9 @@ exclude.workspace = true
 [features]
 default = []
 
+## Hosted compiled reactor output observers and bounded scheduler checkpoints
+hosted-output = ["dep:getrandom"]
+
 ## Hosted timestamped source admission and source progress
 hosted-source-input = ["dep:getrandom"]
 

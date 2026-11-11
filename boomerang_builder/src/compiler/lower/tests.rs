@@ -114,6 +114,7 @@ fn descriptor_with_external_effects(
                 source: None,
                 actions: vec![ActionSlotId::new(format!("{root}/pulse")).unwrap()],
                 clock_control: false,
+                output_observer: false,
             }),
             id: reactor.clone(),
             parent: None,

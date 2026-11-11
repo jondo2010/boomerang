@@ -15,6 +15,8 @@ pub(super) struct InitContextArgs {
     pub(super) actions: Option<syn::ExprArray>,
     /// Explicit manual clock write authority.
     pub(super) clock_control: Option<syn::LitBool>,
+    /// Export the directly owned output boundary for this reactor instance.
+    pub(super) output_observer: Option<syn::LitBool>,
 }
 impl InitContextArgs {
     /// Resolves declared names against existing physical actions before code generation.
@@ -50,7 +52,7 @@ impl InitContextArgs {
                             "init_context action is missing or is not physical",
                         )
                     })?;
-                if ["source", "clock", "send", "__boomerang_marker"]
+                if ["source", "clock", "output", "send", "__boomerang_marker"]
                     .iter()
                     .any(|reserved| ident == reserved)
                     || result.iter().any(|(name, _)| *name == ident)
@@ -64,6 +66,12 @@ impl InitContextArgs {
             }
         }
         Ok(result)
+    }
+    /// Whether this instance exports its output boundary.
+    pub(super) fn output_observer(&self) -> bool {
+        self.output_observer
+            .as_ref()
+            .is_some_and(|value| value.value)
     }
     /// Whether explicit manual clock control is requested.
     pub(super) fn clock_control(&self) -> bool {
@@ -128,12 +136,13 @@ pub(super) fn declaration(
         });
     let source = capabilities.source.as_ref().map(|_| quote!(#[doc = "Execution-bound source progress and timestamped input admission."] pub source: ::boomerang::runtime::input::InputSourceHandle,));
     let clock = capabilities.clock_control().then(|| quote!(#[doc = "Explicit write authority for the selected manual clock."] pub clock: ::boomerang::runtime::clock::ManualClock,));
+    let output = capabilities.output_observer().then(|| quote!(#[doc = "Observer for this reactor instance and its directly declared effects."] pub output: ::boomerang::runtime::OutputObserver,));
     Ok(quote! {
         /// Context supplied after validation and before logical startup.
         /// Return without waiting for logical execution. Keep worker guards in state.
         pub struct #name #generics #where_clause {
             #marker
-            #source #clock #(#actions)*
+            #source #clock #output #(#actions)*
             /// Ordinary asynchronous sending. Use nonblocking sends during initialization.
             pub send: ::boomerang::runtime::SendContext,
         }
@@ -173,11 +182,14 @@ pub(super) fn initializer(
     let clock = capabilities
         .clock_control()
         .then(|| quote!(clock: context.clock_control()?,));
+    let output = capabilities
+        .output_observer()
+        .then(|| quote!(output: context.output_observer()?,));
     Ok(quote! {
         /// Constructs typed capabilities from validated existing action rows.
         #[allow(non_snake_case)]
         pub fn #symbol #impl_generics(context: &::boomerang::runtime::initialization::StateInitContext<'_, '_>, actions: &[::boomerang::runtime::image::ActionIndex]) -> Result<#state, ::boomerang::runtime::initialization::StateInitializationError> #where_clause {
-            Ok(#path(#name #type_args { #marker #source #clock #(#fields)* send: context.send_context() })?)
+            Ok(#path(#name #type_args { #marker #source #clock #output #(#fields)* send: context.send_context() })?)
         }
     })
 }
@@ -190,9 +202,12 @@ pub(super) fn live_registration(
     let Some(capabilities) = &args.init_context else {
         return Ok(quote!());
     };
-    if capabilities.source.is_some() || capabilities.clock_control() {
+    if capabilities.source.is_some()
+        || capabilities.clock_control()
+        || capabilities.output_observer()
+    {
         return Ok(quote! {
-            if ctx.needs_initialization() { return Err(::boomerang::builder::AssemblyError::InconsistentAssemblyState { what: "source admission and manual clock capabilities require compiled Federate execution".into() }); }
+            if ctx.needs_initialization() { return Err(::boomerang::builder::AssemblyError::InconsistentAssemblyState { what: "source admission, manual clock, and output observer capabilities require compiled Federate execution".into() }); }
         });
     }
     let name = &capabilities.name;
@@ -220,6 +235,31 @@ pub(super) fn live_registration(
 mod tests {
     use super::*;
 
+    #[test]
+    fn output_observer_is_a_declared_compiled_capability() {
+        let args: ReactorArgs = syn::parse_quote!(
+            state = DriverState,
+            state_init = DriverState::new,
+            init_context(name = DriverInit, output_observer = true)
+        );
+        let model: Model = syn::parse_quote!(
+            fn Driver() -> impl Reactor {}
+        );
+        let normalized = Declaration::new(&args, &model);
+        let declaration = declaration(&args, &normalized).unwrap().to_string();
+        assert!(declaration.contains("pub output : :: boomerang :: runtime :: OutputObserver"));
+
+        let compiled = initializer(
+            &args,
+            &normalized,
+            &syn::parse_quote!(initialize),
+            &syn::parse_quote!(DriverState),
+        )
+        .unwrap()
+        .to_string();
+        assert!(compiled.contains("context . output_observer () ?"));
+    }
+
     /// Declarative action references must reject missing, logical, duplicate and reserved fields.
     #[test]
     fn capability_action_declarations_reject_invalid_fields() {
@@ -241,6 +281,7 @@ mod tests {
                 source: Some(syn::parse_quote!("plant")),
                 actions: Some(actions),
                 clock_control: None,
+                output_observer: None,
             };
             assert!(declaration
                 .actions(&model)

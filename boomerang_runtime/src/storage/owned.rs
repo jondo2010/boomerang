@@ -99,6 +99,17 @@ impl EnclaveBindings {
             let Some(required) = init.capabilities() else {
                 continue;
             };
+            if required.output_observer {
+                #[cfg(not(feature = "hosted-output"))]
+                return Err(InitializationError::OutputFeatureDisabled.into());
+                #[cfg(feature = "hosted-output")]
+                if image.storage_bounds().event_capacity() == 0 {
+                    return Err(InitializationError::OutputUnavailable(
+                        crate::OutputWaitError::Capacity,
+                    )
+                    .into());
+                }
+            }
             #[cfg(not(feature = "hosted-manual-clock"))]
             if required.clock_control {
                 return Err(InitializationError::InvalidCapabilities.into());
@@ -522,11 +533,7 @@ impl<T: ReactorData + Clone> OutboundRoute for TypedOutboundRoute<'_, T> {
                             delay_nanos: self.delay_nanos,
                         })?
                 };
-                crate::event::AsyncEvent::Logical {
-                    tag,
-                    target,
-                    value: Box::new(value.clone()),
-                }
+                crate::event::AsyncEvent::routed_logical(tag, target, Box::new(value.clone()))
             }
             TimingDomain::Physical => {
                 let time = self
@@ -911,6 +918,9 @@ impl OwnedStorageError {
 
 /// Mutable, heap-backed storage for one validated compiled enclave image.
 pub struct OwnedStorage<'image> {
+    /// Observer lifecycle precedes application state destruction.
+    #[cfg(feature = "hosted-output")]
+    output: crate::sched::output::OutputState,
     /// The validated immutable image that defines every dense storage domain.
     image: EnclaveImageView<'image>,
     /// Concrete reactor payloads keyed by exact image state slots.
@@ -1007,7 +1017,17 @@ impl<'image> OwnedStorage<'image> {
         image: EnclaveImageView<'image>,
         bindings: EnclaveBindings,
     ) -> Result<Self, OwnedStorageError> {
-        Self::new_for_enclave(image, bindings, EnclaveKey::default())
+        let storage = Self::new_for_enclave(image, bindings, EnclaveKey::default())?;
+        #[cfg(feature = "hosted-output")]
+        let storage = {
+            let mut storage = storage;
+            let selected = crate::clock::SelectedClock::host_monotonic(
+                storage.scheduler_send_context().clock,
+            )?;
+            storage.configure_output(EnclaveIndex::new(0), selected.epoch());
+            storage
+        };
+        Ok(storage)
     }
 
     /// Constructs owned storage whose reaction and send contexts use `enclave_key`.
@@ -1074,7 +1094,11 @@ impl<'image> OwnedStorage<'image> {
             .filter(|route| route.direction() == crate::image::RouteDirection::Inbound)
             .map(|route| (route.local_port(), ()))
             .collect();
+        #[cfg(feature = "hosted-output")]
+        let output = crate::sched::output::OutputState::new(image.reactors().keys());
         Ok(Self {
+            #[cfg(feature = "hosted-output")]
+            output,
             image,
             states,
             initializers,
@@ -1093,6 +1117,50 @@ impl<'image> OwnedStorage<'image> {
         })
     }
 
+    /// Whether any deferred initializer declares an output export.
+    #[cfg(feature = "hosted-output")]
+    pub(crate) fn requires_output_observer(&self) -> bool {
+        self.initializers.values().any(|initializer| {
+            initializer
+                .capabilities()
+                .is_some_and(|required| required.output_observer)
+        })
+    }
+
+    /// Returns an observer after execution setup binds the exact image owner and epoch.
+    #[cfg(feature = "hosted-output")]
+    pub fn output_observer(
+        &self,
+        reactor: ReactorIndex,
+    ) -> Result<crate::OutputObserver, crate::OutputWaitError> {
+        self.output.observer(reactor)
+    }
+
+    #[cfg(feature = "hosted-output")]
+    pub(crate) fn configure_output(
+        &mut self,
+        enclave: EnclaveIndex,
+        epoch: crate::clock::ExecutionEpoch,
+    ) {
+        self.output
+            .configure(enclave, epoch, self.event_tx.clone())
+            .expect("output identity is bound once before export");
+    }
+
+    #[cfg(feature = "hosted-output")]
+    pub(crate) fn take_output_state(&mut self) -> crate::sched::output::OutputState {
+        std::mem::replace(
+            &mut self.output,
+            crate::sched::output::OutputState::new(std::iter::empty()),
+        )
+    }
+
+    /// Restores scheduler state and returns the empty placeholder without allocating.
+    #[cfg(feature = "hosted-output")]
+    pub(crate) fn restore_output_state(&mut self, output: &mut crate::sched::output::OutputState) {
+        std::mem::swap(&mut self.output, output);
+    }
+
     /// Runs state construction only after shared execution resources are ready.
     pub(crate) fn initialize_states(
         &mut self,
@@ -1100,12 +1168,21 @@ impl<'image> OwnedStorage<'image> {
         #[cfg(feature = "hosted-source-input")] inputs: Option<&crate::input::InputAdmission>,
         #[cfg(feature = "hosted-manual-clock")] clock: Option<&crate::clock::ManualClock>,
     ) -> Result<(), OwnedStorageError> {
-        for (_, initializer) in std::mem::take(&mut self.initializers) {
+        for (_state_slot, initializer) in std::mem::take(&mut self.initializers) {
+            #[cfg(feature = "hosted-output")]
+            let owner = self
+                .image
+                .reactors()
+                .iter()
+                .find_map(|(owner, reactor)| (reactor.state_slot() == _state_slot).then_some(owner))
+                .ok_or(InitializationError::InvalidOutputOwner)?;
             let context = enclave.and_then(|_enclave| {
                 initializer
                     .capabilities()
                     .map(|requirements| StateInitContext {
                         storage: self,
+                        #[cfg(feature = "hosted-output")]
+                        owner,
                         requirements,
                         #[cfg(feature = "hosted-source-input")]
                         enclave: _enclave,
@@ -1139,7 +1216,12 @@ impl<'image> OwnedStorage<'image> {
 
     /// Shares the Enclave clock policy with all reaction contexts and outbound routes.
     #[cfg(feature = "hosted-manual-clock")]
-    pub(crate) fn set_clock(&mut self, clock: crate::clock::ExecutionClock) {
+    pub(crate) fn set_clock(
+        &mut self,
+        clock: crate::clock::ExecutionClock,
+    ) -> Result<(), crate::clock::PhysicalClockError> {
+        #[cfg(feature = "hosted-output")]
+        self.output.select_clock(&clock)?;
         for context in self.contexts.values_mut() {
             context.clock = clock.clone();
         }
@@ -1150,6 +1232,7 @@ impl<'image> OwnedStorage<'image> {
         {
             route.set_clock(clock.clone());
         }
+        Ok(())
     }
 
     /// Borrows the action stored in the slot declared by its compiled image row.
@@ -1293,12 +1376,18 @@ impl<'image> OwnedStorage<'image> {
         Ok(())
     }
 
-    /// Invokes a directly bound reaction using the image's ordered port and action references.
+    /// Invokes a bound callback with the image's ordered port and action references.
+    /// Retains the returned output in caller-owned scratch.
+    /// The slot is set before outbound routing. Callback unwind leaves it vacant.
+    /// Retention does not allocate; routing errors and panics keep their existing behavior.
     pub(crate) fn invoke_reaction(
         &mut self,
         reaction: ReactionIndex,
         tag: Tag,
+        returned_output: &mut Option<OutputOutcome>,
     ) -> Result<OutputOutcome, OwnedStorageError> {
+        // Scratch validity is local to this invocation, including pre-callback errors.
+        *returned_output = None;
         let mut observation = ReactionObservation {
             reaction,
             tag,
@@ -1336,6 +1425,9 @@ impl<'image> OwnedStorage<'image> {
             refs,
             reaction_image.mode_effect(),
         )?;
+        // Retain the callback's result before validation or outbound code can fail.
+        // An unwind inside the callback leaves this slot vacant.
+        *returned_output = Some(output);
         if !output.is_valid(reaction_image.external_effect()) {
             return Err(OwnedStorageError::OutputContract { reaction, output });
         }
@@ -2277,7 +2369,9 @@ mod tests {
         let reaction = ReactionIndex::new(0);
         let mut ordinary = OwnedStorage::new(image(), complete_bindings()).unwrap();
         assert_eq!(
-            ordinary.invoke_reaction(reaction, Tag::ZERO).unwrap(),
+            ordinary
+                .invoke_reaction(reaction, Tag::ZERO, &mut None)
+                .unwrap(),
             OutputOutcome::NotReported
         );
         let tag = Tag::new(Duration::nanoseconds(7), 2);
@@ -2315,7 +2409,10 @@ mod tests {
                 tx,
             );
 
-            assert_eq!(storage.invoke_reaction(reaction, tag).unwrap(), expected);
+            assert_eq!(
+                storage.invoke_reaction(reaction, tag, &mut None).unwrap(),
+                expected
+            );
             assert_eq!(
                 storage.reaction_trigger_res(reaction).scheduled_actions,
                 [(
@@ -2339,11 +2436,11 @@ mod tests {
             );
             for _ in 0..2 {
                 match rx.try_recv().unwrap().unwrap() {
-                    AsyncEvent::Logical {
+                    AsyncEvent::RoutedLogical(crate::event::RoutedLogical {
                         tag: routed_tag,
                         value,
                         ..
-                    } => {
+                    }) => {
                         assert_eq!(routed_tag, tag);
                         assert_eq!(*value.downcast::<u32>().ok().unwrap(), 42);
                     }
@@ -2462,11 +2559,11 @@ mod tests {
                         })
                     );
                     match rx.try_recv().unwrap().unwrap() {
-                        AsyncEvent::Logical {
+                        AsyncEvent::RoutedLogical(crate::event::RoutedLogical {
                             tag: routed_tag,
                             value,
                             ..
-                        } => {
+                        }) => {
                             assert_eq!(routed_tag, tag);
                             assert_eq!(*value.downcast::<u32>().ok().unwrap(), 1);
                         }
@@ -2612,14 +2709,18 @@ mod tests {
         let mut storage = Box::new(OwnedStorage::new(image(), bindings).unwrap());
         let tag = Tag::new(Duration::nanoseconds(7), 2);
 
-        storage.invoke_reaction(ReactionIndex::new(0), tag).unwrap();
+        storage
+            .invoke_reaction(ReactionIndex::new(0), tag, &mut None)
+            .unwrap();
         assert!(storage
             .reaction_trigger_res(ReactionIndex::new(0))
             .scheduled_shutdown
             .is_some());
         storage.reset_ports();
         storage.scheduler_clear_action(ActionIndex::new(0));
-        storage.invoke_reaction(ReactionIndex::new(0), tag).unwrap();
+        storage
+            .invoke_reaction(ReactionIndex::new(0), tag, &mut None)
+            .unwrap();
         let second = storage.reaction_trigger_res(ReactionIndex::new(0)).clone();
         assert!(second.scheduled_shutdown.is_none());
     }
@@ -2634,7 +2735,7 @@ mod tests {
         let mut storage = OwnedStorage::new(image(), bindings).unwrap();
 
         let error = storage
-            .invoke_reaction(ReactionIndex::new(0), Tag::ZERO)
+            .invoke_reaction(ReactionIndex::new(0), Tag::ZERO, &mut None)
             .unwrap_err();
 
         assert!(matches!(
@@ -2778,7 +2879,7 @@ mod tests {
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {
             done_tx
-                .send(storage.invoke_reaction(ReactionIndex::new(0), source_tag))
+                .send(storage.invoke_reaction(ReactionIndex::new(0), source_tag, &mut None))
                 .unwrap();
         });
         let result = done_rx.recv_timeout(std::time::Duration::from_secs(1));
@@ -2792,7 +2893,7 @@ mod tests {
         ));
 
         match logical_rx.try_recv().unwrap().unwrap() {
-            AsyncEvent::Logical { tag, target, value } => {
+            AsyncEvent::RoutedLogical(crate::event::RoutedLogical { tag, target, value }) => {
                 assert_eq!(tag, Tag::new(Duration::nanoseconds(12), 0));
                 assert_eq!(
                     target,

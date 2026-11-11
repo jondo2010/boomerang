@@ -70,6 +70,33 @@ impl Tag {
         }
     }
 
+    /// Computes a nonnegative shutdown delay without revising completed logical work.
+    /// Before startup, a zero delay selects the startup tag. At the last microstep,
+    /// zero delay advances one nanosecond rather than overflowing the microstep.
+    pub(crate) fn checked_shutdown_after(
+        self,
+        delay: Duration,
+    ) -> Result<Self, crate::clock::PhysicalClockError> {
+        use crate::clock::PhysicalClockError;
+        if delay.is_negative() {
+            return Err(PhysicalClockError::Regression);
+        }
+        if self < Self::ZERO && delay.is_zero() {
+            return Ok(Self::ZERO);
+        }
+        if delay.is_zero() {
+            if self.microstep == usize::MAX {
+                self.checked_delay(Duration::nanoseconds(1))
+                    .ok_or(PhysicalClockError::Overflow)
+            } else {
+                self.checked_after(self)
+            }
+        } else {
+            self.checked_delay(delay)
+                .ok_or(PhysicalClockError::Overflow)
+        }
+    }
+
     /// Create a new Tag strictly in the future from the current.
     pub fn delay(&self, offset: Duration) -> Self {
         if offset.is_zero() {

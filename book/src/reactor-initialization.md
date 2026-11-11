@@ -1,9 +1,9 @@
 # Reactor initialization
 
 Use a state initializer to construct reactor state before logical execution.
-An initializer can receive action handles, a source handle, or manual clock
-control. These resources are called capabilities. Initialization does not
-require an input source or a manual clock.
+An initializer can receive action handles, a source handle, manual clock
+control, or an output observer. These resources are called capabilities.
+Initialization does not require an input source or a manual clock.
 
 ## Declare an initializer context
 
@@ -68,10 +68,12 @@ its fields:
 | `source = "plant"` | `source: InputSourceHandle` |
 | `actions = [sample]`, with `source` | `sample: SourceAction<T>` |
 | `clock_control = true` | `clock: ManualClock` |
+| `output_observer = true` | `output: OutputObserver` |
 
 Each action name must identify a physical action in this reactor declaration.
-Do not repeat action names. The names `source`, `clock`, `send`, and `__boomerang_marker` are reserved
-for generated fields, even when the corresponding option is absent.
+Do not repeat action names. The names `source`, `clock`, `output`, `send`, and
+`__boomerang_marker` are reserved for generated fields, even when the
+corresponding option is absent.
 
 A source declaration applies to all listed actions. One context cannot mix
 ordinary action handles and source action handles. Use separate components
@@ -85,7 +87,7 @@ a source, or use source admission with the host monotonic clock.
 ## Select an execution path
 
 Ordinary action initialization works with the live builder, the live runner,
-and local Cargo-native applications. It requires neither hosted runtime feature.
+and local Cargo-native applications. It requires no hosted runtime feature.
 Source admission and manual clock control require compiled local hosted
 Federate execution. Enable `hosted-source-input` or `hosted-manual-clock` on
 the runtime dependency of each payload package that uses the corresponding API.
@@ -102,6 +104,71 @@ to declare resources and `initialization::StateInitContext` to obtain their
 handles. Capability lookup returns `initialization::InitializationError` when a
 requested resource is unavailable or does not match its declaration.
 Input submission errors remain separate and use `input::InputError`.
+Output configuration errors use `InitializationError::OutputUnavailable` when
+`hosted-output` is enabled. Output requests use `OutputWaitError`.
+
+## Export the owning output boundary
+
+This initializer declares an observer without a clock or source. It queues a
+startup request before execution and starts a worker. The worker's wait has a
+host-time limit:
+
+```rust,no_run
+use boomerang::prelude::*;
+use boomerang::runtime::{OutputOutcome, OutputWaitError, Tag};
+use std::io::Write;
+
+// Application-owned reporting. A failed log write must not panic during teardown.
+fn report_output_failure(message: &str) {
+    let _ = writeln!(std::io::stderr().lock(), "output worker: {message}");
+}
+
+#[derive(Debug)]
+pub struct OutputState {
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl OutputState {
+    fn new(init: OutputInit) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let wait = init.output.request_tag(Tag::ZERO)?;
+        let worker = std::thread::spawn(move || {
+            match wait.wait_timeout(std::time::Duration::from_secs(1)) {
+                Ok(_completion) => {}
+                Err(OutputWaitError::Timeout) => report_output_failure("completion timed out"),
+                Err(error) => report_output_failure(&format!("completion failed: {error:?}")),
+            }
+        });
+        Ok(Self { worker: Some(worker) })
+    }
+}
+
+impl Drop for OutputState {
+    fn drop(&mut self) {
+        if let Some(worker) = self.worker.take() {
+            if worker.join().is_err() {
+                report_output_failure("worker panicked");
+            }
+        }
+    }
+}
+
+#[reactor(
+    state = OutputState, state_init = OutputState::new,
+    init_context(name = OutputInit, output_observer = true),
+    external_effects = [Apply]
+)]
+pub fn OutputDevice() -> impl Reactor {
+    reaction! { Apply(startup) { OutputOutcome::Unchanged } }
+}
+```
+
+The handle selects only this instance's directly declared effects. It excludes
+child effects. Runtime cleanup releases output waiters before it drops state
+that can join workers. Use a finite host-time bound for each worker operation.
+An observer does not keep execution alive. Use `Config::with_keep_alive(true)`
+when a driver must submit requests after startup.
+Provide a stop or failure path for that execution. See
+[External output outcomes](./output-outcomes.md) for bounds and durable cutoffs.
 
 ## Initialize before logical startup
 

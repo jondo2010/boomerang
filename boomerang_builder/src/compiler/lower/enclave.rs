@@ -1188,6 +1188,7 @@ impl ResolvedDeployment {
                         source: required.source.clone(),
                         actions,
                         clock_control: required.clock_control,
+                        output_observer: required.output_observer,
                     })
                 })
                 .transpose()?;

@@ -55,6 +55,8 @@ pub struct InitializerCapabilities {
     pub actions: Vec<ActionSlotId>,
     /// Explicit manual clock write authority.
     pub clock_control: bool,
+    /// Export only this reactor instance's directly declared output effects.
+    pub output_observer: bool,
 }
 
 /// Stable reactor slot and its structural parent.
@@ -858,6 +860,7 @@ mod tests {
                 source: Some("plant".into()),
                 actions,
                 clock_control: false,
+                output_observer: false,
             });
             assert!(build_parts(Parts {
                 reactors: vec![root],

@@ -47,7 +47,7 @@ pub(super) fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
         .as_ref()
         .map(|config| config.validate(&prepared.images))
         .transpose()?;
-    validate_capabilities(&prepared.images, &bindings)?;
+    validate_capabilities(&prepared.images, &bindings, &config)?;
     let deferred_initialization = bindings
         .enclaves
         .values()
@@ -95,13 +95,17 @@ pub(super) fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
     if let Some(clock) = &clock_run.0 {
         clock.attach(&event_senders, abort_handle.clone())?;
         for (slot, (_, storage)) in storages.iter_mut().enumerate() {
-            storage.set_clock(crate::clock::ExecutionClock::manual(clock.clone(), slot));
+            storage.set_clock(crate::clock::ExecutionClock::manual(clock.clone(), slot))?;
         }
     }
     for (_, storage) in &storages {
         storage.initialize_clock(origin);
     }
-    #[cfg(any(feature = "hosted-source-input", feature = "hosted-manual-clock"))]
+    #[cfg(any(
+        feature = "hosted-source-input",
+        feature = "hosted-manual-clock",
+        feature = "hosted-output"
+    ))]
     let selected_clock = {
         let host_clock = || {
             let clock = storages
@@ -122,6 +126,10 @@ pub(super) fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
         #[cfg(not(feature = "hosted-manual-clock"))]
         host_clock()?
     };
+    #[cfg(feature = "hosted-output")]
+    for (enclave, storage) in &mut storages {
+        storage.configure_output(*enclave, selected_clock.epoch());
+    }
     #[cfg(feature = "hosted-source-input")]
     let inputs = physical_inputs.map(|config| {
         let (endpoint, processor) = crate::input::AdmissionProcessor::new(
@@ -150,7 +158,11 @@ pub(super) fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
         clock: clock_run.0.clone(),
         #[cfg(feature = "hosted-manual-clock")]
         clock_failure: Default::default(),
-        #[cfg(any(feature = "hosted-source-input", feature = "hosted-manual-clock"))]
+        #[cfg(any(
+            feature = "hosted-source-input",
+            feature = "hosted-manual-clock",
+            feature = "hosted-output"
+        ))]
         selected_clock,
     };
     let _cleanup = CloseRunOnDrop(shutdown.clone());
@@ -178,7 +190,22 @@ pub(super) fn execute_prepared_federate<'image, B: FederateCoordinationBackend>(
 fn validate_capabilities(
     images: &TinySecondaryMap<EnclaveIndex, EnclaveImageView<'_>>,
     bindings: &FederateBindings<'_>,
+    config: &Config,
 ) -> Result<(), ExecuteOwnedFederateError> {
+    if config.fast_forward {
+        for (enclave, image) in images.iter() {
+            if image
+                .reactions()
+                .values()
+                .any(|reaction| reaction.external_effect())
+            {
+                return Err(ExecuteOwnedFederateError::EnclaveInitialization {
+                    enclave,
+                    source: OwnedStorageError::ExternalEffectFastForward,
+                });
+            }
+        }
+    }
     #[cfg(feature = "hosted-manual-clock")]
     {
         let mut writers = 0;
@@ -732,6 +759,20 @@ fn connect_coordinator<'image, B: FederateCoordinationBackend>(
             return Err(error);
         }
     };
+    #[cfg(feature = "hosted-output")]
+    if !backend.supports_output_proofs() {
+        for (enclave, storage) in storages.iter() {
+            if storage.requires_output_observer() {
+                return Err(ExecuteOwnedFederateError::EnclaveInitialization {
+                    enclave: *enclave,
+                    source: crate::initialization::InitializationError::OutputUnavailable(
+                        crate::OutputWaitError::UnsupportedBackend,
+                    )
+                    .into(),
+                });
+            }
+        }
+    }
     let parts = build_federate_coordination(
         participant_indices,
         storages.iter().map(|(enclave, storage)| {

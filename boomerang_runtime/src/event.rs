@@ -15,6 +15,23 @@ pub enum AsyncEventTarget {
 
 /// `AsyncEvent` is used to inject events into the scheduler from outside of the normal event loop.
 pub enum AsyncEvent {
+    /// Runtime-validated local route or backend ingress, distinct from raw strict input.
+    RoutedLogical(RoutedLogical),
+    /// Opaque computational proof control; callers cannot construct its certificate.
+    #[cfg(feature = "hosted-output")]
+    OutputProof(crate::sched::output::ProofFrame),
+    /// Ordered admission cutoff issued by the existing coordinator.
+    #[cfg(feature = "hosted-output")]
+    OutputIngressSeal(crate::sched::output::IngressSeal),
+    /// Final computational progress backed by a completed freeze/check certificate.
+    #[cfg(feature = "hosted-output")]
+    OutputProgress(crate::sched::output::ProgressRelease),
+    /// Bounded host request for a real scheduler completion checkpoint.
+    #[cfg(feature = "hosted-output")]
+    OutputRequest(Box<crate::output::OutputRequest>),
+    /// A canceled request changed the next output checkpoint candidate.
+    #[cfg(feature = "hosted-output")]
+    OutputWake,
     /// Coherent owned observations validated by the hosted admission service.
     #[cfg(feature = "hosted-source-input")]
     PhysicalBatch(crate::input::InputBatchEvent),
@@ -64,6 +81,21 @@ pub enum AsyncEvent {
 impl Debug for AsyncEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::RoutedLogical(value) => f
+                .debug_struct("RoutedLogical")
+                .field("tag", &value.tag)
+                .field("target", &value.target)
+                .finish_non_exhaustive(),
+            #[cfg(feature = "hosted-output")]
+            Self::OutputProof(_) => f.write_str("OutputProof"),
+            #[cfg(feature = "hosted-output")]
+            Self::OutputIngressSeal(_) => f.write_str("OutputIngressSeal"),
+            #[cfg(feature = "hosted-output")]
+            Self::OutputProgress(_) => f.write_str("OutputProgress"),
+            #[cfg(feature = "hosted-output")]
+            Self::OutputRequest(_) => f.write_str("OutputRequest"),
+            #[cfg(feature = "hosted-output")]
+            Self::OutputWake => f.write_str("OutputWake"),
             #[cfg(feature = "hosted-source-input")]
             Self::PhysicalBatch(batch) => f.debug_tuple("PhysicalBatch").field(batch).finish(),
             Self::FederateResume => f.write_str("FederateResume"),
@@ -107,6 +139,21 @@ impl Debug for AsyncEvent {
 impl Display for AsyncEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::RoutedLogical(value) => f
+                .debug_struct("RoutedLogical")
+                .field("tag", &value.tag)
+                .field("target", &value.target)
+                .finish_non_exhaustive(),
+            #[cfg(feature = "hosted-output")]
+            Self::OutputProof(_) => f.write_str("OutputProof"),
+            #[cfg(feature = "hosted-output")]
+            Self::OutputIngressSeal(_) => f.write_str("OutputIngressSeal"),
+            #[cfg(feature = "hosted-output")]
+            Self::OutputProgress(_) => f.write_str("OutputProgress"),
+            #[cfg(feature = "hosted-output")]
+            Self::OutputRequest(_) => f.write_str("OutputRequest"),
+            #[cfg(feature = "hosted-output")]
+            Self::OutputWake => f.write_str("OutputWake"),
             #[cfg(feature = "hosted-source-input")]
             AsyncEvent::PhysicalBatch(_) => f.write_str("PhysicalBatch"),
             AsyncEvent::FederateResume => f.write_str("FederateResume"),
@@ -139,19 +186,44 @@ impl Display for AsyncEvent {
 
 impl AsyncEvent {
     pub(crate) fn revises_candidate(&self) -> bool {
+        #[cfg(feature = "hosted-output")]
+        if matches!(
+            self,
+            Self::OutputRequest(_)
+                | Self::OutputWake
+                | Self::OutputProof(_)
+                | Self::OutputIngressSeal(_)
+                | Self::OutputProgress(_)
+        ) {
+            return true;
+        }
         #[cfg(feature = "hosted-source-input")]
         if matches!(self, Self::PhysicalBatch(_)) {
             return true;
         }
         matches!(
             self,
-            Self::Logical { .. } | Self::Physical { .. } | Self::Shutdown { .. }
+            Self::Logical { .. }
+                | Self::RoutedLogical(_)
+                | Self::Physical { .. }
+                | Self::Shutdown { .. }
         )
     }
 
     /// Stable event category for native tracing, without inspecting its payload.
     pub fn kind_str(&self) -> &'static str {
         match self {
+            Self::RoutedLogical(_) => "logical",
+            #[cfg(feature = "hosted-output")]
+            Self::OutputProof(_) => "output_proof",
+            #[cfg(feature = "hosted-output")]
+            Self::OutputIngressSeal(_) => "output_ingress_seal",
+            #[cfg(feature = "hosted-output")]
+            Self::OutputProgress(_) => "output_progress",
+            #[cfg(feature = "hosted-output")]
+            Self::OutputRequest(_) => "output_request",
+            #[cfg(feature = "hosted-output")]
+            Self::OutputWake => "output_wake",
             #[cfg(feature = "hosted-source-input")]
             Self::PhysicalBatch(_) => "physical_batch",
             Self::FederateResume => "federate_resume",
@@ -199,5 +271,26 @@ impl AsyncEvent {
     /// Create a shutdown event.
     pub(crate) fn shutdown(delay: Duration) -> Self {
         AsyncEvent::Shutdown { delay }
+    }
+}
+
+/// An opaque payload emitted by a validated runtime route or backend adapter.
+/// Private fields prevent raw/replay senders from bypassing a strict ingress cutoff.
+pub struct RoutedLogical {
+    /// Destination logical timestamp authorized by the existing route contract.
+    pub(crate) tag: Tag,
+    /// Validated destination action or boundary port.
+    pub(crate) target: AsyncEventTarget,
+    /// Owned routed value; completed output proof never retains this payload.
+    pub(crate) value: Box<dyn ReactorData>,
+}
+impl AsyncEvent {
+    /// Keeps internal route provenance private while preserving the existing payload layout.
+    pub(crate) fn routed_logical(
+        tag: Tag,
+        target: AsyncEventTarget,
+        value: Box<dyn ReactorData>,
+    ) -> Self {
+        Self::RoutedLogical(RoutedLogical { tag, target, value })
     }
 }

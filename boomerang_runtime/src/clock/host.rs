@@ -35,10 +35,15 @@ pub(super) fn wait_host_monotonic(
                     }
                 },
                 || {
-                    wait.coordination.as_deref_mut().map_or(
+                    let terminal = wait.coordination.as_deref_mut().map_or(
                         Ok(None),
                         FederateSchedulerCoordination::terminal_after_event_channel_closed,
-                    )
+                    )?;
+                    #[cfg(feature = "hosted-output")]
+                    if terminal.is_none() && wait.checkpoint_only {
+                        return Ok(Some(FederateTermination::Abort));
+                    }
+                    Ok(terminal)
                 },
             );
             if let Some(observation) = observation {
@@ -109,6 +114,8 @@ mod tests {
         let (tx, rx) = kanal::unbounded();
         let mut coordination = None;
         let mut wait = WaitContext {
+            #[cfg(feature = "hosted-output")]
+            checkpoint_only: false,
             key: EnclaveKey::new(0),
             origin: std::time::Instant::now(),
             event_rx: &rx,

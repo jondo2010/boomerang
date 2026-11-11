@@ -467,3 +467,22 @@ mod invalid_output {
 }
 
 }
+
+#[cfg(feature = "output-observer")]
+boomerang::component! {
+pub mod observer {
+    use boomerang::prelude::*;
+    #[derive(Debug)]
+    pub struct DriverState {
+        pub output: boomerang::runtime::OutputObserver,
+    }
+    fn initialize(init: DriverInit) -> Result<DriverState, std::io::Error> {
+        Ok(DriverState {
+            output: init.output,
+        })
+    }
+    #[reactor(contract = "example.observer", contract_version = 1, bounds(queue_capacity = 2, payload_bytes = 1, state_bytes = 1, scratch_bytes = 1), state = DriverState, state_init = initialize, init_context(name = DriverInit, output_observer = true))]
+    pub fn Driver() -> impl Reactor {}
+}
+
+}

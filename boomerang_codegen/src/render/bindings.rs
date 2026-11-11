@@ -175,6 +175,7 @@ fn render_binding(
                 bail!("component '{component}' requires a selected manual clock")
             }
             let clock_control = required.clock_control;
+            let output_observer = required.output_observer;
             let source = if let Some(source) = &required.source {
                 let index = inputs.get(component).copied().ok_or_else(|| {
                     anyhow!("component '{component}' requires physical source '{source}'")
@@ -196,7 +197,7 @@ fn render_binding(
                 requirements.push(quote!(boomerang_runtime::initialization::ActionCapability::new(ActionIndex::new(#row), #payload)));
             }
             Ok(
-                quote!(.bind_state_with_capabilities(BindingSlotIndex::new(#slot), boomerang_runtime::initialization::StateCapabilities { #source actions: vec![#(#requirements),*], clock_control: #clock_control, ..Default::default() }, |context| #path(context, &[#(#action_rows),*]))),
+                quote!(.bind_state_with_capabilities(BindingSlotIndex::new(#slot), boomerang_runtime::initialization::StateCapabilities { #source actions: vec![#(#requirements),*], clock_control: #clock_control, output_observer: #output_observer, ..Default::default() }, |context| #path(context, &[#(#action_rows),*]))),
             )
         }
         RequiredBinding::Port { .. } => Ok(quote!(

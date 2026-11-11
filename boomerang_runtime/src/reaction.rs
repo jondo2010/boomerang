@@ -168,11 +168,11 @@ impl<'store, T: ReactorData + Clone> ReactionFn<'store> for EnclaveSenderReactio
 
                 let _ = self
                     .remote_context
-                    .send_event(crate::event::AsyncEvent::Logical {
+                    .send_event(crate::event::AsyncEvent::routed_logical(
                         tag,
-                        target: crate::AsyncEventTarget::Action(self.remote_action_ref.key()),
-                        value: Box::new(value.clone()),
-                    });
+                        crate::AsyncEventTarget::Action(self.remote_action_ref.key()),
+                        Box::new(value.clone()),
+                    ));
             } else {
                 match self.remote_context.prepare_action(
                     &self.remote_action_ref,

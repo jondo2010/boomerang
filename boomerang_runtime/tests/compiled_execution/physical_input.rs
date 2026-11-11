@@ -115,6 +115,7 @@ fn bindings(
                             PayloadType::<u32>::new(),
                         )],
                         clock_control: false,
+                        output_observer: false,
                     },
                     move |init| {
                         let source = init.source()?;
@@ -427,6 +428,7 @@ fn physical_input_preflight_rejects_invalid_declarations_before_driver_start() {
                                 ),
                             ],
                             clock_control: false,
+                            output_observer: false,
                         },
                         |_| -> Result<CounterState, _> {
                             panic!("invalid input declarations must fail before initialization")
@@ -479,6 +481,7 @@ fn required_host_clock_source_initializes_at_epoch_zero() {
                                 ),
                             ],
                             clock_control: false,
+                        output_observer: false,
                         },
                         move |init| {
                             let source = init.source()?;
@@ -599,6 +602,7 @@ fn all_capability_payloads_are_checked_before_state_side_effects() {
                         source: Some(SourceKey::new(index)),
                         actions: vec![action],
                         clock_control: false,
+                        output_observer: false,
                     },
                     move |_| {
                         initialized.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -652,6 +656,7 @@ fn initializer_failure_and_panic_release_previously_initialized_workers() {
                             PayloadType::<u32>::new(),
                         )],
                         clock_control: false,
+                        output_observer: false,
                     },
                     move |init| {
                         readers.lock().unwrap().push(init.source()?.clock());
@@ -680,6 +685,7 @@ fn initializer_failure_and_panic_release_previously_initialized_workers() {
                             PayloadType::<u32>::new(),
                         )],
                         clock_control: false,
+                        output_observer: false,
                     },
                     move |_| -> Result<CounterState, _> {
                         assert!(!panic, "injected initializer panic");

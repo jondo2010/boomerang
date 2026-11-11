@@ -17,6 +17,9 @@ default = ["builder"]
 ## Disable this feature for compiled payload dependencies to exclude the builder.
 builder = ["dep:boomerang_builder"]
 
+## Observe compiled reactor output completion without clock or source authority
+hosted-output = ["boomerang_runtime/hosted-output"]
+
 # Support for serialization
 serde = ["boomerang_runtime/serde"]
 

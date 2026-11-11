@@ -20,6 +20,7 @@ mod key_set;
 mod observation;
 pub mod output;
 pub mod port;
+mod progress;
 pub mod reaction;
 mod reactor;
 mod reference;
@@ -54,7 +55,9 @@ pub use boundary::{
 };
 pub use kanal::{Receiver, Sender};
 pub use key_set::KeySetLimits as ReactionSetLimits;
-pub use output::{OutputFault, OutputOutcome};
+pub use output::{OutputBound, OutputCompletion, OutputFault, OutputOutcome, OutputWaitError};
+#[cfg(feature = "hosted-output")]
+pub use output::{OutputObserver, OutputWait};
 pub use port::{DynPortRef, DynPortRefMut, *};
 pub use reaction::{
     BoxedReactionFn, ConnectionReceiverReactionFn, ConnectionSenderReactionFn, Deadline,
@@ -94,6 +97,7 @@ impl<T: ReactorData> PayloadType<T> {
     }
 }
 
+/// A failure during reaction execution or runtime coordination.
 #[derive(thiserror::Error, Debug)]
 pub enum RuntimeError {
     /// Fast-forward execution has no physical release rule for direct effects.
@@ -109,13 +113,24 @@ pub enum RuntimeError {
     },
     /// Physical-time or microstep conversion exceeded its supported range.
     #[error(transparent)]
-    PhysicalClock(#[from] crate::clock::PhysicalClockError),
+    PhysicalClock(
+        /// Clock or tag conversion failure.
+        #[from]
+        crate::clock::PhysicalClockError,
+    ),
+    /// The requested port does not exist in runtime storage.
     #[error("Port Key not found: {}", 0)]
-    PortKeyNotFound(PortKey),
+    PortKeyNotFound(
+        /// Missing runtime port key.
+        PortKey,
+    ),
 
     /// Live graphs do not admit ordinary synchronous ports through the async channel.
     #[error("async boundary port target is not available in a live graph: {0}")]
-    AsyncBoundaryPortUnsupported(image::PortIndex),
+    AsyncBoundaryPortUnsupported(
+        /// Compiled boundary port rejected by the live graph.
+        image::PortIndex,
+    ),
 
     /// Source admission requires compiled execution. A live graph cannot accept source batches.
     #[cfg(feature = "hosted-source-input")]
@@ -131,24 +146,41 @@ pub enum RuntimeError {
         period: Duration,
     },
 
+    /// A stored value has a different type from the requested value.
     #[error("Mismatched Dynamic Types found {found} but wanted {wanted}")]
     TypeMismatch {
+        /// Actual stored type name.
         found: &'static str,
+        /// Required type name.
         wanted: &'static str,
     },
 
+    /// Reaction references do not match the required field layout.
     #[error("Destructuring error")]
     DestrError,
 
+    /// A payload encoder failed.
     #[error("Encode error {error}")]
-    EncodeError { error: String },
+    EncodeError {
+        /// Description returned by the encoder.
+        error: String,
+    },
 
-    #[error(transparent)]
-    LogicalTimeBarrier(#[from] LogicalTimeBarrierError),
+    /// The scheduler event channel closed during a wait for upstream permission.
+    #[error("scheduler event channel closed while waiting for upstream enclave {upstream}")]
+    UpstreamEventChannelClosed {
+        /// Upstream Enclave whose permission the scheduler requires.
+        upstream: EnclaveKey,
+    },
 
+    /// Event recording or replay failed.
     #[cfg(feature = "replay")]
     #[error(transparent)]
-    ReplayError(#[from] replay::ReplayError),
+    ReplayError(
+        /// Failure returned by the replay service.
+        #[from]
+        replay::ReplayError,
+    ),
 }
 
 pub mod fmt_utils {

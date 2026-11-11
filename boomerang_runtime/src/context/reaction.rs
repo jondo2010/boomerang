@@ -279,7 +279,9 @@ impl CommonContext for Context {
     }
 
     fn schedule_shutdown(&mut self, offset: Option<Duration>) -> bool {
-        let tag = self.tag.delay(offset.unwrap_or_default());
+        let Ok(tag) = self.tag.checked_shutdown_after(offset.unwrap_or_default()) else {
+            return false;
+        };
 
         self.trigger_res.scheduled_shutdown = self
             .trigger_res

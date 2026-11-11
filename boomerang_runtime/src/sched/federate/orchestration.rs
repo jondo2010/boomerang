@@ -77,6 +77,22 @@ pub(crate) enum FederateControlAuthorization {
 
 /// Scheduler-facing coordination port without a backend or transport type.
 pub(crate) trait FederateSchedulerCoordination {
+    /// Whether the backend excludes independently admitted logical ingress.
+    #[cfg(feature = "hosted-output")]
+    fn supports_output_proofs(&self) -> bool {
+        false
+    }
+
+    /// Serializes a cutoff with admission and queues its ordered scheduler marker.
+    /// A false result requires another mailbox/acquisition pass, not a completed tag.
+    #[cfg(feature = "hosted-output")]
+    fn seal_ingress(
+        &mut self,
+        _cut: crate::OutputBound,
+    ) -> Result<bool, FederateCoordinationError> {
+        Ok(false)
+    }
+
     /// Whether input progress requires a logical-horizon candidate even with no application work.
     #[cfg(feature = "hosted-source-input")]
     fn requires_horizon_candidate(&self) -> bool {
@@ -122,7 +138,7 @@ pub(crate) trait FederateSchedulerCoordination {
         network_input: bool,
     ) -> Result<(), FederateCoordinationError>;
 
-    /// Reports that the legacy shared logical horizon is being processed.
+    /// Reports that terminal processing at the legacy shared logical horizon is complete.
     fn logical_horizon_reached(&mut self, tag: Tag);
 
     /// Reports that this scheduler processed a terminal event.
@@ -134,6 +150,12 @@ pub(crate) trait FederateSchedulerCoordination {
 
 /// Participant-to-coordinator messages that retain only typed state inputs and legacy requests.
 enum CoordinatorReport {
+    /// Admission-cut request; reply does not mutate started/completed progress.
+    #[cfg(feature = "hosted-output")]
+    SealIngress {
+        enclave: EnclaveIndex,
+        cut: crate::OutputBound,
+    },
     /// Initializers completed; backend and scheduler execution can start.
     OpenExecution,
     /// Final execution request; its reply uses a separate participant channel.
@@ -258,6 +280,9 @@ pub(crate) struct FederateCoordinator<B: FederateCoordinationBackend> {
     /// Reusable final-permit reply channels, independent of command ordering.
     #[cfg(feature = "hosted-source-input")]
     permits: TinySecondaryMap<EnclaveIndex, crate::Sender<bool>>,
+    /// Reusable admission-cut replies, separate from source execution permits.
+    #[cfg(feature = "hosted-output")]
+    seal_replies: TinySecondaryMap<EnclaveIndex, crate::Sender<bool>>,
     /// Publication awaiting a fresh mailbox observation from every participant.
     pending_publication: Option<FederatePublication>,
     /// Independent monotonic publication-fence generation.
@@ -335,6 +360,19 @@ impl<B: FederateCoordinationBackend> FederateCoordinator<B> {
         report: CoordinatorReport,
     ) -> Result<bool, FederateCoordinationError> {
         match report {
+            #[cfg(feature = "hosted-output")]
+            CoordinatorReport::SealIngress { enclave, cut } => {
+                self.require_participant(enclave)?;
+                let accepted = self.execution_open
+                    && self.state.seal_ingress(enclave, cut).is_some_and(|seal| {
+                        self.events[enclave]
+                            .try_send(AsyncEvent::OutputIngressSeal(seal))
+                            .unwrap_or(false)
+                    });
+                // Full preserves the durable floor; the scheduler pumps and retries the marker.
+                let _ = self.seal_replies[enclave].try_send(accepted);
+                Ok(false)
+            }
             CoordinatorReport::OpenExecution => {
                 self.execution_open = true;
                 Ok(false)
@@ -595,6 +633,12 @@ impl<B: FederateCoordinationBackend> Drop for FederateCoordinator<B> {
 ///
 /// The stored compiled Enclave identity keeps its channel traffic associated with that scheduler.
 pub(crate) struct EnclaveCoordinationPort {
+    /// Immutable backend profile, checked before observers can establish a cut.
+    #[cfg(feature = "hosted-output")]
+    supports_output_proofs: bool,
+    /// Dedicated cutoff reply lane; marker ordering remains in the event mailbox.
+    #[cfg(feature = "hosted-output")]
+    seal_rx: crate::Receiver<bool>,
     /// Cached source configuration; executions without sources skip permit exchange.
     #[cfg(feature = "hosted-source-input")]
     pub(crate) input_enabled: bool,
@@ -767,6 +811,24 @@ impl EnclaveCoordinationPort {
 }
 
 impl FederateSchedulerCoordination for EnclaveCoordinationPort {
+    #[cfg(feature = "hosted-output")]
+    fn supports_output_proofs(&self) -> bool {
+        self.supports_output_proofs
+    }
+
+    #[cfg(feature = "hosted-output")]
+    fn seal_ingress(&mut self, cut: crate::OutputBound) -> Result<bool, FederateCoordinationError> {
+        self.report(CoordinatorReport::SealIngress {
+            enclave: self.enclave,
+            cut,
+        })?;
+        self.seal_rx.recv().map_err(|_| {
+            FederateCoordinationError::ParticipantCommandChannelDisconnected {
+                enclave: self.enclave,
+            }
+        })
+    }
+
     /// Request a final execution permit after physical pacing.
     #[cfg(feature = "hosted-source-input")]
     fn begin_tag(&mut self, tag: Tag) -> bool {
@@ -1091,6 +1153,8 @@ impl<B: FederateCoordinationBackend> FederateCoordinationParts<B> {
         lifecycle: LifecyclePolicy,
         backend: B,
     ) -> Result<Self, FederateCoordinationError> {
+        #[cfg(feature = "hosted-output")]
+        let supports_output_proofs = backend.supports_output_proofs();
         let participants = participants.into_iter().collect::<Vec<_>>();
         let state = FederateCoordinationState::new(
             participants.iter().map(|(enclave, _, _)| *enclave),
@@ -1100,6 +1164,8 @@ impl<B: FederateCoordinationBackend> FederateCoordinationParts<B> {
         let mut commands = TinySecondaryMap::new();
         #[cfg(feature = "hosted-source-input")]
         let mut permits = TinySecondaryMap::new();
+        #[cfg(feature = "hosted-output")]
+        let mut seal_replies = TinySecondaryMap::new();
         let mut publication_observed = TinySecondaryMap::new();
         let mut events = TinySecondaryMap::new();
         let mut ports = TinySecondaryMap::new();
@@ -1112,11 +1178,21 @@ impl<B: FederateCoordinationBackend> FederateCoordinationParts<B> {
                 permits.insert(enclave, tx);
                 rx
             };
+            #[cfg(feature = "hosted-output")]
+            let seal_rx = {
+                let (tx, rx) = kanal::bounded(1);
+                seal_replies.insert(enclave, tx);
+                rx
+            };
             publication_observed.insert(enclave, 0);
             events.insert(enclave, event_tx);
             ports.insert(
                 enclave,
                 EnclaveCoordinationPort {
+                    #[cfg(feature = "hosted-output")]
+                    supports_output_proofs,
+                    #[cfg(feature = "hosted-output")]
+                    seal_rx,
                     #[cfg(feature = "hosted-source-input")]
                     input_enabled: false,
                     #[cfg(feature = "hosted-source-input")]
@@ -1148,6 +1224,8 @@ impl<B: FederateCoordinationBackend> FederateCoordinationParts<B> {
                 inputs: None,
                 #[cfg(feature = "hosted-source-input")]
                 permits,
+                #[cfg(feature = "hosted-output")]
+                seal_replies,
                 pending_publication: None,
                 publication_generation: 0,
                 publication_observed,
@@ -1807,6 +1885,10 @@ mod tests {
     ) -> (EnclaveCoordinationPort, crate::Sender<AsyncEvent>) {
         let (event_tx, event_rx) = kanal::unbounded();
         let participant = EnclaveCoordinationPort {
+            #[cfg(feature = "hosted-output")]
+            supports_output_proofs: true,
+            #[cfg(feature = "hosted-output")]
+            seal_rx: kanal::bounded(1).1,
             #[cfg(feature = "hosted-source-input")]
             input_enabled: false,
             #[cfg(feature = "hosted-source-input")]

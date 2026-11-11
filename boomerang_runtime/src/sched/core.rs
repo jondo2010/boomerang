@@ -14,6 +14,7 @@ use crate::{
     event::{AsyncEvent, AsyncEventTarget},
     keepalive,
     key_set::KeySetView,
+    progress::ProgressBound,
     ActionKey, Duration, EnclaveKey, Level, ReactionSetLimits, ReactorData, RuntimeError,
     SchedulerPhase, SendContext, Tag, TransitionKind,
 };
@@ -32,6 +33,12 @@ pub(crate) trait Schedule {
     type Mode: tinymap::Key + Copy + std::fmt::Debug;
     /// Scope identity used by the schedule.
     type Scope: tinymap::Key + Copy + std::fmt::Debug;
+
+    /// Exact output owner, available only for compiled schedules.
+    #[cfg(feature = "hosted-output")]
+    fn output_reactor(_reactor: Self::Reactor) -> Option<crate::image::ReactorIndex> {
+        None
+    }
 
     fn reaction_limits(&self) -> ReactionSetLimits;
     fn action_capacity(&self) -> usize;
@@ -193,6 +200,8 @@ where
     S: Schedule,
     E: ExecutionStorage<S>,
 {
+    #[cfg(feature = "hosted-output")]
+    pub(super) output: Option<&'a mut crate::sched::output::OutputState>,
     /// Enclave whose logical time this invocation advances.
     pub(super) key: EnclaveKey,
     /// Selected execution timeline, including the shared host monotonic origin.
@@ -238,6 +247,50 @@ where
     pub(super) outcomes: &'a mut Vec<ReactionOutcome<S::Action, S::Mode>>,
     /// Whether modal scope checks are required in the hot path.
     pub(super) has_modal_scopes: bool,
+}
+
+#[cfg(feature = "hosted-output")]
+impl<S: Schedule, E: ExecutionStorage<S>> Drop for SchedulerCore<'_, '_, S, E> {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            // The core owns exclusive access to the current proof, including any
+            // reservation created in this turn. Abort while unwinding so a caller
+            // that catches the panic cannot strand a live root or participant.
+            if let Some(output) = self.output.as_deref_mut() {
+                output.abort_unwind();
+            }
+        }
+    }
+}
+
+/// Retains each returned result when a reaction batch leaves its scope.
+/// The adapter clears scratch before invoking callbacks. A vacant slot is not evidence.
+/// This guard runs before the core aborts proofs on unwind. It does not replay effects.
+/// It borrows existing scratch and owner slots; normal reporting does not allocate.
+#[cfg(feature = "hosted-output")]
+struct OutputBatch<'a, S: Schedule> {
+    output: Option<&'a mut crate::sched::output::OutputState>,
+    schedule: &'a S,
+    reactions: &'a [S::Reaction],
+    outcomes: &'a mut [ReactionOutcome<S::Action, S::Mode>],
+    tag: Tag,
+}
+
+#[cfg(feature = "hosted-output")]
+impl<S: Schedule> Drop for OutputBatch<'_, S> {
+    fn drop(&mut self) {
+        let Some(output) = self.output.as_deref_mut() else {
+            return;
+        };
+        for (&reaction, outcome) in self.reactions.iter().zip(self.outcomes.iter()) {
+            if let (Some(outcome), Some(owner)) = (
+                outcome.output,
+                S::output_reactor(self.schedule.reactor_for_reaction(reaction)),
+            ) {
+                output.record(owner, self.tag, outcome);
+            }
+        }
+    }
 }
 
 /// Failure from concrete time coordination or mutable execution storage.
@@ -292,13 +345,63 @@ where
     }
 
     /// Handle an asynchronous event from the event queue
-    fn handle_async_event(&mut self, event: AsyncEvent) -> Result<(), E::Error> {
+    pub(super) fn handle_async_event(&mut self, event: AsyncEvent) -> Result<(), E::Error> {
         self.stats.increment_processed_events();
         if let Some(observation) = self.observation {
             observation.increment_processed_events();
         }
         let origin = event.kind_str();
         match event {
+            #[cfg(feature = "hosted-output")]
+            AsyncEvent::OutputProof(frame) => self.handle_output_proof(frame),
+            #[cfg(feature = "hosted-output")]
+            AsyncEvent::OutputIngressSeal(seal) => {
+                if let Some(output) = self.output.as_deref_mut() {
+                    output.progress.install(seal);
+                }
+            }
+            #[cfg(feature = "hosted-output")]
+            AsyncEvent::OutputProgress(release) => {
+                if self.output.is_none() {
+                    return Ok(());
+                }
+                if let Some(barrier) = self.upstream_enclaves.get_mut(release.enclave) {
+                    barrier.observe_completion(ProgressBound::ThroughTime(release.time));
+                    if let Some(participant) = self
+                        .output
+                        .as_deref_mut()
+                        .and_then(|output| output.proof.participant.as_mut())
+                    {
+                        participant.observe_progress(
+                            release.enclave,
+                            ProgressBound::ThroughTime(release.time),
+                        );
+                    }
+                }
+            }
+            AsyncEvent::RoutedLogical(crate::event::RoutedLogical { tag, target, value }) => {
+                #[cfg(feature = "hosted-output")]
+                if self
+                    .output
+                    .as_deref()
+                    .is_some_and(|output| output.progress.rejects(tag, true))
+                {
+                    return Err(crate::clock::PhysicalClockError::Regression.into());
+                }
+                if tag > *self.current_tag {
+                    self.admit_value(tag, target, value, origin)?;
+                }
+            }
+            #[cfg(feature = "hosted-output")]
+            AsyncEvent::OutputRequest(request) => {
+                if let Some(output) = self.output.as_deref_mut() {
+                    output.accept(*request);
+                } else {
+                    request.reply(Err(crate::OutputWaitError::UnsupportedBackend));
+                }
+            }
+            #[cfg(feature = "hosted-output")]
+            AsyncEvent::OutputWake => {}
             #[cfg(feature = "hosted-source-input")]
             AsyncEvent::PhysicalBatch(batch) => {
                 for (tag, target, value) in batch.values {
@@ -316,9 +419,42 @@ where
                 self.upstream_enclaves
                     .get_mut(enclave)
                     .expect("Unknown upstream enclave")
-                    .release_tag(tag);
+                    .observe_completion(ProgressBound::ThroughTag(tag));
+                #[cfg(feature = "hosted-output")]
+                if let Some(participant) = self
+                    .output
+                    .as_deref_mut()
+                    .and_then(|output| output.proof.participant.as_mut())
+                {
+                    participant.observe_progress(enclave, ProgressBound::ThroughTag(tag));
+                }
             }
             AsyncEvent::TagReleaseProvisional { enclave, tag } => {
+                #[cfg(feature = "hosted-output")]
+                if let Some(output) = self
+                    .output
+                    .as_deref_mut()
+                    .filter(|_| tag.microstep() == usize::MAX)
+                {
+                    if let Some(participant) = output.proof.participant.as_ref() {
+                        if let Ok(time) = crate::clock::PhysicalInstant::from_tag(tag) {
+                            if time <= participant.cut {
+                                // Legacy virtual demand may arrive from a not-yet-reserved
+                                // peer. It needs a final subcertificate, never a MAX event.
+                                output.proof.outbox.send(
+                                    &participant.reply,
+                                    &participant.lease,
+                                    participant.round,
+                                    crate::sched::output::closure::protocol::ProofKind::NeedFrontier {
+                                        key: self.key,
+                                        cut: time,
+                                    },
+                                );
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
                 if tag <= *self.current_tag {
                     if tag < *self.current_tag {
                         tracing::warn!(target: "boomerang::runtime",
@@ -334,11 +470,19 @@ where
                 // TagReleaseProvisional events are coming from downstream enclaves.
                 // If this enclave is also an upstream (cycle), then also release it provisionally.
                 if let Some(barrier) = self.upstream_enclaves.get_mut(enclave) {
-                    barrier.release_tag_provisional(tag);
+                    barrier.permit_provisional(tag);
                 }
                 self.events.push_control_event(tag);
             }
             AsyncEvent::Logical { tag, target, value } => {
+                #[cfg(feature = "hosted-output")]
+                if self
+                    .output
+                    .as_deref()
+                    .is_some_and(|output| output.progress.rejects(tag, false))
+                {
+                    return Err(crate::clock::PhysicalClockError::Regression.into());
+                }
                 if tag <= *self.current_tag {
                     tracing::warn!(target: "boomerang::runtime",
                         event = "runtime.event.rejected", enclave = self.key.as_u32(),
@@ -358,6 +502,11 @@ where
             } => {
                 let tag = time.to_tag(Duration::ZERO)?;
                 let tag = tag.checked_after(*self.current_tag)?;
+                #[cfg(feature = "hosted-output")]
+                let tag = self
+                    .output
+                    .as_deref()
+                    .map_or(Ok(tag), |output| output.progress.retag(tag))?;
                 let tag = match target {
                     AsyncEventTarget::Action(key) => {
                         let action = self.storage.action_from_runtime(key);
@@ -374,8 +523,8 @@ where
                 self.admit_value(tag, target, value, origin)?;
             }
             AsyncEvent::Shutdown { delay } => {
-                let tag = self.current_tag.delay(delay);
-                self.schedule_shutdown_at(tag);
+                let tag = self.current_tag.checked_shutdown_after(delay)?;
+                self.schedule_shutdown_at(tag)?;
                 tracing::debug!(target: "boomerang::runtime",
                     event = "runtime.event.admitted", enclave = self.key.as_u32(),
                     kind = origin, tag_kind = tag.kind_str(), tag_offset_ns = tag.offset().whole_nanoseconds(), tag_microstep = tag.microstep(),
@@ -439,7 +588,23 @@ where
         Ok(())
     }
 
-    fn schedule_shutdown_at(&mut self, tag: Tag) {
+    fn schedule_shutdown_at(&mut self, tag: Tag) -> Result<(), crate::clock::PhysicalClockError> {
+        #[cfg(feature = "hosted-output")]
+        let tag = self
+            .output
+            .as_deref()
+            .map_or(Ok(tag), |output| output.progress.retag(tag))?;
+        if tag < Tag::ZERO {
+            return Err(crate::clock::PhysicalClockError::Regression);
+        }
+        if tag == Tag::FOREVER {
+            return Err(crate::clock::PhysicalClockError::Overflow);
+        }
+        // Logical fast-forward retains its wider signed-duration range. Physical
+        // shutdown work must fit the selected clock and always observes the floor.
+        if !self.config.fast_forward {
+            crate::clock::PhysicalInstant::from_tag(tag)?;
+        }
         *self.shutdown_tag = Some((*self.shutdown_tag).map_or(tag, |pending| pending.min(tag)));
         for action in self.schedule.shutdown_actions() {
             self.storage.push_action_value(action, tag, Box::new(()));
@@ -447,6 +612,7 @@ where
 
         self.events
             .push_event(tag, self.schedule.shutdown_reactions(), true);
+        Ok(())
     }
 
     /// Returns the first representable shutdown tag strictly after the current scheduler tag.
@@ -486,7 +652,14 @@ where
                 event = "runtime.scheduler.shutdown_scheduled", enclave = self.key.as_u32(),
                 reason = "timeout", tag_kind = tag.kind_str(), tag_offset_ns = tag.offset().whole_nanoseconds(), tag_microstep = tag.microstep(),
             );
-            self.schedule_shutdown_at(tag);
+            if self.schedule_shutdown_at(tag).is_err() {
+                #[cfg(feature = "hosted-output")]
+                if let Some(output) = self.output.as_deref_mut() {
+                    output.close(crate::OutputWaitError::ExecutionFailed);
+                }
+                self.events.shutdown();
+                self.shutdown_tx.shutdown();
+            }
         }
 
         tracing::info!(target: "boomerang::runtime",
@@ -502,6 +675,10 @@ where
 
     /// Finalizes normal shutdown after the last tag has been processed.
     pub(super) fn shutdown(&mut self) {
+        #[cfg(feature = "hosted-output")]
+        if let Some(output) = self.output.as_deref_mut() {
+            output.close(crate::OutputWaitError::Shutdown);
+        }
         self.events.shutdown();
         if let Some(observation) = self.observation {
             observation.enter(SchedulerPhase::Idle, std::time::Instant::now());
@@ -524,6 +701,10 @@ where
 
     /// Finalizes failed shutdown without running normal shutdown reporting.
     pub(super) fn shutdown_failed(&mut self) {
+        #[cfg(feature = "hosted-output")]
+        if let Some(output) = self.output.as_deref_mut() {
+            output.close(crate::OutputWaitError::ExecutionFailed);
+        }
         self.shutdown_tx.shutdown();
         self.events.shutdown();
         if let Some(observation) = self.observation {
@@ -563,7 +744,7 @@ where
     }
 
     /// Release the current tag to downstream reactors
-    fn release_tag_downstream(&self, current_tag: Tag) {
+    pub(super) fn release_tag_downstream(&self, current_tag: Tag) {
         for (key, ctx) in self.downstream_enclaves.iter() {
             let event = AsyncEvent::release(self.key, current_tag);
             if ctx.send_event(event).is_err() && self.shutdown_tag.is_none() {
@@ -577,7 +758,7 @@ where
     }
 
     /// Reports one scheduler failure and marks its ownership for the supervising layer.
-    fn report_federate_failure(
+    pub(super) fn report_federate_failure(
         &mut self,
         error: SchedulerError<E::Error>,
     ) -> SchedulerError<E::Error> {
@@ -594,13 +775,39 @@ where
     /// Terminates this scheduler after coordination ends without granting further work.
     fn stop_for_federate_termination(&mut self, tag: Tag) {
         self.federate_coordination.take();
+        #[cfg(feature = "hosted-output")]
+        let tag = match self
+            .output
+            .as_deref()
+            .map_or(Ok(tag), |output| output.progress.retag(tag))
+        {
+            Ok(tag) => tag,
+            Err(_) => {
+                self.abort_for_federate_termination();
+                return;
+            }
+        };
         self.federate_shutdown_tag = Some(tag);
         self.shutdown_tx.shutdown();
-        self.schedule_shutdown_at(tag);
+        if self.schedule_shutdown_at(tag).is_err() {
+            self.abort_for_federate_termination();
+        }
     }
 
     /// Exits immediately after a Federate abort without running shutdown lifecycle work.
     fn abort_for_federate_termination(&mut self) {
+        #[cfg(feature = "hosted-output")]
+        {
+            // The clock can fail after the step checks it, before a wait returns.
+            let error = if self.clock.failed() {
+                crate::OutputWaitError::ExecutionFailed
+            } else {
+                crate::OutputWaitError::Canceled
+            };
+            if let Some(output) = self.output.as_deref_mut() {
+                output.close(error);
+            }
+        }
         self.federate_coordination.take();
         self.shutdown_tx.shutdown();
         self.events.shutdown();
@@ -647,7 +854,7 @@ where
     }
 
     /// Coordinates permission to process the next compiled scheduler tag.
-    fn coordinate_next_tag(
+    pub(super) fn coordinate_next_tag(
         &mut self,
         next_tag: Tag,
         control_only: bool,
@@ -655,14 +862,19 @@ where
     ) -> Result<Option<bool>, SchedulerError<E::Error>> {
         let observation = self.observation;
         #[cfg(feature = "hosted-source-input")]
-        let input_bound = self
+        let requires_candidate = self
             .federate_coordination
             .as_deref()
             .is_some_and(|port| port.requires_horizon_candidate());
         #[cfg(not(feature = "hosted-source-input"))]
-        let input_bound = false;
+        let requires_candidate = false;
+        #[cfg(feature = "hosted-output")]
+        let requires_candidate = requires_candidate
+            || self.output.as_deref_mut().is_some_and(|output| {
+                output.candidate().is_some() || output.proof.participant.is_some()
+            });
         if let Some(coordination) = self.federate_coordination.as_deref_mut() {
-            if !input_bound
+            if !requires_candidate
                 && logical_horizon == Some(next_tag)
                 && !self.events.has_nonterminal_work()
             {
@@ -759,6 +971,33 @@ where
         let observation = self.observation;
         if self.federate_shutdown_tag != Some(next_tag) {
             for (_upstream_enclave_key, barrier) in self.upstream_enclaves.iter_mut() {
+                #[cfg(feature = "hosted-output")]
+                if let Some((outbox, participant)) = self.output.as_deref_mut().and_then(|output| {
+                    output
+                        .proof
+                        .participant
+                        .as_mut()
+                        .map(|participant| (&mut output.proof.outbox, participant))
+                }) {
+                    use crate::OutputBound;
+                    match OutputBound::ThroughTag(next_tag).upstream_cut(barrier.delay) {
+                        Ok(None) => continue,
+                        Ok(Some(OutputBound::ThroughTime(time))) => {
+                            if barrier.completed_through(ProgressBound::ThroughTime(time)) {
+                                continue;
+                            }
+                            participant.request_frontier(_upstream_enclave_key, time, outbox);
+                            self.wait_output_control()?;
+                            return Ok(Some(true));
+                        }
+                        Ok(Some(OutputBound::ThroughTag(_))) => {}
+                        Err(_) => {
+                            return Err(SchedulerError::Execution(
+                                crate::clock::PhysicalClockError::Overflow.into(),
+                            ))
+                        }
+                    }
+                }
                 let async_event = match observe_coordination_wait(observation, || {
                     barrier.acquire_tag(next_tag, self.key, self.event_rx)
                 }) {
@@ -767,7 +1006,7 @@ where
                         if let Some(keep_running) = self.handle_closed_event_channel()? {
                             return Ok(Some(keep_running));
                         }
-                        return Err(SchedulerError::Coordination(error.into()));
+                        return Err(SchedulerError::Coordination(error));
                     }
                 };
                 if let Some(async_event) = async_event {
@@ -787,12 +1026,16 @@ where
     }
 
     /// Paces the next tag through the selected clock and handles any interruption.
-    fn synchronize_next_tag(
+    pub(super) fn synchronize_next_tag(
         &mut self,
         next_tag: Tag,
     ) -> Result<Option<bool>, SchedulerError<E::Error>> {
         if !self.config.fast_forward {
+            #[cfg(feature = "hosted-output")]
+            let checkpoint_only = self.events.peek_tag() != Some(next_tag);
             let mut wait = WaitContext {
+                #[cfg(feature = "hosted-output")]
+                checkpoint_only,
                 key: self.key,
                 origin: *self.start_time,
                 event_rx: self.event_rx,
@@ -821,6 +1064,16 @@ where
                     return Ok(Some(true));
                 }
                 ClockWaitResult::FederateTerminated(FederateTermination::Abort) => {
+                    #[cfg(feature = "hosted-output")]
+                    if checkpoint_only
+                        && self.event_rx.is_closed()
+                        && self.federate_coordination.is_none()
+                        && !self.clock.failed()
+                    {
+                        if let Some(output) = self.output.as_deref_mut() {
+                            output.close(crate::OutputWaitError::Disconnected);
+                        }
+                    }
                     self.abort_for_federate_termination();
                     return Ok(Some(false));
                 }
@@ -836,13 +1089,12 @@ where
     ) -> Result<bool, SchedulerError<E::Error>> {
         let mut event = self.events.pop_next_event().unwrap();
 
+        // The horizon uses terminal completion rather than ordinary network completion.
+        // Keep its notification until after effects and output proofs: the coordinator
+        // can close the mailbox as soon as it receives that notification.
+        // Retain the port meanwhile so a terminal callback error can report failure.
+        let at_horizon = event.terminal && logical_horizon == Some(event.tag);
         if event.terminal {
-            if logical_horizon == Some(event.tag) {
-                if let Some(coordination) = self.federate_coordination.as_deref_mut() {
-                    coordination.logical_horizon_reached(event.tag);
-                }
-                self.federate_coordination.take();
-            }
             // Signal to any waiting threads that the scheduler is shutting down.
             self.shutdown_tx.shutdown();
         }
@@ -871,12 +1123,14 @@ where
 
         // Release the current tag to downstream reactors
         self.release_tag_downstream(*self.current_tag);
-        if let Some(coordination) = self.federate_coordination.as_deref_mut() {
-            if let Err(error) = coordination
-                .logical_tag_complete(*self.current_tag, event.network_input)
-                .map_err(SchedulerError::FederateCoordination)
-            {
-                return Err(self.report_federate_failure(error));
+        if !at_horizon {
+            if let Some(coordination) = self.federate_coordination.as_deref_mut() {
+                if let Err(error) = coordination
+                    .logical_tag_complete(*self.current_tag, event.network_input)
+                    .map_err(SchedulerError::FederateCoordination)
+                {
+                    return Err(self.report_federate_failure(error));
+                }
             }
         }
 
@@ -890,8 +1144,15 @@ where
             network_input = event.network_input,
         );
 
+        #[cfg(feature = "hosted-output")]
+        self.complete_output_bound(crate::OutputBound::ThroughTag(*self.current_tag));
+
         if event.terminal {
-            if logical_horizon != Some(event.tag) {
+            if at_horizon {
+                if let Some(coordination) = self.federate_coordination.take() {
+                    coordination.logical_horizon_reached(event.tag);
+                }
+            } else {
                 if let Some(coordination) = self.federate_coordination.as_deref_mut() {
                     coordination.participant_stopped();
                 }
@@ -950,7 +1211,8 @@ where
             // Shutdown event will be processed at the next event loop iteration
             let shutdown = self.next_shutdown_tag();
             *self.shutdown_tag = Some(shutdown);
-            self.schedule_shutdown_at(shutdown);
+            self.schedule_shutdown_at(shutdown)
+                .map_err(|error| SchedulerError::Execution(error.into()))?;
         }
 
         Ok(true)
@@ -958,6 +1220,15 @@ where
 
     /// Process one scheduler step, returning coordination failures to the caller.
     pub(super) fn try_next(&mut self) -> Result<bool, SchedulerError<E::Error>> {
+        #[cfg(feature = "hosted-output")]
+        if self
+            .output
+            .as_deref()
+            .is_some_and(|output| output.execution_interrupted())
+        {
+            self.abort_for_federate_termination();
+            return Ok(false);
+        }
         if self.abort_if_clock_failed() {
             return Ok(false);
         }
@@ -972,13 +1243,32 @@ where
                 return Ok(keep_running);
             }
             if self.federate_coordination.is_none() && self.federate_shutdown_tag.is_none() {
-                self.schedule_shutdown_at(self.next_shutdown_tag());
+                self.schedule_shutdown_at(self.next_shutdown_tag())
+                    .map_err(|error| SchedulerError::Execution(error.into()))?;
             }
         }
 
-        if let Some(next_tag) = self.events.peek_tag() {
+        #[cfg(feature = "hosted-output")]
+        if let Some(result) = self.service_output_proof()? {
+            return Ok(result);
+        }
+
+        let next_tag = self.events.peek_tag();
+        #[cfg(feature = "hosted-output")]
+        let checkpoint = self
+            .output
+            .as_deref_mut()
+            .and_then(|output| output.candidate());
+        #[cfg(feature = "hosted-output")]
+        let next_tag = match (next_tag, checkpoint) {
+            (Some(real), Some(checkpoint)) => Some(real.min(checkpoint)),
+            (real, checkpoint) => real.or(checkpoint),
+        };
+        if let Some(next_tag) = next_tag {
             let control_only =
                 self.federate_coordination.is_some() && self.events.peek_is_control_only();
+            #[cfg(feature = "hosted-output")]
+            let control_only = control_only && checkpoint != Some(next_tag);
             let logical_horizon = self.config.timeout.map(|timeout| Tag::ZERO.delay(timeout));
             if let Some(keep_running) =
                 self.coordinate_next_tag(next_tag, control_only, logical_horizon)?
@@ -1004,6 +1294,10 @@ where
                     .is_some_and(|port| !port.begin_tag(next_tag))
             {
                 return Ok(true);
+            }
+            #[cfg(feature = "hosted-output")]
+            if self.events.peek_tag() != Some(next_tag) {
+                return self.process_output_checkpoint(next_tag);
             }
             let result = self.process_next_event(logical_horizon);
             self.observe_event_queue();
@@ -1082,11 +1376,22 @@ where
 
             let outcome_count = self.reaction_buffer.len();
             self.observe(SchedulerPhase::Reaction);
-            let reaction_result = self.storage.execute_reactions(
-                self.reaction_buffer,
-                tag,
-                &mut self.outcomes[..outcome_count],
-            );
+            let reaction_result = {
+                #[cfg(feature = "hosted-output")]
+                let batch = OutputBatch {
+                    output: self.output.as_deref_mut(),
+                    schedule: self.schedule,
+                    reactions: self.reaction_buffer,
+                    outcomes: &mut self.outcomes[..outcome_count],
+                    tag,
+                };
+                #[cfg(feature = "hosted-output")]
+                let outcomes = &mut *batch.outcomes;
+                #[cfg(not(feature = "hosted-output"))]
+                let outcomes = &mut self.outcomes[..outcome_count];
+                self.storage
+                    .execute_reactions(self.reaction_buffer, tag, outcomes)
+            };
             self.observe(SchedulerPhase::Framework);
             if let Err(error) = reaction_result {
                 execution_error = Some(error);
@@ -1139,7 +1444,10 @@ where
             }
 
             if let Some(shutdown_tag) = pending_shutdown_tag {
-                self.schedule_shutdown_at(shutdown_tag);
+                if let Err(error) = self.schedule_shutdown_at(shutdown_tag) {
+                    execution_error = Some(error.into());
+                    return;
+                }
             }
 
             // Collect all the reactions that are triggered by the ports

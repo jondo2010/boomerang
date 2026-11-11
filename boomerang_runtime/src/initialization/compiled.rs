@@ -33,12 +33,17 @@ pub struct StateCapabilities {
     pub actions: Vec<ActionCapability>,
     /// Whether this initializer owns the selected manual clock's write capability.
     pub clock_control: bool,
+    /// Export this state owner's directly declared output effects.
+    pub output_observer: bool,
 }
 /// Borrowed initialized endpoints used by generated named capability construction.
 /// All requirements are validated before any component initializer is invoked.
 pub struct StateInitContext<'a, 'image> {
     /// Actual prepared action and context storage.
     pub(crate) storage: &'a OwnedStorage<'image>,
+    /// Actual reactor resolved from this initializer's state storage slot.
+    #[cfg(feature = "hosted-output")]
+    pub(crate) owner: crate::image::ReactorIndex,
     /// Original compiled Enclave identity.
     #[cfg(feature = "hosted-source-input")]
     pub(crate) enclave: EnclaveIndex,
@@ -109,6 +114,16 @@ impl StateInitContext<'_, '_> {
             self.storage.scheduler_action_ref(action),
         ))
         .map_err(|_| InitializationError::InvalidCapabilities)
+    }
+    /// Returns the declared observer for this exact state owner and selected epoch.
+    #[cfg(feature = "hosted-output")]
+    pub fn output_observer(&self) -> Result<crate::OutputObserver, InitializationError> {
+        if !self.requirements.output_observer {
+            return Err(InitializationError::InvalidCapabilities);
+        }
+        self.storage
+            .output_observer(self.owner)
+            .map_err(InitializationError::OutputUnavailable)
     }
     /// Shares the ordinary asynchronous action scheduling context.
     pub fn send_context(&self) -> crate::SendContext {
